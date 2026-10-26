@@ -26,7 +26,7 @@ pub struct File {
     pub sha256: String,
 }
 
-fn bucket_url(api: &Api, path: &str) -> String {
+pub fn bucket_url(api: &Api, path: &str) -> String {
     format!("{}/storage/v1/object/public/client/{path}", api.config().supabase_url)
 }
 

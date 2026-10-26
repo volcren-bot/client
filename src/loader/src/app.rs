@@ -1637,6 +1637,9 @@ impl LoaderApp {
         };
         match Script::start(ctx, &prepared.source, Some(&prepared.entry), Some(&target), &self.settings) {
             Ok(script) => {
+                if let Some(warning) = &prepared.warning {
+                    self.script_info(format!("Warning: {warning}"));
+                }
                 self.script_info(format!("Running {title} (revision {}).", prepared.session.revision));
                 self.script = Some(script);
                 let interval = Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));

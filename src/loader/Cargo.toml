@@ -8,7 +8,7 @@ eframe = { version = "0.36.2", features = ["persistence"] }
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-injector = { version = "0.1.0", path = "../injector" }
+injector = { version = "0.1.0", path = "../injector", default-features = false }
 egui_extras = { version = "0.36", features = ["svg"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls", "json"] }
 sha2 = "0.11.1"
@@ -17,6 +17,7 @@ rand = "0.10.3"
 webbrowser = "1.2.5"
 directories = "6.0.0"
 keyring = "4.2.0"
+zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

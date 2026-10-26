@@ -66,7 +66,7 @@ Cancelling drops the queue, interrupts the running job's sleeps and returns once
 ### `require`
 
 - **With `--script <path>`** (the loader always passes it; a Windows path under Wine): `require("./x")` / `require("../x")` reads `x.luau`, `x.lua` or `x/init.luau` from disk, relative to the requiring file. Paths must start with `./` or `../`; modules are cached by normalized path. New lib files need no rebuild.
-- **Otherwise** (piped script, or a bare name like `require("game_state")`): the lib compiled into the injector (`LIB_MODULES`, `include_str!` from the sibling `lib/` project, default `embedded-lib` feature). It is stale until a rebuild, new lib files must be added to `LIB_MODULES`, and `VOLCREN_LIB_DIR` (a `lib/` directory; under Wine a Windows path like `Z:\home\me\VOLCREN\lib`) reads those modules from disk instead. `--no-default-features` drops the embedded copy, so the build no longer reads `lib/`.
+- **Otherwise** (piped script, or a bare name like `require("game_state")`): the lib compiled into the injector (`LIB_MODULES`, `include_str!` from the sibling `lib/` project, default `embedded-lib` feature). It is stale until a rebuild, new lib files must be added to `LIB_MODULES`, and `VOLCREN_LIB_DIR` (a `lib/` directory; under Wine a Windows path like `Z:\home\me\VOLCREN\lib`) reads those modules from disk instead. `--no-default-features` drops the embedded copy, so the build no longer reads `lib/`; the release workflow builds that way, since the loader always passes `--script`.
 
 ### Adding a global
 

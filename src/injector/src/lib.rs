@@ -3,6 +3,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use ipc::{Header, Incompatible};
 pub use ipc::PROTOCOL_VERSION;
+
+/// What the sandbox offers the Luau lib: bumped whenever a global is added or changed in a way a newer lib depends on.
+/// A published lib states the `HOST_API` it needs, and a loader only installs libs it satisfies.
+pub const HOST_API: u32 = 1;
 pub use ipc::state::varp;
 
 pub mod async_input;

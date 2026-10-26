@@ -9,6 +9,7 @@ mod script;
 mod session;
 mod store;
 mod theme;
+mod libs;
 mod update;
 
 use eframe::egui;

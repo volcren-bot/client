@@ -9,6 +9,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use crate::libs;
 use crate::api::{Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript, models::end_reason_message};
 
 /// The server ends a session after 5 minutes without a heartbeat, so the script is stopped before that.
@@ -18,8 +19,10 @@ const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
 const ENTRY: &str = "main.luau";
 const COMPLETE: &str = ".complete";
 
+/// The cache folder. Each revision is a folder `<script id>_<revision>` directly in it, and the shared lib is `lib` beside them,
+/// so a script's `require("../lib/...")` finds it.
 pub fn cache_root() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "volcren", "Volcren").map(|dirs| dirs.cache_dir().join("scripts"))
+    directories::ProjectDirs::from("com", "volcren", "Volcren").map(|dirs| dirs.cache_dir().to_path_buf())
 }
 
 /// A file name from the server, accepted only if it can't leave the revision's folder.
@@ -38,15 +41,17 @@ pub fn safe_id(id: &str) -> Option<&str> {
 }
 
 pub fn revision_dir(root: &Path, script_id: &str, revision: i64) -> PathBuf {
-    root.join(script_id).join(format!("{revision:09}"))
+    root.join(format!("{script_id}_{revision:09}"))
 }
 
 /// Removes every cached revision of a script except `keep`.
 pub fn prune_old(root: &Path, script_id: &str, keep: i64) {
-    let keep = format!("{keep:09}");
-    let Ok(entries) = fs::read_dir(root.join(script_id)) else { return };
+    let keep = format!("{script_id}_{keep:09}");
+    let prefix = format!("{script_id}_");
+    let Ok(entries) = fs::read_dir(root) else { return };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy() != keep {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name != keep {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
@@ -61,17 +66,21 @@ pub struct Prepared {
     pub session: StartedSession,
     pub entry: PathBuf,
     pub source: String,
+    /// Something the user should know before the script runs, such as an outdated loader.
+    pub warning: Option<String>,
 }
 
 /// Starts a session and makes sure its files are on disk. If anything after the start fails, the session is ended so the user isn't billed.
 pub fn prepare(api: &Api, script: &StoreScript) -> Result<Prepared, String> {
     let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
     let id = safe_id(&script.id).ok_or("The server sent a script id that can't be used.")?;
+    // Before the session starts, so downloading the lib is never billed.
+    let lib = libs::ensure(api, &root)?;
     let session = api.start_session(id).map_err(|e| e.to_string())?;
     match download(api, &root, id, &session) {
         Ok((entry, source)) => {
             prune_old(&root, id, session.revision);
-            Ok(Prepared { session, entry, source })
+            Ok(Prepared { session, entry, source, warning: lib.warning })
         }
         Err(error) => {
             let _ = api.end_session(&session.session_id);
