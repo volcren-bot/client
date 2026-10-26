@@ -209,15 +209,36 @@ fn color(kind: Kind, dark: bool) -> Color32 {
     if dark { dark_color } else { light_color }
 }
 
-pub fn layout_job(source: &str, font: FontId, dark: bool) -> LayoutJob {
+/// `hidden` holds sorted, separate byte ranges (see `fold`) that stay in the text but are laid out with no height and no ink.
+pub fn layout_job(source: &str, font: FontId, dark: bool, hidden: &[Range<usize>]) -> LayoutJob {
     let mut job = LayoutJob::default();
     let tokens = tokenize(source);
     if tokens.iter().any(|(range, _)| source.get(range.clone()).is_none()) {
         job.append(source, 0.0, TextFormat::simple(font, color(Kind::Plain, dark)));
         return job;
     }
+    let folded = TextFormat {
+        font_id: FontId::new(1.0, font.family.clone()),
+        color: Color32::TRANSPARENT,
+        line_height: Some(0.0),
+        ..Default::default()
+    };
+    let mut next = 0;
     for (range, kind) in tokens {
-        job.append(&source[range], 0.0, TextFormat::simple(font.clone(), color(kind, dark)));
+        let mut at = range.start;
+        while at < range.end {
+            while next < hidden.len() && hidden[next].end <= at {
+                next += 1;
+            }
+            let (end, is_hidden) = match hidden.get(next) {
+                Some(h) if h.start <= at => (h.end.min(range.end), true),
+                Some(h) => (h.start.min(range.end), false),
+                None => (range.end, false),
+            };
+            let format = if is_hidden { folded.clone() } else { TextFormat::simple(font.clone(), color(kind, dark)) };
+            job.append(&source[at..end], 0.0, format);
+            at = end;
+        }
     }
     job
 }
@@ -229,15 +250,15 @@ pub struct Highlighter {
 }
 
 impl Highlighter {
-    pub fn layout(&mut self, ui: &egui::Ui, source: &str) -> LayoutJob {
+    pub fn layout(&mut self, ui: &egui::Ui, source: &str, hidden: &[Range<usize>]) -> LayoutJob {
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let dark = ui.visuals().dark_mode;
         let mut hasher = DefaultHasher::new();
-        (source, dark, font.size.to_bits()).hash(&mut hasher);
+        (source, dark, font.size.to_bits(), hidden).hash(&mut hasher);
         let key = hasher.finish();
         if self.key != key || self.job.is_none() {
             self.key = key;
-            self.job = Some(layout_job(source, font, dark));
+            self.job = Some(layout_job(source, font, dark, hidden));
         }
         self.job.clone().unwrap()
     }

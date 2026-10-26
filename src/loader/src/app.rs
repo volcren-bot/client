@@ -473,6 +473,7 @@ pub struct LoaderApp {
     script_file: ScriptFile,
     find: Find,
     highlighter: Highlighter,
+    fold: crate::fold::Folds,
     script: Option<Script>,
     form: Option<crate::form::Form>,
     /// The file's new contents, while asking whether to reload it before running.
@@ -535,6 +536,7 @@ impl LoaderApp {
                 .unwrap_or_default(),
             find: Find::default(),
             highlighter: Highlighter::default(),
+            fold: crate::fold::Folds::default(),
             script: None,
             form: None,
             reload_prompt: None,
@@ -1855,47 +1857,99 @@ impl LoaderApp {
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let (row_height, digit_width) = ui.fonts_mut(|fonts| (fonts.row_height(&font), fonts.glyph_width(&font, '0')));
         let lines = self.script_file.text.matches('\n').count() + 1;
-        let gutter_width = digit_width * lines.to_string().len() as f32 + 3.0 * margin.leftf();
-        let gutter_height = size.y.max(lines as f32 * row_height + margin.sum().y);
+        let arrow_width = row_height;
+        let gutter_width = digit_width * lines.to_string().len() as f32 + 3.0 * margin.leftf() + arrow_width;
         let gutter_color = ui.visuals().weak_text_color();
         let matches = if self.find.open {
             find_matches(&self.script_file.text, &self.find.query, self.find.case_sensitive)
         } else {
             Vec::new()
         };
+        self.fold.sync(&self.script_file.path, &self.script_file.text);
+        if self.find.open
+            && self.find.jump
+            && let Some(&at) = matches.get(self.find.current)
+        {
+            self.fold.reveal(self.script_file.text[..at].matches('\n').count());
+        }
+        let view = self.fold.view(&self.script_file.text);
+        // wide enough for the longest line (a tab counted as four columns), so the area scrolls sideways
+        let longest = self.script_file.text.lines().map(|l| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>()).max().unwrap_or(0);
+        let text_width = (longest as f32 * digit_width + margin.sum().x + 8.0).max(size.x - gutter_width);
+        let gutter_height = size.y.max(view.visible.len() as f32 * row_height + margin.sum().y);
         let highlighter = &mut self.highlighter;
-        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = highlighter.layout(ui, text.as_str());
-            job.wrap.max_width = wrap_width;
+        let hidden = &view.hidden;
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
+            // never wrap: the gutter counts one row per line, and the area scrolls sideways instead
+            let mut job = highlighter.layout(ui, text.as_str(), hidden);
+            job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
         egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    let (gutter, _) = ui.allocate_exact_size(egui::vec2(gutter_width, gutter_height), egui::Sense::hover());
+                    let (gutter, response) =
+                        ui.allocate_exact_size(egui::vec2(gutter_width, gutter_height), egui::Sense::click());
                     ui.painter().rect_filled(gutter, 0.0, ui.visuals().faint_bg_color);
+                    let row_top = |row: usize| gutter.top() + margin.topf() + row as f32 * row_height;
                     let first = ((ui.clip_rect().top() - gutter.top() - margin.topf()) / row_height).floor().max(0.0) as usize;
                     let last = ((ui.clip_rect().bottom() - gutter.top() - margin.topf()) / row_height).ceil().max(0.0) as usize;
-                    for line in first..last.min(lines) {
-                        let y = gutter.top() + margin.topf() + line as f32 * row_height;
+                    let arrow_center = |row: usize| egui::pos2(gutter.right() - arrow_width / 2.0, row_top(row) + row_height / 2.0);
+                    let hovered = response.hovered();
+                    for row in first..last.min(view.visible.len()) {
+                        let line = view.visible[row];
                         ui.painter().text(
-                            egui::pos2(gutter.right() - 2.0 * margin.leftf(), y),
+                            egui::pos2(gutter.right() - arrow_width - 2.0 * margin.leftf(), row_top(row)),
                             egui::Align2::RIGHT_TOP,
                             line + 1,
                             font.clone(),
                             gutter_color,
                         );
+                        if self.fold.is_foldable(line) {
+                            // always shown for a folded one, so it can be found again; the others when the gutter is hovered
+                            if self.fold.is_folded(line) || hovered {
+                                paint_arrow(ui.painter(), arrow_center(row), row_height * 0.3, self.fold.is_folded(line), gutter_color);
+                            }
+                        }
+                    }
+                    if response.clicked()
+                        && let Some(pos) = response.interact_pointer_pos()
+                    {
+                        let row = ((pos.y - gutter.top() - margin.topf()) / row_height).floor();
+                        if row >= 0.0
+                            && let Some(&line) = view.visible.get(row as usize)
+                        {
+                            self.fold.toggle(line);
+                        }
                     }
                     let output = egui::TextEdit::multiline(&mut self.script_file.text)
                         .code_editor()
                         .margin(margin)
-                        .desired_width(f32::INFINITY)
+                        .desired_width(text_width)
                         .min_size(size)
                         .layouter(&mut layouter)
                         .show(ui);
+                    if let Some(range) = output.state.cursor.char_range() {
+                        self.fold.follow_cursor(&self.script_file.text, range.primary.index.0);
+                    }
                     if self.find.open {
                         paint_matches(ui, &output, &self.script_file.text, &matches, &mut self.find);
+                    }
+                    for &(line, header_end) in &view.headers {
+                        let text = &self.script_file.text;
+                        let at = output.galley.pos_from_cursor(egui::text::CCursor::new(text[..header_end].chars().count()));
+                        let badge = egui::Rect::from_min_size(
+                            egui::pos2(output.galley_pos.x + at.max.x + 6.0, output.galley_pos.y + at.min.y + 1.0),
+                            egui::vec2(2.0 * digit_width + 8.0, row_height - 2.0),
+                        );
+                        let click = ui.interact(badge, ui.id().with(("fold_badge", line)), egui::Sense::click());
+                        let fill = if click.hovered() { ui.visuals().widgets.hovered.bg_fill } else { ui.visuals().widgets.inactive.bg_fill };
+                        ui.painter().rect_filled(badge, 3.0, fill);
+                        ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, "...", font.clone(), gutter_color);
+                        if click.on_hover_text("Click to unfold").clicked() {
+                            self.fold.toggle(line);
+                        }
                     }
                 });
             });
@@ -2123,19 +2177,27 @@ impl LoaderApp {
 
     fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
         if self.log_tab == LogTab::Script {
-            egui::Panel::right("script_tools").resizable(true).default_size(330.0).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
-                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
+            // each side keeps to its own half however small the window gets, and clips what doesn't fit
+            let room = ui.available_width();
+            egui::Panel::right("script_tools")
+                .resizable(true)
+                .default_size(330.0_f32.min(room * 0.5))
+                .size_range(60.0..=(room * 0.5).max(60.0))
+                .show(ui, |ui| {
+                    ui.shrink_clip_rect(ui.max_rect());
+                    ui.horizontal_wrapped(|ui| {
+                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
+                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
+                    });
+                    ui.separator();
+                    match self.tools_tab {
+                        ToolsTab::Xp => self.xp_tracker_ui(ui),
+                        ToolsTab::Breaks => self.breaks_ui(ui),
+                    }
                 });
-                ui.separator();
-                match self.tools_tab {
-                    ToolsTab::Xp => self.xp_tracker_ui(ui),
-                    ToolsTab::Breaks => self.breaks_ui(ui),
-                }
-            });
         }
-        ui.horizontal(|ui| {
+        ui.shrink_clip_rect(ui.available_rect_before_wrap());
+        ui.horizontal_wrapped(|ui| {
             crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
             crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Script, "Script");
             let log = match self.log_tab {
@@ -2152,26 +2214,36 @@ impl LoaderApp {
                     }
                 });
             log.set_filter(filter);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let log = match self.log_tab {
-                    LogTab::Script => &mut self.script_log,
-                    LogTab::Loader => &mut self.loader_log,
-                };
-                if ui
-                    .add_enabled(!log.is_empty(), egui::Button::new("Clear"))
-                    .on_hover_text("Clears the output of the open tab.")
-                    .clicked()
-                {
-                    log.clear();
-                }
-                if ui
-                    .add_enabled(!log.is_empty(), egui::Button::new("Copy all"))
-                    .on_hover_text("Copies the shown output of the open tab.")
-                    .clicked()
-                {
-                    ui.ctx().copy_text(log.text.clone());
-                }
-            });
+            // the buttons sit at the right while they fit, and follow the filter (wrapping to the next row) when they don't
+            let button_font = egui::TextStyle::Button.resolve(ui.style());
+            let padding = 2.0 * ui.spacing().button_padding.x;
+            let needed = ["Copy all", "Clear"]
+                .iter()
+                .map(|label| ui.fonts_mut(|fonts| fonts.layout_no_wrap(label.to_string(), button_font.clone(), egui::Color32::WHITE).size().x) + padding)
+                .sum::<f32>()
+                + ui.spacing().item_spacing.x * 2.0;
+            let spare = ui.available_width() - needed;
+            if spare > 0.0 {
+                ui.add_space(spare);
+            }
+            let log = match self.log_tab {
+                LogTab::Script => &mut self.script_log,
+                LogTab::Loader => &mut self.loader_log,
+            };
+            if ui
+                .add_enabled(!log.is_empty(), egui::Button::new("Copy all"))
+                .on_hover_text("Copies the shown output of the open tab.")
+                .clicked()
+            {
+                ui.ctx().copy_text(log.text.clone());
+            }
+            if ui
+                .add_enabled(!log.is_empty(), egui::Button::new("Clear"))
+                .on_hover_text("Clears the output of the open tab.")
+                .clicked()
+            {
+                log.clear();
+            }
         });
         ui.separator();
         self.log_ui(ui);
@@ -2272,6 +2344,16 @@ impl LoaderApp {
                 }
             });
     }
+}
+
+/// A fold arrow: pointing right when folded, down when open.
+fn paint_arrow(painter: &egui::Painter, center: egui::Pos2, size: f32, folded: bool, color: egui::Color32) {
+    let points = if folded {
+        vec![center + egui::vec2(-size * 0.6, -size), center + egui::vec2(-size * 0.6, size), center + egui::vec2(size * 0.9, 0.0)]
+    } else {
+        vec![center + egui::vec2(-size, -size * 0.6), center + egui::vec2(size, -size * 0.6), center + egui::vec2(0.0, size * 0.9)]
+    };
+    painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
 }
 
 /// Paints the find matches over the editor, and scrolls to the current one when asked.

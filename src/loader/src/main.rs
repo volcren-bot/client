@@ -10,6 +10,7 @@ mod fake_api;
 #[cfg(test)]
 mod flow_tests;
 mod form;
+mod fold;
 mod highlight;
 mod script;
 mod session;
