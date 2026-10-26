@@ -6,7 +6,7 @@ pub use ipc::PROTOCOL_VERSION;
 
 /// What the sandbox offers the Luau lib: bumped whenever a global is added or changed in a way a newer lib depends on.
 /// A published lib states the `HOST_API` it needs, and a loader only installs libs it satisfies.
-pub const HOST_API: u32 = 1;
+pub const HOST_API: u32 = 2;
 pub use ipc::state::varp;
 
 pub mod async_input;

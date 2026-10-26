@@ -9,7 +9,7 @@ use std::{
 };
 
 use eframe::egui;
-use injector::{Connection, Cursor, CursorStyle, DisplayName, GameState, Input, LoadReport, MouseButton, Overlay, varp};
+use injector::{Cursor, CursorStyle, DisplayName, GameState, LoadReport, Overlay, varp};
 use serde::{Deserialize, Serialize};
 
 use loader::backend::{self, Scan, Settings, Target};
@@ -50,15 +50,8 @@ enum Event {
         read: Read,
         result: Result<Option<Vec<i32>>, String>,
     },
-    Input {
-        pid: u32,
-        input: Input,
-        result: Result<(), String>,
-    },
-    Mouse {
-        pid: u32,
-        result: Result<Option<Connection>, String>,
-    },
+    /// A read for the XP tracker, taken while a script runs.
+    XpState(Result<GameState, String>),
     Name {
         pid: u32,
         name: String,
@@ -97,9 +90,6 @@ struct StoreRun {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Clients,
-    State,
-    Varps,
-    Input,
     Store,
     Scripts,
     Development,
@@ -238,6 +228,9 @@ impl Drop for TilesWorker {
 const SCRIPT_KEY: &str = "script";
 const FORMS_KEY: &str = "forms";
 const CURSOR_KEY: &str = "cursor";
+
+/// How often the XP tracker reads the client while a script runs.
+const XP_READ_EVERY: Duration = Duration::from_secs(5);
 
 const EXAMPLE_SCRIPT: &str = r#"local GameState = require("game_state")
 local Login = require("login")
@@ -458,6 +451,13 @@ fn line_tag(text: &str) -> Option<&str> {
     (end > 0 && end <= 32 && !rest[..end].contains('[')).then(|| &rest[..end])
 }
 
+/// The tabs of the panel beside the script output.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolsTab {
+    Xp,
+    Breaks,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LogTab {
     Loader,
@@ -467,8 +467,6 @@ enum LogTab {
 pub struct LoaderApp {
     settings: Settings,
     tab: Tab,
-    text: String,
-    mouse: (i32, i32),
     display_name: String,
     varp: usize,
     varps: Option<Vec<i32>>,
@@ -500,6 +498,17 @@ pub struct LoaderApp {
     followed_tab: Tab,
     script_log: Log,
     loader_log: Log,
+    xp: crate::xp::XpTracker,
+    breaks: crate::breaks::BreaksTracker,
+    counters: crate::counters::CountersTracker,
+    /// When the running script started, and when it ended; the XP Tracker's clock.
+    run_started: Option<std::time::Instant>,
+    run_ended: Option<std::time::Instant>,
+    tools_tab: ToolsTab,
+    /// The client the XP tracker reads while the script runs, when one was chosen.
+    xp_target: Option<Target>,
+    xp_next: std::time::Instant,
+    xp_reading: bool,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
@@ -518,8 +527,6 @@ impl LoaderApp {
         let mut app = Self {
             settings,
             tab: Tab::Clients,
-            text: String::new(),
-            mouse: (0, 0),
             display_name: String::new(),
             varp: varp::RUN,
             varps: None,
@@ -554,6 +561,15 @@ impl LoaderApp {
             log_tab: LogTab::Loader,
             followed_tab: Tab::Clients,
             script_log: Log::default(),
+            xp: Default::default(),
+            breaks: Default::default(),
+            counters: Default::default(),
+            run_started: None,
+            run_ended: None,
+            tools_tab: ToolsTab::Xp,
+            xp_target: None,
+            xp_next: std::time::Instant::now(),
+            xp_reading: false,
             loader_log: Log::default(),
             tx,
             rx,
@@ -635,6 +651,33 @@ impl LoaderApp {
         if let Some(run) = self.store_run.take() {
             self.api_job(ctx, move |api| Event::SessionEnded(api.end_session(&run.session_id)));
         }
+    }
+
+    fn start_xp_tracking(&mut self, target: Option<Target>) {
+        self.xp.reset();
+        self.breaks.reset();
+        self.counters.reset();
+        self.run_started = Some(std::time::Instant::now());
+        self.run_ended = None;
+        self.xp_target = target;
+        self.xp_next = std::time::Instant::now();
+    }
+
+    /// While a script runs, reads the client's skills every few seconds for the XP tracker.
+    fn drive_xp(&mut self, ctx: &egui::Context) {
+        if !self.script.as_ref().is_some_and(Script::is_running) {
+            return;
+        }
+        // the run time on screen ticks every second
+        ctx.request_repaint_after(Duration::from_secs(1));
+        let Some(target) = self.xp_target.clone().filter(|t| t.client.loaded.is_some()) else { return };
+        let now = std::time::Instant::now();
+        if self.xp_reading || now < self.xp_next {
+            ctx.request_repaint_after(self.xp_next.saturating_duration_since(now).max(Duration::from_millis(250)));
+            return;
+        }
+        self.xp_reading = true;
+        self.background(ctx, move |settings| Event::XpState(backend::state(&target, &settings)));
     }
 
     /// Sends a heartbeat when one is due, and asks for a repaint when the next one will be.
@@ -872,28 +915,12 @@ impl LoaderApp {
         });
     }
 
-    fn send_input(&mut self, ctx: &egui::Context, target: Target, input: Input) {
-        let pid = target.client.pid;
-        self.spawn(ctx, "Sending input…", move |settings| {
-            let result = backend::input(&target, &settings, &input);
-            Event::Input { pid, input, result }
-        });
-    }
-
     fn set_display_name(&mut self, ctx: &egui::Context, target: Target) {
         let pid = target.client.pid;
         let name = self.display_name.trim().to_owned();
         self.spawn(ctx, "Setting the name…", move |settings| {
             let result = backend::set_display_name(&target, &settings, &name);
             Event::Name { pid, name, result }
-        });
-    }
-
-    fn read_mouse(&mut self, ctx: &egui::Context, target: Target) {
-        let pid = target.client.pid;
-        self.spawn(ctx, "Reading…", move |settings| Event::Mouse {
-            pid,
-            result: backend::connection(&target, &settings),
         });
     }
 
@@ -1029,16 +1056,6 @@ impl LoaderApp {
                         self.error(format!("Setting the cursor of {pid} failed: {error}"));
                     }
                 }
-                Event::Input { pid, input, result } => match result {
-                    Ok(()) => self.info(format!("{pid}: sent {}.", describe(&input))),
-                    Err(error) => self.error(format!("Sending input to {pid} failed: {error}")),
-                },
-                Event::Mouse { pid, result } => match result {
-                    Ok(Some(c)) if c.mouse_x < 0 => self.info(format!("{pid}: agent hasn't seen the mouse move yet.")),
-                    Ok(Some(c)) => self.info(format!("{pid}: Mouse at ({}, {}).", c.mouse_x, c.mouse_y)),
-                    Ok(None) => self.error(format!("Reading the mouse of {pid} failed: agent isn't loaded.")),
-                    Err(error) => self.error(format!("Reading the mouse of {pid} failed: {error}")),
-                },
                 Event::Name { pid, name, result } => match result {
                     Ok(DisplayName::Kept { real }) => self.info(format!(
                         "{pid}: showing \"{name}\" instead of {}, kept across logins. Text already on screen changes when the client redraws it (the chatbox's input line soon, the quest tab's summary after switching tabs).",
@@ -1050,6 +1067,19 @@ impl LoaderApp {
                     Ok(DisplayName::Off) => self.info(format!("{pid}: the real display name shows.")),
                     Err(error) => self.error(format!("Setting the display name in {pid} failed: {error}")),
                 },
+                Event::XpState(result) => {
+                    self.xp_reading = false;
+                    self.xp_next = std::time::Instant::now() + XP_READ_EVERY;
+                    // a failed or empty read (logged out, client closing) is skipped; the baseline stays
+                    let skills = result.ok().and_then(|state| state.skills).filter(|skills| skills.iter().any(|s| s.xp > 0));
+                    if let Some(skills) = skills.filter(|_| self.script.as_ref().is_some_and(Script::is_running)) {
+                        let skills = skills
+                            .into_iter()
+                            .map(|s| crate::xp::SkillXp { name: s.name, level: s.real_level as i64, xp: s.xp as i64 })
+                            .collect();
+                        self.xp.update(skills);
+                    }
+                }
                 Event::State { pid, read, result } => match result {
                     Ok(state) => self.report_state(pid, read, &state),
                     Err(error) => self.error(format!("Reading the game state of {pid} failed: {error}")),
@@ -1567,6 +1597,8 @@ impl LoaderApp {
                         run.beat.report(experience, gold, &custom);
                     }
                 }
+                ScriptEvent::Counters(counters) => self.counters.update(counters),
+                ScriptEvent::Breaks(plan) => self.breaks.update(plan, std::time::Instant::now()),
                 ScriptEvent::Finished { stopped: true, .. } => self.script_info("Script stopped."),
                 ScriptEvent::Finished { result: Ok(()), .. } => self.script_info("Script finished."),
                 ScriptEvent::Finished {
@@ -1574,6 +1606,7 @@ impl LoaderApp {
                 } => self.script_error(format!("Script failed: {error}")),
             }
             if finished {
+                self.run_ended = Some(std::time::Instant::now());
                 self.end_store_session(ctx);
             }
         }
@@ -1649,6 +1682,7 @@ impl LoaderApp {
                 }
                 self.script_info(format!("Running {title} (revision {}).", prepared.session.revision));
                 self.script = Some(script);
+                self.start_xp_tracking(Some(target.clone()));
                 let interval = Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
                 self.store_run = Some(StoreRun { session_id, beat: Beat::new(std::time::Instant::now(), interval), stopping: false });
             }
@@ -1672,6 +1706,7 @@ impl LoaderApp {
             Ok(script) => {
                 self.script_info(format!("Running {name}…"));
                 self.script = Some(script);
+                self.start_xp_tracking(target.cloned());
             }
             Err(error) => self.script_error(format!("Couldn't start the script: {error}")),
         }
@@ -1771,6 +1806,7 @@ impl LoaderApp {
             if ui.add_enabled(!running, egui::Button::new("Save as…")).clicked() {
                 self.save_script_as();
             }
+            ui.add_space(16.0);
             let can_run = !running && !self.script_file.text.trim().is_empty();
             if ui
                 .add_enabled(can_run, egui::Button::new("Run"))
@@ -1956,86 +1992,10 @@ impl LoaderApp {
         }
     }
 
-    fn input_ui(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let target = self.loaded_target_ui(ui);
-        let enabled = self.busy.is_none() && target.is_some();
-        let mut send = None;
-
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.text)
-                    .hint_text("Text to type")
-                    .desired_width(300.0),
-            );
-            if ui
-                .add_enabled(enabled && !self.text.is_empty(), egui::Button::new("Type"))
-                .on_hover_text("Types the text without pressing enter.")
-                .clicked()
-            {
-                send = Some(Input::Type {
-                    text: self.text.clone(),
-                    hold_ms: injector::KEY_HOLD_MS,
-                });
-            }
-        });
-        ui.add_space(6.0);
-
-        ui.horizontal(|ui| {
-            let (x, y) = &mut self.mouse;
-            ui.label("x");
-            ui.add(egui::DragValue::new(x).range(0..=7680));
-            ui.label("y");
-            ui.add(egui::DragValue::new(y).range(0..=4320));
-            let (x, y) = (*x, *y);
-            if ui
-                .add_enabled(enabled, egui::Button::new("Move mouse"))
-                .clicked()
-            {
-                send = Some(Input::Move { x, y });
-            }
-            if ui
-                .add_enabled(enabled, egui::Button::new("Left click"))
-                .on_hover_text("Clicks at x, y.")
-                .clicked()
-            {
-                send = Some(Input::Click {
-                    button: MouseButton::Left,
-                    x,
-                    y,
-                    hold_ms: injector::CLICK_HOLD_MS,
-                });
-            }
-            if ui
-                .add_enabled(enabled, egui::Button::new("Right click"))
-                .on_hover_text("Clicks at x, y.")
-                .clicked()
-            {
-                send = Some(Input::Click {
-                    button: MouseButton::Right,
-                    x,
-                    y,
-                    hold_ms: injector::CLICK_HOLD_MS,
-                });
-            }
-        });
-        ui.add_space(6.0);
-
-        if ui
-            .add_enabled(enabled, egui::Button::new("Mouse position"))
-            .on_hover_text("Prints where agent last saw the mouse, in client coordinates.")
-            .clicked()
-            && let Some(target) = target.clone()
-        {
-            self.read_mouse(&ctx, target);
-        }
-
-        if let (Some(input), Some(target)) = (send, target) {
-            self.send_input(&ctx, target, input);
-        }
-    }
-
     fn development_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Game state").default_open(true).show(ui, |ui| self.state_ui(ui));
+        egui::CollapsingHeader::new("Varps").default_open(true).show(ui, |ui| self.varps_ui(ui));
+        ui.separator();
         egui::Grid::new("development_toggles")
             .num_columns(DEV_COLUMNS)
             .spacing([24.0, 6.0])
@@ -2054,7 +2014,127 @@ impl LoaderApp {
             });
     }
 
+    /// How long the script has run: it keeps counting while the script does and stops where the script ended.
+    fn run_time(&self) -> Duration {
+        let Some(started) = self.run_started else { return Duration::ZERO };
+        self.run_ended.unwrap_or_else(std::time::Instant::now).saturating_duration_since(started)
+    }
+
+    fn xp_tracker_ui(&self, ui: &mut egui::Ui) {
+        use crate::{counters::number, xp::{duration, thousands}};
+        if self.run_started.is_none() || (self.xp.is_empty() && self.counters.is_empty()) {
+            ui.weak("Waiting for the first read of the client's skills.");
+            return;
+        }
+        let elapsed = self.run_time();
+        ui.label(format!("{} · {} xp", duration(elapsed), thousands(self.xp.total())));
+        let rows = self.xp.rows(elapsed);
+        egui::ScrollArea::vertical().id_salt("xp_rows").auto_shrink([false, false]).show(ui, |ui| {
+            if rows.is_empty() {
+                ui.weak("No experience gained yet.");
+            } else {
+                egui::Grid::new("xp_grid").num_columns(5).spacing([12.0, 2.0]).show(ui, |ui| {
+                    for head in ["Skill", "Gained", "XP/hr", "Level", "To level"] {
+                        ui.weak(head);
+                    }
+                    ui.end_row();
+                    for row in &rows {
+                        ui.label(&row.name);
+                        ui.label(thousands(row.gained));
+                        ui.label(row.per_hour.map_or("-".into(), thousands));
+                        ui.label(row.level.to_string());
+                        ui.label(row.to_level.map_or("-".into(), duration));
+                        ui.end_row();
+                    }
+                });
+            }
+            let counters = self.counters.rows(elapsed);
+            if !counters.is_empty() {
+                ui.add_space(6.0);
+                ui.separator();
+                egui::Grid::new("counters_grid").num_columns(4).spacing([12.0, 2.0]).show(ui, |ui| {
+                    for head in ["", "Total", "Per hour", ""] {
+                        ui.weak(head);
+                    }
+                    ui.end_row();
+                    for row in &counters {
+                        ui.label(&row.label);
+                        ui.label(number(row.total));
+                        ui.label(row.per_hour.map_or("-".into(), number));
+                        ui.label(row.ratio.as_deref().unwrap_or(""));
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+    }
+
+    fn breaks_ui(&self, ui: &mut egui::Ui) {
+        use crate::{breaks::clock, xp::duration};
+        let running = self.script.as_ref().is_some_and(Script::is_running);
+        // counts down every second while the script runs, and stands at the last report once it has ended
+        let at = if running { std::time::Instant::now() } else { self.breaks.received().unwrap_or_else(std::time::Instant::now) };
+        let Some(view) = self.breaks.view(at) else {
+            ui.weak("The script hasn't reported any breaks.");
+            return;
+        };
+        if running {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        if let Some(active) = &view.active {
+            ui.label(egui::RichText::new(format!("On a {} · {} left", active.kind, duration(active.remaining))).strong());
+            ui.add_space(4.0);
+        }
+        egui::ScrollArea::vertical().id_salt("breaks_rows").auto_shrink([false, false]).show(ui, |ui| {
+            if !view.breaks.is_empty() {
+                ui.label(egui::RichText::new("Breaks").strong());
+                egui::Grid::new("breaks_grid").num_columns(2).spacing([12.0, 2.0]).show(ui, |ui| {
+                    ui.weak("In");
+                    ui.weak("Length");
+                    ui.end_row();
+                    for row in &view.breaks {
+                        ui.label(duration(row.remaining));
+                        ui.label(format!("~{}", duration(row.length)));
+                        ui.end_row();
+                    }
+                });
+            }
+            if !view.sleeps.is_empty() {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("Sleeps").strong());
+                egui::Grid::new("sleeps_grid").num_columns(3).spacing([12.0, 2.0]).show(ui, |ui| {
+                    ui.weak("At");
+                    ui.weak("In");
+                    ui.weak("Length");
+                    ui.end_row();
+                    for row in &view.sleeps {
+                        ui.label(row.at.map_or("-".into(), clock));
+                        ui.label(duration(row.remaining));
+                        ui.label(format!("~{}", duration(row.length)));
+                        ui.end_row();
+                    }
+                });
+            }
+            if view.breaks.is_empty() && view.sleeps.is_empty() {
+                ui.weak("Nothing is scheduled.");
+            }
+        });
+    }
+
     fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
+        if self.log_tab == LogTab::Script {
+            egui::Panel::right("script_tools").resizable(true).default_size(330.0).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
+                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
+                });
+                ui.separator();
+                match self.tools_tab {
+                    ToolsTab::Xp => self.xp_tracker_ui(ui),
+                    ToolsTab::Breaks => self.breaks_ui(ui),
+                }
+            });
+        }
         ui.horizontal(|ui| {
             crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
             crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Script, "Script");
@@ -2236,22 +2316,6 @@ fn varp_text(name: Option<&str>, id: usize, value: i32) -> String {
     text
 }
 
-fn describe(input: &Input) -> String {
-    match input {
-        Input::Move { x, y } => format!("a mouse move to ({x}, {y})"),
-        Input::WindMouse { x, y, .. } => format!("a WindMouse move to ({x}, {y})"),
-        Input::Click { button, x, y, .. } => format!("a {} click at ({x}, {y})", button.name()),
-        Input::Button { button, down } => format!(
-            "a {} button {}",
-            button.name(),
-            if *down { "press" } else { "release" }
-        ),
-        Input::Scroll { notches } => format!("a scroll of {notches} notches"),
-        Input::Key { key, down } => format!("key {key} {}", if *down { "down" } else { "up" }),
-        Input::Type { text, .. } => format!("{:?}", text),
-    }
-}
-
 fn pick_file(path: &mut String, name: &str, extension: &str) {
     let mut dialog = rfd::FileDialog::new().add_filter(name, &[extension]);
     if let Some(dir) = std::path::Path::new(path.as_str())
@@ -2281,6 +2345,7 @@ impl eframe::App for LoaderApp {
         self.handle_events(&ctx);
         self.handle_script_events(&ctx);
         self.drive_session(&ctx);
+        self.drive_xp(&ctx);
         self.form_ui(&ctx);
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
@@ -2305,9 +2370,6 @@ impl eframe::App for LoaderApp {
         egui::CentralPanel::default_margins().show(ui, |ui| {
             ui.horizontal(|ui| {
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Clients, "Clients");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::State, "Game state");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Varps, "Varps");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Input, "Input");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Store, "Store");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Scripts, "Scripts");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Development, "Development");
@@ -2327,9 +2389,6 @@ impl eframe::App for LoaderApp {
             }
             match self.tab {
                 Tab::Clients => self.clients_ui(ui),
-                Tab::State => self.state_ui(ui),
-                Tab::Varps => self.varps_ui(ui),
-                Tab::Input => self.input_ui(ui),
                 Tab::Store => self.store_ui(ui),
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),

@@ -3,6 +3,8 @@
 mod api;
 mod account;
 mod app;
+mod breaks;
+mod counters;
 #[cfg(test)]
 mod fake_api;
 #[cfg(test)]
@@ -15,6 +17,7 @@ mod store;
 mod theme;
 mod libs;
 mod update;
+mod xp;
 
 use eframe::egui;
 

@@ -1,9 +1,87 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 pub const SCRIPT_PREFIX: &str = "\u{1e}SCRIPT ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
 /// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";
+
+/// A line a script writes with `report_breaks`: the breaks and sleeps it has scheduled, for the loader's Breaks tab.
+pub const BREAKS_PREFIX: &str = "\u{1e}BREAKS ";
+
+/// A scheduled break or sleep. Times are milliseconds, counted from when the line was written.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct PlannedBreak {
+    /// How long until it is taken.
+    pub remaining: f64,
+    /// About how long it lasts.
+    pub length: f64,
+    /// For a sleep, the time of day it is scheduled to, in seconds since local midnight.
+    #[serde(default)]
+    pub at: Option<f64>,
+}
+
+/// The break or sleep being taken right now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveBreak {
+    /// `"break"` or `"sleep"`.
+    pub kind: String,
+    /// How long until it is over.
+    pub remaining: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct BreakPlan {
+    #[serde(default)]
+    pub breaks: Vec<PlannedBreak>,
+    #[serde(default)]
+    pub sleeps: Vec<PlannedBreak>,
+    #[serde(default)]
+    pub active: Option<ActiveBreak>,
+}
+
+pub fn breaks_line(plan: &BreakPlan) -> String {
+    format!("{BREAKS_PREFIX}{}", serde_json::to_string(plan).unwrap_or_default())
+}
+
+/// The plan of a `BREAKS_PREFIX` line, without the prefix.
+pub fn parse_breaks(payload: &str) -> Option<BreakPlan> {
+    serde_json::from_str(payload).ok()
+}
+
+/// A line a script writes with `report_counters`: what it counts, for the loader's XP Tracker tab.
+pub const COUNTERS_PREFIX: &str = "\u{1e}COUNTERS ";
+
+fn yes() -> bool {
+    true
+}
+
+/// Something a script counts, with its total since the script started. The loader works out the rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Counter {
+    /// What other counters refer to it by.
+    pub id: String,
+    pub label: String,
+    pub value: f64,
+    /// Whether to show it per hour of the run (on unless set to false).
+    #[serde(default = "yes")]
+    pub hourly: bool,
+    /// The `id` of a counter to divide by, shown as "per" it, such as points per game.
+    #[serde(default)]
+    pub per: Option<String>,
+    /// The `id` of a counter this is a share of, shown as a percent, such as wins of games.
+    #[serde(default)]
+    pub percent_of: Option<String>,
+}
+
+pub fn counters_line(counters: &[Counter]) -> String {
+    format!("{COUNTERS_PREFIX}{}", serde_json::to_string(counters).unwrap_or_default())
+}
+
+/// The counters of a `COUNTERS_PREFIX` line, without the prefix.
+pub fn parse_counters(payload: &str) -> Option<Vec<Counter>> {
+    serde_json::from_str(payload).ok()
+}
 
 pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
 
@@ -131,6 +209,20 @@ mod tests {
         let line = stats_line(10, -5, &[1, 2]);
         assert_eq!(parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()), Some((10, -5, vec![1, 2])));
         assert_eq!(parse_stats("nope"), None);
+        let plan = BreakPlan {
+            breaks: vec![PlannedBreak { remaining: 1000.0, length: 500.0, at: None }],
+            sleeps: vec![PlannedBreak { remaining: 5000.0, length: 9000.0, at: Some(3600.0) }],
+            active: Some(ActiveBreak { kind: "break".into(), remaining: 20.0 }),
+        };
+        assert_eq!(parse_breaks(breaks_line(&plan).strip_prefix(BREAKS_PREFIX).unwrap()), Some(plan));
+        let counters = vec![
+            Counter { id: "wins".into(), label: "Wins".into(), value: 3.0, hourly: true, per: None, percent_of: Some("games".into()) },
+            Counter { id: "points".into(), label: "Points".into(), value: 9.5, hourly: false, per: Some("games".into()), percent_of: None },
+        ];
+        assert_eq!(parse_counters(counters_line(&counters).strip_prefix(COUNTERS_PREFIX).unwrap()), Some(counters));
+        assert!(parse_counters(r#"[{"id":"a","label":"A","value":1}]"#).unwrap()[0].hourly);
+        assert_eq!(parse_counters("{}"), None);
+        assert_eq!(parse_breaks("{}"), Some(BreakPlan::default()));
         assert_eq!(parse_reply("{\"cancelled\":true}"), Ok(None));
         assert_eq!(parse_reply("{\"values\":{\"a\":1}}"), Ok(Some(json!({ "a": 1 }))));
     }

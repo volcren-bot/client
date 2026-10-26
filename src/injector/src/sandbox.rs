@@ -526,6 +526,30 @@ pub fn run_with_form(
             Ok(())
         })?,
     )?;
+    // The loader shows these under the skills in its XP Tracker tab and works out the rates itself; each call replaces the last.
+    let counters_print = print.clone();
+    globals.set(
+        "report_counters",
+        lua.create_function_mut(move |lua, counters: mlua::Value| {
+            let counters: Vec<crate::form::Counter> =
+                lua.from_value(counters).map_err(|e| mlua::Error::RuntimeError(format!("report_counters: {e}")))?;
+            if counters.iter().any(|c| !c.value.is_finite()) {
+                return Err(mlua::Error::RuntimeError("report_counters: values must be finite numbers".into()));
+            }
+            (counters_print.borrow_mut())(crate::form::counters_line(&counters));
+            Ok(())
+        })?,
+    )?;
+    // The loader shows these in its Breaks tab, in any run, and counts the times down itself.
+    let breaks_print = print.clone();
+    globals.set(
+        "report_breaks",
+        lua.create_function_mut(move |lua, plan: mlua::Value| {
+            let plan: crate::form::BreakPlan = lua.from_value(plan).map_err(|e| mlua::Error::RuntimeError(format!("report_breaks: {e}")))?;
+            (breaks_print.borrow_mut())(crate::form::breaks_line(&plan));
+            Ok(())
+        })?,
+    )?;
     // The loader sums these between heartbeats. Outside a store run it has nowhere to send them and drops them.
     globals.set(
         "report_stats",
@@ -837,6 +861,32 @@ mod tests {
         assert_eq!(lines[1], "after");
         assert!(run_lines("report_stats(-1, 0)").1.is_err());
         assert!(run_lines("report_stats(0/0, 0)").1.is_err());
+    }
+
+    #[test]
+    fn report_breaks_writes_a_breaks_line() {
+        let (lines, result) = run_lines(
+            "report_breaks({ breaks = { { remaining = 1500.5, length = 60000 } }, sleeps = {}, active = { kind = 'break', remaining = 10 } })",
+        );
+        result.unwrap();
+        let plan = crate::form::parse_breaks(lines[0].strip_prefix(crate::form::BREAKS_PREFIX).unwrap()).unwrap();
+        assert_eq!(plan.breaks[0].remaining, 1500.5);
+        assert!(plan.sleeps.is_empty());
+        assert_eq!(plan.active.unwrap().kind, "break");
+        assert!(run_lines("report_breaks({ breaks = 5 })").1.is_err());
+    }
+
+    #[test]
+    fn report_counters_writes_a_counters_line() {
+        let (lines, result) = run_lines(
+            "report_counters({ { id = 'wins', label = 'Wins', value = 3, percent_of = 'games' }, { id = 'games', label = 'Games', value = 4, hourly = false } })",
+        );
+        result.unwrap();
+        let counters = crate::form::parse_counters(lines[0].strip_prefix(crate::form::COUNTERS_PREFIX).unwrap()).unwrap();
+        assert_eq!(counters[0].percent_of.as_deref(), Some("games"));
+        assert!(counters[0].hourly && !counters[1].hourly);
+        assert!(run_lines("report_counters({ { label = 'No id', value = 1 } })").1.is_err());
+        assert!(run_lines("report_counters({ { id = 'a', label = 'A', value = 0/0 } })").1.is_err());
     }
 
     // A scratch directory with `files` (path, contents) written under it.

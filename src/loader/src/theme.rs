@@ -1,7 +1,5 @@
 use eframe::egui::{self, Color32, CornerRadius, Stroke, vec2};
 
-const ACCENT: Color32 = Color32::from_rgb(244, 105, 36);
-
 /// Fira Code Nerd Font Mono (SIL OFL, see `assets/FiraCode-LICENSE.txt`) ahead of egui's monospace font, which covers the rest.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -13,55 +11,71 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Rounder, roomier widgets for both themes, and a flat onyx palette with one accent for the dark one.
+/// Tokyonight (night), the webapp's default colorscheme.
+const BG_DARK: Color32 = Color32::from_rgb(0x16, 0x16, 0x1e);
+const BG: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x26);
+const BG_FLOAT: Color32 = Color32::from_rgb(0x1f, 0x23, 0x35);
+const BG_HL: Color32 = Color32::from_rgb(0x29, 0x2e, 0x42);
+const BORDER: Color32 = Color32::from_rgb(0x3b, 0x42, 0x61);
+const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
+const FG_DARK: Color32 = Color32::from_rgb(0xa9, 0xb1, 0xd6);
+const COMMENT: Color32 = Color32::from_rgb(0x56, 0x5f, 0x89);
+const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
+const SEL: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
+
+/// A flat, square, all-monospace look after the webapp's Neovim/LazyVim layer, always dark.
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
+    ctx.set_theme(egui::ThemePreference::Dark);
     ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = vec2(8.0, 6.0);
-        style.spacing.button_padding = vec2(10.0, 4.0);
-        style.spacing.interact_size.y = 24.0;
-        style.spacing.menu_margin = egui::Margin::same(6);
+        style.spacing.item_spacing = vec2(8.0, 4.0);
+        style.spacing.button_padding = vec2(8.0, 2.0);
+        style.spacing.interact_size.y = 22.0;
+        style.spacing.menu_margin = egui::Margin::same(4);
 
-        let radius = CornerRadius::same(6);
-        let visuals = &mut style.visuals;
-        visuals.window_corner_radius = CornerRadius::same(10);
-        visuals.menu_corner_radius = radius;
-        for widget in [
-            &mut visuals.widgets.noninteractive,
-            &mut visuals.widgets.inactive,
-            &mut visuals.widgets.hovered,
-            &mut visuals.widgets.active,
-            &mut visuals.widgets.open,
+        for (text_style, size) in [
+            (egui::TextStyle::Small, 11.0),
+            (egui::TextStyle::Body, 13.0),
+            (egui::TextStyle::Button, 13.0),
+            (egui::TextStyle::Monospace, 13.0),
+            (egui::TextStyle::Heading, 16.0),
         ] {
-            widget.corner_radius = radius;
+            style.text_styles.insert(text_style, egui::FontId::new(size, egui::FontFamily::Monospace));
         }
-        // Buttons read as flat fills, not outlined boxes.
-        visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-        visuals.widgets.inactive.weak_bg_fill = visuals.widgets.inactive.bg_fill;
-        visuals.selection.bg_fill = ACCENT.gamma_multiply(0.45);
-        visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-        visuals.hyperlink_color = ACCENT;
-    });
 
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
         let visuals = &mut style.visuals;
-        visuals.panel_fill = Color32::from_rgb(20, 21, 22);
-        visuals.window_fill = Color32::from_rgb(28, 29, 30);
-        visuals.extreme_bg_color = Color32::from_rgb(14, 15, 16);
-        visuals.faint_bg_color = Color32::from_rgb(28, 29, 30);
-        visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(54, 56, 57));
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(46, 48, 49));
-        visuals.widgets.inactive.bg_fill = Color32::from_rgb(40, 42, 43);
-        visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(40, 42, 43);
-        visuals.widgets.hovered.bg_fill = Color32::from_rgb(53, 56, 57);
-        visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(53, 56, 57);
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.7));
-        visuals.widgets.active.bg_fill = ACCENT.gamma_multiply(0.6);
-        visuals.widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.6);
+        visuals.dark_mode = true;
+        visuals.window_corner_radius = CornerRadius::ZERO;
+        visuals.menu_corner_radius = CornerRadius::ZERO;
+        visuals.panel_fill = BG;
+        visuals.window_fill = BG_FLOAT;
+        visuals.extreme_bg_color = BG_DARK;
+        visuals.faint_bg_color = BG_FLOAT;
+        visuals.code_bg_color = BG_DARK;
+        visuals.window_stroke = Stroke::new(1.0, BORDER);
+        visuals.hyperlink_color = BLUE;
+        visuals.selection.bg_fill = SEL;
+        visuals.selection.stroke = Stroke::new(1.0, BLUE);
+        visuals.popup_shadow = egui::Shadow::NONE;
+        visuals.window_shadow = egui::Shadow::NONE;
+
+        let w = &mut visuals.widgets;
+        w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+        w.noninteractive.fg_stroke = Stroke::new(1.0, FG_DARK);
+        for (widget, fill) in [(&mut w.inactive, BG_HL), (&mut w.hovered, SEL), (&mut w.active, SEL), (&mut w.open, BG_HL)] {
+            widget.corner_radius = CornerRadius::ZERO;
+            widget.bg_fill = fill;
+            widget.weak_bg_fill = fill;
+            widget.fg_stroke = Stroke::new(1.0, FG);
+        }
+        w.noninteractive.corner_radius = CornerRadius::ZERO;
+        w.inactive.bg_stroke = Stroke::NONE;
+        w.hovered.bg_stroke = Stroke::new(1.0, BLUE);
+        w.active.bg_stroke = Stroke::new(1.0, BLUE);
     });
 }
 
-/// A tab: the open one has accent text and an accent outline, the others are bare text.
+/// A bufferline tab: the open one sits on a lifted background with a blue top bar, the others are dim text.
 pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, label: &str) -> egui::Response {
     let selected = *current == value;
     let galley = egui::WidgetText::from(label).into_galley(
@@ -70,7 +84,7 @@ pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, lab
         f32::INFINITY,
         egui::TextStyle::Button,
     );
-    let (rect, mut response) = ui.allocate_exact_size(galley.size() + vec2(24.0, 10.0), egui::Sense::click());
+    let (rect, mut response) = ui.allocate_exact_size(galley.size() + vec2(20.0, 8.0), egui::Sense::click());
     if response.clicked() && !selected {
         *current = value;
         response.mark_changed();
@@ -78,15 +92,15 @@ pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, lab
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     if ui.is_rect_visible(rect) {
         let color = if selected {
-            ACCENT
+            FG
         } else if response.hovered() {
-            ui.visuals().strong_text_color()
+            FG_DARK
         } else {
-            ui.visuals().weak_text_color()
+            COMMENT
         };
         if selected {
-            let top = CornerRadius { nw: 6, ne: 6, sw: 0, se: 0 };
-            ui.painter().rect_stroke(rect, top, Stroke::new(1.0, ACCENT), egui::StrokeKind::Inside);
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
+            ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, vec2(rect.width(), 2.0)), CornerRadius::ZERO, BLUE);
         }
         ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     }

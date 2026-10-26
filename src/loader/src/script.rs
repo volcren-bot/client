@@ -18,6 +18,10 @@ pub enum ScriptEvent {
     Form(serde_json::Value),
     /// Experience, gold and custom tracker gains from `report_stats`.
     Stats(i64, i64, Vec<i64>),
+    /// The breaks and sleeps from `report_breaks`.
+    Breaks(injector::form::BreakPlan),
+    /// What the script counts, from `report_counters`.
+    Counters(Vec<injector::form::Counter>),
     Finished { result: Result<(), String>, stopped: bool },
 }
 
@@ -45,15 +49,26 @@ impl Script {
             .map_err(|e| format!("Couldn't run {}: {e}", command.get_program().to_string_lossy()))?;
 
         let mut stdin = child.stdin.take().expect("piped");
+        let stdout = child.stdout.take().expect("piped");
+        let mut stderr_pipe = child.stderr.take().expect("piped");
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
-        stdin
+        if let Err(error) = stdin
             .write_all(header.as_bytes())
             .and_then(|()| stdin.write_all(source.as_bytes()))
             .and_then(|()| stdin.flush())
-            .map_err(|e| format!("Couldn't send the script: {e}"))?;
-
-        let stdout = child.stdout.take().expect("piped");
-        let stderr_pipe = child.stderr.take().expect("piped");
+        {
+            // The injector quit before reading the script (bad arguments, an old build): say why instead of "broken pipe".
+            drop(stdin);
+            let _ = child.wait();
+            let mut said = String::new();
+            let _ = std::io::Read::read_to_string(&mut stderr_pipe, &mut said);
+            let said = said.trim();
+            return Err(if said.is_empty() {
+                format!("Couldn't send the script: {error}")
+            } else {
+                format!("The injector stopped before it got the script: {said}")
+            });
+        }
 
         let (tx, output) = channel();
         let repaint_ctx = ctx.clone();
@@ -157,6 +172,18 @@ impl Script {
                         None => ScriptEvent::Output(format!("Bad stats from the script: {payload}")),
                     };
                 }
+                if let Some(payload) = line.strip_prefix(injector::form::BREAKS_PREFIX) {
+                    return match injector::form::parse_breaks(payload) {
+                        Some(plan) => ScriptEvent::Breaks(plan),
+                        None => ScriptEvent::Output(format!("Bad breaks from the script: {payload}")),
+                    };
+                }
+                if let Some(payload) = line.strip_prefix(injector::form::COUNTERS_PREFIX) {
+                    return match injector::form::parse_counters(payload) {
+                        Some(counters) => ScriptEvent::Counters(counters),
+                        None => ScriptEvent::Output(format!("Bad counters from the script: {payload}")),
+                    };
+                }
                 match line.strip_prefix(injector::form::FORM_PREFIX).map(serde_json::from_str) {
                     Some(Ok(spec)) => ScriptEvent::Form(spec),
                     Some(Err(error)) => ScriptEvent::Output(format!("Bad form from the script: {error}")),
@@ -214,6 +241,8 @@ mod tests {
                 match event {
                     ScriptEvent::Output(line) => lines.push(line),
                     ScriptEvent::Form(spec) => lines.push(format!("form {spec}")),
+                    ScriptEvent::Breaks(plan) => lines.push(format!("breaks {}", plan.breaks.len())),
+                    ScriptEvent::Counters(counters) => lines.push(format!("counters {}", counters.len())),
                     ScriptEvent::Stats(experience, gold, _) => lines.push(format!("stats {experience} {gold}")),
                     ScriptEvent::Finished { result, stopped } => return (lines, Some((result, stopped))),
                 }
@@ -251,7 +280,7 @@ mod tests {
                 match event {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Stats(..) => {}
+                    ScriptEvent::Stats(..) | ScriptEvent::Breaks(..) | ScriptEvent::Counters(..) => {}
                     ScriptEvent::Finished { .. } => panic!("the script ended before asking for a form"),
                 }
             }
