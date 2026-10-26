@@ -122,6 +122,10 @@ jobs:
                       echo "Set the SUPABASE_URL repository variable and the SUPABASE_SERVICE_KEY secret." >&2
                       exit 1
                   fi
+                  # A secret pasted with a trailing newline would end the request headers early and turn the rest
+                  # of them into the start of the uploaded file, so only ever send the key without whitespace.
+                  SUPABASE_URL="$(printf %s "$SUPABASE_URL" | tr -d '[:space:]')"
+                  SUPABASE_SERVICE_KEY="$(printf %s "$SUPABASE_SERVICE_KEY" | tr -d '[:space:]')"
                   upload() { # <local file> <path in the bucket> <content type> [cache-control]
                       curl -sS --fail -X POST "$SUPABASE_URL/storage/v1/object/client/$2" \
                           -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" -H "apikey: $SUPABASE_SERVICE_KEY" \
@@ -141,3 +145,9 @@ jobs:
                           linux: {name: $lin, path: "\($version)/\($lin)", sha256: $linsum}}}' > out/latest.json
                   cat out/latest.json
                   upload out/latest.json latest.json application/json max-age=60
+
+                  # What was just published must be the manifest itself, nothing else.
+                  sleep 2
+                  curl -sS --fail "$SUPABASE_URL/storage/v1/object/public/client/latest.json?check=$VERSION" -o out/check.json
+                  jq -e --arg version "$VERSION" '.version == $version' out/check.json > /dev/null \
+                      || { echo "The published latest.json is not the manifest that was uploaded." >&2; exit 1; }
