@@ -1,0 +1,61 @@
+name: release
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        name: build (${{ matrix.name }})
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # Windows: cross-compiled from Linux with MinGW. Builds the whole workspace,
+                    # including the agent DLL, which only exists for Windows.
+                    - name: windows
+                      target: x86_64-pc-windows-gnu
+                      build: cargo build --release --workspace --target x86_64-pc-windows-gnu
+                      artifact_path: |
+                          target/x86_64-pc-windows-gnu/release/*.exe
+                          target/x86_64-pc-windows-gnu/release/*.dll
+                    # Linux: native build of the default members (injector and loader).
+                    # The agent is Windows-only and is not built here.
+                    - name: linux
+                      target: ""
+                      build: cargo build --release
+                      artifact_path: |
+                          target/release/injector
+                          target/release/loader
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install MinGW toolchain
+              if: matrix.name == 'windows'
+              run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  key: ${{ matrix.name }}
+
+            # Uses the `release` profile (full LTO, stripped) from the root Cargo.toml.
+            - name: Build release
+              run: ${{ matrix.build }}
+
+            - name: Upload binaries
+              uses: actions/upload-artifact@v4
+              with:
+                  name: volcren-${{ matrix.name }}-release
+                  path: ${{ matrix.artifact_path }}
+                  if-no-files-found: error

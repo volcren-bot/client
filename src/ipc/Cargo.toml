@@ -1,0 +1,7 @@
+[package]
+name = "ipc"
+version = "0.1.0"
+edition = "2021"
+description = "Shared memory layout shared by agent and loader"
+
+[dependencies]

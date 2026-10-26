@@ -1,0 +1,15 @@
+[package]
+name = "loader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.36.2", features = ["persistence"] }
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+injector = { version = "0.1.0", path = "../injector" }
+egui_extras = { version = "0.36", features = ["svg"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

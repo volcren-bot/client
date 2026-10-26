@@ -1,0 +1,23 @@
+[env]
+CXXSTDLIB_x86_64_pc_windows_gnu = "static:-bundle=stdc++"
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[alias]
+# Fast iteration builds (the `fast` profile in Cargo.toml: release without full LTO).
+fast-loader = "run --profile fast -p loader --bin loader"
+fast-win = "build --profile fast --target x86_64-pc-windows-gnu -p agent -p injector"
+
+# Release builds with a separate target dir each, so they can run in parallel
+# (cargo locks the target dir during a build).
+b-loader = "build --release -p loader --target-dir target/loader"
+b-agent = "build --release --target x86_64-pc-windows-gnu -p agent --target-dir target/agent"
+b-ipc = "build --release -p ipc --target-dir target/ipc"
+b-injector ="build --release --target x86_64-pc-windows-gnu -p injector --target-dir target/injector"
+
+# Lint everything the way it actually ships: the Windows targets.
+lint = "clippy --workspace --all-targets --target x86_64-pc-windows-gnu"

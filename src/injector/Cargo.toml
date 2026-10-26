@@ -1,0 +1,26 @@
+[package]
+name = "injector"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Compile lib/ into the injector, so piped scripts can `require` it. Without it, lib/ is only read from disk
+# relative to the script's own path (`injector run --script <path>`), and lib/ can live outside this repo.
+default = ["embedded-lib"]
+embedded-lib = []
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+mlua = { version = "0.12.2", features = ["luau-jit", "serialize"] }
+ipc = { path = "../ipc" }
+decode = { path = "../decode" }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Security"] }
+
+[target."cfg(not(windows))".dependencies]
+libc = "0.2.190"
+
+[dev-dependencies]
+decode = { path = "../decode", features = ["test-support"] }
