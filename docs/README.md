@@ -29,7 +29,21 @@ VOLCREN Client automates the native game client (a C++ x64 PE). It reads game st
  Luau sandbox (mlua): scripts written in Luau against the typed `host` wrapper
 ```
 
-The loader also talks to the Volcren API (sign-in, store, sessions, heartbeats, stats); see [loader-gui.md](loader-gui.md). It never talks to the database directly.
+Around the loader sits the Volcren backend:
+
+```
+ loader --- sign in (PKCE, browser) ------------------> Supabase auth (Discord)
+   |
+   +------ /launcher/* (Bearer token) ----------------> Volcren API (api/)
+   |         me, scripts, start session,                   |  service_role
+   |         heartbeat (+ stats), end session              v
+   |                                                    Postgres: payments.*_session, stats.report_session
+   |
+   +------ signed URLs: script files ------------------> private `scripts` bucket
+   +------ latest.json, lib/index.json, releases ------> public `client` bucket
+```
+
+The loader never talks to the database directly. The API owns billing: a session is billed per minute while heartbeats arrive. See [loader-gui.md](loader-gui.md).
 
 Per frame:
 

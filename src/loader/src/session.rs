@@ -73,13 +73,18 @@ pub struct Prepared {
 /// Starts a session and makes sure its files are on disk. If anything after the start fails, the session is ended so the user isn't billed.
 pub fn prepare(api: &Api, script: &StoreScript) -> Result<Prepared, String> {
     let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
+    prepare_in(api, script, &root)
+}
+
+/// `prepare` with the cache folder given, so tests don't touch the real one.
+pub fn prepare_in(api: &Api, script: &StoreScript, root: &Path) -> Result<Prepared, String> {
     let id = safe_id(&script.id).ok_or("The server sent a script id that can't be used.")?;
     // Before the session starts, so downloading the lib is never billed.
-    let lib = libs::ensure(api, &root)?;
+    let lib = libs::ensure(api, root)?;
     let session = api.start_session(id).map_err(|e| e.to_string())?;
-    match download(api, &root, id, &session) {
+    match download(api, root, id, &session) {
         Ok((entry, source)) => {
-            prune_old(&root, id, session.revision);
+            prune_old(root, id, session.revision);
             Ok(Prepared { session, entry, source, warning: lib.warning })
         }
         Err(error) => {

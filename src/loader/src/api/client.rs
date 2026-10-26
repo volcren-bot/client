@@ -33,6 +33,19 @@ impl Api {
         Self { config: Arc::new(config), agent, session: Arc::new(Mutex::new(None)) }
     }
 
+    /// An `Api` that is already signed in, without touching the system keyring.
+    #[cfg(test)]
+    pub fn signed_in(config: Config, access_token: &str) -> Self {
+        let api = Self::new(config);
+        let session = Session {
+            access_token: access_token.into(),
+            refresh_token: "refresh".into(),
+            expires_at: std::time::Instant::now() + Duration::from_secs(3600),
+        };
+        *api.session.lock().unwrap() = Some(session);
+        api
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }

@@ -3,6 +3,10 @@
 mod api;
 mod account;
 mod app;
+#[cfg(test)]
+mod fake_api;
+#[cfg(test)]
+mod flow_tests;
 mod form;
 mod highlight;
 mod script;
