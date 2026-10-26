@@ -343,6 +343,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("mouse", "utils/input/mouse.luau"),
     lib_module!("keyboard", "utils/input/keyboard.luau"),
     lib_module!("ticks", "utils/ticks.luau"),
+    lib_module!("stats_report", "utils/stats_report.luau"),
     lib_module!("log", "utils/log.luau"),
 ];
 
