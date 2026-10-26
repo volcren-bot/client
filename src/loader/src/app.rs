@@ -1077,7 +1077,7 @@ impl LoaderApp {
                             .into_iter()
                             .map(|s| crate::xp::SkillXp { name: s.name, level: s.real_level as i64, xp: s.xp as i64 })
                             .collect();
-                        self.xp.update(skills);
+                        self.xp.update(skills, self.run_time());
                     }
                 }
                 Event::State { pid, read, result } => match result {
@@ -2028,7 +2028,7 @@ impl LoaderApp {
         }
         let elapsed = self.run_time();
         ui.label(format!("{} · {} xp", duration(elapsed), thousands(self.xp.total())));
-        let rows = self.xp.rows(elapsed);
+        let rows = self.xp.rows();
         egui::ScrollArea::vertical().id_salt("xp_rows").auto_shrink([false, false]).show(ui, |ui| {
             if rows.is_empty() {
                 ui.weak("No experience gained yet.");

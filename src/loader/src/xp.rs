@@ -13,6 +13,8 @@ pub struct SkillXp {
 pub struct XpTracker {
     first: Vec<SkillXp>,
     latest: Vec<SkillXp>,
+    /// The run time when `latest` was read; rates are worked out against it, so they hold still between reads.
+    read_at: Duration,
 }
 
 pub struct XpRow {
@@ -39,7 +41,7 @@ impl XpTracker {
         self.first.is_empty()
     }
 
-    pub fn update(&mut self, skills: Vec<SkillXp>) {
+    pub fn update(&mut self, skills: Vec<SkillXp>, at: Duration) {
         if self.first.is_empty() {
             self.first = skills.clone();
         }
@@ -50,6 +52,7 @@ impl XpTracker {
             }
         }
         self.latest = skills;
+        self.read_at = at;
     }
 
     pub fn total(&self) -> i64 {
@@ -59,9 +62,9 @@ impl XpTracker {
             .sum()
     }
 
-    /// Skills that gained experience, biggest gain first, with rates over a run of `elapsed`.
-    pub fn rows(&self, elapsed: Duration) -> Vec<XpRow> {
-        let hours = elapsed.as_secs_f64() / 3600.0;
+    /// Skills that gained experience, biggest gain first, with rates over the run up to the last read.
+    pub fn rows(&self) -> Vec<XpRow> {
+        let hours = self.read_at.as_secs_f64() / 3600.0;
         let mut rows: Vec<XpRow> = self
             .latest
             .iter()
@@ -121,10 +124,10 @@ mod tests {
     fn tracks_gains_from_the_first_snapshot() {
         let mut tracker = XpTracker::default();
         assert!(tracker.is_empty());
-        tracker.update(vec![skill("Fishing", 70, 737_627), skill("Attack", 50, 100)]);
-        assert!(tracker.rows(Duration::ZERO).is_empty());
-        tracker.update(vec![skill("Fishing", 70, 747_627), skill("Attack", 50, 100)]);
-        let rows = tracker.rows(Duration::from_secs(3600));
+        tracker.update(vec![skill("Fishing", 70, 737_627), skill("Attack", 50, 100)], Duration::ZERO);
+        assert!(tracker.rows().is_empty());
+        tracker.update(vec![skill("Fishing", 70, 747_627), skill("Attack", 50, 100)], Duration::from_secs(3600));
+        let rows = tracker.rows();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].gained, rows[0].per_hour), (10_000, Some(10_000)));
         assert_eq!(tracker.total(), 10_000);
