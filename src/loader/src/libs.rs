@@ -1,5 +1,5 @@
 //! The Luau lib that store scripts `require("../lib/...")`: published to the public `client` bucket by the lib project's
-//! workflow as `lib/<version>/lib-<version>.zip` plus `lib/latest.json`, and kept in the cache next to the script folders.
+//! workflow as `lib/<version>/lib-<version>.zip` plus `lib/index.json`, and kept in the cache next to the script folders.
 
 use std::{
     fs,

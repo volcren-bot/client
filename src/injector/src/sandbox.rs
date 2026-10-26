@@ -383,7 +383,7 @@ fn local_time_of_day() -> f64 {
 }
 
 pub fn run(name: &str, source: &str, pid: Option<u32>, print: impl FnMut(String) + 'static) -> mlua::Result<()> {
-    run_with_form(name, source, pid, print, None, None)
+    run_with_form(name, source, pid, print, None, None, None)
 }
 
 // Resolves `.` and `..` by name only, so a module is cached under one path however it was reached.
@@ -430,7 +430,19 @@ fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
     Ok((file, source))
 }
 
+// What `require("../lib/main/walker")` asks for inside the lib, when the path names a `lib` folder: `main/walker`.
+fn lib_relative(path: &str) -> Option<&str> {
+    let mut rest = path;
+    let mut stepped = false;
+    while let Some(next) = rest.strip_prefix("../").or_else(|| rest.strip_prefix("./")) {
+        rest = next;
+        stepped = true;
+    }
+    rest.strip_prefix("lib/").filter(|r| stepped && !r.is_empty())
+}
+
 // `script_path` is the file the script was read from; without it only modules embedded in the injector can be required.
+// `lib_dir` is the developer's own lib folder: the script's `require("../lib/...")` reads from it instead of from beside the script.
 pub fn run_with_form(
     name: &str,
     source: &str,
@@ -438,6 +450,7 @@ pub fn run_with_form(
     print: impl FnMut(String) + 'static,
     form: Option<crate::form::FormHandler>,
     script_path: Option<&Path>,
+    lib_dir: Option<&Path>,
 ) -> mlua::Result<()> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::BIT,
@@ -455,15 +468,23 @@ pub fn run_with_form(
         dirs.borrow_mut().insert(format!("={name}"), dir.to_path_buf());
     }
 
+    let script_chunk = script_path.map(|_| format!("={name}"));
+    let lib_dir = lib_dir.map(Path::to_path_buf);
+
     let loaded = lua.create_table()?;
     globals.set(
         "require",
         lua.create_function(move |lua, path: String| {
             let relative = path.starts_with("./") || path.starts_with("../");
             let from = lua.inspect_stack(1, |d| d.source().source.map(|s| s.into_owned())).flatten();
+            let from_script = from.is_some() && from == script_chunk;
             let dir = from.and_then(|chunk| dirs.borrow().get(&chunk).cloned()).filter(|_| relative);
 
-            let found = dir.map(|dir| find_module(&dir, &path));
+            // The script's own `../lib/...` requires read from the configured lib folder; the modules inside it find each other as usual.
+            let found = match (&lib_dir, lib_relative(&path)) {
+                (Some(lib), Some(rest)) if from_script => Some(find_module(lib, rest)),
+                _ => dir.map(|dir| find_module(&dir, &path)),
+            };
             let key = match &found {
                 Some(Ok(file)) => file.display().to_string(),
                 _ => module_name(&path).to_string(),
@@ -834,7 +855,7 @@ mod tests {
         let lines = Rc::new(RefCell::new(Vec::new()));
         let collected = lines.clone();
         let name = path.file_name().unwrap().to_string_lossy();
-        let result = run_with_form(&name, source, None, move |line| collected.borrow_mut().push(line), None, Some(path));
+        let result = run_with_form(&name, source, None, move |line| collected.borrow_mut().push(line), None, Some(path), None);
         (Rc::try_unwrap(lines).unwrap().into_inner(), result)
     }
 
@@ -856,6 +877,56 @@ mod tests {
         );
         result.unwrap();
         assert_eq!(lines, ["true\thost\textra"]);
+    }
+
+    fn run_script_with_lib(path: &Path, source: &str, lib: &Path) -> (Vec<String>, mlua::Result<()>) {
+        let lines = Rc::new(RefCell::new(Vec::new()));
+        let collected = lines.clone();
+        let name = path.file_name().unwrap().to_string_lossy();
+        let result = run_with_form(&name, source, None, move |line| collected.borrow_mut().push(line), None, Some(path), Some(lib));
+        (Rc::try_unwrap(lines).unwrap().into_inner(), result)
+    }
+
+    #[test]
+    fn lib_relative_names_the_path_inside_the_lib() {
+        assert_eq!(lib_relative("../lib/main/walker"), Some("main/walker"));
+        assert_eq!(lib_relative("./lib/host"), Some("host"));
+        assert_eq!(lib_relative("../../lib/host"), Some("host"));
+        assert_eq!(lib_relative("lib/host"), None);
+        assert_eq!(lib_relative("../library/host"), None);
+        assert_eq!(lib_relative("../lib/"), None);
+        assert_eq!(lib_relative("./extra"), None);
+    }
+
+    #[test]
+    fn a_lib_folder_replaces_the_lib_beside_the_script() {
+        let dir = scratch(
+            "requires_lib_dir",
+            &[
+                ("lib/host.luau", "return { name = 'beside' }"),
+                ("mine/host.luau", "return { name = 'mine' }"),
+                ("mine/main/walker.luau", "local Host = require('../host')\nreturn { host = Host }"),
+            ],
+        );
+        let source = "print(require('../lib/host').name, require('../lib/main/walker').host.name)";
+        let script = dir.join("scripts/run.luau");
+
+        let (lines, result) = run_script_with_lib(&script, source, &dir.join("mine"));
+        result.unwrap();
+        assert_eq!(lines, ["mine\tmine"]);
+
+        // Without a lib folder, the lib beside the script is used as before.
+        let (lines, result) = run_script_at(&script, "print(require('../lib/host').name)");
+        result.unwrap();
+        assert_eq!(lines, ["beside"]);
+    }
+
+    #[test]
+    fn a_module_missing_from_the_lib_folder_is_an_error_naming_it() {
+        let dir = scratch("requires_lib_dir_missing", &[("mine/host.luau", "return {}"), ("lib/nope.luau", "return {}")]);
+        let (_, result) = run_script_with_lib(&dir.join("scripts/run.luau"), "require('../lib/nope')", &dir.join("mine"));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("module '../lib/nope' not found, tried:") && error.contains("mine"), "{error}");
     }
 
     #[test]

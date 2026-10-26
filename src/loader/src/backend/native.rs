@@ -93,7 +93,8 @@ pub fn connection(target: &Target, _settings: &Settings) -> Result<Option<Connec
     Ok(injector::connection(target.client.pid))
 }
 
-pub fn script_command(target: Option<&Target>, settings: &Settings, script: Option<&Path>) -> Result<Command, String> {
+/// `lib` is only for scripts run from a local file: store scripts get the downloaded lib beside them.
+pub fn script_command(target: Option<&Target>, settings: &Settings, script: Option<&Path>, lib: Option<&Path>) -> Result<Command, String> {
     if settings.helper.is_empty() || !Path::new(&settings.helper).is_file() {
         return Err("Set the path to injector.exe, scripts run in it.".into());
     }
@@ -101,6 +102,9 @@ pub fn script_command(target: Option<&Target>, settings: &Settings, script: Opti
     command.arg("run");
     if let Some(script) = script {
         command.arg("--script").arg(script);
+        if let Some(lib) = lib {
+            command.arg("--lib").arg(lib);
+        }
     }
     if let Some(target) = target {
         command.arg(target.client.pid.to_string());

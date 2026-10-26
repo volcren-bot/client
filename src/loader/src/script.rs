@@ -34,8 +34,9 @@ pub struct Script {
 }
 
 impl Script {
-    pub fn start(ctx: &egui::Context, source: &str, path: Option<&Path>, target: Option<&Target>, settings: &Settings) -> Result<Self, String> {
-        let mut command = backend::script_command(target, settings, path)?;
+    /// `lib` is your own lib folder, for a script run from a local file.
+    pub fn start(ctx: &egui::Context, source: &str, path: Option<&Path>, lib: Option<&Path>, target: Option<&Target>, settings: &Settings) -> Result<Self, String> {
+        let mut command = backend::script_command(target, settings, path, lib)?;
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -224,7 +225,7 @@ mod tests {
 
     fn start(source: &str) -> Script {
         ensure_runner_built();
-        Script::start(&egui::Context::default(), source, None, None, &Settings::default()).unwrap()
+        Script::start(&egui::Context::default(), source, None, None, None, &Settings::default()).unwrap()
     }
 
     #[test]
@@ -345,7 +346,7 @@ mod tests {
     }
 
     fn run_live(client: &(Target, Settings), source: &str) -> Run {
-        let mut script = Script::start(&egui::Context::default(), source, None, Some(&client.0), &client.1).unwrap();
+        let mut script = Script::start(&egui::Context::default(), source, None, None, Some(&client.0), &client.1).unwrap();
         let (lines, end) = wait(&mut script, Duration::from_secs(30));
         for line in &lines {
             println!("{line}");

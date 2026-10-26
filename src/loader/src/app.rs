@@ -1244,6 +1244,13 @@ impl LoaderApp {
             }
             ui.end_row();
 
+            ui.label("lib folder").on_hover_text("Optional. Scripts you run from a file read require(\"../lib/...\") from this folder, e.g. your lib checkout. Store scripts always use the downloaded lib.");
+            ui.add(egui::TextEdit::singleline(&mut self.settings.lib_dir).desired_width(460.0).hint_text("empty: the lib beside the script, or the built-in one"));
+            if ui.button("Browse…").clicked() {
+                pick_folder(&mut self.settings.lib_dir);
+            }
+            ui.end_row();
+
             if !cfg!(windows) {
                 ui.label("injector.exe");
                 ui.add(egui::TextEdit::singleline(&mut self.settings.helper).desired_width(460.0));
@@ -1635,7 +1642,7 @@ impl LoaderApp {
             self.api_job(ctx, move |api| Event::SessionEnded(api.end_session(&session_id)));
             return;
         };
-        match Script::start(ctx, &prepared.source, Some(&prepared.entry), Some(&target), &self.settings) {
+        match Script::start(ctx, &prepared.source, Some(&prepared.entry), None, Some(&target), &self.settings) {
             Ok(script) => {
                 if let Some(warning) = &prepared.warning {
                     self.script_info(format!("Warning: {warning}"));
@@ -1655,7 +1662,13 @@ impl LoaderApp {
     fn run_script(&mut self, ctx: &egui::Context, target: Option<&Target>) {
         let name = self.script_file.name();
         let path = Some(std::path::Path::new(&self.script_file.path)).filter(|p| p.is_file());
-        match Script::start(ctx, &self.script_file.text, path, target, &self.settings) {
+        // Developing: `require("../lib/...")` reads from your own lib folder when one is set.
+        let lib = Some(std::path::PathBuf::from(self.settings.lib_dir.trim())).filter(|l| path.is_some() && !l.as_os_str().is_empty());
+        if let Some(lib) = lib.as_ref().filter(|l| !l.is_dir()) {
+            self.script_error(format!("Couldn't start the script: the lib folder {} doesn't exist. Fix it in the settings.", lib.display()));
+            return;
+        }
+        match Script::start(ctx, &self.script_file.text, path, lib.as_deref(), target, &self.settings) {
             Ok(script) => {
                 self.script_info(format!("Running {name}…"));
                 self.script = Some(script);
@@ -2248,6 +2261,16 @@ fn pick_file(path: &mut String, name: &str, extension: &str) {
         dialog = dialog.set_directory(dir);
     }
     if let Some(picked) = dialog.pick_file() {
+        *path = picked.display().to_string();
+    }
+}
+
+fn pick_folder(path: &mut String) {
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(dir) = Some(std::path::Path::new(path.as_str())).filter(|d| d.is_dir()) {
+        dialog = dialog.set_directory(dir);
+    }
+    if let Some(picked) = dialog.pick_folder() {
         *path = picked.display().to_string();
     }
 }

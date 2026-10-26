@@ -263,12 +263,16 @@ pub fn players(target: &Target, settings: &Settings) -> Result<Vec<Player>, Stri
     run(&target.location, &helper, &["players", &target.client.pid.to_string()])
 }
 
-pub fn script_command(target: Option<&Target>, settings: &Settings, script: Option<&Path>) -> Result<Command, String> {
+/// `lib` is only for scripts run from a local file: store scripts get the downloaded lib beside them.
+pub fn script_command(target: Option<&Target>, settings: &Settings, script: Option<&Path>, lib: Option<&Path>) -> Result<Command, String> {
     let Some(target) = target else {
         let mut command = Command::new(native_helper()?);
         command.arg("run");
         if let Some(script) = script {
             command.arg("--script").arg(script);
+            if let Some(lib) = lib {
+                command.arg("--lib").arg(lib);
+            }
         }
         return Ok(command);
     };
@@ -277,6 +281,9 @@ pub fn script_command(target: Option<&Target>, settings: &Settings, script: Opti
     // Under Wine the injector needs the script's Windows path; a script outside every drive just can't require from disk.
     if let Some(path) = script.and_then(|s| windows_path(&target.location.prefix, s).ok()) {
         command.args(["--script", &path]);
+        if let Some(lib) = lib.and_then(|l| windows_path(&target.location.prefix, l).ok()) {
+            command.args(["--lib", &lib]);
+        }
     }
     command.arg(target.client.pid.to_string());
     Ok(command)

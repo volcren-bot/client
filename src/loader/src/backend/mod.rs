@@ -24,6 +24,8 @@ pub use wine::{
 pub struct Settings {
     pub dll: String,
     pub helper: String,
+    /// Your own lib folder: local script files read `require("../lib/...")` from it instead of the downloaded lib.
+    pub lib_dir: String,
 }
 
 impl Default for Settings {
@@ -35,6 +37,7 @@ impl Default for Settings {
         Self {
             dll: detect(&exe_dir, "agent.dll"),
             helper: detect(&exe_dir, "injector.exe"),
+            lib_dir: String::new(),
         }
     }
 }

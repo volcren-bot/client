@@ -270,7 +270,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up");
         eprintln!("       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms>");
         eprintln!("       injector overlay <pid> rect <x1> <y1> <x2> <y2> <r> <g> <b> <a> | overlay <pid> clear");
-        eprintln!("       injector serve | run [--script <path>] [pid]");
+        eprintln!("       injector serve | run [--script <path> [--lib <dir>]] [pid]");
         return std::process::ExitCode::from(2);
     }
     println!("{}", dispatch(&args));
@@ -282,7 +282,7 @@ fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if let ["run", rest @ ..] = args.as_slice()
-        && matches!(rest, [] | ["--script", _])
+        && matches!(rest, [] | ["--script", _] | ["--script", _, "--lib", _])
     {
         return run_script(rest);
     }
@@ -297,6 +297,10 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         ["--script", path, rest @ ..] => (Some(std::path::PathBuf::from(path)), rest),
         _ => (None, args),
     };
+    let (lib_dir, args) = match args {
+        ["--lib", dir, rest @ ..] => (Some(std::path::PathBuf::from(dir)), rest),
+        _ => (None, args),
+    };
     let pid = match args {
         [] => None,
         [pid] => match pid.parse() {
@@ -307,7 +311,7 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             }
         },
         _ => {
-            eprintln!("Usage: injector run [--script <path>] [pid]");
+            eprintln!("Usage: injector run [--script <path> [--lib <dir>]] [pid]");
             return std::process::ExitCode::from(2);
         }
     };
@@ -372,7 +376,7 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         let mut out = stdout.lock();
         let _ = write!(out, "{line}{}", form::ENTRY_END);
         let _ = out.flush();
-    }, handler, script_path.as_deref());
+    }, handler, script_path.as_deref(), lib_dir.as_deref());
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
