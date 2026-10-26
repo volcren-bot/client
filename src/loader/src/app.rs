@@ -14,8 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use loader::backend::{self, Scan, Settings, Target};
 
+use crate::account::{self, Auth};
+use crate::api::{Api, ApiError, Config, Me, StoreScript, models::{API_VERSION, Ended}, Heartbeat, Stats};
 use crate::highlight::Highlighter;
 use crate::script::{Script, ScriptEvent};
+use crate::session::{self, Beat, Prepared, Verdict};
+use crate::store::{self, Store};
+use crate::update::{self, Release};
 
 enum Event {
     Scanned(Scan),
@@ -63,6 +68,30 @@ enum Event {
         pid: u32,
         result: Result<usize, String>,
     },
+    Restored(Result<Option<Me>, ApiError>),
+    SignedIn(Result<Me, String>),
+    Me(Result<Me, ApiError>),
+    Scripts(Result<Vec<StoreScript>, ApiError>),
+    StoreStarted {
+        pid: u32,
+        title: String,
+        result: Result<Prepared, String>,
+    },
+    Heartbeat {
+        session_id: String,
+        sent: Option<Stats>,
+        result: Result<Heartbeat, ApiError>,
+    },
+    SessionEnded(Result<Ended, ApiError>),
+    Update(Result<Option<Release>, String>),
+}
+
+/// A store script that is running, and the session that is billing it.
+struct StoreRun {
+    session_id: String,
+    beat: Beat,
+    /// The script is being stopped for a reason already reported; the end of the session follows its exit.
+    stopping: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,6 +100,7 @@ enum Tab {
     State,
     Varps,
     Input,
+    Store,
     Scripts,
     Development,
     Settings,
@@ -453,6 +483,14 @@ pub struct LoaderApp {
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
     tiles: Option<TilesWorker>,
+    api: Api,
+    auth: Auth,
+    store: Store,
+    store_run: Option<StoreRun>,
+    /// A newer launcher release, until the user dismisses it.
+    update: Option<Release>,
+    /// Title of the store script being prepared (session start and download).
+    starting: Option<String>,
     targets: Vec<Target>,
     dll_version: Option<String>,
     selected: Option<String>,
@@ -503,6 +541,12 @@ impl LoaderApp {
                 .and_then(|s| eframe::get_value(s, CURSOR_KEY))
                 .unwrap_or(DEFAULT_CURSOR),
             tiles: None,
+            api: Api::new(Config::from_env()),
+            auth: Auth::Restoring,
+            store: Store::default(),
+            store_run: None,
+            update: None,
+            starting: None,
             targets: Vec::new(),
             dll_version: None,
             selected: None,
@@ -515,7 +559,184 @@ impl LoaderApp {
             rx,
         };
         app.scan(&cc.egui_ctx);
+        app.restore_sign_in(&cc.egui_ctx);
+        app.api_job(&cc.egui_ctx, |api| Event::Update(update::check(&api)));
         app
+    }
+
+    fn api_job(&self, ctx: &egui::Context, job: impl FnOnce(Api) -> Event + Send + 'static) {
+        let (tx, ctx, api) = (self.tx.clone(), ctx.clone(), self.api.clone());
+        thread::spawn(move || {
+            let _ = tx.send(job(api));
+            ctx.request_repaint();
+        });
+    }
+
+    fn restore_sign_in(&mut self, ctx: &egui::Context) {
+        self.auth = Auth::Restoring;
+        self.api_job(ctx, |api| Event::Restored(account::restore(&api)));
+    }
+
+    fn start_sign_in(&mut self, ctx: &egui::Context) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.auth = Auth::SigningIn(cancel.clone());
+        self.info("Waiting for you to sign in in the browser…");
+        self.api_job(ctx, move |api| Event::SignedIn(account::sign_in(&api, &cancel)));
+    }
+
+    fn sign_out(&mut self, why: Option<String>) {
+        self.api.sign_out();
+        self.auth = Auth::SignedOut;
+        self.store = Store::default();
+        match why {
+            Some(why) => self.error(format!("Signed out: {why}")),
+            None => self.info("Signed out."),
+        }
+    }
+
+    fn signed_in(&mut self, ctx: &egui::Context, me: Me) {
+        self.info(format!("Signed in as {}.", me.username));
+        if me.api_version > API_VERSION {
+            self.error("This launcher is too old for the server. Update it to run store scripts.");
+        }
+        self.auth = Auth::SignedIn(me);
+        self.fetch_scripts(ctx);
+    }
+
+    fn fetch_scripts(&mut self, ctx: &egui::Context) {
+        self.store.loading = true;
+        self.store.error = None;
+        self.api_job(ctx, |api| Event::Scripts(api.scripts("", "")));
+    }
+
+    /// Why a store script can't start right now, apart from the script itself.
+    fn run_block(&self, target: Option<&Target>) -> Option<String> {
+        if self.auth.me().is_some_and(|me| me.api_version > API_VERSION) {
+            return Some("Update the launcher to run store scripts.".into());
+        }
+        if self.starting.is_some() {
+            return Some("A script is starting.".into());
+        }
+        if self.script.as_ref().is_some_and(Script::is_running) {
+            return Some("A script is already running. Stop it first.".into());
+        }
+        target.is_none().then(|| "Select a client with agent loaded in the Clients tab.".into())
+    }
+
+    fn start_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+        self.starting = Some(script.title.clone());
+        self.info(format!("Starting {}…", script.title));
+        let (pid, title) = (target.client.pid, script.title.clone());
+        self.api_job(ctx, move |api| Event::StoreStarted { pid, title, result: session::prepare(&api, &script) });
+    }
+
+    /// Ends the session of the store script that just stopped. Idempotent on the server, so it is safe to call twice.
+    fn end_store_session(&mut self, ctx: &egui::Context) {
+        if let Some(run) = self.store_run.take() {
+            self.api_job(ctx, move |api| Event::SessionEnded(api.end_session(&run.session_id)));
+        }
+    }
+
+    /// Sends a heartbeat when one is due, and asks for a repaint when the next one will be.
+    fn drive_session(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        let Some(run) = self.store_run.as_mut().filter(|run| !run.stopping) else { return };
+        if run.beat.due(now) {
+            let sent = run.beat.take(now);
+            let session_id = run.session_id.clone();
+            self.api_job(ctx, move |api| {
+                let result = api.heartbeat(&session_id, sent.as_ref());
+                Event::Heartbeat { session_id, sent, result }
+            });
+        } else {
+            ctx.request_repaint_after(run.beat.next_due().saturating_duration_since(now).max(Duration::from_millis(250)));
+        }
+    }
+
+    fn store_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(me) = self.auth.me().cloned() else {
+            match self.auth {
+                Auth::Restoring => {
+                    ui.label("Checking for a saved sign-in…");
+                }
+                Auth::SigningIn(_) => {
+                    ui.label("Waiting for you to sign in in the browser…");
+                }
+                _ => {
+                    ui.label("Sign in with Discord to browse and run scripts.");
+                    if ui.button("Sign in").clicked() {
+                        self.start_sign_in(&ctx);
+                    }
+                }
+            }
+            return;
+        };
+        if !self.store.loaded && !self.store.loading && self.store.error.is_none() {
+            self.fetch_scripts(&ctx);
+        }
+        let target = self.loaded_target_ui(ui);
+        let block = self.run_block(target.as_ref());
+        match self.store.ui(ui, &me, block.as_deref()) {
+            Some(store::Action::Refresh) => self.fetch_scripts(&ctx),
+            Some(store::Action::Run(script)) => {
+                if let Some(target) = target {
+                    self.start_store_script(&ctx, *script, target);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn update_banner_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let Some(release) = self.update.clone() else { return };
+        egui::Panel::top("update").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("Version {} is available (you have {}).", release.version, update::VERSION));
+                if let Some(url) = release.download_url(&self.api)
+                    && ui.button("Download").clicked()
+                {
+                    let _ = webbrowser::open(&url);
+                }
+                if ui.button("Dismiss").clicked() {
+                    self.update = None;
+                    ctx.request_repaint();
+                }
+            });
+        });
+    }
+
+    fn account_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        match &self.auth {
+            Auth::SignedIn(me) => {
+                let (name, balance) = (me.username.clone(), store::balance_label(me));
+                if ui.button("Sign out").clicked() {
+                    self.sign_out(None);
+                    return;
+                }
+                if !self.api.config().site_url.is_empty() && ui.button("Buy credits").clicked() {
+                    let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
+                }
+                ui.label(balance);
+                ui.label(egui::RichText::new(name).strong());
+            }
+            Auth::SigningIn(cancel) => {
+                if ui.button("Cancel").clicked() {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                ui.spinner();
+                ui.label("Signing in…");
+            }
+            Auth::Restoring => {
+                ui.spinner();
+            }
+            Auth::SignedOut => {
+                if ui.button("Sign in").clicked() {
+                    self.start_sign_in(&ctx);
+                }
+            }
+        }
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -720,6 +941,84 @@ impl LoaderApp {
                         self.error(format!("Scene tiles in {pid} failed: {error}"));
                     }
                 }
+                Event::Restored(result) => match result {
+                    Ok(Some(me)) => self.signed_in(ctx, me),
+                    Ok(None) => self.auth = Auth::SignedOut,
+                    Err(error) => {
+                        self.auth = Auth::SignedOut;
+                        if let ApiError::SignedOut(why) = &error {
+                            self.error(format!("Your saved sign-in is no longer valid: {why}"));
+                        } else {
+                            self.error(format!("Couldn't sign in with the saved session: {error}"));
+                        }
+                    }
+                },
+                Event::SignedIn(result) => match result {
+                    Ok(me) => self.signed_in(ctx, me),
+                    Err(error) => {
+                        self.auth = Auth::SignedOut;
+                        self.error(error);
+                    }
+                },
+                Event::Update(result) => match result {
+                    Ok(release) => self.update = release,
+                    // Offline or no release published yet: not worth an error line.
+                    Err(error) => self.info(format!("Couldn't check for updates: {error}")),
+                },
+                Event::Me(result) => match result {
+                    Ok(me) => self.auth = Auth::SignedIn(me),
+                    Err(ApiError::Unauthorized | ApiError::SignedOut(_)) => self.sign_out(Some("your session expired.".into())),
+                    Err(error) => self.error(format!("Couldn't refresh your account: {error}")),
+                },
+                Event::Scripts(result) => {
+                    self.store.loading = false;
+                    match result {
+                        Ok(scripts) => {
+                            self.store.scripts = scripts;
+                            self.store.loaded = true;
+                        }
+                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
+                        Err(error) => self.store.error = Some(format!("Couldn't load the scripts: {error}")),
+                    }
+                }
+                Event::StoreStarted { pid, title, result } => {
+                    self.starting = None;
+                    match result {
+                        Ok(prepared) => self.run_prepared(ctx, pid, &title, prepared),
+                        Err(error) => self.script_error(format!("Couldn't start {title}: {error}")),
+                    }
+                }
+                Event::Heartbeat { session_id, sent, result } => {
+                    let now = std::time::Instant::now();
+                    if let (Ok(beat), Some(me)) = (&result, self.auth.me_mut())
+                        && let Some(credits) = beat.credits
+                    {
+                        me.credits = credits;
+                    }
+                    let verdict = match self.store_run.as_mut().filter(|run| run.session_id == session_id) {
+                        Some(run) => run.beat.on_result(now, sent, result),
+                        None => Verdict::Continue,
+                    };
+                    if let Verdict::Stop { reason, sign_out } = verdict {
+                        if let Some(run) = &mut self.store_run {
+                            run.stopping = true;
+                        }
+                        if let Some(script) = &mut self.script {
+                            script.stop();
+                        }
+                        self.script_error(reason.clone());
+                        if sign_out {
+                            self.sign_out(Some(reason));
+                        }
+                    }
+                }
+                Event::SessionEnded(result) => match result {
+                    Ok(ended) => {
+                        self.script_info(format!("Session ended, {} credits charged for the last minutes.", ended.charged));
+                        self.api_job(ctx, |api| Event::Me(api.me()));
+                    }
+                    Err(error) => self.script_error(format!("Couldn't end the session: {error}. The server will end it within 5 minutes.")),
+                },
                 Event::Console { pid, result } => {
                     if let Err(error) = result {
                         self.error(format!("Opening the console of {pid} failed: {error}"));
@@ -1240,6 +1539,7 @@ impl LoaderApp {
         }
         let events = self.script.as_mut().map(Script::poll).unwrap_or_default();
         for event in events {
+            let finished = matches!(event, ScriptEvent::Finished { .. });
             match event {
                 ScriptEvent::Output(line) => self.script_info(line),
                 ScriptEvent::Form(spec) => {
@@ -1254,11 +1554,20 @@ impl LoaderApp {
                     ));
                     ctx.request_repaint();
                 }
+                // Only a store run has a session to send them to; stats from a local run are dropped.
+                ScriptEvent::Stats(experience, gold, custom) => {
+                    if let Some(run) = &mut self.store_run {
+                        run.beat.report(experience, gold, &custom);
+                    }
+                }
                 ScriptEvent::Finished { stopped: true, .. } => self.script_info("Script stopped."),
                 ScriptEvent::Finished { result: Ok(()), .. } => self.script_info("Script finished."),
                 ScriptEvent::Finished {
                     result: Err(error), ..
                 } => self.script_error(format!("Script failed: {error}")),
+            }
+            if finished {
+                self.end_store_session(ctx);
             }
         }
     }
@@ -1316,6 +1625,27 @@ impl LoaderApp {
         match &self.script_file.disk {
             Some(known) => (&disk != known).then_some(disk),
             None => (disk != self.script_file.text).then_some(disk),
+        }
+    }
+
+    fn run_prepared(&mut self, ctx: &egui::Context, pid: u32, title: &str, prepared: Prepared) {
+        let session_id = prepared.session.session_id.clone();
+        let Some(target) = self.targets.iter().find(|t| t.client.pid == pid && t.client.loaded.is_some()).cloned() else {
+            self.script_error(format!("The client {pid} is gone, so {title} wasn't started."));
+            self.api_job(ctx, move |api| Event::SessionEnded(api.end_session(&session_id)));
+            return;
+        };
+        match Script::start(ctx, &prepared.source, Some(&prepared.entry), Some(&target), &self.settings) {
+            Ok(script) => {
+                self.script_info(format!("Running {title} (revision {}).", prepared.session.revision));
+                self.script = Some(script);
+                let interval = Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
+                self.store_run = Some(StoreRun { session_id, beat: Beat::new(std::time::Instant::now(), interval), stopping: false });
+            }
+            Err(error) => {
+                self.script_error(format!("Couldn't start {title}: {error}"));
+                self.api_job(ctx, move |api| Event::SessionEnded(api.end_session(&session_id)));
+            }
         }
     }
 
@@ -1438,7 +1768,11 @@ impl LoaderApp {
             }
             if ui
                 .add_enabled(running, egui::Button::new(if paused { "Resume" } else { "Pause" }))
-                .on_hover_text("Suspends the script's process, so it takes effect immediately, even in a tight loop.")
+                .on_hover_text(if self.store_run.is_some() {
+                    "Suspends the script's process. A store script is still billed while paused: stop it to stop billing."
+                } else {
+                    "Suspends the script's process, so it takes effect immediately, even in a tight loop."
+                })
                 .clicked()
                 && let Some(script) = &mut self.script
             {
@@ -1920,6 +2254,7 @@ impl eframe::App for LoaderApp {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);
         self.handle_script_events(&ctx);
+        self.drive_session(&ctx);
         self.form_ui(&ctx);
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
@@ -1929,9 +2264,11 @@ impl eframe::App for LoaderApp {
             ui.horizontal(|ui| {
                 ui.add(egui::Image::new(egui::include_image!("../assets/volcren.svg")).fit_to_exact_size(egui::vec2(32.0, 32.0)));
                 ui.label(egui::RichText::new("Volcren").size(22.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.account_ui(ui));
             });
             ui.add_space(6.0);
         });
+        self.update_banner_ui(&ctx, ui);
         egui::Panel::bottom("log")
             .resizable(true)
             .default_size(140.0)
@@ -1945,6 +2282,7 @@ impl eframe::App for LoaderApp {
                 crate::theme::tab_value(ui, &mut self.tab, Tab::State, "Game state");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Varps, "Varps");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Input, "Input");
+                crate::theme::tab_value(ui, &mut self.tab, Tab::Store, "Store");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Scripts, "Scripts");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Development, "Development");
                 if let Some(label) = self.busy {
@@ -1959,13 +2297,14 @@ impl eframe::App for LoaderApp {
             ui.separator();
             if self.tab != self.followed_tab {
                 self.followed_tab = self.tab;
-                self.log_tab = if self.tab == Tab::Scripts { LogTab::Script } else { LogTab::Loader };
+                self.log_tab = if matches!(self.tab, Tab::Scripts | Tab::Store) { LogTab::Script } else { LogTab::Loader };
             }
             match self.tab {
                 Tab::Clients => self.clients_ui(ui),
                 Tab::State => self.state_ui(ui),
                 Tab::Varps => self.varps_ui(ui),
                 Tab::Input => self.input_ui(ui),
+                Tab::Store => self.store_ui(ui),
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),
                 Tab::Settings => self.settings_ui(ui),
@@ -1983,6 +2322,16 @@ impl eframe::App for LoaderApp {
     fn on_exit(&mut self) {
         if let Some(script) = &mut self.script {
             script.stop();
+        }
+        // Closing must not wait on the network. If this doesn't land, the server ends the session within 5 minutes.
+        if let Some(run) = self.store_run.take() {
+            let (done, wait) = channel();
+            let api = self.api.clone();
+            thread::spawn(move || {
+                let _ = api.end_session(&run.session_id);
+                let _ = done.send(());
+            });
+            let _ = wait.recv_timeout(Duration::from_secs(3));
         }
         backend::shutdown();
     }

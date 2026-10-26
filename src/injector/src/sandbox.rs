@@ -434,7 +434,7 @@ pub fn run_with_form(
     name: &str,
     source: &str,
     pid: Option<u32>,
-    mut print: impl FnMut(String) + 'static,
+    print: impl FnMut(String) + 'static,
     form: Option<crate::form::FormHandler>,
     script_path: Option<&Path>,
 ) -> mlua::Result<()> {
@@ -442,6 +442,7 @@ pub fn run_with_form(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::BIT,
         LuaOptions::default(),
     )?;
+    let print: Rc<RefCell<dyn FnMut(String)>> = Rc::new(RefCell::new(print));
     let globals = lua.globals();
     let worker: InputWorker = pid.map(|pid| Arc::new(input_jobs::worker(move |input: &Input, pace: &dyn Pace| send_input_with(pid, input, pace))));
     globals.set("dofile", mlua::Nil)?;
@@ -494,11 +495,24 @@ pub fn run_with_form(
         })?,
     )?;
 
+    let printer = print.clone();
     globals.set(
         "print",
         lua.create_function_mut(move |_, args: MultiValue| {
             let line: Vec<String> = args.iter().map(|v| v.to_string().unwrap_or_else(|_| "?".into())).collect();
-            print(line.join("\t"));
+            (printer.borrow_mut())(line.join("\t"));
+            Ok(())
+        })?,
+    )?;
+    // The loader sums these between heartbeats. Outside a store run it has nowhere to send them and drops them.
+    globals.set(
+        "report_stats",
+        lua.create_function_mut(move |_, (experience, gold, custom): (f64, f64, Option<Vec<f64>>)| {
+            if !experience.is_finite() || !gold.is_finite() || experience < 0.0 {
+                return Err(mlua::Error::RuntimeError("report_stats: experience must be a number of 0 or more, and gold a number".into()));
+            }
+            let custom: Vec<i64> = custom.unwrap_or_default().into_iter().map(|value| value.round() as i64).collect();
+            (print.borrow_mut())(crate::form::stats_line(experience.round() as i64, gold.round() as i64, &custom));
             Ok(())
         })?,
     )?;
@@ -791,6 +805,16 @@ mod tests {
         let collected = lines.clone();
         let result = run("test.luau", source, None, move |line| collected.borrow_mut().push(line));
         (Rc::try_unwrap(lines).unwrap().into_inner(), result)
+    }
+
+    #[test]
+    fn report_stats_writes_a_stats_line_and_rejects_bad_values() {
+        let (lines, result) = run_lines("report_stats(100.4, -20, { 1, 2.6 }) print('after')");
+        result.unwrap();
+        assert_eq!(lines[0], crate::form::stats_line(100, -20, &[1, 3]));
+        assert_eq!(lines[1], "after");
+        assert!(run_lines("report_stats(-1, 0)").1.is_err());
+        assert!(run_lines("report_stats(0/0, 0)").1.is_err());
     }
 
     // A scratch directory with `files` (path, contents) written under it.

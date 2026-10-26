@@ -16,6 +16,8 @@ use loader::backend::{self, Settings, Target};
 pub enum ScriptEvent {
     Output(String),
     Form(serde_json::Value),
+    /// Experience, gold and custom tracker gains from `report_stats`.
+    Stats(i64, i64, Vec<i64>),
     Finished { result: Result<(), String>, stopped: bool },
 }
 
@@ -147,10 +149,18 @@ impl Script {
         let mut events: Vec<ScriptEvent> = self
             .output
             .try_iter()
-            .map(|line| match line.strip_prefix(injector::form::FORM_PREFIX).map(serde_json::from_str) {
-                Some(Ok(spec)) => ScriptEvent::Form(spec),
-                Some(Err(error)) => ScriptEvent::Output(format!("Bad form from the script: {error}")),
-                None => ScriptEvent::Output(line),
+            .map(|line| {
+                if let Some(payload) = line.strip_prefix(injector::form::STATS_PREFIX) {
+                    return match injector::form::parse_stats(payload) {
+                        Some((experience, gold, custom)) => ScriptEvent::Stats(experience, gold, custom),
+                        None => ScriptEvent::Output(format!("Bad stats from the script: {payload}")),
+                    };
+                }
+                match line.strip_prefix(injector::form::FORM_PREFIX).map(serde_json::from_str) {
+                    Some(Ok(spec)) => ScriptEvent::Form(spec),
+                    Some(Err(error)) => ScriptEvent::Output(format!("Bad form from the script: {error}")),
+                    None => ScriptEvent::Output(line),
+                }
             })
             .collect();
         if !self.finished && let Ok(Some(status)) = self.child.try_wait() {
@@ -203,6 +213,7 @@ mod tests {
                 match event {
                     ScriptEvent::Output(line) => lines.push(line),
                     ScriptEvent::Form(spec) => lines.push(format!("form {spec}")),
+                    ScriptEvent::Stats(experience, gold, _) => lines.push(format!("stats {experience} {gold}")),
                     ScriptEvent::Finished { result, stopped } => return (lines, Some((result, stopped))),
                 }
             }
@@ -239,6 +250,7 @@ mod tests {
                 match event {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
+                    ScriptEvent::Stats(..) => {}
                     ScriptEvent::Finished { .. } => panic!("the script ended before asking for a form"),
                 }
             }
@@ -263,6 +275,14 @@ mod tests {
         let (rest, end) = wait(&mut script, Duration::from_secs(5));
         lines.extend(rest);
         assert_eq!(lines, ["Cage\t3", "nil\tcancelled"]);
+        assert_eq!(end, Some((Ok(()), false)));
+    }
+
+    #[test]
+    fn report_stats_arrives_as_a_stats_event_not_output() {
+        let mut script = start("report_stats(10, 5, { 1 }) report_stats(20, -5) print('done')");
+        let (lines, end) = wait(&mut script, Duration::from_secs(5));
+        assert_eq!(lines, ["stats 10 5", "stats 20 -5", "done"]);
         assert_eq!(end, Some((Ok(()), false)));
     }
 

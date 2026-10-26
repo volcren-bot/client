@@ -72,7 +72,11 @@ Outputs:
    ```
 3. In the loader, select the game client, check that the DLL and helper paths point at the files built
    above (they are filled in automatically when they are in `target/`), and load the agent.
-4. Open a Luau script and run it.
+4. Either open a local Luau script in the Scripts tab and run it (no account needed), or press **Sign in**
+   (Discord, in your browser), pick a script in the **Store** tab and press **Run**.
+
+The loader reads `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and optionally `SITE_URL` from `.env`
+in the repository root at build time and embeds them; the same names in the environment override them at run time.
 
 The injector can also be used on its own, for example `injector list` to list game clients,
 `injector load <pid> <dll>` to load the agent and `injector run --script script.luau <pid> < script.luau`

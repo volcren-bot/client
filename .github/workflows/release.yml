@@ -34,8 +34,20 @@ jobs:
                           target/release/injector
                           target/release/loader
 
+        # The loader embeds these at build time (see src/loader/build.rs). They are public values, so they are repository
+        # variables, not secrets. Builds without them (forks, pull requests) still compile; sign-in just isn't configured.
+        env:
+            API_URL: ${{ vars.API_URL }}
+            SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+            SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+            SITE_URL: ${{ vars.SITE_URL }}
+
         steps:
             - uses: actions/checkout@v4
+
+            # YYYY.MM.DD-<7 character commit>, from the commit's UTC date, so every job names the same build the same way.
+            - name: Version
+              run: echo "VOLCREN_VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
             - name: Install MinGW toolchain
               if: matrix.name == 'windows'
@@ -59,3 +71,72 @@ jobs:
                   name: volcren-${{ matrix.name }}-release
                   path: ${{ matrix.artifact_path }}
                   if-no-files-found: error
+
+    # On every push to main: package both platforms and publish them, with a manifest the loader's update check reads,
+    # to the public `client` bucket. latest.json goes up last, so it never points at files that aren't there yet.
+    publish:
+        name: publish to the client bucket
+        needs: build
+        if: github.event_name == 'push'
+        concurrency:
+            group: publish
+            cancel-in-progress: false
+        runs-on: ubuntu-latest
+        env:
+            SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+            SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/download-artifact@v4
+              with:
+                  path: dist
+
+            - name: Version
+              run: |
+                  echo "VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+                  echo "API_VERSION=$(grep -m1 'pub const API_VERSION' src/loader/src/api/models.rs | grep -o '[0-9]*;' | tr -d ';')" >> "$GITHUB_ENV"
+
+            - name: Package
+              run: |
+                  mkdir -p out
+                  win=dist/volcren-windows-release
+                  lin=dist/volcren-linux-release
+
+                  # Windows: everything runs natively.
+                  (cd "$win" && zip -q "../../out/volcren-windows-$VERSION.zip" loader.exe injector.exe agent.dll)
+
+                  # Linux: the loader and a native injector, plus the Windows injector and agent that run inside Wine.
+                  stage=$(mktemp -d)/volcren
+                  mkdir -p "$stage"
+                  cp "$lin/loader" "$lin/injector" "$win/injector.exe" "$win/agent.dll" "$stage/"
+                  chmod +x "$stage/loader" "$stage/injector"
+                  tar -C "$(dirname "$stage")" -czf "out/volcren-linux-$VERSION.tar.gz" volcren
+
+                  (cd out && sha256sum * | tee SHA256SUMS)
+
+            - name: Upload
+              run: |
+                  if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
+                      echo "Set the SUPABASE_URL repository variable and the SUPABASE_SERVICE_KEY secret." >&2
+                      exit 1
+                  fi
+                  upload() { # <local file> <path in the bucket> <content type> [cache-control]
+                      curl -sS --fail -X POST "$SUPABASE_URL/storage/v1/object/client/$2" \
+                          -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" -H "apikey: $SUPABASE_SERVICE_KEY" \
+                          -H "x-upsert: true" -H "Content-Type: $3" -H "cache-control: ${4:-max-age=31536000}" \
+                          --data-binary "@$1" > /dev/null
+                  }
+                  win="volcren-windows-$VERSION.zip"
+                  lin="volcren-linux-$VERSION.tar.gz"
+                  upload "out/$win" "$VERSION/$win" application/zip
+                  upload "out/$lin" "$VERSION/$lin" application/gzip
+
+                  jq -n --arg version "$VERSION" --argjson api "${API_VERSION:-1}" \
+                      --arg win "$win" --arg winsum "$(sha256sum "out/$win" | cut -d' ' -f1)" \
+                      --arg lin "$lin" --arg linsum "$(sha256sum "out/$lin" | cut -d' ' -f1)" \
+                      '{version: $version, api_version: $api, files: {
+                          windows: {name: $win, path: "\($version)/\($win)", sha256: $winsum},
+                          linux: {name: $lin, path: "\($version)/\($lin)", sha256: $linsum}}}' > out/latest.json
+                  cat out/latest.json
+                  upload out/latest.json latest.json application/json max-age=60

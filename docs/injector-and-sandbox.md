@@ -21,7 +21,7 @@ Real code only on Windows. On other targets the same API compiles to stubs retur
 | `input_jobs.rs` | The jobs the sandbox's worker runs (`Job`: an input or a wait) and the held-button/key tracking released on cancel. |
 | `font.rs` | The game's bitmap fonts, decoded from the cache, for overlay text. |
 | `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). |
-| `form.rs` | Script settings form spec, shared with the loader. |
+| `form.rs` | Script settings form spec and the `STATS_PREFIX` line format, shared with the loader. |
 | `sandbox.rs` | The Luau runtime (`mlua` with `luau-jit`) and every script global. |
 | `main.rs` | CLI. |
 
@@ -51,6 +51,7 @@ injector serve                                     JSON-lines server (the loader
 - Queries and actions return `(result, err)`.
 - `connection` and `game_state` raise instead ("no client selected", "agent isn't loaded in the client"); `run <pid>` exits at startup when the agent is missing or on another protocol, so scripts never see a nil connection.
 - `time()` is ms since start, `clock()` seconds since local midnight; `form(spec)` shows a settings dialog (defaults when no handler).
+- `report_stats(experience, gold, custom?)` writes a `form::STATS_PREFIX` line (`\u{1e}STATS {json}`) through the print sink; the loader sums these between heartbeats and sends them to the API. Experience must be 0 or more; values are rounded to integers. Outside a store run the loader drops them. The gains are since the last call, not totals; runtime is measured by the loader, never reported by the script.
 
 ### Async input
 

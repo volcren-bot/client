@@ -1,10 +1,15 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod api;
+mod account;
 mod app;
 mod form;
 mod highlight;
 mod script;
+mod session;
+mod store;
 mod theme;
+mod update;
 
 use eframe::egui;
 

@@ -29,6 +29,8 @@ VOLCREN Client automates the native game client (a C++ x64 PE). It reads game st
  Luau sandbox (mlua): scripts written in Luau against the typed `host` wrapper
 ```
 
+The loader also talks to the Volcren API (sign-in, store, sessions, heartbeats, stats); see [loader-gui.md](loader-gui.md). It never talks to the database directly.
+
 Per frame:
 
 1. The agent's render hook reads game structures, using offsets it found at startup, and writes them to named shared memory: `AGENT_DATA_<pid>` (header, frame image, overlay) and `AGENT_STATE_<pid>` (game state).

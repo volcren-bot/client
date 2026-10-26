@@ -2,6 +2,8 @@ use serde_json::{Map, Value, json};
 
 pub const SCRIPT_PREFIX: &str = "\u{1e}SCRIPT ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
+/// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
+pub const STATS_PREFIX: &str = "\u{1e}STATS ";
 
 pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
 
@@ -79,6 +81,17 @@ pub fn defaults(spec: &Value) -> Value {
     Value::Object(values)
 }
 
+pub fn stats_line(experience: i64, gold: i64, custom: &[i64]) -> String {
+    format!("{STATS_PREFIX}{}", json!({ "experience": experience, "gold": gold, "custom": custom }))
+}
+
+/// The values of a `STATS_PREFIX` line, without the prefix.
+pub fn parse_stats(payload: &str) -> Option<(i64, i64, Vec<i64>)> {
+    let value: Value = serde_json::from_str(payload).ok()?;
+    let custom = value.get("custom").and_then(Value::as_array).map_or_else(Vec::new, |values| values.iter().filter_map(Value::as_i64).collect());
+    Some((value.get("experience")?.as_i64()?, value.get("gold")?.as_i64()?, custom))
+}
+
 /// Ends every entry the script writes to stdout, so an entry can hold newlines.
 pub const ENTRY_END: char = '\0';
 
@@ -115,6 +128,9 @@ mod tests {
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "slider" }] })).is_err());
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "choice" }] })).is_err());
         assert!(validate(&json!({ "fields": [{ "id": "a" }, { "id": "a" }] })).is_err());
+        let line = stats_line(10, -5, &[1, 2]);
+        assert_eq!(parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()), Some((10, -5, vec![1, 2])));
+        assert_eq!(parse_stats("nope"), None);
         assert_eq!(parse_reply("{\"cancelled\":true}"), Ok(None));
         assert_eq!(parse_reply("{\"values\":{\"a\":1}}"), Ok(Some(json!({ "a": 1 }))));
     }
