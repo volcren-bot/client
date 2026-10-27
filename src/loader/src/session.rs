@@ -16,7 +16,6 @@ use crate::api::{Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript, m
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(4 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
-const ENTRY: &str = "main.luau";
 const COMPLETE: &str = ".complete";
 
 /// The cache folder. Each revision is a folder `<script id>_<revision>` directly in it, and the shared lib is `lib` beside them,
@@ -118,9 +117,9 @@ fn download(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Resul
         .iter()
         .map(|file| safe_file_name(&file.name).ok_or_else(|| format!("The server sent a file name that can't be used: {:?}", file.name)))
         .collect::<Result<Vec<_>, _>>()?;
-    if !names.contains(&ENTRY) {
-        return Err(format!("This revision has no {ENTRY}."));
-    }
+    let entry_name = safe_file_name(&session.entry)
+        .filter(|entry| names.contains(entry))
+        .ok_or_else(|| format!("This revision's entry file {:?} isn't one of its files.", session.entry))?;
 
     // A finished download of this revision is reused. Revisions never change once published.
     if !(dir.join(COMPLETE).is_file() && names.iter().all(|name| dir.join(name).is_file())) {
@@ -151,11 +150,11 @@ fn download(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Resul
         fs::write(dir.join(COMPLETE), b"").map_err(|e| format!("Couldn't finish the download: {e}"))?;
     }
 
-    let entry = dir.join(ENTRY);
+    let entry = dir.join(entry_name);
     let mut source = String::new();
     fs::File::open(&entry)
         .and_then(|mut file| file.read_to_string(&mut source))
-        .map_err(|e| format!("Couldn't read {ENTRY}: {e}"))?;
+        .map_err(|e| format!("Couldn't read {entry_name}: {e}"))?;
     Ok((entry, source))
 }
 

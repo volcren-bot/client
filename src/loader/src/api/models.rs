@@ -123,6 +123,8 @@ pub struct StartedSession {
     pub session_id: String,
     pub revision: i64,
     pub price: i64,
+    /// The file to run; one of `files`.
+    pub entry: String,
     pub files: Vec<SessionFile>,
     pub heartbeat_seconds: u64,
 }
@@ -253,7 +255,7 @@ mod tests {
     #[test]
     fn parses_a_started_session() {
         let session: StartedSession = serde_json::from_str(
-            r#"{"session_id":"s","revision":3,"price":0,"files":[{"name":"main.luau","url":"https://x/y"},{"name":"util.luau","url":"https://x/z","sha256":"ab"}],"heartbeat_seconds":60}"#,
+            r#"{"session_id":"s","revision":3,"price":0,"entry":"main.luau","files":[{"name":"main.luau","url":"https://x/y"},{"name":"util.luau","url":"https://x/z","sha256":"ab"}],"heartbeat_seconds":60}"#,
         )
         .unwrap();
         assert_eq!(session.files.len(), 2);

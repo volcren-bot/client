@@ -26,13 +26,14 @@ struct Server {
     file_status: u16,
     /// Serve a wrong checksum for the files.
     wrong_checksum: bool,
+    entry: &'static str,
     /// 404 for the lib index, as before the first lib release.
     no_lib: bool,
 }
 
 impl Server {
     const fn healthy() -> Self {
-        Self { revision: 4, start_status: 200, file_status: 200, wrong_checksum: false, no_lib: false }
+        Self { revision: 4, start_status: 200, file_status: 200, wrong_checksum: false, entry: "main.luau", no_lib: false }
     }
 
     fn start(self) -> FakeServer {
@@ -83,6 +84,7 @@ impl Server {
                         "session_id": "s1",
                         "revision": self.revision,
                         "price": 30,
+                        "entry": self.entry,
                         "heartbeat_seconds": 60,
                         "files": [
                             { "name": "main.luau", "url": format!("{base}/files/main.luau"), "sha256": checksum(MAIN) },
@@ -209,6 +211,25 @@ fn a_failed_download_ends_the_session_so_nothing_is_billed() {
     assert!(error.contains("Couldn't download"), "{error}");
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_entry_file_comes_from_the_server_and_needs_no_particular_name() {
+    let fake = Server { entry: "util.luau", ..Server::healthy() }.start();
+    let root = cache("entry");
+
+    let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
+    assert_eq!(prepared.source, UTIL);
+    assert_eq!(prepared.entry, revision_dir(&root, SCRIPT_ID, 4).join("util.luau"));
+}
+
+#[test]
+fn an_entry_that_is_not_one_of_the_files_is_rejected_and_the_session_ended() {
+    let fake = Server { entry: "gone.luau", ..Server::healthy() }.start();
+
+    let error = prepare_in(&api(&fake), &script(), &cache("bad_entry")).err().expect("must fail");
+    assert!(error.contains("gone.luau"), "{error}");
+    assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
 }
 
 #[test]
