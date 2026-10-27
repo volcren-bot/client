@@ -2487,8 +2487,8 @@ impl eframe::App for LoaderApp {
         egui::CentralPanel::default_margins().show(ui, |ui| {
             ui.horizontal(|ui| {
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Clients, "Clients");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Store, "Store");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Scripts, "Scripts");
+                crate::theme::tab_value(ui, &mut self.tab, Tab::Store, "Scripts");
+                crate::theme::tab_value(ui, &mut self.tab, Tab::Scripts, "Editor");
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Development, "Development");
                 if let Some(label) = self.busy {
                     ui.separator();

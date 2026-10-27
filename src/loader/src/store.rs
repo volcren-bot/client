@@ -1,4 +1,4 @@
-//! The Store tab: the scripts the account can see, and what it takes to run each.
+//! The Scripts tab: the scripts the account can see, and what it takes to run each.
 
 use eframe::egui;
 

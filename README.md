@@ -72,8 +72,8 @@ Outputs:
    ```
 3. In the loader, select the game client, check that the DLL and helper paths point at the files built
    above (they are filled in automatically when they are in `target/`), and load the agent.
-4. Either open a local Luau script in the Scripts tab and run it (no account needed), or press **Sign in**
-   (Discord, in your browser), pick a script in the **Store** tab and press **Run**.
+4. Press **Sign in with Discord** (in your browser); the loader needs a signed-in account. Then either pick a
+   script in the **Scripts** tab and press **Run**, or open a local Luau script in the **Editor** tab and run it.
 
 The loader reads `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and optionally `SITE_URL` from `.env`
 in the repository root at build time and embeds them; the same names in the environment override them at run time.
