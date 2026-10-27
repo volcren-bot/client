@@ -2937,7 +2937,6 @@ impl eframe::App for LoaderApp {
             });
         if self.auth.me().is_none() {
             egui::CentralPanel::default_margins().show(ui, |ui| {
-                crate::logo::paint_background(ui, ui.max_rect());
                 self.login_gate_ui(ui);
             });
             return;
@@ -3004,7 +3003,9 @@ impl eframe::App for LoaderApp {
                 });
         }
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            crate::logo::paint_background(ui, ui.max_rect());
+            if self.tab == Tab::Clients {
+                crate::logo::paint_background(ui, ui.max_rect());
+            }
             if let Some(label) = self.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
