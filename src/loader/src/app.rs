@@ -96,6 +96,10 @@ enum Tab {
     Settings,
 }
 
+/// Window width from which the sidebar is always shown.
+const SIDEBAR_MIN_WINDOW: f32 = 760.0;
+const SIDEBAR_WIDTH: f32 = 190.0;
+
 const DEV_TOGGLES: [&str; 33] = [
     "Players",
     "NPCs",
@@ -537,6 +541,8 @@ type LogJobKey = (LogTab, u64, egui::FontId, egui::Color32, egui::Color32);
 pub struct LoaderApp {
     settings: Settings,
     tab: Tab,
+    /// The sidebar drawer is open (only used when the window is too narrow to show it permanently).
+    sidebar_open: bool,
     display_name: String,
     varp: usize,
     varps: Option<Vec<i32>>,
@@ -600,6 +606,7 @@ impl LoaderApp {
         let mut app = Self {
             settings,
             tab: Tab::Clients,
+            sidebar_open: false,
             display_name: String::new(),
             varp: varp::RUN,
             varps: None,
@@ -803,6 +810,27 @@ impl LoaderApp {
                 }
             }
             None => {}
+        }
+    }
+
+    /// The page tree on the left, after the website's neo-tree. Picking a page closes the drawer on narrow windows.
+    fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        crate::theme::sidebar_header(ui, "explorer");
+        crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
+        let before = self.tab;
+        let items = [
+            (Tab::Clients, "\u{f108}", "client"),
+            (Tab::Store, "\u{f489}", "scripts"),
+            (Tab::Scripts, "\u{f044}", "editor"),
+            (Tab::Development, "\u{f188}", "development"),
+            (Tab::Settings, "\u{f013}", "settings"),
+        ];
+        for (i, (tab, icon, name)) in items.iter().enumerate() {
+            crate::theme::sidebar_item(ui, &mut self.tab, *tab, icon, name, i == items.len() - 1);
+        }
+        if self.tab != before {
+            self.sidebar_open = false;
         }
     }
 
@@ -2589,13 +2617,27 @@ impl eframe::App for LoaderApp {
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
 
+        let signed_in = self.auth.me().is_some();
+        let narrow = ctx.content_rect().width() < SIDEBAR_MIN_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add(egui::Image::new(egui::include_image!("../assets/volcren.svg")).fit_to_exact_size(egui::vec2(32.0, 32.0)));
-                ui.label(egui::RichText::new("Volcren").size(22.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.account_ui(ui));
-            });
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 32.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg")).fit_to_exact_size(egui::vec2(32.0, 32.0));
+                    if narrow && signed_in {
+                        // Below the breakpoint the logo opens the sidebar, as on the website.
+                        if ui.add(egui::Button::image(logo).selected(self.sidebar_open)).on_hover_text("Toggle the sidebar").clicked() {
+                            self.sidebar_open = !self.sidebar_open;
+                        }
+                    } else {
+                        ui.add(logo);
+                    }
+                    ui.label(egui::RichText::new("VOLCREN").font(egui::FontId::new(22.0, crate::theme::bold_family())));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.account_ui(ui));
+                },
+            );
             ui.add_space(6.0);
         });
         self.update_banner_ui(&ctx, ui);
@@ -2610,22 +2652,48 @@ impl eframe::App for LoaderApp {
             egui::CentralPanel::default_margins().show(ui, |ui| self.login_gate_ui(ui));
             return;
         }
+        if !narrow {
+            egui::Panel::left("sidebar")
+                .resizable(false)
+                .exact_size(SIDEBAR_WIDTH)
+                .frame(crate::theme::sidebar_frame())
+                .show(ui, |ui| self.sidebar_ui(ui));
+        } else if self.sidebar_open {
+            // A drawer over the page, closed by a click outside it, Esc or the logo.
+            let area = ui.available_rect_before_wrap();
+            let backdrop = egui::Area::new("sidebar_backdrop".into())
+                .order(egui::Order::Foreground)
+                .fixed_pos(area.min)
+                .show(&ctx, |ui| {
+                    let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::click());
+                    ui.painter().rect_filled(area, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(130));
+                    response
+                })
+                .inner;
+            let drawer = egui::Area::new("sidebar_drawer".into())
+                .order(egui::Order::Foreground)
+                .fixed_pos(area.min)
+                .show(&ctx, |ui| {
+                    crate::theme::sidebar_frame().show(ui, |ui| {
+                        ui.set_width(SIDEBAR_WIDTH.min(area.width() * 0.85));
+                        ui.set_min_height(area.height() - 12.0);
+                        self.sidebar_ui(ui);
+                    });
+                })
+                .response;
+            let outside = backdrop.clicked() && !drawer.contains_pointer();
+            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.sidebar_open = false;
+            }
+        }
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Clients, "Clients");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Store, "Scripts");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Scripts, "Editor");
-                crate::theme::tab_value(ui, &mut self.tab, Tab::Development, "Development");
-                if let Some(label) = self.busy {
-                    ui.separator();
+            if let Some(label) = self.busy {
+                ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(label);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    crate::theme::tab_value(ui, &mut self.tab, Tab::Settings, "Settings");
                 });
-            });
-            ui.separator();
+                ui.separator();
+            }
             if self.tab != self.followed_tab {
                 self.followed_tab = self.tab;
                 self.log_tab = if matches!(self.tab, Tab::Scripts | Tab::Store) { LogTab::Script } else { LogTab::Loader };

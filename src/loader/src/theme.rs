@@ -8,7 +8,17 @@ fn install_fonts(ctx: &egui::Context) {
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/FiraCodeNerdFontMono-Regular.ttf"))),
     );
     fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "fira_code".to_owned());
+    fonts.font_data.insert(
+        "fira_code_bold".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/FiraCodeNerdFontMono-Bold.ttf"))),
+    );
+    fonts.families.insert(bold_family(), vec!["fira_code_bold".to_owned(), "fira_code".to_owned()]);
     ctx.set_fonts(fonts);
+}
+
+/// The bold weight of Fira Code, used for the app title.
+pub fn bold_family() -> egui::FontFamily {
+    egui::FontFamily::Name("fira_code_bold".into())
 }
 
 /// Tokyonight (night), the webapp's default colorscheme.
@@ -24,6 +34,7 @@ const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
 const SEL: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
 pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
+const PURPLE: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
 pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
 
 /// A flat, square, all-monospace look after the webapp's Neovim/LazyVim layer, always dark.
@@ -108,4 +119,56 @@ pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, lab
         ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     }
     response
+}
+
+/// The webapp's neo-tree header: a bold, spaced, uppercase purple label.
+pub fn sidebar_header(ui: &mut egui::Ui, label: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(label.to_uppercase()).font(egui::FontId::new(11.0, bold_family())).color(PURPLE));
+    ui.add_space(2.0);
+}
+
+/// The tree's root row (not clickable): `icon name/` in yellow.
+pub fn sidebar_root(ui: &mut egui::Ui, icon: &str, name: &str) {
+    ui.label(egui::RichText::new(format!("{icon} {name}/")).color(YELLOW));
+}
+
+/// A neo-tree row: dim guide, icon and `name/`; the open one is lifted and blue, hover brightens it.
+pub fn sidebar_item<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, icon: &str, name: &str, last: bool) -> egui::Response {
+    let selected = *current == value;
+    let (rect, mut response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), ui.spacing().interact_size.y), egui::Sense::click());
+    if response.clicked() && !selected {
+        *current = value;
+        response.mark_changed();
+    }
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let text = if selected {
+            BLUE
+        } else if response.hovered() {
+            FG
+        } else {
+            FG_DARK
+        };
+        if selected || response.hovered() {
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
+        }
+        let font = egui::FontId::monospace(13.0);
+        let mut job = egui::text::LayoutJob::default();
+        for (s, color) in [(if last { "└─ " } else { "├─ " }, COMMENT), (icon, text), (" ", text), (name, text), ("/", text)] {
+            job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
+        }
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0), galley, text);
+    }
+    response
+}
+
+/// The sidebar's own surface: darker than the page with a single line on its right edge.
+pub fn sidebar_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(BG_DARK)
+        .stroke(Stroke::NONE)
+        .inner_margin(egui::Margin::symmetric(0, 6))
 }
