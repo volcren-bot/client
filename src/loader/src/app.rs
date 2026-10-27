@@ -87,6 +87,8 @@ enum Event {
 /// A store script that is running, and the session that is billing it.
 struct StoreRun {
     session_id: String,
+    /// The script's name, for its page in the sidebar.
+    title: String,
     beat: Beat,
     /// The script is being stopped for a reason already reported; the end of the session follows its exit.
     stopping: bool,
@@ -96,9 +98,21 @@ struct StoreRun {
 enum Tab {
     Clients,
     Store,
+    /// The page of the store script that is running; it replaces `Store` in the sidebar until the script ends.
+    Running,
     Scripts,
     Development,
     Settings,
+}
+
+/// A script's title as a sidebar row: lowercase like the other pages, cut to fit.
+fn sidebar_name(title: &str) -> String {
+    const MAX: usize = 16;
+    let name = title.to_lowercase();
+    if name.chars().count() <= MAX {
+        return name;
+    }
+    name.chars().take(MAX - 1).chain(['\u{2026}']).collect()
 }
 
 /// Window width from which the sidebar is always shown.
@@ -897,12 +911,16 @@ impl LoaderApp {
         crate::theme::sidebar_header(ui, "explorer");
         crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
         let before = self.tab;
+        let running = self.store_run.as_ref().map(|run| sidebar_name(&run.title));
         let items = [
-            (Tab::Clients, "\u{f108}", "client"),
-            (Tab::Store, "\u{f489}", "scripts"),
-            (Tab::Scripts, "\u{f044}", "editor"),
-            (Tab::Development, "\u{f188}", "development"),
-            (Tab::Settings, "\u{f013}", "settings"),
+            (Tab::Clients, "\u{f108}", "client".to_owned()),
+            match running {
+                Some(name) => (Tab::Running, "\u{f04b}", name),
+                None => (Tab::Store, "\u{f489}", "scripts".to_owned()),
+            },
+            (Tab::Scripts, "\u{f044}", "editor".to_owned()),
+            (Tab::Development, "\u{f188}", "development".to_owned()),
+            (Tab::Settings, "\u{f013}", "settings".to_owned()),
         ];
         for (i, (tab, icon, name)) in items.iter().enumerate() {
             crate::theme::sidebar_item(ui, &mut self.tab, *tab, icon, name, i == items.len() - 1);
@@ -1834,6 +1852,9 @@ impl LoaderApp {
             match event {
                 ScriptEvent::Output(line) => self.script_info(line),
                 ScriptEvent::Form(spec) => {
+                    if self.store_run.is_some() {
+                        self.tab = Tab::Running;
+                    }
                     let title = spec
                         .get("title")
                         .and_then(serde_json::Value::as_str)
@@ -1870,13 +1891,22 @@ impl LoaderApp {
         if self.script.as_ref().is_none_or(|s| !s.is_running()) {
             self.form = None;
         }
+        // A store script's form is shown on its page instead
+        if self.store_run.is_some() {
+            return;
+        }
         let Some(form) = &mut self.form else { return };
-        let answer = match form.show(ctx) {
+        let outcome = form.show(ctx);
+        self.answer_form(outcome);
+    }
+
+    /// Sends the script what the user did with its form, and remembers the values for next time.
+    fn answer_form(&mut self, outcome: crate::form::Outcome) {
+        let answer = match outcome {
             crate::form::Outcome::Open => return,
             crate::form::Outcome::Submitted(values) => {
-                if let serde_json::Value::Object(map) = &values {
-                    self.remembered_forms
-                        .insert(form.title.clone(), map.clone());
+                if let (serde_json::Value::Object(map), Some(form)) = (&values, &self.form) {
+                    self.remembered_forms.insert(form.title.clone(), map.clone());
                 }
                 Some(values)
             }
@@ -1887,6 +1917,55 @@ impl LoaderApp {
             && let Err(error) = script.answer_form(answer) {
                 self.script_error(error);
             }
+    }
+
+    /// The page of the running store script: its controls, and its settings form while it is waiting for one.
+    fn running_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(title) = self.store_run.as_ref().map(|run| run.title.clone()) else { return };
+        let running = self.script.as_ref().is_some_and(Script::is_running);
+        let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
+        let stopping = self.script.as_ref().is_some_and(Script::stop_requested);
+        ui.heading(&title);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(running && !stopping, egui::Button::new(if paused { "Resume" } else { "Pause" }))
+                .on_hover_text("Suspends the script's process. It is still billed while paused: stop it to stop billing.")
+                .clicked()
+            {
+                self.toggle_pause();
+            }
+            if ui.add_enabled(running && !stopping, egui::Button::new("Stop")).clicked()
+                && let Some(script) = &mut self.script
+            {
+                script.stop();
+            }
+            ui.separator();
+            ui.label(match (running, stopping, paused) {
+                (false, ..) => "ended",
+                (_, true, _) => "stopping",
+                (_, _, true) => "paused",
+                _ => "running",
+            });
+        });
+        ui.add_space(8.0);
+        ui.separator();
+        match &mut self.form {
+            Some(form) => {
+                ui.label(egui::RichText::new(&form.title).strong());
+                let outcome = form.show_inline(ui);
+                self.answer_form(outcome);
+            }
+            None => {
+                ui.label(egui::RichText::new("The script isn't asking for settings.").weak());
+            }
+        }
+    }
+
+    fn toggle_pause(&mut self) {
+        let Some(script) = &mut self.script else { return };
+        let paused = script.is_paused();
+        script.set_paused(!paused);
+        self.script_info(if paused { "Script resumed." } else { "Script paused." });
     }
 
     fn open_script(&mut self) {
@@ -1938,7 +2017,9 @@ impl LoaderApp {
                 self.script = Some(script);
                 self.start_xp_tracking(Some(target.clone()));
                 let interval = Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
-                self.store_run = Some(StoreRun { session_id, beat: Beat::new(std::time::Instant::now(), interval), stopping: false });
+                self.store_run = Some(StoreRun { session_id, title: title.to_owned(), beat: Beat::new(std::time::Instant::now(), interval), stopping: false });
+                self.tab = Tab::Running;
+                self.sidebar_open = false;
             }
             Err(error) => {
                 self.script_error(format!("Couldn't start {title}: {error}"));
@@ -2080,10 +2161,8 @@ impl LoaderApp {
                     "Suspends the script's process, so it takes effect immediately, even in a tight loop."
                 })
                 .clicked()
-                && let Some(script) = &mut self.script
             {
-                script.set_paused(!paused);
-                self.script_info(if paused { "Script resumed." } else { "Script paused." });
+                self.toggle_pause();
             }
             if ui.add_enabled(running, egui::Button::new("Stop")).clicked()
                 && let Some(script) = &mut self.script
@@ -2882,13 +2961,18 @@ impl eframe::App for LoaderApp {
                 });
                 ui.separator();
             }
+            // the script's page goes away with the script
+            if self.tab == Tab::Running && self.store_run.is_none() {
+                self.tab = Tab::Store;
+            }
             if self.tab != self.followed_tab {
                 self.followed_tab = self.tab;
-                self.log_tab = if matches!(self.tab, Tab::Scripts | Tab::Store) { LogTab::Script } else { LogTab::Loader };
+                self.log_tab = if matches!(self.tab, Tab::Scripts | Tab::Store | Tab::Running) { LogTab::Script } else { LogTab::Loader };
             }
             match self.tab {
                 Tab::Clients => self.clients_ui(ui),
                 Tab::Store => self.store_ui(ui),
+                Tab::Running => self.running_ui(ui),
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),
                 Tab::Settings => self.settings_ui(ui),

@@ -100,29 +100,35 @@ impl Form {
         }
     }
 
+    /// The form in a window of its own, over whatever page is open.
     pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
         let mut outcome = Outcome::Open;
-        let submit = self.spec.get("submit").and_then(Value::as_str).unwrap_or("Start");
-        let fields = spec_form::fields(&self.spec);
         egui::Window::new(&self.title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                for field in fields {
-                    let value = spec_form::id(field).and_then(|id| self.values.get_mut(id));
-                    Self::field_ui(ui, field, value);
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(submit).clicked() {
-                        outcome = Outcome::Submitted(Value::Object(collect(&self.values)));
-                    }
-                    if ui.button("Cancel").clicked() {
-                        outcome = Outcome::Cancelled;
-                    }
-                });
-            });
+            .show(ctx, |ui| outcome = self.show_inline(ui));
+        outcome
+    }
+
+    /// The form's fields and buttons in `ui`, for a page that hosts the form itself.
+    pub fn show_inline(&mut self, ui: &mut egui::Ui) -> Outcome {
+        let mut outcome = Outcome::Open;
+        let submit = self.spec.get("submit").and_then(Value::as_str).unwrap_or("Start");
+        let fields = spec_form::fields(&self.spec);
+        for field in fields {
+            let value = spec_form::id(field).and_then(|id| self.values.get_mut(id));
+            Self::field_ui(ui, field, value);
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button(submit).clicked() {
+                outcome = Outcome::Submitted(Value::Object(collect(&self.values)));
+            }
+            if ui.button("Cancel").clicked() {
+                outcome = Outcome::Cancelled;
+            }
+        });
         outcome
     }
 }
