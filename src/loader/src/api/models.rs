@@ -13,7 +13,7 @@ pub fn eur_per_hour(credits_per_minute: i64) -> f64 {
 }
 
 /// The launcher API contract version this build speaks; `GET /me` reports the server's.
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Me {
@@ -51,6 +51,40 @@ pub struct StoreScript {
     pub author: String,
     #[serde(default)]
     pub online: i64,
+    /// Written by someone below scripter: not reviewed by staff, and the user is warned before it runs.
+    #[serde(default)]
+    pub community: bool,
+    /// Came from a share code, so the account can remove it again.
+    #[serde(default)]
+    pub granted: bool,
+}
+
+/// The answer to a redeemed share code.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Redeemed {
+    pub script_id: String,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Removed {
+    #[serde(default)]
+    pub removed: bool,
+}
+
+/// A share code is 64 hex digits. Whitespace and case are forgiven, because codes are copied and pasted;
+/// anything else is refused before the server is asked.
+pub fn normalize_share_code(input: &str) -> Option<String> {
+    let code = input.trim().to_ascii_lowercase();
+    (code.len() == 64 && code.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).then_some(code)
+}
+
+impl Me {
+    /// Testers and above can list every community script (`GET /launcher/scripts?community=true`).
+    pub fn can_browse_community(&self) -> bool {
+        matches!(self.role.as_str(), "tester" | "scripter" | "moderator" | "administrator")
+    }
 }
 
 impl StoreScript {
@@ -179,6 +213,41 @@ mod tests {
         locked.can_access = true;
         locked.revision = None;
         assert!(locked.blocked(1_000_000, 5).unwrap().contains("live revision"));
+    }
+
+    #[test]
+    fn community_flags_default_to_off_for_older_servers() {
+        let list: ScriptList = serde_json::from_str(r#"{"scripts":[{"id":"a","url":"a","title":"A"},{"id":"b","url":"b","title":"B","community":true,"granted":true}]}"#).unwrap();
+        assert!(!list.scripts[0].community && !list.scripts[0].granted);
+        assert!(list.scripts[1].community && list.scripts[1].granted);
+    }
+
+    #[test]
+    fn only_testers_and_above_browse_community_scripts() {
+        let me = |role: &str| Me {
+            username: "x".into(),
+            avatar_url: None,
+            role: role.into(),
+            credits: 0,
+            min_balance_minutes: 1,
+            api_version: API_VERSION,
+        };
+        assert!(!me("user").can_browse_community());
+        assert!(!me("contributor").can_browse_community());
+        assert!(me("tester").can_browse_community());
+        assert!(me("administrator").can_browse_community());
+        assert!(!me("").can_browse_community());
+    }
+
+    #[test]
+    fn share_codes_are_checked_before_the_server_is_asked() {
+        let code = "0123456789abcdef".repeat(4);
+        assert_eq!(normalize_share_code(&code), Some(code.clone()));
+        assert_eq!(normalize_share_code(&format!("  {}\n", code.to_uppercase())), Some(code.clone()));
+        assert_eq!(normalize_share_code(&code[1..]), None);
+        assert_eq!(normalize_share_code(&format!("{code}0")), None);
+        assert_eq!(normalize_share_code(&format!("g{}", &code[1..])), None);
+        assert_eq!(normalize_share_code(""), None);
     }
 
     #[test]

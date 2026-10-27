@@ -9,7 +9,7 @@ use super::{
     auth::{self, Session, TokenError, TokenStore},
     config::Config,
     error::{ApiError, ErrorBody},
-    models::{Ended, Heartbeat, Me, ScriptList, StartedSession, Stats, StoreScript},
+    models::{Ended, Heartbeat, Me, Redeemed, Removed, ScriptList, StartedSession, Stats, StoreScript},
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -146,6 +146,7 @@ impl Api {
                 }
                 request.call()
             }
+            "DELETE" => self.agent.delete(&url).header("Authorization", &authorization).header("Origin", &self.config.api_url).call(),
             _ => {
                 let request = self.agent.post(&url).header("Authorization", &authorization).header("Origin", &self.config.api_url);
                 match body {
@@ -166,7 +167,8 @@ impl Api {
         self.call::<Me>("GET", "/launcher/me", &[], None::<&()>)
     }
 
-    pub fn scripts(&self, search: &str, category: &str) -> Result<Vec<StoreScript>, ApiError> {
+    /// `community` lists every community script the account can see instead of the default list (testers and above only).
+    pub fn scripts(&self, search: &str, category: &str, community: bool) -> Result<Vec<StoreScript>, ApiError> {
         let mut query = Vec::new();
         if !search.is_empty() {
             query.push(("q", search));
@@ -174,7 +176,24 @@ impl Api {
         if !category.is_empty() {
             query.push(("category", category));
         }
+        if community {
+            query.push(("community", "true"));
+        }
         self.call::<ScriptList>("GET", "/launcher/scripts", &query, None::<&()>).map(|list| list.scripts)
+    }
+
+    /// Redeems a share code (already checked with `normalize_share_code`). The server marks it used and adds the script in one step.
+    pub fn redeem(&self, code: &str) -> Result<Redeemed, ApiError> {
+        self.call("POST", "/launcher/scripts/redeem", &[], Some(&serde_json::json!({ "code": code })))
+    }
+
+    /// Takes a script that came from a share code off the account. Its code stays used.
+    pub fn remove_grant(&self, script_id: &str) -> Result<Removed, ApiError> {
+        // The id goes into the path, so only a plain id is sent
+        if script_id.is_empty() || !script_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(ApiError::NotFound("That script id can't be used.".into()));
+        }
+        self.call("DELETE", &format!("/launcher/scripts/{script_id}/grant"), &[], None::<&()>)
     }
 
     pub fn start_session(&self, script_id: &str) -> Result<StartedSession, ApiError> {

@@ -1,11 +1,43 @@
 //! The Scripts tab: the scripts the account can see, and what it takes to run each.
 
+use std::collections::BTreeMap;
+
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
 use crate::api::{
     Me, StoreScript,
-    models::{credits_to_eur, eur_per_hour},
+    models::{credits_to_eur, eur_per_hour, normalize_share_code},
 };
+
+/// How many community scripts the loader remembers warning about. Old entries are only a missed "don't ask again".
+const MAX_CONFIRMED: usize = 500;
+
+/// The community scripts the user was warned about and chose to run, and the revision they confirmed. A new revision
+/// of the same script, or a different script, warns again. Kept in the loader's local storage, per machine.
+#[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Confirmed(BTreeMap<String, i64>);
+
+impl Confirmed {
+    pub fn has(&self, script_id: &str, revision: i64) -> bool {
+        self.0.get(script_id) == Some(&revision)
+    }
+
+    pub fn confirm(&mut self, script_id: &str, revision: i64) {
+        if self.0.len() >= MAX_CONFIRMED
+            && !self.0.contains_key(script_id)
+            && let Some(first) = self.0.keys().next().cloned()
+        {
+            self.0.remove(&first);
+        }
+        self.0.insert(script_id.to_owned(), revision);
+    }
+
+    /// For a script that left the account: it would be warned about again if it ever came back.
+    pub fn forget(&mut self, script_id: &str) {
+        self.0.remove(script_id);
+    }
+}
 
 #[derive(Default)]
 pub struct Store {
@@ -15,12 +47,28 @@ pub struct Store {
     pub error: Option<String>,
     pub search: String,
     pub category: String,
+    /// Testers and above: list every community script instead of the default list.
+    pub community: bool,
+    /// The share code being typed, and what happened to the last one (`true` when it worked).
+    pub code: String,
+    pub redeeming: bool,
+    pub redeem_result: Option<(bool, String)>,
+    /// The script whose "remove from my account" is waiting for a second click.
+    pub removing: Option<String>,
 }
 
 /// What the user asked for in the list this frame.
 pub enum Action {
     Refresh,
     Run(Box<StoreScript>),
+    /// A share code that already passed `normalize_share_code`.
+    Redeem(String),
+    RemoveGrant(Box<StoreScript>),
+}
+
+/// The tag next to a script's title: where it comes from.
+pub fn origin_label(script: &StoreScript) -> &'static str {
+    if script.community { "community" } else { "official" }
 }
 
 pub fn price_label(script: &StoreScript) -> String {
@@ -68,8 +116,38 @@ impl Store {
             if ui.add_enabled(!self.loading, egui::Button::new("Refresh")).clicked() {
                 action = Some(Action::Refresh);
             }
+            if me.can_browse_community()
+                && ui
+                    .checkbox(&mut self.community, "Community")
+                    .on_hover_text("List every community script you can see. They stay out of the default list.")
+                    .changed()
+            {
+                action = Some(Action::Refresh);
+            }
             if self.loading {
                 ui.spinner();
+            }
+        });
+        ui.horizontal(|ui| {
+            let editing = ui.add_enabled(
+                !self.redeeming,
+                egui::TextEdit::singleline(&mut self.code).hint_text("Paste a share code").desired_width(420.0).password(false),
+            );
+            let submitted = editing.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.add_enabled(!self.redeeming && !self.code.trim().is_empty(), egui::Button::new("Redeem")).clicked() || submitted)
+                && !self.redeeming
+            {
+                match normalize_share_code(&self.code) {
+                    Some(code) => action = Some(Action::Redeem(code)),
+                    None => self.redeem_result = Some((false, "A share code is 64 characters: the digits 0-9 and the letters a-f.".into())),
+                }
+            }
+            if self.redeeming {
+                ui.spinner();
+            }
+            if let Some((ok, message)) = &self.redeem_result {
+                let color = if *ok { egui::Color32::from_rgb(0x9e, 0xce, 0x6a) } else { ui.visuals().error_fg_color };
+                ui.colored_label(color, message);
             }
         });
         ui.add_space(4.0);
@@ -80,7 +158,7 @@ impl Store {
             ui.label("No scripts available.");
         }
 
-        let mut run = None;
+        let (mut run, mut remove, mut start_remove, mut cancel_remove) = (None, None, None, false);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for script in self.visible() {
                 ui.group(|ui| {
@@ -89,6 +167,16 @@ impl Store {
                         ui.label(egui::RichText::new(&script.title).strong().size(16.0));
                         ui.label(egui::RichText::new(format!("by {}", script.author)).weak());
                         ui.label(egui::RichText::new(&script.stage).small());
+                        let tag = egui::RichText::new(origin_label(script)).small();
+                        if script.community {
+                            ui.label(tag.color(egui::Color32::from_rgb(0xff, 0x9e, 0x64)))
+                                .on_hover_text("Written by a community member, not reviewed by staff. You're warned before it runs.");
+                        } else {
+                            ui.label(tag.color(egui::Color32::from_rgb(0x7a, 0xa2, 0xf7))).on_hover_text("Written by a scripter.");
+                        }
+                        if script.granted {
+                            ui.label(egui::RichText::new("shared with you").small().color(egui::Color32::from_rgb(0x9e, 0xce, 0x6a)));
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.credits, me.min_balance_minutes));
                             let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
@@ -106,10 +194,31 @@ impl Store {
                     if !script.description.is_empty() {
                         ui.label(egui::RichText::new(&script.description).weak());
                     }
+                    if script.granted {
+                        ui.horizontal(|ui| {
+                            if self.removing.as_deref() == Some(script.id.as_str()) {
+                                ui.label("Remove it from your account? You'll need a new code to get it back.");
+                                if ui.button("Remove").clicked() {
+                                    remove = Some(Box::new(script.clone()));
+                                }
+                                if ui.button("Keep").clicked() {
+                                    cancel_remove = true;
+                                }
+                            } else if ui.small_button("Remove from my account").clicked() {
+                                start_remove = Some(script.id.clone());
+                            }
+                        });
+                    }
                 });
             }
         });
-        run.map(Action::Run).or(action)
+        if start_remove.is_some() {
+            self.removing = start_remove;
+        }
+        if cancel_remove {
+            self.removing = None;
+        }
+        run.map(Action::Run).or(remove.map(Action::RemoveGrant)).or(action)
     }
 }
 
@@ -131,7 +240,46 @@ mod tests {
             can_access: true,
             author: "a".into(),
             online: 0,
+            community: false,
+            granted: false,
         }
+    }
+
+    #[test]
+    fn scripts_are_tagged_by_where_they_come_from() {
+        let mut community = script("c", 0, &[]);
+        community.community = true;
+        assert_eq!(origin_label(&community), "community");
+        assert_eq!(origin_label(&script("o", 0, &[])), "official");
+    }
+
+    #[test]
+    fn a_warning_holds_for_one_revision_of_one_script() {
+        let mut confirmed = Confirmed::default();
+        assert!(!confirmed.has("a", 1));
+        confirmed.confirm("a", 1);
+        assert!(confirmed.has("a", 1));
+        assert!(!confirmed.has("a", 2), "a new revision warns again");
+        assert!(!confirmed.has("b", 1), "so does a different script");
+        confirmed.confirm("a", 2);
+        assert!(confirmed.has("a", 2) && !confirmed.has("a", 1), "only the latest confirmed revision is kept");
+        confirmed.forget("a");
+        assert!(!confirmed.has("a", 2));
+    }
+
+    #[test]
+    fn confirmations_survive_storage_and_stay_bounded() {
+        let mut confirmed = Confirmed::default();
+        for i in 0..(MAX_CONFIRMED + 20) {
+            confirmed.confirm(&format!("script-{i:04}"), 1);
+        }
+        assert_eq!(confirmed.0.len(), MAX_CONFIRMED);
+        let again: Confirmed = serde_json::from_str(&serde_json::to_string(&confirmed).unwrap()).unwrap();
+        assert_eq!(again, confirmed);
+        // Confirming a script that is already remembered never evicts another one
+        let before = confirmed.0.len();
+        confirmed.confirm("script-0019", 2);
+        assert_eq!(confirmed.0.len(), before);
     }
 
     #[test]

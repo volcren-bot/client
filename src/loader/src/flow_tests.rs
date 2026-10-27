@@ -6,12 +6,13 @@ use serde_json::json;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    api::{Api, Config, Stats, StoreScript},
+    api::{Api, ApiError, Config, Stats, StoreScript},
     fake_api::{FakeServer, Reply, Request},
-    session::{prepare_in, revision_dir, sha256_hex},
+    session::{prepare_in, prepare_warned, revision_dir, sha256_hex},
 };
 
 const SCRIPT_ID: &str = "7d081fdd-59de-4a4e-9c29-b2f92d9bc697";
+const COMMUNITY_ID: &str = "0f3c1b52-8f0e-4c3a-9a58-1d6a4f7b2e90";
 const LIB_VERSION: &str = "2026.10.26-abc1234";
 const MAIN: &str = "print('main')";
 const UTIL: &str = "return 1";
@@ -53,6 +54,24 @@ impl Server {
                 }] }),
             ),
             ("GET", p) if p.ends_with("/lib.zip") => Reply::bytes(lib),
+            ("GET", "/launcher/scripts") => {
+                let only_community = request.path.contains("community=true");
+                let scripts = [
+                    json!({ "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 30, "revision": 4, "can_access": true }),
+                    json!({ "id": COMMUNITY_ID, "url": "mine", "title": "Mine", "price": 0, "revision": 4, "can_access": true, "community": true, "granted": true }),
+                ];
+                let scripts: Vec<_> = scripts.into_iter().filter(|s| !only_community || s["community"] == true).collect();
+                Reply::json(200, json!({ "scripts": scripts }))
+            }
+            ("POST", "/launcher/scripts/redeem") => match request.json()["code"].as_str().and_then(|code| code.chars().next()) {
+                Some('a') => Reply::json(200, json!({ "script_id": COMMUNITY_ID, "url": "mine" })),
+                Some('b') => Reply::json(409, json!({ "error": "This share code has already been used.", "reason": "used" })),
+                Some('c') => Reply::json(410, json!({ "error": "This share code has expired.", "reason": "expired" })),
+                Some('d') => Reply::json(429, json!({ "error": "Too many failed attempts. Try again later.", "reason": "rate_limited" })),
+                _ => Reply::json(404, json!({ "error": "This share code is not valid.", "reason": "invalid" })),
+            },
+            ("DELETE", p) if p == format!("/launcher/scripts/{COMMUNITY_ID}/grant") => Reply::json(200, json!({ "removed": true })),
+            ("DELETE", p) if p.starts_with("/launcher/scripts/") => Reply::json(404, json!({ "error": "This script isn't granted to your account." })),
             ("POST", "/launcher/sessions") if self.start_status == 402 => {
                 Reply::json(402, json!({ "error": "Not enough credits.", "required": 300 }))
             }
@@ -229,5 +248,117 @@ fn an_old_cached_lib_is_used_when_the_index_cannot_be_read() {
     prepare_in(&api(&Server::healthy().start()), &script(), &root).unwrap();
     let fake = Server { no_lib: true, ..Server::healthy() }.start();
     prepare_in(&api(&fake), &script(), &root).expect("the cached lib is enough");
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn community_script() -> StoreScript {
+    serde_json::from_value(json!({
+        "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 0, "revision": 4, "can_access": true, "community": true
+    }))
+    .unwrap()
+}
+
+fn code(first: char) -> String {
+    std::iter::repeat_n(first, 64).collect()
+}
+
+#[test]
+fn a_redeemed_code_adds_the_script() {
+    let fake = Server::healthy().start();
+    let redeemed = api(&fake).redeem(&code('a')).expect("redeem");
+    assert_eq!(redeemed.script_id, COMMUNITY_ID);
+    assert_eq!(redeemed.url.as_deref(), Some("mine"));
+    let sent = fake.requests().into_iter().find(|r| r.path == "/launcher/scripts/redeem").unwrap();
+    assert_eq!(sent.header("authorization"), Some("Bearer token-1"));
+    assert_eq!(sent.json(), json!({ "code": code('a') }));
+}
+
+#[test]
+fn a_code_the_server_refuses_says_why() {
+    let fake = Server::healthy().start();
+    let api = api(&fake);
+    assert_eq!(api.redeem(&code('b')).unwrap_err(), ApiError::Conflict("This share code has already been used.".into()));
+    assert_eq!(api.redeem(&code('c')).unwrap_err().to_string(), "This share code has expired.");
+    assert_eq!(api.redeem(&code('d')).unwrap_err().to_string(), "Too many failed attempts. Try again later.");
+    assert_eq!(api.redeem(&code('e')).unwrap_err(), ApiError::NotFound("This share code is not valid.".into()));
+}
+
+#[test]
+fn a_granted_script_can_be_removed_from_the_account() {
+    let fake = Server::healthy().start();
+    let api = api(&fake);
+    assert!(api.remove_grant(COMMUNITY_ID).unwrap().removed);
+    assert_eq!(fake.count("DELETE", &format!("/launcher/scripts/{COMMUNITY_ID}/grant")), 1);
+    let sent = fake.requests().into_iter().find(|r| r.method == "DELETE").unwrap();
+    assert_eq!(sent.header("authorization"), Some("Bearer token-1"));
+    // The server says no for a script that isn't granted
+    assert!(matches!(api.remove_grant(SCRIPT_ID), Err(ApiError::NotFound(_))));
+}
+
+#[test]
+fn an_id_that_isnt_plain_never_reaches_the_server() {
+    let fake = Server::healthy().start();
+    let api = api(&fake);
+    for id in ["", "../me", "a/b", "a?b=1", "a b"] {
+        assert!(matches!(api.remove_grant(id), Err(ApiError::NotFound(_))), "{id:?}");
+    }
+    assert_eq!(fake.count("DELETE", ""), 0);
+}
+
+#[test]
+fn the_list_carries_the_community_tag_and_the_filter_asks_for_it() {
+    let fake = Server::healthy().start();
+    let api = api(&fake);
+
+    let all = api.scripts("", "", false).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(!all[0].community && !all[0].granted);
+    assert!(all[1].community && all[1].granted);
+    assert_eq!(crate::store::origin_label(&all[0]), "official");
+    assert_eq!(crate::store::origin_label(&all[1]), "community");
+    assert!(!fake.requests().iter().any(|r| r.path.contains("community")), "the default list doesn't ask for the filter");
+
+    let community = api.scripts("", "", true).unwrap();
+    assert_eq!(community.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Mine"]);
+    assert_eq!(fake.count("GET", "/launcher/scripts?community=true"), 1);
+}
+
+#[test]
+fn a_community_script_runs_only_at_the_revision_the_user_was_warned_about() {
+    let root = cache("warned");
+    let fake = Server::healthy().start();
+
+    // Warned about revision 4, and revision 4 is what the server starts
+    let prepared = prepare_warned(&api(&fake), &community_script(), &root, Some(4)).expect("runs");
+    assert_eq!(prepared.session.revision, 4);
+    assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 0);
+    let _ = fs::remove_dir_all(&root);
+
+    // A new revision went live after the warning: nothing runs, the session is ended and nothing is downloaded
+    let fake = Server { revision: 5, ..Server::healthy() }.start();
+    let root = cache("warned-new-revision");
+    let error = prepare_warned(&api(&fake), &community_script(), &root, Some(4)).err().expect("refused");
+    assert!(error.contains("new revision"), "{error}");
+    assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
+    assert_eq!(fake.count("GET", "/files/"), 0);
+    assert!(!revision_dir(&root, SCRIPT_ID, 5).exists());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_community_script_never_runs_without_a_warning() {
+    let fake = Server::healthy().start();
+    let root = cache("unwarned");
+    assert!(prepare_warned(&api(&fake), &community_script(), &root, None).is_err());
+    assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
+    assert_eq!(fake.count("GET", "/files/"), 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_official_script_needs_no_warning() {
+    let fake = Server::healthy().start();
+    let root = cache("official");
+    prepare_warned(&api(&fake), &script(), &root, None).expect("official scripts run without one");
     let _ = fs::remove_dir_all(&root);
 }

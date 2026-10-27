@@ -15,11 +15,11 @@ use serde::{Deserialize, Serialize};
 use loader::backend::{self, Scan, Settings, Target};
 
 use crate::account::{self, Auth};
-use crate::api::{Api, ApiError, Config, Me, StoreScript, models::{API_VERSION, Ended}, Heartbeat, Stats};
+use crate::api::{Api, ApiError, Config, Me, Redeemed, Removed, StoreScript, models::{API_VERSION, Ended}, Heartbeat, Stats};
 use crate::highlight::Highlighter;
 use crate::script::{Script, ScriptEvent};
 use crate::session::{self, Beat, Prepared, Verdict};
-use crate::store::{self, Store};
+use crate::store::{self, Confirmed, Store};
 use crate::update::{self, Release};
 
 enum Event {
@@ -65,6 +65,11 @@ enum Event {
     SignedIn(Result<Me, String>),
     Me(Result<Me, ApiError>),
     Scripts(Result<Vec<StoreScript>, ApiError>),
+    Redeemed(Result<Redeemed, ApiError>),
+    GrantRemoved {
+        id: String,
+        result: Result<Removed, ApiError>,
+    },
     StoreStarted {
         pid: u32,
         title: String,
@@ -255,6 +260,7 @@ impl Drop for TilesWorker {
 const SCRIPT_KEY: &str = "script";
 const FORMS_KEY: &str = "forms";
 const CURSOR_KEY: &str = "cursor";
+const CONFIRMED_KEY: &str = "community_confirmed";
 
 /// How often the XP tracker reads the client while a script runs.
 const XP_READ_EVERY: Duration = Duration::from_secs(5);
@@ -561,6 +567,10 @@ pub struct LoaderApp {
     api: Api,
     auth: Auth,
     store: Store,
+    /// Community scripts the user agreed to run, by revision (persisted).
+    confirmed: Confirmed,
+    /// A community script waiting for the user to accept the warning before it starts.
+    warning: Option<(StoreScript, Target)>,
     store_run: Option<StoreRun>,
     /// A newer launcher release, until the user dismisses it.
     update: Option<Release>,
@@ -632,6 +642,11 @@ impl LoaderApp {
             api: Api::new(Config::from_env()),
             auth: Auth::Restoring,
             store: Store::default(),
+            confirmed: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, CONFIRMED_KEY))
+                .unwrap_or_default(),
+            warning: None,
             store_run: None,
             update: None,
             starting: None,
@@ -686,6 +701,7 @@ impl LoaderApp {
         self.api.sign_out();
         self.auth = Auth::SignedOut;
         self.store = Store::default();
+        self.warning = None;
         match why {
             Some(why) => self.error(format!("Signed out: {why}")),
             None => self.info("Signed out."),
@@ -704,7 +720,8 @@ impl LoaderApp {
     fn fetch_scripts(&mut self, ctx: &egui::Context) {
         self.store.loading = true;
         self.store.error = None;
-        self.api_job(ctx, |api| Event::Scripts(api.scripts("", "")));
+        let community = self.store.community;
+        self.api_job(ctx, move |api| Event::Scripts(api.scripts("", "", community)));
     }
 
     /// Why a store script can't start right now, apart from the script itself.
@@ -725,7 +742,9 @@ impl LoaderApp {
         self.starting = Some(script.title.clone());
         self.info(format!("Starting {}…", script.title));
         let (pid, title) = (target.client.pid, script.title.clone());
-        self.api_job(ctx, move |api| Event::StoreStarted { pid, title, result: session::prepare(&api, &script) });
+        // A community script only runs at the revision the user was warned about
+        let warned = script.community.then_some(script.revision).flatten();
+        self.api_job(ctx, move |api| Event::StoreStarted { pid, title, result: session::prepare(&api, &script, warned) });
     }
 
     /// Ends the session of the store script that just stopped. Idempotent on the server, so it is safe to call twice.
@@ -806,10 +825,67 @@ impl LoaderApp {
             Some(store::Action::Refresh) => self.fetch_scripts(&ctx),
             Some(store::Action::Run(script)) => {
                 if let Some(target) = target {
-                    self.start_store_script(&ctx, *script, target);
+                    // Community scripts are not reviewed by staff: warn before the first run of each revision
+                    let confirmed = script.revision.is_some_and(|revision| self.confirmed.has(&script.id, revision));
+                    if script.community && !confirmed {
+                        self.warning = Some((*script, target));
+                    } else {
+                        self.start_store_script(&ctx, *script, target);
+                    }
                 }
             }
+            Some(store::Action::Redeem(code)) => {
+                self.store.redeeming = true;
+                self.store.redeem_result = None;
+                self.api_job(&ctx, move |api| Event::Redeemed(api.redeem(&code)));
+            }
+            Some(store::Action::RemoveGrant(script)) => {
+                let id = script.id.clone();
+                self.api_job(&ctx, move |api| Event::GrantRemoved { result: api.remove_grant(&id), id });
+            }
             None => {}
+        }
+        self.warning_ui(&ctx);
+    }
+
+    /// The warning shown before a community script runs. Accepting it is remembered for that revision of that script.
+    fn warning_ui(&mut self, ctx: &egui::Context) {
+        let Some((script, target)) = self.warning.take() else { return };
+        let mut decision = None;
+        egui::Window::new("Community script")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label(egui::RichText::new(&script.title).strong());
+                ui.label(format!("by {}", script.author));
+                ui.add_space(6.0);
+                ui.label(
+                    "This is a community script. It was written by a community member and has not been reviewed by the Volcren team. \
+                     It runs on your computer and controls your game client, so only run scripts from people you trust.",
+                );
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("You won't be asked again until a new revision of this script comes out.").weak());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Run anyway").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => {
+                if let Some(revision) = script.revision {
+                    self.confirmed.confirm(&script.id, revision);
+                }
+                self.start_store_script(ctx, script, target);
+            }
+            Some(false) => {}
+            None => self.warning = Some((script, target)),
         }
     }
 
@@ -1142,11 +1218,39 @@ impl LoaderApp {
                         Err(error) => self.store.error = Some(format!("Couldn't load the scripts: {error}")),
                     }
                 }
+                Event::Redeemed(result) => {
+                    self.store.redeeming = false;
+                    match result {
+                        Ok(_) => {
+                            self.store.code.clear();
+                            self.store.redeem_result = Some((true, "Added to your scripts.".into()));
+                            self.fetch_scripts(ctx);
+                        }
+                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
+                        Err(error) => self.store.redeem_result = Some((false, error.to_string())),
+                    }
+                }
+                Event::GrantRemoved { id, result } => {
+                    self.store.removing = None;
+                    match result {
+                        Ok(_) => {
+                            self.confirmed.forget(&id);
+                            self.store.redeem_result = Some((true, "Removed from your account.".into()));
+                            self.fetch_scripts(ctx);
+                        }
+                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
+                        Err(error) => self.store.redeem_result = Some((false, error.to_string())),
+                    }
+                }
                 Event::StoreStarted { pid, title, result } => {
                     self.starting = None;
                     match result {
                         Ok(prepared) => self.run_prepared(ctx, pid, &title, prepared),
-                        Err(error) => self.script_error(format!("Couldn't start {title}: {error}")),
+                        Err(error) => {
+                            self.script_error(format!("Couldn't start {title}: {error}"));
+                            // The list may be stale (a new revision, a grant that was revoked)
+                            self.fetch_scripts(ctx);
+                        }
                     }
                 }
                 Event::Heartbeat { session_id, sent, result } => {
@@ -2713,6 +2817,7 @@ impl eframe::App for LoaderApp {
         eframe::set_value(storage, SCRIPT_KEY, &self.script_file);
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
+        eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
     }
 
     fn on_exit(&mut self) {

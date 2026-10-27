@@ -71,17 +71,34 @@ pub struct Prepared {
 }
 
 /// Starts a session and makes sure its files are on disk. If anything after the start fails, the session is ended so the user isn't billed.
-pub fn prepare(api: &Api, script: &StoreScript) -> Result<Prepared, String> {
+///
+/// `warned` is the revision of a community script the user was warned about and agreed to run (see `store::Confirmed`).
+/// A community script only runs if the revision the server started is that one, so a revision published since the
+/// warning was shown is never run unseen.
+pub fn prepare(api: &Api, script: &StoreScript, warned: Option<i64>) -> Result<Prepared, String> {
     let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
-    prepare_in(api, script, &root)
+    prepare_warned(api, script, &root, warned)
 }
 
-/// `prepare` with the cache folder given, so tests don't touch the real one.
+/// `prepare_warned` for a script that needs no warning, with the cache folder given so tests don't touch the real one.
+#[cfg(test)]
 pub fn prepare_in(api: &Api, script: &StoreScript, root: &Path) -> Result<Prepared, String> {
+    prepare_warned(api, script, root, None)
+}
+
+/// `prepare` with the cache folder given.
+pub fn prepare_warned(api: &Api, script: &StoreScript, root: &Path, warned: Option<i64>) -> Result<Prepared, String> {
     let id = safe_id(&script.id).ok_or("The server sent a script id that can't be used.")?;
     // Before the session starts, so downloading the lib is never billed.
     let lib = libs::ensure(api, root)?;
     let session = api.start_session(id).map_err(|e| e.to_string())?;
+    if script.community && warned != Some(session.revision) {
+        let _ = api.end_session(&session.session_id);
+        return Err(format!(
+            "A new revision of {} went live since you looked at it, so it wasn't run. Review the warning and run it again.",
+            script.title
+        ));
+    }
     match download(api, root, id, &session) {
         Ok((entry, source)) => {
             prune_old(root, id, session.revision);
