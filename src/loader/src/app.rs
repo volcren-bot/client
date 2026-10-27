@@ -1880,7 +1880,7 @@ impl LoaderApp {
                         run.beat.report(experience, gold, &custom);
                     }
                 }
-                ScriptEvent::Counters(counters) => self.counters.update(counters),
+                ScriptEvent::Counters(counters) => self.counters.update(counters, self.run_time()),
                 ScriptEvent::Breaks(plan) => self.breaks.update(plan, std::time::Instant::now()),
                 ScriptEvent::Finished { stopped: true, .. } => self.script_info("Script stopped."),
                 ScriptEvent::Finished { result: Ok(()), .. } => self.script_info("Script finished."),
@@ -2528,7 +2528,7 @@ impl LoaderApp {
                     }
                 });
             }
-            let counters = self.counters.rows(elapsed);
+            let counters = self.counters.rows();
             if !counters.is_empty() {
                 ui.add_space(6.0);
                 ui.separator();
@@ -2616,8 +2616,11 @@ impl LoaderApp {
                 });
             log.set_filter(filter);
         }
-        // the buttons sit at the right edge, Copy all first
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // the buttons sit at the right edge, Copy all first; when the row is too narrow for the filter and both buttons
+        // they follow the filter instead, wrapping onto the next line, so nothing is drawn over anything else
+        let narrow = ui.available_width() < 150.0;
+        let layout = if narrow { egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true) } else { egui::Layout::right_to_left(egui::Align::Center) };
+        ui.with_layout(layout, |ui| {
             let log = match self.log_tab {
                 LogTab::Script => &mut self.script_log,
                 LogTab::Loader => &mut self.loader_log,
@@ -2671,7 +2674,7 @@ impl LoaderApp {
                     }
                 });
         }
-        ui.horizontal(|ui| self.log_controls_ui(ui));
+        ui.horizontal_wrapped(|ui| self.log_controls_ui(ui));
         self.log_ui(ui);
     }
 

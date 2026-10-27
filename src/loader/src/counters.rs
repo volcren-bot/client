@@ -6,6 +6,8 @@ use injector::form::Counter;
 #[derive(Default)]
 pub struct CountersTracker {
     counters: Vec<Counter>,
+    /// The run time when the script last reported; rates are worked out against it, so they hold still between reports.
+    read_at: Duration,
 }
 
 pub struct CounterRow {
@@ -18,11 +20,12 @@ pub struct CounterRow {
 
 impl CountersTracker {
     pub fn reset(&mut self) {
-        self.counters.clear();
+        *self = Self::default();
     }
 
-    pub fn update(&mut self, counters: Vec<Counter>) {
+    pub fn update(&mut self, counters: Vec<Counter>, at: Duration) {
         self.counters = counters;
+        self.read_at = at;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -33,9 +36,9 @@ impl CountersTracker {
         self.counters.iter().find(|c| c.id == id).map(|c| (c.label.as_str(), c.value))
     }
 
-    /// The rows as of a run time of `elapsed`, in the order the script sent them.
-    pub fn rows(&self, elapsed: Duration) -> Vec<CounterRow> {
-        let hours = elapsed.as_secs_f64() / 3600.0;
+    /// The rows with rates over the run up to the last report, in the order the script sent them.
+    pub fn rows(&self) -> Vec<CounterRow> {
+        let hours = self.read_at.as_secs_f64() / 3600.0;
         self.counters
             .iter()
             .map(|c| {
@@ -85,18 +88,20 @@ mod tests {
         let mut points = counter("points", "Points", 9_000.0);
         points.per = Some("games".into());
         points.hourly = false;
-        tracker.update(vec![counter("games", "Games", 12.0), wins, points]);
+        tracker.update(vec![counter("games", "Games", 12.0), wins, points], Duration::from_secs(1800));
 
-        let rows = tracker.rows(Duration::from_secs(1800));
+        let rows = tracker.rows();
         assert_eq!((rows[0].total, rows[0].per_hour), (12.0, Some(24.0)));
         assert_eq!(rows[1].ratio.as_deref(), Some("75% of Games"));
         assert_eq!(rows[2].per_hour, None);
         assert_eq!(rows[2].ratio.as_deref(), Some("750 per Games"));
 
-        // a newer report replaces the totals, and the same clock gives new rates
-        tracker.update(vec![counter("games", "Games", 24.0)]);
-        assert_eq!(tracker.rows(Duration::from_secs(3600))[0].per_hour, Some(24.0));
-        assert_eq!(tracker.rows(Duration::ZERO)[0].per_hour, None);
+        // rates hold still until the next report, which brings new totals and a new clock
+        assert_eq!(tracker.rows()[0].per_hour, Some(24.0));
+        tracker.update(vec![counter("games", "Games", 24.0)], Duration::from_secs(3600));
+        assert_eq!(tracker.rows()[0].per_hour, Some(24.0));
+        tracker.update(vec![counter("games", "Games", 24.0)], Duration::ZERO);
+        assert_eq!(tracker.rows()[0].per_hour, None);
     }
 
     #[test]
@@ -106,8 +111,8 @@ mod tests {
         wins.percent_of = Some("games".into());
         let mut points = counter("points", "Points", 5.0);
         points.per = Some("nothing".into());
-        tracker.update(vec![wins, points, counter("games", "Games", 0.0)]);
-        let rows = tracker.rows(Duration::from_secs(60));
+        tracker.update(vec![wins, points, counter("games", "Games", 0.0)], Duration::from_secs(60));
+        let rows = tracker.rows();
         assert_eq!(rows[0].ratio.as_deref(), Some("-"));
         assert_eq!(rows[1].ratio.as_deref(), Some("-"));
     }
