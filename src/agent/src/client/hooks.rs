@@ -438,7 +438,12 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
     restore_state(prev_program, prev_vao);
 
     let original = ORIGINAL_WGL_SWAPBUFFERS.get().unwrap();
-    original.call(hdc)
+    let presented = original.call(hdc);
+    // after the swap, so a reader woken by it paints the overlay for the next frame from what this one showed
+    if let Some(memory) = MEMORY_MANAGER.get() {
+        memory.lock().unwrap_or_else(|e| e.into_inner()).frame_presented();
+    }
+    presented
 }
 
 unsafe fn hook_wgl_swap_buffers() {

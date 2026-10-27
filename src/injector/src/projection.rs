@@ -298,6 +298,10 @@ impl Terrain {
             let count = (end.checked_sub(begin)? as usize / VERTEX_SIZE).min(MAX_TRIANGLES);
             let indices = memory.i32s(begin, count * 3)?;
             let vertex_count = usize::try_from(*indices.iter().max()?).ok()? + 1;
+            // A scene still loading can hold garbage here; a real tile model has far fewer vertices than triangles allow.
+            if vertex_count > MAX_TRIANGLES * 3 {
+                return None;
+            }
             let vertices = memory.i32s(memory.ptr(model + p.model_vertices as u64)?, vertex_count * 3)?;
             let vertex = |i: i32| -> Option<Vertex> { vertices.get(i as usize * 3..i as usize * 3 + 3)?.try_into().ok() };
             return indices.as_chunks::<3>().0.iter().map(|t| Some([vertex(t[0])?, vertex(t[1])?, vertex(t[2])?])).collect();

@@ -5,7 +5,7 @@ use std::{
         mpsc::{Receiver, Sender, channel},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -187,10 +187,13 @@ const DEV_LAYERS: [Option<&str>; DEV_TOGGLES.len()] = [
     None,
     None,
 ];
-// The pause between scene tile paints so the worker yields; the injector skips repeats cheaply.
-const TILES_PAUSE: Duration = Duration::from_millis(1);
+// How long the scene tiles may keep failing before the worker gives up and reports why.
+const TILES_GIVE_UP: Duration = Duration::from_secs(10);
+// The pause after a failed paint: the frame it waited for is spent, so the next try wouldn't wait for one.
+const TILES_RETRY: Duration = Duration::from_millis(50);
 
-// Paints scene tiles back to back on its own thread so the overlay trails by one paint; dropping it stops and clears.
+// Paints scene tiles on its own thread once per frame the client presents, so the overlay trails the game by a steady
+// frame and nothing is read in between; dropping it stops and clears.
 struct TilesWorker {
     pid: u32,
     layers: Arc<Mutex<Vec<&'static str>>>,
@@ -203,14 +206,34 @@ impl TilesWorker {
         let worker = Self { pid, layers: Arc::new(Mutex::new(layers)), stop: Arc::new(AtomicBool::new(false)) };
         let (layers, stop, ctx) = (worker.layers.clone(), worker.stop.clone(), ctx.clone());
         thread::spawn(move || {
+            // the frame last painted after; the first paint waits for any frame
+            let mut frame = 0;
+            // since when the paints have been failing
+            let mut failing: Option<Instant> = None;
             while !stop.load(Ordering::Relaxed) {
                 let current = layers.lock().map(|l| l.clone()).unwrap_or_default();
-                if let Err(error) = backend::scene_tiles(&target, &settings, &current) {
-                    let _ = tx.send(Event::Tiles { pid, result: Err(error) });
-                    ctx.request_repaint();
-                    return;
+                match backend::scene_tiles_next_frame(&target, &settings, &current, frame) {
+                    Ok(Some(painted)) => {
+                        frame = painted;
+                        failing = None;
+                    }
+                    // no frame came (minimized, loading): look again once it's clear the worker isn't stopping
+                    Ok(None) => {}
+                    // A scene change, world hop or logout fails the paints for a moment: the boxes come off at once,
+                    // since they'd stay where the old scene had them, and painting picks up again when it can.
+                    Err(error) => {
+                        let since = *failing.get_or_insert_with(|| {
+                            let _ = backend::draw(&target, &settings, &Overlay::Clear);
+                            Instant::now()
+                        });
+                        if since.elapsed() > TILES_GIVE_UP {
+                            let _ = tx.send(Event::Tiles { pid, result: Err(error) });
+                            ctx.request_repaint();
+                            break;
+                        }
+                        thread::sleep(TILES_RETRY);
+                    }
                 }
-                thread::sleep(TILES_PAUSE);
             }
             // Take the boxes off the client once nothing can paint them again.
             let _ = backend::draw(&target, &settings, &Overlay::Clear);
@@ -386,6 +409,9 @@ struct LogLine {
     tag: Option<usize>,
 }
 
+/// The lines a log tab keeps; older ones are dropped, since the whole output is laid out again whenever a line is added.
+const MAX_LOG_LINES: usize = 2000;
+
 /// One log tab's output; `view` and `text` hold only lines the tag filter lets through and are rebuilt only when it changes.
 #[derive(Default)]
 struct Log {
@@ -394,6 +420,8 @@ struct Log {
     filter: Option<usize>,
     view: Vec<usize>,
     text: String,
+    /// Bumped whenever `view` changes, so the laid out output is only rebuilt then.
+    revision: u64,
 }
 
 impl Log {
@@ -409,6 +437,11 @@ impl Log {
             self.show(self.lines.len(), &text);
         }
         self.lines.push(LogLine { error, text, tag });
+        // dropped a quarter at a time, so the view is rebuilt once every few hundred lines rather than on each
+        if self.lines.len() > MAX_LOG_LINES + MAX_LOG_LINES / 4 {
+            self.lines.drain(..self.lines.len() - MAX_LOG_LINES);
+            self.rebuild();
+        }
     }
 
     fn show(&mut self, index: usize, text: &str) {
@@ -417,6 +450,7 @@ impl Log {
         }
         self.text.push_str(text);
         self.view.push(index);
+        self.revision += 1;
     }
 
     fn set_filter(&mut self, filter: Option<usize>) {
@@ -424,19 +458,53 @@ impl Log {
             return;
         }
         self.filter = filter;
+        self.rebuild();
+    }
+
+    fn rebuild(&mut self) {
         self.view.clear();
         self.text.clear();
+        self.revision += 1;
         let lines = std::mem::take(&mut self.lines);
         for (index, line) in lines.iter().enumerate() {
-            if filter.is_none() || filter == line.tag {
+            if self.filter.is_none() || self.filter == line.tag {
                 self.show(index, &line.text);
             }
         }
         self.lines = lines;
     }
 
+    /// The shown lines in their colors: one section per run of lines of the same color.
+    fn layout_job(&self, font: egui::FontId, normal: egui::Color32, error: egui::Color32) -> egui::text::LayoutJob {
+        let mut job = egui::text::LayoutJob { text: self.text.clone(), ..Default::default() };
+        let mut section = |range: std::ops::Range<usize>, is_error: bool| {
+            job.sections.push(egui::text::LayoutSection {
+                leading_space: 0.0,
+                byte_range: egui::text::ByteIndex(range.start)..egui::text::ByteIndex(range.end),
+                format: egui::TextFormat::simple(font.clone(), if is_error { error } else { normal }),
+            });
+        };
+        let mut start = 0;
+        let mut run: Option<(usize, bool)> = None;
+        for (i, &index) in self.view.iter().enumerate() {
+            let line = &self.lines[index];
+            if let Some((from, was_error)) = run.filter(|&(_, was_error)| was_error != line.error) {
+                section(from..start, was_error);
+                run = None;
+            }
+            run.get_or_insert((start, line.error));
+            // each line but the last is followed by the newline that joins it to the next
+            start += line.text.len() + usize::from(i + 1 < self.view.len());
+        }
+        if let Some((from, was_error)) = run {
+            section(from..self.text.len(), was_error);
+        }
+        job
+    }
+
     fn clear(&mut self) {
-        *self = Self::default();
+        // the revision keeps counting, so a job laid out before the clear can't pass for the new output
+        *self = Self { revision: self.revision + 1, ..Self::default() };
     }
 
     fn is_empty(&self) -> bool {
@@ -463,6 +531,8 @@ enum LogTab {
     Loader,
     Script,
 }
+
+type LogJobKey = (LogTab, u64, egui::FontId, egui::Color32, egui::Color32);
 
 pub struct LoaderApp {
     settings: Settings,
@@ -499,6 +569,8 @@ pub struct LoaderApp {
     followed_tab: Tab,
     script_log: Log,
     loader_log: Log,
+    /// The output tab's layout job, for the tab and revision it was built from.
+    log_job: Option<(LogJobKey, egui::text::LayoutJob)>,
     xp: crate::xp::XpTracker,
     breaks: crate::breaks::BreaksTracker,
     counters: crate::counters::CountersTracker,
@@ -573,6 +645,7 @@ impl LoaderApp {
             xp_next: std::time::Instant::now(),
             xp_reading: false,
             loader_log: Log::default(),
+            log_job: None,
             tx,
             rx,
         };
@@ -959,8 +1032,8 @@ impl LoaderApp {
 
     fn handle_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
-            // Tiles run in the background, so they must not clear another job's busy label.
-            if !matches!(event, Event::Tiles { .. }) {
+            // Tiles and the XP tracker's reads run in the background, so they must not clear another job's busy label.
+            if !matches!(event, Event::Tiles { .. } | Event::XpState(_)) {
                 self.busy = None;
             }
             match event {
@@ -1878,25 +1951,24 @@ impl LoaderApp {
             ui.label(format!("{}, {status}", self.script_file.name())).on_hover_text(&self.script_file.path);
         });
         ui.add_space(4.0);
-        if self.find.open {
-            self.find_ui(ui);
+        let matches = if self.find.open {
+            let matches = self.find_ui(ui);
             ui.add_space(4.0);
-        }
+            matches
+        } else {
+            Vec::new()
+        };
 
         let size = ui.available_size();
         let margin = egui::Margin::symmetric(4, 2);
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let (row_height, digit_width) = ui.fonts_mut(|fonts| (fonts.row_height(&font), fonts.glyph_width(&font, '0')));
-        let lines = self.script_file.text.matches('\n').count() + 1;
+        // only scans the text when it changed since the last frame
+        self.fold.sync(&self.script_file.path, &self.script_file.text);
+        let lines = self.fold.line_count();
         let arrow_width = row_height;
         let gutter_width = digit_width * lines.to_string().len() as f32 + 3.0 * margin.leftf() + arrow_width;
         let gutter_color = ui.visuals().weak_text_color();
-        let matches = if self.find.open {
-            find_matches(&self.script_file.text, &self.find.query, self.find.case_sensitive)
-        } else {
-            Vec::new()
-        };
-        self.fold.sync(&self.script_file.path, &self.script_file.text);
         if self.find.open
             && self.find.jump
             && let Some(&at) = matches.get(self.find.current)
@@ -1905,8 +1977,7 @@ impl LoaderApp {
         }
         let view = self.fold.view(&self.script_file.text);
         // wide enough for the longest line (a tab counted as four columns), so the area scrolls sideways
-        let longest = self.script_file.text.lines().map(|l| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>()).max().unwrap_or(0);
-        let text_width = (longest as f32 * digit_width + margin.sum().x + 8.0).max(size.x - gutter_width);
+        let text_width = (self.fold.longest_line() as f32 * digit_width + margin.sum().x + 8.0).max(size.x - gutter_width);
         let gutter_height = size.y.max(view.visible.len() as f32 * row_height + margin.sum().y);
         let highlighter = &mut self.highlighter;
         let hidden = &view.hidden;
@@ -1964,12 +2035,17 @@ impl LoaderApp {
                     if let Some(range) = output.state.cursor.char_range() {
                         self.fold.follow_cursor(&self.script_file.text, range.primary.index.0);
                     }
+                    // the rows on screen, with one to spare either side
+                    let on_screen = first.saturating_sub(1)..last + 1;
                     if self.find.open {
-                        paint_matches(ui, &output, &self.script_file.text, &matches, &mut self.find);
+                        paint_matches(ui, &output, &self.script_file.text, &matches, &mut self.find, &view.visible, on_screen.clone());
                     }
+                    let mut walk = TextWalk::new(&self.script_file.text);
                     for &(line, header_end) in &view.headers {
-                        let text = &self.script_file.text;
-                        let at = output.galley.pos_from_cursor(egui::text::CCursor::new(text[..header_end].chars().count()));
+                        if !view.visible.binary_search(&line).is_ok_and(|row| on_screen.contains(&row)) {
+                            continue;
+                        }
+                        let at = output.galley.pos_from_cursor(egui::text::CCursor::new(walk.advance(header_end).0));
                         let badge = egui::Rect::from_min_size(
                             egui::pos2(output.galley_pos.x + at.max.x + 6.0, output.galley_pos.y + at.min.y + 1.0),
                             egui::vec2(2.0 * digit_width + 8.0, row_height - 2.0),
@@ -1986,7 +2062,8 @@ impl LoaderApp {
             });
     }
 
-    fn find_ui(&mut self, ui: &mut egui::Ui) {
+    /// The find bar; returns the matches in the text as it stands after the bar's own edits.
+    fn find_ui(&mut self, ui: &mut egui::Ui) -> Vec<usize> {
         let matches = find_matches(&self.script_file.text, &self.find.query, self.find.case_sensitive);
         let count = matches.len();
         self.find.current = self.find.current.min(count.saturating_sub(1));
@@ -1995,6 +2072,7 @@ impl LoaderApp {
         let mut step = None;
         let mut replace_current = false;
         let mut replace_all = false;
+        let mut query_changed = false;
 
         ui.horizontal(|ui| {
             let query = ui.add(egui::TextEdit::singleline(&mut self.find.query).hint_text("Find").desired_width(200.0));
@@ -2004,6 +2082,7 @@ impl LoaderApp {
             if query.changed() {
                 self.find.current = 0;
                 self.find.jump = true;
+                query_changed = true;
             }
             if (query.has_focus() || query.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 step = Some(ui.input(|i| i.modifiers.shift));
@@ -2025,6 +2104,7 @@ impl LoaderApp {
             if ui.checkbox(&mut self.find.case_sensitive, "Match case").changed() {
                 self.find.current = 0;
                 self.find.jump = true;
+                query_changed = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Close").on_hover_text("Escape").clicked() {
@@ -2065,6 +2145,7 @@ impl LoaderApp {
             out.push_str(&self.script_file.text[last..]);
             self.script_file.text = out;
             self.find.current = 0;
+            find_matches(&self.script_file.text, &self.find.query, self.find.case_sensitive)
         } else if let (true, Some(&at)) = (replace_current, matches.get(self.find.current)) {
             let replacement = self.find.replacement.clone();
             let text = &mut self.script_file.text;
@@ -2074,6 +2155,11 @@ impl LoaderApp {
             let next = find_matches(text, &self.find.query, self.find.case_sensitive);
             self.find.current = next.iter().position(|&start| start >= after).unwrap_or(0);
             self.find.jump = true;
+            next
+        } else if query_changed {
+            find_matches(&self.script_file.text, &self.find.query, self.find.case_sensitive)
+        } else {
+            matches
         }
     }
 
@@ -2290,14 +2376,14 @@ impl LoaderApp {
         let font = egui::TextStyle::Body.resolve(ui.style());
         let normal = ui.visuals().text_color();
         let error = ui.visuals().error_fg_color;
+        // the job is only rebuilt when the shown lines change; egui's own cache then skips the layout too
+        let key = (self.log_tab, log.revision, font.clone(), normal, error);
+        if self.log_job.as_ref().is_none_or(|(cached, _)| *cached != key) {
+            self.log_job = Some((key, log.layout_job(font, normal, error)));
+        }
+        let cached_job = self.log_job.as_ref().map(|(_, job)| job);
         let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = egui::text::LayoutJob::default();
-            for (i, &index) in log.view.iter().enumerate() {
-                let line = &log.lines[index];
-                let color = if line.error { error } else { normal };
-                let separator = if i > 0 { "\n" } else { "" };
-                job.append(&format!("{separator}{}", line.text), 0.0, egui::TextFormat::simple(font.clone(), color));
-            }
+            let mut job = cached_job.cloned().unwrap_or_default();
             job.wrap.max_width = wrap_width;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
@@ -2313,6 +2399,9 @@ impl LoaderApp {
                     .layouter(&mut layouter)
                     .show(ui);
 
+                let Some(pointer) = ui.input(|i| i.pointer.hover_pos()).filter(|pos| output.response.rect.contains(*pos)) else {
+                    return;
+                };
                 // Rows of one galley map to text lines (a row that ends with a newline closes one); an entry can span several.
                 let entry_of_line: Vec<usize> = log
                     .view
@@ -2320,9 +2409,6 @@ impl LoaderApp {
                     .enumerate()
                     .flat_map(|(entry, &index)| std::iter::repeat_n(entry, log.lines[index].text.matches('\n').count() + 1))
                     .collect();
-                let Some(pointer) = ui.input(|i| i.pointer.hover_pos()).filter(|pos| output.response.rect.contains(*pos)) else {
-                    return;
-                };
                 let origin = output.galley_pos.to_vec2();
                 let mut paragraph = 0;
                 let mut hovered = None;
@@ -2387,18 +2473,59 @@ fn paint_arrow(painter: &egui::Painter, center: egui::Pos2, size: f32, folded: b
     painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
 }
 
-/// Paints the find matches over the editor, and scrolls to the current one when asked.
-fn paint_matches(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput, text: &str, matches: &[usize], find: &mut Find) {
+/// Walks forward through a text, turning byte offsets asked for in increasing order into char indices and line numbers,
+/// so many offsets cost one pass over the text rather than one each.
+struct TextWalk<'a> {
+    text: &'a str,
+    byte: usize,
+    char: usize,
+    line: usize,
+}
+
+impl<'a> TextWalk<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, byte: 0, char: 0, line: 0 }
+    }
+
+    /// The char index and line of byte `to`. An offset behind the walk, or not in the text (it was edited this frame), stays where the walk is.
+    fn advance(&mut self, to: usize) -> (usize, usize) {
+        if let Some(part) = self.text.get(self.byte..to) {
+            self.char += part.chars().count();
+            self.line += part.bytes().filter(|&b| b == b'\n').count();
+            self.byte = to;
+        }
+        (self.char, self.line)
+    }
+}
+
+/// Paints the find matches on the editor rows `on_screen` (indices into `visible`), and scrolls to the current one when asked.
+fn paint_matches(
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    text: &str,
+    matches: &[usize],
+    find: &mut Find,
+    visible: &[usize],
+    on_screen: std::ops::Range<usize>,
+) {
     let query_len = find.query.len();
     let origin = output.galley_pos.to_vec2();
+    let mut walk = TextWalk::new(text);
     for (i, &at) in matches.iter().enumerate() {
-        let start = output.galley.pos_from_cursor(egui::text::CCursor::new(text[..at].chars().count()));
-        let end = output.galley.pos_from_cursor(egui::text::CCursor::new(text[..at + query_len].chars().count()));
+        let (first_char, line) = walk.advance(at);
+        let current = i == find.current;
+        // laying out a match's place costs a pass over the galley's rows, so only the ones that can be seen get one
+        let shown = visible.binary_search(&line).is_ok_and(|row| on_screen.contains(&row));
+        if !shown && !(current && find.jump) {
+            continue;
+        }
+        let Some(query_chars) = text.get(at..at + query_len).map(|q| q.chars().count()) else { continue };
+        let start = output.galley.pos_from_cursor(egui::text::CCursor::new(first_char));
+        let end = output.galley.pos_from_cursor(egui::text::CCursor::new(first_char + query_chars));
         // A match split across wrapped rows is skipped rather than drawn wrong.
         if (start.top() - end.top()).abs() > 1.0 {
             continue;
         }
-        let current = i == find.current;
         let rect = egui::Rect::from_min_max(start.min, egui::pos2(end.max.x, start.max.y)).translate(origin);
         let color = if current {
             egui::Color32::from_rgba_unmultiplied(255, 140, 0, 150)
@@ -2536,5 +2663,50 @@ impl eframe::App for LoaderApp {
             let _ = wait.recv_timeout(Duration::from_secs(3));
         }
         backend::shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_keeps_the_newest_lines_and_its_filter() {
+        let mut log = Log::default();
+        for i in 0..MAX_LOG_LINES + MAX_LOG_LINES / 4 + 1 {
+            log.push(false, if i % 2 == 0 { format!("[even] {i}") } else { format!("{i}") });
+        }
+        assert_eq!(log.lines.len(), MAX_LOG_LINES);
+        assert_eq!(log.lines.last().unwrap().text, format!("[even] {}", MAX_LOG_LINES + MAX_LOG_LINES / 4));
+        assert_eq!(log.text.lines().count(), MAX_LOG_LINES);
+        log.set_filter(Some(0));
+        assert_eq!(log.view.len(), MAX_LOG_LINES / 2);
+        assert!(log.text.lines().all(|line| line.starts_with("[even]")));
+        let revision = log.revision;
+        log.clear();
+        assert!(log.revision > revision);
+    }
+
+    #[test]
+    fn log_sections_cover_runs_of_one_color() {
+        let mut log = Log::default();
+        for (error, text) in [(false, "a"), (false, "bb"), (true, "c\nd"), (false, "e")] {
+            log.push(error, text.into());
+        }
+        let (normal, error) = (egui::Color32::WHITE, egui::Color32::RED);
+        let job = log.layout_job(egui::FontId::monospace(13.0), normal, error);
+        let sections: Vec<_> = job.sections.iter().map(|s| (&job.text[s.byte_range.start.0..s.byte_range.end.0], s.format.color)).collect();
+        assert_eq!(sections, [("a\nbb\n", normal), ("c\nd\n", error), ("e", normal)]);
+    }
+
+    #[test]
+    fn the_text_walk_counts_chars_and_lines() {
+        let text = "é\nab\nc";
+        let mut walk = TextWalk::new(text);
+        assert_eq!(walk.advance(3), (2, 1));
+        assert_eq!(walk.advance(7), (6, 2));
+        // behind the walk, or past the end of a text edited this frame: it stays put
+        assert_eq!(walk.advance(1), (6, 2));
+        assert_eq!(walk.advance(99), (6, 2));
     }
 }

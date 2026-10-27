@@ -7,7 +7,7 @@ use alloc::{format, string::String};
 pub mod read;
 pub mod state;
 
-pub const PROTOCOL_VERSION: u8 = 44;
+pub const PROTOCOL_VERSION: u8 = 45;
 
 pub const SHARED_MEMORY_PREFIX: &str = "AGENT_DATA_";
 
@@ -54,6 +54,12 @@ pub fn unload_event_name(pid: u32) -> String {
 /// The event that wakes the agent's worker thread to answer read-only requests without waiting for a frame.
 pub fn work_event_name(pid: u32) -> String {
     format!("AGENT_WORK_{pid}")
+}
+
+/// An auto-reset event the agent sets each time the client presents a frame, after bumping `Header::frame_serial`,
+/// so a reader can do its work once per frame without polling.
+pub fn frame_event_name(pid: u32) -> String {
+    format!("AGENT_FRAME_{pid}")
 }
 
 /// Held by whoever has a request in the worker's single slot, from writing it to reading the answer.
@@ -127,6 +133,8 @@ pub struct Header {
     pub cursor_style: u8,
     pub cursor_color: [u8; 3],
     pub cursor_size: u8,
+    // Bumped by the agent each time the client presents a frame (wrapping), then `frame_event_name` is set.
+    pub frame_serial: u32,
 }
 
 pub const HEADER_SIZE: usize = core::mem::size_of::<Header>();
@@ -186,7 +194,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Header, overlay_hash), 44);
         assert_eq!(core::mem::offset_of!(Header, cursor_style), 52);
         assert_eq!(core::mem::offset_of!(Header, cursor_size), 56);
-        assert_eq!(HEADER_SIZE, PREAMBLE_SIZE + 28 + 3 + 4 + 8 + 4 + 1);
+        assert_eq!(core::mem::offset_of!(Header, frame_serial), 57);
+        assert_eq!(HEADER_SIZE, PREAMBLE_SIZE + 28 + 3 + 4 + 8 + 4 + 1 + 4);
     }
 
     #[test]
@@ -233,5 +242,6 @@ mod tests {
     #[test]
     fn names_are_per_process() {
         assert_eq!(shared_memory_name(32), "AGENT_DATA_32");
+        assert_eq!(frame_event_name(32), "AGENT_FRAME_32");
     }
 }

@@ -77,8 +77,8 @@ pub fn varc(target: &Target, _settings: &Settings, id: i32) -> Result<Option<i32
     injector::varc(target.client.pid, id)
 }
 
-pub fn scene_tiles(target: &Target, _settings: &Settings, layers: &[&str]) -> Result<usize, String> {
-    injector::scene_tiles(target.client.pid, layers)
+pub fn scene_tiles_next_frame(target: &Target, _settings: &Settings, layers: &[&str], after: u32) -> Result<Option<u32>, String> {
+    injector::scene_tiles_next_frame(target.client.pid, layers, after)
 }
 
 pub fn npcs(target: &Target, _settings: &Settings) -> Result<Vec<Npc>, String> {

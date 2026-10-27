@@ -150,7 +150,7 @@ mod win;
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
 pub use win::{
-    cache_archive_files, cache_archives, cache_files, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, project, project_moved, sub_interfaces, load, loc_model, locs, npc_model, npc_words, npcs, player_model, players, screenshot, set_display_name, set_total_xp,
+    cache_archive_files, cache_archives, cache_files, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, npc_model, npc_words, npcs, player_model, players, screenshot, set_display_name, set_total_xp,
     unload, varc, varp_value, varps, widget, widget_children, world_select,
 };
 

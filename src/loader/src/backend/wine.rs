@@ -17,7 +17,15 @@ use super::{Scan, Settings, Target};
 const CLIENT_EXES: &[&str] = &["osclient.exe", "osrswindows.exe"];
 const HELPER_TIMEOUT: Duration = Duration::from_secs(45);
 
-static SERVERS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<Server>>>>> = OnceLock::new();
+/// Which of a prefix's helpers a request goes to. Requests that wait for the client's next frame get their own, since a
+/// helper answers one request at a time and the rest would queue behind every wait.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Lane {
+    Main,
+    Frames,
+}
+
+static SERVERS: OnceLock<Mutex<HashMap<(PathBuf, Lane), Arc<Mutex<Server>>>>> = OnceLock::new();
 
 struct Server {
     child: Child,
@@ -86,23 +94,24 @@ fn wine_command(location: &Location, helper: &Path) -> Command {
     command
 }
 
-fn ensure_connection(location: &Location, helper: &Path) -> Result<Arc<Mutex<Server>>, String> {
+fn ensure_connection(lane: Lane, location: &Location, helper: &Path) -> Result<Arc<Mutex<Server>>, String> {
     let registry = SERVERS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut registry = registry.lock().map_err(|_| "injector connection registry lock poisoned.".to_string())?;
-    let alive = registry.get(&location.prefix).is_some_and(|server| {
+    let key = (location.prefix.clone(), lane);
+    let alive = registry.get(&key).is_some_and(|server| {
         server.lock().map(|mut server| server.alive()).unwrap_or(false)
     });
     if !alive {
-        registry.insert(location.prefix.clone(), Arc::new(Mutex::new(Server::spawn(location, helper)?)));
+        registry.insert(key.clone(), Arc::new(Mutex::new(Server::spawn(location, helper)?)));
     }
-    Ok(registry.get(&location.prefix).expect("just ensured").clone())
+    Ok(registry.get(&key).expect("just ensured").clone())
 }
 
-fn disconnect(location: &Location) {
+fn disconnect(lane: Lane, location: &Location) {
     if let Some(registry) = SERVERS.get()
         && let Ok(mut registry) = registry.lock()
     {
-        registry.remove(&location.prefix);
+        registry.remove(&(location.prefix.clone(), lane));
     }
 }
 
@@ -114,13 +123,13 @@ pub fn shutdown() {
     }
 }
 
-fn send(location: &Location, helper: &Path, args: &[&str]) -> Result<String, String> {
-    let server = ensure_connection(location, helper)?;
+fn send(lane: Lane, location: &Location, helper: &Path, args: &[&str]) -> Result<String, String> {
+    let server = ensure_connection(lane, location, helper)?;
     let mut server = server.lock().map_err(|_| "injector connection lock poisoned.".to_string())?;
     let result = server.send(args);
     if result.is_err() {
         drop(server);
-        disconnect(location);
+        disconnect(lane, location);
     }
     result
 }
@@ -245,12 +254,12 @@ pub fn varc(target: &Target, settings: &Settings, id: i32) -> Result<Option<i32>
     run(&target.location, &helper, &["varc", &target.client.pid.to_string(), &id.to_string()])
 }
 
-pub fn scene_tiles(target: &Target, settings: &Settings, layers: &[&str]) -> Result<usize, String> {
+pub fn scene_tiles_next_frame(target: &Target, settings: &Settings, layers: &[&str], after: u32) -> Result<Option<u32>, String> {
     let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["tiles", &pid];
+    let (pid, after) = (target.client.pid.to_string(), after.to_string());
+    let mut args = vec!["tiles-next", &pid, &after];
     args.extend_from_slice(layers);
-    run(&target.location, &helper, &args)
+    run_on(Lane::Frames, &target.location, &helper, &args)
 }
 
 pub fn npcs(target: &Target, settings: &Settings) -> Result<Vec<Npc>, String> {
@@ -383,7 +392,11 @@ fn windows_path(prefix: &Path, path: &Path) -> Result<String, String> {
 }
 
 fn run<T: DeserializeOwned>(location: &Location, helper: &Path, args: &[&str]) -> Result<T, String> {
-    let line = send(location, helper, args)?;
+    run_on(Lane::Main, location, helper, args)
+}
+
+fn run_on<T: DeserializeOwned>(lane: Lane, location: &Location, helper: &Path, args: &[&str]) -> Result<T, String> {
+    let line = send(lane, location, helper, args)?;
     serde_json::from_str::<Result<T, String>>(&line).map_err(|e| format!("Unexpected output from injector.exe ({e}): {line}"))?
 }
 

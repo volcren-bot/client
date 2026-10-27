@@ -79,6 +79,9 @@ pub struct Folds {
     path: String,
     seen: Option<(u64, usize)>,
     ranges: Vec<(usize, usize)>,
+    /// Byte offset of every newline in the text, and the widest line in columns (a tab counted as four).
+    newlines: Vec<usize>,
+    longest: usize,
     folded: BTreeSet<usize>,
     /// Where the cursor was (a char index) after the last frame, and the line it is on.
     cursor: (usize, usize),
@@ -116,8 +119,20 @@ impl Folds {
         }
         self.seen = Some((hash, lines));
         self.ranges = ranges(text);
+        self.newlines = text.match_indices('\n').map(|(at, _)| at).collect();
+        self.longest = text.lines().map(|l| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>()).max().unwrap_or(0);
         let starts = &self.ranges;
         self.folded.retain(|at| starts.binary_search_by_key(at, |&(start, _)| start).is_ok());
+    }
+
+    /// The number of lines in the text of the last `sync`.
+    pub fn line_count(&self) -> usize {
+        self.newlines.len() + 1
+    }
+
+    /// The widest line of the text of the last `sync`, in columns.
+    pub fn longest_line(&self) -> usize {
+        self.longest
     }
 
     fn end_of(&self, line: usize) -> Option<usize> {
@@ -157,9 +172,9 @@ impl Folds {
         self.reveal(line);
     }
 
+    /// `text` is the one of the last `sync`.
     pub fn view(&self, text: &str) -> View {
-        let lines = text.matches('\n').count() + 1;
-        let newlines: Vec<usize> = text.match_indices('\n').map(|(at, _)| at).collect();
+        let (lines, newlines) = (self.line_count(), &self.newlines);
         let mut view = View { visible: Vec::new(), hidden: Vec::new(), headers: Vec::new() };
         let mut line = 0;
         while line < lines {

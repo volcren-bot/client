@@ -1,16 +1,17 @@
 use std::{
     ffi::CString,
     mem::size_of,
-    ptr::{addr_of, null_mut, read_volatile, write_bytes},
+    ptr::{addr_of, addr_of_mut, null_mut, read_volatile, write_bytes},
     sync::{Mutex, OnceLock},
     thread::sleep,
     time::{Duration, Instant},
 };
 use windows::{
-    core::PCSTR,
+    core::{PCSTR, PCWSTR},
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::LibraryLoader::GetModuleFileNameW,
+        System::Threading::{CreateEventW, SetEvent},
         System::Memory::{
             CreateFileMappingA, MapViewOfFile, OpenFileMappingA, UnmapViewOfFile,
             FILE_MAP_ALL_ACCESS, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
@@ -18,7 +19,7 @@ use windows::{
     },
 };
 use ipc::{
-    build_id, cursor_style, initial_cursor_name, offsets_state, overlay_mode, shared_memory_name, Header, IMAGE_DATA_SIZE, OVERLAY_SLOTS, PROTOCOL_VERSION,
+    build_id, cursor_style, frame_event_name, initial_cursor_name, offsets_state, overlay_mode, shared_memory_name, Header, IMAGE_DATA_SIZE, OVERLAY_SLOTS, PROTOCOL_VERSION,
     INITIAL_CURSOR_SIZE, VERSION_LEN,
 };
 
@@ -52,6 +53,8 @@ const BUFFER_SIZE: usize = std::mem::size_of::<SharedMemory>();
 pub struct MemoryManager {
     ptr: *mut SharedMemory,
     hmap: HANDLE,
+    // Set after each presented frame (`ipc::frame_event_name`); only the client's own manager has one, not Simba's.
+    frame_event: HANDLE,
 }
 
 unsafe impl Send for MemoryManager {}
@@ -122,9 +125,16 @@ impl MemoryManager {
             cursor_style,
             cursor_color,
             cursor_size,
+            frame_serial: 0,
         };
 
-        Self { ptr, hmap }
+        let event_name: Vec<u16> = frame_event_name(pid).encode_utf16().chain(std::iter::once(0)).collect();
+        let frame_event = CreateEventW(None, false, false, PCWSTR(event_name.as_ptr())).unwrap_or_else(|error| {
+            println!("[Agent]: Cannot create the frame event ({error}); overlays fall back to polling.\r\n");
+            HANDLE::default()
+        });
+
+        Self { ptr, hmap, frame_event }
     }
 
     pub unsafe fn open_map(pid: u32, time: u64) -> Self {
@@ -163,7 +173,7 @@ impl MemoryManager {
             "[Agent]: Simba and the client are using different builds of the agent. Load this build into the client with loader, or restart the client.\r\n"
         );
 
-        Self { ptr, hmap }
+        Self { ptr, hmap, frame_event: HANDLE::default() }
     }
 
     pub unsafe fn mark_closed(&self) {
@@ -189,6 +199,24 @@ impl MemoryManager {
                 println!("[Agent]: Failed to close memory map handle.\r\n");
             }
             self.hmap = HANDLE::default();
+        }
+
+        if !self.frame_event.is_invalid() {
+            let _ = CloseHandle(self.frame_event);
+            self.frame_event = HANDLE::default();
+        }
+    }
+
+    /// Counts a frame the client presented and wakes whoever waits for the next one.
+    pub unsafe fn frame_presented(&self) {
+        if self.ptr.is_null() {
+            return;
+        }
+        // packed and unaligned; only the game thread writes it, and a reader only looks for a change
+        let at = addr_of_mut!((*self.ptr).header.frame_serial);
+        at.write_unaligned(at.read_unaligned().wrapping_add(1));
+        if !self.frame_event.is_invalid() {
+            let _ = SetEvent(self.frame_event);
         }
     }
 

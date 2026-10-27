@@ -187,6 +187,10 @@ fn main() -> std::process::ExitCode {
                 (Ok(pid), Ok(id)) => json(injector::varc(pid, id)),
                 _ => json::<()>(Err(format!("Invalid varc command: {args:?}"))),
             },
+            ["tiles-next", pid, after, layers @ ..] => match (pid.parse(), after.parse()) {
+                (Ok(pid), Ok(after)) => json(injector::scene_tiles_next_frame(pid, layers, after)),
+                _ => json::<()>(Err(format!("Invalid tiles-next command: {args:?}"))),
+            },
             ["tiles", pid, layers @ ..] => match pid.parse() {
                 Ok(pid) => json(injector::scene_tiles(pid, layers)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),

@@ -12,7 +12,7 @@ The user-facing desktop app (`eframe`/egui), a native binary. It never touches t
 - On start it fetches `latest.json` from the public `client` bucket and shows a Download/Dismiss banner when a newer version exists (`src/update.rs`). Releases are built and published by `.github/workflows/release.yml` on every push to `main`. Versions are `YYYY.MM.DD-<7 character commit>` (UTC commit date), embedded by `build.rs`; local builds use their checked out commit, or `dev` outside git, which never prompts an update. Store scripts run against the shared `lib/` in the cache (`src/libs.rs`): the newest lib in `lib/index.json` whose `requires_host` is at most the loader's `injector::HOST_API`. If a newer one exists that this loader cannot run, the script log warns to update the loader. Settings detection looks next to the executable first, so an installed release needs no `target/` folder.
 - Edits scripts with Luau syntax highlighting.
 - On Run, compares the file on disk with what the editor last synced (`ScriptFile::disk`: set on open, save, startup) and prompts to reload if it changed; the prompt also warns about unsaved edits.
-- Dev tools: RuneLite-style checkboxes (`DEV_TOGGLES` in `app.rs`) that draw scene layers through `injector::scene_tiles`; a checkbox with no entry in `DEV_LAYERS` isn't ported yet.
+- Dev tools: RuneLite-style checkboxes (`DEV_TOGGLES` in `app.rs`) that draw scene layers through `injector::scene_tiles_next_frame`, once per frame the client presents (`TilesWorker`); a checkbox with no entry in `DEV_LAYERS` isn't ported yet.
 - Persists `Settings { dll, helper }` (paths of `agent.dll` and `injector.exe`), auto-detected next to the executable or in `target/x86_64-pc-windows-gnu/{release,debug}`. Also persists the mouse cursor preference (`Cursor`, storage key `cursor`), which is passed to `injector load` so the agent starts with it (the injector leaves it in an `AGENT_CURSOR_<pid>` mapping the agent reads while building its header).
 
 ## Layout
@@ -30,7 +30,7 @@ The user-facing desktop app (`eframe`/egui), a native binary. It never touches t
 | `src/highlight.rs` | Luau highlighter. |
 | `src/backend/mod.rs` | `Settings`, `Target`, `Scan`; re-exports one function set (`connection`, `load`, `state`, `input`, `draw`, ...) from the compiled backend, so `app.rs` is platform independent. |
 | `src/backend/native.rs` | Windows: calls the `injector` library directly. |
-| `src/backend/wine.rs` | Linux: finds each client's Wine prefix (by the client executable's name, `CLIENT_EXES`), runs one `injector.exe serve` per prefix and talks JSON lines over stdio (`HELPER_TIMEOUT` 45 s). |
+| `src/backend/wine.rs` | Linux: finds each client's Wine prefix (by the client executable's name, `CLIENT_EXES`), runs one `injector.exe serve` per prefix and talks JSON lines over stdio (`HELPER_TIMEOUT` 45 s). A helper answers one request at a time, so requests that wait for the client's next frame (the dev overlays) go to a second helper of their own (`Lane::Frames`). |
 
 ## Gotchas
 

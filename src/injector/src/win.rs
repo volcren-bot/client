@@ -35,7 +35,7 @@ use windows_sys::{
                 VirtualFreeEx,
             },
             Threading::{
-                CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, ReleaseMutex, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
+                CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE, ReleaseMutex, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
                 PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
                 PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
                 QueryFullProcessImageNameW, SetEvent, WaitForSingleObject,
@@ -51,7 +51,7 @@ use windows_sys::{
 
 use ipc::{
     HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, overlay_mode, overlay_offset, shared_memory_name,
-    initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name,
+    frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name,
     read::short_string_text,
     state::{
         item_name_status, loc_status, menu_status, model_status, model_target, project_status, cache_kind, cache_status, CacheReply, CacheRequest, GameValRequest, ItemNameRequest, LocsReply, ModelRequest, NamesReply, worker_kind, worker_status, WorkerRequest, ProjectRequest, CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, ITEM_NAME_BATCH, PROJECT_BATCH,
@@ -486,6 +486,8 @@ struct Session {
     work: OnceLock<Option<Handle>>,
     // The mutex guarding the worker's request slot, opened on first use.
     slot: OnceLock<Option<Handle>>,
+    // The agent's frame event, opened on first use (`None` when it has none).
+    frame: OnceLock<Option<Handle>>,
 }
 
 // SAFETY: the process handle works from any thread and the view is read through sequence-locked helpers, one request at a time per script.
@@ -505,7 +507,7 @@ fn session(pid: u32) -> Result<Arc<Session>, String> {
     let view = StateView::open(pid, true)?;
     let process = Handle::new(unsafe { OpenProcess(PROCESS_VM_READ, 0, pid) })
         .ok_or_else(|| format!("Cannot open client {pid} to read it"))?;
-    let session = Arc::new(Session { process: Arc::new(process), view, born: Instant::now(), work: OnceLock::new(), slot: OnceLock::new() });
+    let session = Arc::new(Session { process: Arc::new(process), view, born: Instant::now(), work: OnceLock::new(), slot: OnceLock::new(), frame: OnceLock::new() });
     sessions.push((pid, session.clone()));
     Ok(session)
 }
@@ -1942,6 +1944,60 @@ fn with_terrain<T>(pid: u32, read: impl FnOnce(&Terrain) -> T) -> Result<T, Stri
     };
     *cache = terrain.map(|terrain| (pid, terrain));
     value
+}
+
+// How long `scene_tiles_next_frame` waits for a frame, so a caller looping on it can check whether to stop.
+const FRAME_WAIT: Duration = Duration::from_millis(100);
+// The longest single wait on the frame event: also notices a frame whose event another waiter took.
+const FRAME_SLICE: Duration = Duration::from_millis(20);
+
+fn frame_serial(pid: u32) -> Result<u32, String> {
+    match read_header(pid) {
+        Some(Ok(header)) => Ok(header.frame_serial),
+        Some(Err(Incompatible { protocol, .. })) => Err(format!(
+            "Client {pid} runs agent protocol {protocol}, this is {}: restart the client and load a matching agent",
+            ipc::PROTOCOL_VERSION
+        )),
+        None => Err(format!("No agent shared memory in client {pid}")),
+    }
+}
+
+// Waits up to `timeout` for client `pid` to present a frame other than `after` (a `Header::frame_serial`); `None` if none came.
+fn next_frame(pid: u32, after: u32, timeout: Duration) -> Result<Option<u32>, String> {
+    let session = session(pid)?;
+    let event = session
+        .frame
+        .get_or_init(|| {
+            let name = wide(frame_event_name(pid));
+            Handle::new(unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) })
+        })
+        .as_ref();
+    let deadline = Instant::now() + timeout;
+    loop {
+        let frame = frame_serial(pid)?;
+        if frame != after {
+            return Ok(Some(frame));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        match event {
+            Some(event) => {
+                unsafe { WaitForSingleObject(event.0, left.min(FRAME_SLICE).as_millis().max(1) as u32) };
+            }
+            None => sleep(left.min(Duration::from_millis(1))),
+        }
+    }
+}
+
+/// Draws `layers` as `scene_tiles` does, once client `pid` has presented a frame after `after`, so a loop of these paints
+/// once per frame. Returns the frame it painted after, to pass as the next `after`, or `None` (nothing painted) when no
+/// frame came within `FRAME_WAIT` (the client is minimized or loading).
+pub fn scene_tiles_next_frame(pid: u32, layers: &[&str], after: u32) -> Result<Option<u32>, String> {
+    let Some(frame) = next_frame(pid, after, FRAME_WAIT)? else { return Ok(None) };
+    scene_tiles(pid, layers)?;
+    Ok(Some(frame))
 }
 
 // Draws the layers named in `layers` (see `LAYERS`); returns how many tile outlines were drawn in full on the canvas.
