@@ -17,6 +17,7 @@ mod session;
 mod store;
 mod theme;
 mod libs;
+mod logo;
 mod update;
 mod xp;
 
