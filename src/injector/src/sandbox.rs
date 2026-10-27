@@ -305,6 +305,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("wornitems", "main/interfaces/gametabs/wornitems.luau"),
     lib_module!("side_panels", "main/interfaces/gametabs/side_panels.luau"),
     lib_module!("magic", "main/interfaces/gametabs/magic.luau"),
+    lib_module!("prayer", "main/interfaces/gametabs/prayer.luau"),
     lib_module!("npcs", "main/entities/npcs.luau"),
     lib_module!("objects", "main/entities/objects.luau"),
     lib_module!("ground_items", "main/entities/ground_items.luau"),
