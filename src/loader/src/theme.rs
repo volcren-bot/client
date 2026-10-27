@@ -19,9 +19,12 @@ const BG_HL: Color32 = Color32::from_rgb(0x29, 0x2e, 0x42);
 const BORDER: Color32 = Color32::from_rgb(0x3b, 0x42, 0x61);
 const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
 const FG_DARK: Color32 = Color32::from_rgb(0xa9, 0xb1, 0xd6);
-const COMMENT: Color32 = Color32::from_rgb(0x56, 0x5f, 0x89);
+pub const COMMENT: Color32 = Color32::from_rgb(0x56, 0x5f, 0x89);
 const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
 const SEL: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
+pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
+pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
+pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
 
 /// A flat, square, all-monospace look after the webapp's Neovim/LazyVim layer, always dark.
 pub fn apply(ctx: &egui::Context) {

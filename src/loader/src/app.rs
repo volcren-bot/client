@@ -1401,88 +1401,60 @@ impl LoaderApp {
     fn clients_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
-        if ui
-            .add_enabled(self.busy.is_none(), egui::Button::new("Refresh"))
-            .clicked()
-        {
-            self.scan(&ctx);
-        }
-
-        let mut changed = false;
         ui.horizontal(|ui| {
-            ui.label("Mouse cursor");
-            egui::ComboBox::from_id_salt("cursor_style")
-                .selected_text(cursor_style_label(self.cursor.style))
-                .show_ui(ui, |ui| {
-                    for style in CURSOR_STYLES {
-                        changed |= ui.selectable_value(&mut self.cursor.style, style, cursor_style_label(style)).changed();
-                    }
-                });
-            ui.add_enabled_ui(self.cursor.style != CursorStyle::Off, |ui| {
-                changed |= ui.color_edit_button_srgb(&mut self.cursor.color).changed();
-                ui.label("Size");
-                changed |= ui.add(egui::DragValue::new(&mut self.cursor.size).range(4..=64).suffix(" px")).changed();
+            ui.heading("Clients");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(self.busy.is_none(), egui::Button::new("Refresh")).clicked() {
+                    self.scan(&ctx);
+                }
             });
         });
-        if changed && let Some(target) = self.selected_target() {
-            self.set_cursor(&ctx, target);
-        }
-        ui.add_space(6.0);
+        ui.add_space(4.0);
+
         if self.targets.is_empty() {
             if self.busy.is_none() {
-                ui.label("No game clients found.");
+                ui.label(egui::RichText::new("No game clients found.").color(crate::theme::COMMENT));
             }
         } else {
             self.step_selected_client(&ctx);
             let show_prefix = !cfg!(windows);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
-                .max_height(ui.available_height() - 40.0)
+                .max_height((ui.available_height() - 120.0).max(60.0))
                 .show(ui, |ui| {
                     egui::Grid::new("clients")
-                        .num_columns(6)
+                        .num_columns(if show_prefix { 4 } else { 3 })
                         .striped(true)
+                        .min_col_width(60.0)
+                        .spacing(egui::vec2(16.0, 6.0))
                         .show(ui, |ui| {
-                            for header in [
-                                "",
-                                "PID",
-                                "Title",
-                                "Executable",
-                                if show_prefix { "Prefix" } else { "" },
-                                "Status",
-                            ] {
-                                ui.strong(header);
+                            ui.label(egui::RichText::new("PID").color(crate::theme::COMMENT));
+                            ui.label(egui::RichText::new("Title").color(crate::theme::COMMENT));
+                            if show_prefix {
+                                ui.label(egui::RichText::new("Prefix").color(crate::theme::COMMENT));
                             }
+                            ui.label(egui::RichText::new("Status").color(crate::theme::COMMENT));
                             ui.end_row();
 
                             for target in &self.targets {
                                 let client = &target.client;
-                                ui.radio_value(&mut self.selected, Some(target.key()), "");
-                                ui.label(client.pid.to_string());
-                                ui.label(&client.title);
-                                ui.label(&client.exe);
-                                ui.label(if show_prefix {
-                                    target.location.label().unwrap_or_default()
-                                } else {
-                                    String::new()
-                                });
+                                ui.selectable_value(&mut self.selected, Some(target.key()), client.pid.to_string());
+                                ui.label(&client.title).on_hover_text(&client.exe);
+                                if show_prefix {
+                                    ui.label(target.location.label().unwrap_or_default());
+                                }
                                 if let Some(module) = &client.loaded {
-                                    let version =
-                                        client.version.as_deref().unwrap_or("unknown version");
-                                    let text = if self
-                                        .dll_version
-                                        .as_deref()
-                                        .is_some_and(|v| v != version)
-                                    {
-                                        format!("Loaded {version}, outdated")
+                                    let version = client.version.as_deref().unwrap_or("unknown version");
+                                    if self.dll_version.as_deref().is_some_and(|v| v != version) {
+                                        ui.colored_label(crate::theme::YELLOW, format!("Loaded {version}, outdated"))
                                     } else {
-                                        format!("Loaded {version}")
-                                    };
-                                    ui.label(text).on_hover_text(module);
+                                        ui.colored_label(crate::theme::GREEN, format!("Loaded {version}"))
+                                    }
+                                    .on_hover_text(module);
                                 } else if !client.is_64bit {
-                                    ui.label("32-bit, unsupported");
+                                    ui.colored_label(crate::theme::RED, "32-bit, unsupported");
                                 } else {
-                                    ui.label("Not loaded");
+                                    ui.label(egui::RichText::new("Not loaded").color(crate::theme::COMMENT));
                                 }
                                 ui.end_row();
                             }
@@ -1501,7 +1473,7 @@ impl LoaderApp {
             && (!loaded || outdated);
         let can_unload = self.busy.is_none() && loaded;
 
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             let load = if loaded { "Reload" } else { "Load" };
             if ui
@@ -1525,28 +1497,55 @@ impl LoaderApp {
             {
                 self.console(&ctx, target);
             }
+        });
 
-            ui.separator();
-            let hint = "Shown instead of your display name, in this client only, and kept across logins until reset. Empty puts the real name back.";
-            let field = ui
-                .add_enabled(
-                    can_unload,
-                    egui::TextEdit::singleline(&mut self.display_name)
-                        .hint_text("Display name")
-                        .char_limit(injector::state::MAX_NAME_BYTES)
-                        .desired_width(140.0),
-                )
-                .on_hover_text(hint);
-            let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let label = if self.display_name.trim().is_empty() { "Reset name" } else { "Set name" };
-            if (ui.add_enabled(can_unload, egui::Button::new(label)).on_hover_text(hint).clicked() || submitted)
-                && let Some(target) = selected
-            {
-                self.set_display_name(&ctx, target);
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Client options").default_open(false).show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("client_options").num_columns(2).spacing(egui::vec2(16.0, 6.0)).show(ui, |ui| {
+                ui.label("Mouse cursor");
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("cursor_style")
+                        .selected_text(cursor_style_label(self.cursor.style))
+                        .show_ui(ui, |ui| {
+                            for style in CURSOR_STYLES {
+                                changed |= ui.selectable_value(&mut self.cursor.style, style, cursor_style_label(style)).changed();
+                            }
+                        });
+                    ui.add_enabled_ui(self.cursor.style != CursorStyle::Off, |ui| {
+                        changed |= ui.color_edit_button_srgb(&mut self.cursor.color).changed();
+                        changed |= ui.add(egui::DragValue::new(&mut self.cursor.size).range(4..=64).suffix(" px")).changed();
+                    });
+                });
+                ui.end_row();
+
+                ui.label("Display name");
+                ui.horizontal(|ui| {
+                    let hint = "Shown instead of your display name, in this client only, and kept across logins until reset. Empty puts the real name back.";
+                    let field = ui
+                        .add_enabled(
+                            can_unload,
+                            egui::TextEdit::singleline(&mut self.display_name)
+                                .hint_text("Real name")
+                                .char_limit(injector::state::MAX_NAME_BYTES)
+                                .desired_width(140.0),
+                        )
+                        .on_hover_text(hint);
+                    let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let label = if self.display_name.trim().is_empty() { "Reset" } else { "Set" };
+                    if (ui.add_enabled(can_unload, egui::Button::new(label)).on_hover_text(hint).clicked() || submitted)
+                        && let Some(target) = selected.clone()
+                    {
+                        self.set_display_name(&ctx, target);
+                    }
+                });
+                ui.end_row();
+            });
+            if changed && let Some(target) = selected {
+                self.set_cursor(&ctx, target);
             }
         });
     }
-
     /// Moves the client selection with the up and down arrows, unless a text field has the keyboard.
     fn step_selected_client(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
