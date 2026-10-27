@@ -2223,6 +2223,7 @@ dependencies = [
  "libc",
  "rand 0.10.3",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

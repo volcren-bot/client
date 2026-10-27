@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 pub const SCRIPT_PREFIX: &str = "\u{1e}SCRIPT ";
+/// Optional, before the script: a JSON object of the script's other files by name, which the injector keeps in memory.
+pub const MODULES_PREFIX: &str = "\u{1e}MODULES ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
 /// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";

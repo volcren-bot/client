@@ -368,9 +368,14 @@ fn find_locations() -> Vec<Location> {
 }
 
 fn windows_path(prefix: &Path, path: &Path) -> Result<String, String> {
-    let path = path
-        .canonicalize()
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // A premium script's entry file doesn't exist (it only lives in memory), so its folder stands in for it.
+    let path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => match (path.parent().map(Path::canonicalize), path.file_name()) {
+            (Some(Ok(dir)), Some(file)) => dir.join(file),
+            _ => return Err(format!("{}: {error}", path.display())),
+        },
+    };
     let dosdevices = prefix.join("dosdevices");
 
     let mut best: Option<(char, PathBuf)> = None;

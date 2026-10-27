@@ -344,6 +344,23 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         eprintln!("Couldn't read the script from stdin.");
         return std::process::ExitCode::from(2);
     }
+    // The script's other files can come first, so they never touch the disk.
+    let mut modules = std::collections::HashMap::new();
+    if let Some(len) = first.strip_prefix(form::MODULES_PREFIX).map(|len| len.trim().parse::<usize>()) {
+        let files = len.ok().and_then(|len| {
+            let mut bytes = vec![0u8; len];
+            input.read_exact(&mut bytes).ok()?;
+            serde_json::from_slice::<std::collections::HashMap<String, String>>(&bytes).ok()
+        });
+        first.clear();
+        match files {
+            Some(files) if input.read_line(&mut first).is_ok() => modules = files,
+            _ => {
+                eprintln!("Couldn't read the script's files from stdin.");
+                return std::process::ExitCode::from(2);
+            }
+        }
+    }
     let (source, handler) = match first.strip_prefix(SCRIPT_PREFIX).map(|len| len.trim().parse::<usize>()) {
         Some(Ok(len)) => {
             let mut bytes = vec![0u8; len];
@@ -376,11 +393,11 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
 
     let stdout = std::io::stdout();
     let name = script_path.as_deref().and_then(std::path::Path::file_name).map_or_else(|| "script.luau".into(), |n| n.to_string_lossy().into_owned());
-    let result = injector::sandbox::run_with_form(&name, &source, pid, move |line| {
+    let result = injector::sandbox::run_with_modules(&name, &source, pid, move |line| {
         let mut out = stdout.lock();
         let _ = write!(out, "{line}{}", form::ENTRY_END);
         let _ = out.flush();
-    }, handler, script_path.as_deref(), lib_dir.as_deref());
+    }, handler, script_path.as_deref(), lib_dir.as_deref(), modules);
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

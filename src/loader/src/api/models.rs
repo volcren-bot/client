@@ -126,6 +126,9 @@ pub struct StartedSession {
     /// The file to run; one of `files`.
     pub entry: String,
     pub files: Vec<SessionFile>,
+    /// The key the files were encrypted with, as 64 hex digits. `None` for a revision published before files were encrypted.
+    #[serde(default)]
+    pub key: Option<String>,
     pub heartbeat_seconds: u64,
 }
 

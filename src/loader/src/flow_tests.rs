@@ -29,11 +29,29 @@ struct Server {
     entry: &'static str,
     /// 404 for the lib index, as before the first lib release.
     no_lib: bool,
+    /// Credits per minute of the started session; a premium script's files stay in memory.
+    price: i64,
+    /// Serve the files encrypted, and the key with the session.
+    encrypted: bool,
+}
+
+const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+/// What the webapp stores: nonce || ciphertext || tag, bound to the file's place.
+fn seal(revision: i64, name: &str, plain: &str) -> Vec<u8> {
+    use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+    let key: Vec<u8> = (0..32).collect();
+    let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).unwrap());
+    let nonce = [7u8; 12];
+    let mut body = plain.as_bytes().to_vec();
+    let aad = format!("volcren:{SCRIPT_ID}/{revision:09}/{name}");
+    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad.as_bytes()), &mut body).unwrap();
+    [nonce.to_vec(), body].concat()
 }
 
 impl Server {
     const fn healthy() -> Self {
-        Self { revision: 4, start_status: 200, file_status: 200, wrong_checksum: false, entry: "main.luau", no_lib: false }
+        Self { revision: 4, start_status: 200, file_status: 200, wrong_checksum: false, entry: "main.luau", no_lib: false, price: 30, encrypted: false }
     }
 
     fn start(self) -> FakeServer {
@@ -77,22 +95,34 @@ impl Server {
                 Reply::json(402, json!({ "error": "Not enough credits.", "required": 300 }))
             }
             ("POST", "/launcher/sessions") => {
-                let checksum = |text: &str| if self.wrong_checksum { "0".repeat(64) } else { sha256_hex(text.as_bytes()) };
+                // the checksum is of the file as stored, so of the ciphertext when encrypted
+                let checksum = |name: &str, text: &str| {
+                    if self.wrong_checksum {
+                        "0".repeat(64)
+                    } else if self.encrypted {
+                        sha256_hex(&seal(self.revision, name, text))
+                    } else {
+                        sha256_hex(text.as_bytes())
+                    }
+                };
                 Reply::json(
                     200,
                     json!({
                         "session_id": "s1",
                         "revision": self.revision,
-                        "price": 30,
+                        "price": self.price,
+                        "key": self.encrypted.then_some(KEY_HEX),
                         "entry": self.entry,
                         "heartbeat_seconds": 60,
                         "files": [
-                            { "name": "main.luau", "url": format!("{base}/files/main.luau"), "sha256": checksum(MAIN) },
-                            { "name": "util.luau", "url": format!("{base}/files/util.luau"), "sha256": checksum(UTIL) },
+                            { "name": "main.luau", "url": format!("{base}/files/main.luau"), "sha256": checksum("main.luau", MAIN) },
+                            { "name": "util.luau", "url": format!("{base}/files/util.luau"), "sha256": checksum("util.luau", UTIL) },
                         ],
                     }),
                 )
             }
+            ("GET", "/files/main.luau") if self.file_status == 200 && self.encrypted => Reply::bytes(seal(self.revision, "main.luau", MAIN)),
+            ("GET", "/files/util.luau") if self.file_status == 200 && self.encrypted => Reply::bytes(seal(self.revision, "util.luau", UTIL)),
             ("GET", "/files/main.luau") if self.file_status == 200 => Reply::bytes(MAIN),
             ("GET", "/files/util.luau") if self.file_status == 200 => Reply::bytes(UTIL),
             ("GET", p) if p.starts_with("/files/") => Reply::status(self.file_status),
@@ -134,6 +164,13 @@ fn script() -> StoreScript {
     .unwrap()
 }
 
+fn free_script() -> StoreScript {
+    serde_json::from_value(json!({
+        "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 0, "revision": 4, "can_access": true
+    }))
+    .unwrap()
+}
+
 #[test]
 fn a_store_script_runs_from_start_to_end() {
     let fake = Server::healthy().start();
@@ -146,7 +183,10 @@ fn a_store_script_runs_from_start_to_end() {
     assert_eq!(prepared.session.session_id, "s1");
     let dir = revision_dir(&root, SCRIPT_ID, 4);
     assert_eq!(prepared.entry, dir.join("main.luau"));
-    assert_eq!(fs::read_to_string(dir.join("util.luau")).unwrap(), UTIL);
+    // A premium script is never written to disk: its other files are handed over in memory.
+    assert!(prepared.premium);
+    assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "the revision folder is empty");
     // The lib sits beside the revision folders, which is where `require("../lib/...")` looks.
     assert_eq!(fs::read_to_string(root.join("lib/main/game_state.luau")).unwrap(), "return 1");
     assert_eq!(fs::read_to_string(root.join("lib/.version")).unwrap(), LIB_VERSION);
@@ -178,12 +218,60 @@ fn a_store_script_runs_from_start_to_end() {
 }
 
 #[test]
+fn encrypted_files_are_opened_with_the_session_key() {
+    let root = cache("encrypted");
+    // premium: decrypted in memory only
+    let fake = Server { encrypted: true, ..Server::healthy() }.start();
+    let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
+    assert_eq!(prepared.source, MAIN);
+    assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
+    assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 4)).unwrap().count(), 0);
+    // free: cached decrypted, so the next start needs no key to read it
+    let fake = Server { encrypted: true, price: 0, revision: 6, ..Server::healthy() }.start();
+    let prepared = prepare_in(&api(&fake), &free_script(), &root).expect("prepare");
+    assert_eq!(prepared.source, MAIN);
+    assert_eq!(fs::read_to_string(revision_dir(&root, SCRIPT_ID, 6).join("util.luau")).unwrap(), UTIL);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_session_priced_zero_for_a_premium_script_is_still_premium() {
+    // authors and testers run for free, but the script is still premium: nothing of it is written to disk
+    let root = cache("premium-free-session");
+    let fake = Server { price: 0, ..Server::healthy() }.start();
+    let premium_listing: StoreScript = serde_json::from_value(json!({
+        "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 30, "revision": 4, "can_access": true
+    }))
+    .unwrap();
+    let prepared = prepare_in(&api(&fake), &premium_listing, &root).expect("prepare");
+    assert!(prepared.premium);
+    assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 4)).unwrap().count(), 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_free_script_is_cached_and_a_premium_one_is_not() {
+    let root = cache("free");
+    let free = Server { price: 0, ..Server::healthy() }.start();
+    let prepared = prepare_in(&api(&free), &free_script(), &root).unwrap();
+    assert!(!prepared.premium);
+    assert!(prepared.modules.is_empty());
+    let dir = revision_dir(&root, SCRIPT_ID, 4);
+    assert_eq!(fs::read_to_string(dir.join("util.luau")).unwrap(), UTIL);
+    assert_eq!(fs::read_to_string(dir.join("main.luau")).unwrap(), MAIN);
+    // Once it costs credits, the cached copy is removed.
+    prepare_in(&api(&Server::healthy().start()), &script(), &root).unwrap();
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn a_second_start_reuses_the_download_and_the_lib() {
-    let fake = Server::healthy().start();
+    let fake = Server { price: 0, ..Server::healthy() }.start();
     let api = api(&fake);
     let root = cache("reuse");
-    prepare_in(&api, &script(), &root).unwrap();
-    prepare_in(&api, &script(), &root).unwrap();
+    prepare_in(&api, &free_script(), &root).unwrap();
+    prepare_in(&api, &free_script(), &root).unwrap();
     assert_eq!(fake.count("GET", "/files/main.luau"), 1);
     assert_eq!(fake.count("GET", "/storage/v1/object/public/client/lib/index.json"), 2, "the index is checked every time");
     assert_eq!(fake.count("GET", &format!("/storage/v1/object/public/client/lib/{LIB_VERSION}/lib.zip")), 1);
@@ -194,10 +282,10 @@ fn a_second_start_reuses_the_download_and_the_lib() {
 #[test]
 fn a_new_revision_replaces_the_old_one_in_the_cache() {
     let root = cache("revisions");
-    let old = Server { revision: 4, ..Server::healthy() }.start();
-    prepare_in(&api(&old), &script(), &root).unwrap();
-    let new = Server { revision: 5, ..Server::healthy() }.start();
-    prepare_in(&api(&new), &script(), &root).unwrap();
+    let old = Server { revision: 4, price: 0, ..Server::healthy() }.start();
+    prepare_in(&api(&old), &free_script(), &root).unwrap();
+    let new = Server { revision: 5, price: 0, ..Server::healthy() }.start();
+    prepare_in(&api(&new), &free_script(), &root).unwrap();
     assert!(!revision_dir(&root, SCRIPT_ID, 4).exists());
     assert!(revision_dir(&root, SCRIPT_ID, 5).join("main.luau").is_file());
     let _ = fs::remove_dir_all(&root);

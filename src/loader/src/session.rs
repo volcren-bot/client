@@ -56,6 +56,28 @@ pub fn prune_old(root: &Path, script_id: &str, keep: i64) {
     }
 }
 
+/// Opens a file the webapp encrypted: `nonce (12 bytes) || ciphertext || tag (16 bytes)` under AES-256-GCM, authenticated with
+/// the file's place (`volcren:<script id>/<9-digit revision>/<name>`), so a file moved to another name or revision doesn't open.
+pub fn decrypt_file(key_hex: &str, script_id: &str, revision: i64, name: &str, sealed: &[u8]) -> Result<Vec<u8>, String> {
+    use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
+    let failed = || format!("Couldn't decrypt {name}.");
+    let key = (key_hex.len() == 64)
+        .then(|| (0..32).map(|i| u8::from_str_radix(&key_hex[2 * i..2 * i + 2], 16).ok()).collect::<Option<Vec<u8>>>())
+        .flatten()
+        .ok_or("The server sent a key that can't be used.")?;
+    let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).map_err(|_| "The server sent a key that can't be used.")?);
+    if sealed.len() < NONCE_LEN + AES_256_GCM.tag_len() {
+        return Err(failed());
+    }
+    let (nonce, body) = sealed.split_at(NONCE_LEN);
+    let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| failed())?;
+    let aad = format!("volcren:{script_id}/{revision:09}/{name}");
+    let mut buffer = body.to_vec();
+    let plain_len = key.open_in_place(nonce, Aad::from(aad.as_bytes()), &mut buffer).map_err(|_| failed())?.len();
+    buffer.truncate(plain_len);
+    Ok(buffer)
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -65,6 +87,10 @@ pub struct Prepared {
     pub session: StartedSession,
     pub entry: PathBuf,
     pub source: String,
+    /// A premium script's other files by name. They are only ever in memory, and go to the injector over its stdin.
+    pub modules: Vec<(String, String)>,
+    /// The script costs credits: its files are never written to disk, and its source isn't shown.
+    pub premium: bool,
     /// Something the user should know before the script runs, such as an outdated loader.
     pub warning: Option<String>,
 }
@@ -98,16 +124,74 @@ pub fn prepare_warned(api: &Api, script: &StoreScript, root: &Path, warned: Opti
             script.title
         ));
     }
-    match download(api, root, id, &session) {
-        Ok((entry, source)) => {
+    // The session's price is 0 for the author and testers, so the listed price counts too.
+    let premium = session.price > 0 || script.price > 0;
+    let downloaded = if premium { download_to_memory(api, root, id, &session) } else { download(api, root, id, &session).map(|(entry, source)| (entry, source, Vec::new())) };
+    match downloaded {
+        Ok((entry, source, modules)) => {
             prune_old(root, id, session.revision);
-            Ok(Prepared { session, entry, source, warning: lib.warning })
+            Ok(Prepared { session, entry, source, modules, premium, warning: lib.warning })
         }
         Err(error) => {
             let _ = api.end_session(&session.session_id);
             Err(error)
         }
     }
+}
+
+fn fetch(api: &Api, id: &str, session: &StartedSession, url: &str, name: &str, sha256: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut response = api.agent().get(url).call().map_err(|e| format!("Couldn't download {name}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Couldn't download {name}: the server answered {}.", response.status()));
+    }
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_FILE_BYTES)
+        .read_to_vec()
+        .map_err(|e| format!("Couldn't download {name}: {e}"))?;
+    if let Some(expected) = sha256
+        && !expected.eq_ignore_ascii_case(&sha256_hex(&bytes))
+    {
+        return Err(format!("{name} didn't match its checksum, so it was discarded."));
+    }
+    match &session.key {
+        Some(key) => decrypt_file(key, id, session.revision, name, &bytes),
+        None => Ok(bytes),
+    }
+}
+
+/// A premium script's files, kept in memory: nothing of it is written to the cache, and an earlier cached copy is removed.
+/// The returned entry path points into an empty folder, which is only where the script's `require("../lib/...")` starts from.
+fn download_to_memory(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<(PathBuf, String, Vec<(String, String)>), String> {
+    let names = session
+        .files
+        .iter()
+        .map(|file| safe_file_name(&file.name).ok_or_else(|| format!("The server sent a file name that can't be used: {:?}", file.name)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let entry_name = safe_file_name(&session.entry)
+        .filter(|entry| names.contains(entry))
+        .ok_or_else(|| format!("This revision's entry file {:?} isn't one of its files.", session.entry))?;
+
+    let mut source = None;
+    let mut modules = Vec::new();
+    for (file, name) in session.files.iter().zip(&names) {
+        let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
+        // The script can only require Luau; anything else it ships has nothing to run it.
+        if *name != entry_name && !name.ends_with(".luau") && !name.ends_with(".lua") {
+            continue;
+        }
+        let text = String::from_utf8(bytes).map_err(|_| format!("{name} isn't valid text."))?;
+        if *name == entry_name {
+            source = Some(text);
+        } else {
+            modules.push(((*name).to_owned(), text));
+        }
+    }
+    let dir = revision_dir(root, id, session.revision);
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the cache folder: {e}"))?;
+    Ok((dir.join(entry_name), source.ok_or("The entry file wasn't downloaded.")?, modules))
 }
 
 fn download(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<(PathBuf, String), String> {
@@ -126,25 +210,7 @@ fn download(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Resul
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the cache folder: {e}"))?;
         for (file, name) in session.files.iter().zip(&names) {
-            let mut response = api
-                .agent()
-                .get(&file.url)
-                .call()
-                .map_err(|e| format!("Couldn't download {name}: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!("Couldn't download {name}: the server answered {}.", response.status()));
-            }
-            let bytes = response
-                .body_mut()
-                .with_config()
-                .limit(MAX_FILE_BYTES)
-                .read_to_vec()
-                .map_err(|e| format!("Couldn't download {name}: {e}"))?;
-            if let Some(expected) = &file.sha256
-                && !expected.eq_ignore_ascii_case(&sha256_hex(&bytes))
-            {
-                return Err(format!("{name} didn't match its checksum, so it was discarded."));
-            }
+            let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
             fs::write(dir.join(name), &bytes).map_err(|e| format!("Couldn't save {name}: {e}"))?;
         }
         fs::write(dir.join(COMPLETE), b"").map_err(|e| format!("Couldn't finish the download: {e}"))?;
@@ -374,5 +440,42 @@ mod tests {
         beat.take(t0 + Duration::from_secs(70));
         beat.on_result(t0 + Duration::from_secs(70), None, network());
         assert_eq!(beat.next_due() - (t0 + Duration::from_secs(70)), Duration::from_secs(10));
+    }
+}
+
+#[cfg(test)]
+mod decrypt_tests {
+    use super::decrypt_file;
+
+    const SCRIPT: &str = "10000000-0000-0000-0000-000000000001";
+    const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    /// Made by the webapp's `encryptFile` (src/lib/encryption.ts) for revision 7, `main.luau`, "print('hi')".
+    const SEALED: &str = "e215109cbac11277ceb0ba7977032371b4effbe804668d0342d0f5393ed8dda6488e183c1d10c4";
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn opens_what_the_webapp_sealed() {
+        assert_eq!(decrypt_file(KEY, SCRIPT, 7, "main.luau", &bytes(SEALED)).unwrap(), b"print('hi')");
+    }
+
+    #[test]
+    fn a_file_only_opens_in_its_own_place() {
+        let sealed = bytes(SEALED);
+        for (script, revision, name) in [(SCRIPT, 8, "main.luau"), (SCRIPT, 7, "other.luau"), ("20000000-0000-0000-0000-000000000001", 7, "main.luau")] {
+            assert!(decrypt_file(KEY, script, revision, name, &sealed).is_err(), "{script} {revision} {name}");
+        }
+    }
+
+    #[test]
+    fn tampering_a_wrong_key_and_short_input_are_refused() {
+        let mut sealed = bytes(SEALED);
+        *sealed.last_mut().unwrap() ^= 1;
+        assert!(decrypt_file(KEY, SCRIPT, 7, "main.luau", &sealed).is_err());
+        assert!(decrypt_file(&"ab".repeat(32), SCRIPT, 7, "main.luau", &bytes(SEALED)).is_err());
+        assert!(decrypt_file(KEY, SCRIPT, 7, "main.luau", &[0; 10]).is_err());
+        assert!(decrypt_file("not hex", SCRIPT, 7, "main.luau", &bytes(SEALED)).is_err());
     }
 }

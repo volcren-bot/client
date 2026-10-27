@@ -405,7 +405,8 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 // The file `require("../lib/host")` names from `dir`: `host.luau`, `host.lua` or `host/init.luau`.
-fn find_module(dir: &Path, path: &str) -> Result<PathBuf, Vec<PathBuf>> {
+// `memory` holds files that exist only in memory (a premium script's own files), keyed by their normalized path.
+fn find_module(dir: &Path, path: &str, memory: &HashMap<PathBuf, String>) -> Result<PathBuf, Vec<PathBuf>> {
     let base = normalize(&dir.join(path));
     let with = |suffix: &str| {
         let mut file = base.clone().into_os_string();
@@ -413,7 +414,7 @@ fn find_module(dir: &Path, path: &str) -> Result<PathBuf, Vec<PathBuf>> {
         PathBuf::from(file)
     };
     let candidates = [with(".luau"), with(".lua"), base.join("init.luau")];
-    candidates.iter().find(|c| c.is_file()).cloned().ok_or_else(|| candidates.into())
+    candidates.iter().find(|c| memory.contains_key(*c) || c.is_file()).cloned().ok_or_else(|| candidates.into())
 }
 
 // A module that ships inside the injector (`LIB_MODULES`), looked up by its bare name.
@@ -453,6 +454,22 @@ pub fn run_with_form(
     script_path: Option<&Path>,
     lib_dir: Option<&Path>,
 ) -> mlua::Result<()> {
+    run_with_modules(name, source, pid, print, form, script_path, lib_dir, HashMap::new())
+}
+
+// `modules` are the script's other files by name, kept in memory instead of on disk: `require("./name")` finds them
+// beside `script_path` as if they were there, so a script's source never has to be written out.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_modules(
+    name: &str,
+    source: &str,
+    pid: Option<u32>,
+    print: impl FnMut(String) + 'static,
+    form: Option<crate::form::FormHandler>,
+    script_path: Option<&Path>,
+    lib_dir: Option<&Path>,
+    modules: HashMap<String, String>,
+) -> mlua::Result<()> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::BIT,
         LuaOptions::default(),
@@ -469,6 +486,10 @@ pub fn run_with_form(
         dirs.borrow_mut().insert(format!("={name}"), dir.to_path_buf());
     }
 
+    let memory: HashMap<PathBuf, String> = match script_path.and_then(Path::parent) {
+        Some(dir) => modules.into_iter().map(|(file, text)| (normalize(&dir.join(file)), text)).collect(),
+        None => HashMap::new(),
+    };
     let script_chunk = script_path.map(|_| format!("={name}"));
     let lib_dir = lib_dir.map(Path::to_path_buf);
 
@@ -483,8 +504,8 @@ pub fn run_with_form(
 
             // The script's own `../lib/...` requires read from the configured lib folder; the modules inside it find each other as usual.
             let found = match (&lib_dir, lib_relative(&path)) {
-                (Some(lib), Some(rest)) if from_script => Some(find_module(lib, rest)),
-                _ => dir.map(|dir| find_module(&dir, &path)),
+                (Some(lib), Some(rest)) if from_script => Some(find_module(lib, rest, &memory)),
+                _ => dir.map(|dir| find_module(&dir, &path, &memory)),
             };
             let key = match &found {
                 Some(Ok(file)) => file.display().to_string(),
@@ -497,7 +518,10 @@ pub fn run_with_form(
 
             let (chunk, source) = match found {
                 Some(Ok(file)) => {
-                    let source = std::fs::read_to_string(&file).map_err(|e| mlua::Error::RuntimeError(format!("cannot read {key}: {e}")))?;
+                    let source = match memory.get(&file) {
+                        Some(text) => text.clone(),
+                        None => std::fs::read_to_string(&file).map_err(|e| mlua::Error::RuntimeError(format!("cannot read {key}: {e}")))?,
+                    };
                     dirs.borrow_mut().insert(format!("={key}"), file.parent().map(Path::to_path_buf).unwrap_or_default());
                     (key.clone(), source)
                 }
@@ -908,6 +932,25 @@ mod tests {
         let name = path.file_name().unwrap().to_string_lossy();
         let result = run_with_form(&name, source, None, move |line| collected.borrow_mut().push(line), None, Some(path), None);
         (Rc::try_unwrap(lines).unwrap().into_inner(), result)
+    }
+
+    #[test]
+    fn modules_given_in_memory_are_required_without_files() {
+        let dir = scratch("requires_memory", &[("lib/host.luau", "return { name = 'host' }")]);
+        let script = dir.join("scripts/run.luau");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        let modules = HashMap::from([
+            ("util.luau".to_owned(), "local Other = require('./deeper')\nreturn { name = 'util', other = Other.name }".to_owned()),
+            ("deeper.luau".to_owned(), "return { name = 'deeper' }".to_owned()),
+        ]);
+        let lines = Rc::new(RefCell::new(Vec::new()));
+        let collected = lines.clone();
+        let source = "local Util = require('./util')\nprint(Util.name, Util.other, require('../lib/host').name, require('./util') == Util)";
+        let result = run_with_modules("run.luau", source, None, move |line| collected.borrow_mut().push(line), None, Some(&script), None, modules);
+        result.unwrap();
+        assert_eq!(*lines.borrow(), vec!["util\tdeeper\thost\ttrue".to_string()]);
+        assert!(!dir.join("scripts/util.luau").exists(), "nothing is written out");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

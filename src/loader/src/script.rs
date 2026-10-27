@@ -40,6 +40,11 @@ pub struct Script {
 impl Script {
     /// `lib` is your own lib folder, for a script run from a local file.
     pub fn start(ctx: &egui::Context, source: &str, path: Option<&Path>, lib: Option<&Path>, target: Option<&Target>, settings: &Settings) -> Result<Self, String> {
+        Self::start_with(ctx, source, &[], path, lib, target, settings)
+    }
+
+    /// `modules` are the script's other files by name, sent to the injector to keep in memory, beside `path`.
+    pub fn start_with(ctx: &egui::Context, source: &str, modules: &[(String, String)], path: Option<&Path>, lib: Option<&Path>, target: Option<&Target>, settings: &Settings) -> Result<Self, String> {
         let mut command = backend::script_command(target, settings, path, lib)?;
         let mut child = command
             .stdin(Stdio::piped())
@@ -52,8 +57,15 @@ impl Script {
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
+        let files = if modules.is_empty() {
+            String::new()
+        } else {
+            let json = serde_json::to_string(&modules.iter().cloned().collect::<std::collections::HashMap<_, _>>()).expect("strings serialize");
+            format!("{}{}\n{json}", injector::form::MODULES_PREFIX, json.len())
+        };
         if let Err(error) = stdin
-            .write_all(header.as_bytes())
+            .write_all(files.as_bytes())
+            .and_then(|()| stdin.write_all(header.as_bytes()))
             .and_then(|()| stdin.write_all(source.as_bytes()))
             .and_then(|()| stdin.flush())
         {
