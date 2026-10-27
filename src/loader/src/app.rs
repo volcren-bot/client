@@ -784,6 +784,37 @@ impl LoaderApp {
         }
     }
 
+    /// Shown instead of the app until the account is signed in: the loader doesn't start without a Discord login.
+    fn login_gate_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.3).max(16.0));
+            ui.label(egui::RichText::new("Sign in to continue").size(20.0).strong());
+            ui.add_space(8.0);
+            match &self.auth {
+                Auth::Restoring => {
+                    ui.spinner();
+                    ui.label("Checking for a saved sign-in…");
+                }
+                Auth::SigningIn(cancel) => {
+                    ui.spinner();
+                    ui.label("Waiting for you to sign in in the browser…");
+                    ui.add_space(8.0);
+                    if ui.button("Cancel").clicked() {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                }
+                _ => {
+                    ui.label("Volcren needs a Discord account. Your browser will open to sign in.");
+                    ui.add_space(8.0);
+                    if ui.button(egui::RichText::new("Sign in with Discord").size(16.0)).clicked() {
+                        self.start_sign_in(&ctx);
+                    }
+                }
+            }
+        });
+    }
+
     fn info(&mut self, text: impl Into<String>) {
         self.loader_log.push(false, text.into());
     }
@@ -2449,6 +2480,10 @@ impl eframe::App for LoaderApp {
                 ui.add_space(4.0);
                 self.log_panel_ui(ui);
             });
+        if self.auth.me().is_none() {
+            egui::CentralPanel::default_margins().show(ui, |ui| self.login_gate_ui(ui));
+            return;
+        }
         egui::CentralPanel::default_margins().show(ui, |ui| {
             ui.horizontal(|ui| {
                 crate::theme::tab_value(ui, &mut self.tab, Tab::Clients, "Clients");
