@@ -130,7 +130,7 @@ pub fn sidebar_header(ui: &mut egui::Ui, label: &str) {
 
 /// The tree's root row (not clickable): `icon name/` in yellow.
 pub fn sidebar_root(ui: &mut egui::Ui, icon: &str, name: &str) {
-    ui.label(egui::RichText::new(format!("{icon} {name}/")).color(YELLOW));
+    ui.label(egui::RichText::new(format!("{icon} {name}/")).size(SIDEBAR_FONT_SIZE).color(YELLOW));
 }
 
 /// A neo-tree row: dim guide, icon and `name/`; the open one is lifted and blue, hover brightens it.
@@ -154,7 +154,7 @@ pub fn sidebar_item<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, 
         if selected || response.hovered() {
             ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
         }
-        let font = egui::FontId::monospace(13.0);
+        let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
         let mut job = egui::text::LayoutJob::default();
         for (s, color) in [(if last { "└─ " } else { "├─ " }, COMMENT), (icon, text), (" ", text), (name, text), ("/", text)] {
             job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
@@ -165,10 +165,30 @@ pub fn sidebar_item<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, 
     response
 }
 
+/// Text size of the sidebar's list rows.
+const SIDEBAR_FONT_SIZE: f32 = 15.0;
+
+/// Space left of the sidebar's list.
+pub const SIDEBAR_INSET: i8 = 8;
+
 /// The sidebar's own surface: darker than the page with a single line on its right edge.
 pub fn sidebar_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(BG_DARK)
         .stroke(Stroke::NONE)
-        .inner_margin(egui::Margin::symmetric(0, 6))
+        .inner_margin(egui::Margin { left: SIDEBAR_INSET, right: 0, top: 6, bottom: 6 })
+}
+
+/// The narrow-window sidebar toggle, the drawer's right edge: a tall, skinny strip with a chevron that turns from
+/// pointing right (closed, `open` 0) to left (open, `open` 1).
+pub fn sidebar_handle(ui: &mut egui::Ui, open: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Toggle the sidebar");
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, if response.hovered() { BG_HL } else { BG_DARK });
+    let color = if response.hovered() || open > 0.5 { FG } else { FG_DARK };
+    let (sin, cos) = (open * std::f32::consts::PI).sin_cos();
+    let points = [vec2(-3.0, -7.0), vec2(3.0, 0.0), vec2(-3.0, 7.0)]
+        .map(|p| rect.center() + vec2(p.x * cos - p.y * sin, p.x * sin + p.y * cos));
+    ui.painter().add(egui::Shape::line(points.to_vec(), Stroke::new(2.0, color)));
+    response
 }

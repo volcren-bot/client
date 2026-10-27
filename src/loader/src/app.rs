@@ -104,6 +104,8 @@ enum Tab {
 /// Window width from which the sidebar is always shown.
 const SIDEBAR_MIN_WINDOW: f32 = 760.0;
 const SIDEBAR_WIDTH: f32 = 190.0;
+/// Width of the strip that toggles the sidebar on narrow windows.
+const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
 
 const DEV_TOGGLES: [&str; 33] = [
     "Players",
@@ -912,18 +914,33 @@ impl LoaderApp {
 
     fn update_banner_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let Some(release) = self.update.clone() else { return };
-        egui::Panel::top("update").show(ui, |ui| {
+        // Added before the log panel so it takes the very bottom of the window.
+        egui::Panel::bottom("update").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("Version {} is available (you have {}).", release.version, update::VERSION));
-                if let Some(url) = release.download_url(&self.api)
-                    && ui.button("Download").clicked()
-                {
-                    let _ = webbrowser::open(&url);
-                }
-                if ui.button("Dismiss").clicked() {
-                    self.update = None;
-                    ctx.request_repaint();
-                }
+                ui.vertical(|ui| {
+                    ui.label(format!("Version {} is available", release.version));
+                    ui.label(format!("You have version {}", update::VERSION));
+                });
+                // Each button is as tall as a text line, in a slightly smaller font, and as wide as the longer label.
+                let row = ui.text_style_height(&egui::TextStyle::Body);
+                let font = egui::FontId::monospace(12.0);
+                let width = ui.painter().layout_no_wrap("Download".into(), font.clone(), egui::Color32::WHITE).size().x
+                    + 2.0 * ui.spacing().button_padding.x;
+                ui.add_space((ui.available_width() - width).max(0.0));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().button_padding.y = 0.0;
+                    let size = egui::vec2(width, row);
+                    let button = |text: &str| egui::Button::new(egui::RichText::new(text).font(font.clone())).min_size(size);
+                    if let Some(url) = release.download_url(&self.api)
+                        && ui.add(button("Download")).clicked()
+                    {
+                        let _ = webbrowser::open(&url);
+                    }
+                    if ui.add(button("Dismiss")).clicked() {
+                        self.update = None;
+                        ctx.request_repaint();
+                    }
+                });
             });
         });
     }
@@ -2108,7 +2125,9 @@ impl LoaderApp {
         }
         let view = self.fold.view(&self.script_file.text);
         // wide enough for the longest line (a tab counted as four columns), so the area scrolls sideways
-        let text_width = (self.fold.longest_line() as f32 * digit_width + margin.sum().x + 8.0).max(size.x - gutter_width);
+        // (the gutter and the text sit side by side, an item spacing apart); the text fills what the window leaves
+        let text_width = (self.fold.longest_line() as f32 * digit_width + margin.sum().x + 8.0)
+            .max(size.x - gutter_width - ui.spacing().item_spacing.x);
         let gutter_height = size.y.max(view.visible.len() as f32 * row_height + margin.sum().y);
         let highlighter = &mut self.highlighter;
         let hidden = &view.hidden;
@@ -2122,6 +2141,7 @@ impl LoaderApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
+                    let mut select_line = None;
                     let (gutter, response) =
                         ui.allocate_exact_size(egui::vec2(gutter_width, gutter_height), egui::Sense::click());
                     ui.painter().rect_filled(gutter, 0.0, ui.visuals().faint_bg_color);
@@ -2129,21 +2149,30 @@ impl LoaderApp {
                     let first = ((ui.clip_rect().top() - gutter.top() - margin.topf()) / row_height).floor().max(0.0) as usize;
                     let last = ((ui.clip_rect().bottom() - gutter.top() - margin.topf()) / row_height).ceil().max(0.0) as usize;
                     let arrow_center = |row: usize| egui::pos2(gutter.right() - arrow_width / 2.0, row_top(row) + row_height / 2.0);
-                    let hovered = response.hovered();
+                    // the row under the pointer: its number lights up, and so does the line in the text
+                    let hover_row = response
+                        .hover_pos()
+                        .map(|pos| ((pos.y - gutter.top() - margin.topf()) / row_height).floor())
+                        .filter(|&row| row >= 0.0 && (row as usize) < view.visible.len())
+                        .map(|row| row as usize);
+                    let hover_fill = ui.visuals().widgets.hovered.bg_fill;
+                    if let Some(row) = hover_row {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        let rect = egui::Rect::from_min_size(egui::pos2(gutter.left(), row_top(row)), egui::vec2(gutter_width, row_height));
+                        ui.painter().rect_filled(rect, 0.0, hover_fill);
+                    }
                     for row in first..last.min(view.visible.len()) {
                         let line = view.visible[row];
+                        let number_color = if hover_row == Some(row) { ui.visuals().strong_text_color() } else { gutter_color };
                         ui.painter().text(
                             egui::pos2(gutter.right() - arrow_width - 2.0 * margin.leftf(), row_top(row)),
                             egui::Align2::RIGHT_TOP,
                             line + 1,
                             font.clone(),
-                            gutter_color,
+                            number_color,
                         );
                         if self.fold.is_foldable(line) {
-                            // always shown for a folded one, so it can be found again; the others when the gutter is hovered
-                            if self.fold.is_folded(line) || hovered {
-                                paint_arrow(ui.painter(), arrow_center(row), row_height * 0.3, self.fold.is_folded(line), gutter_color);
-                            }
+                            paint_arrow(ui.painter(), arrow_center(row), row_height * 0.3, self.fold.is_folded(line), gutter_color);
                         }
                     }
                     if response.clicked()
@@ -2153,16 +2182,35 @@ impl LoaderApp {
                         if row >= 0.0
                             && let Some(&line) = view.visible.get(row as usize)
                         {
-                            self.fold.toggle(line);
+                            // the arrow folds; the number selects the line's text
+                            if pos.x >= gutter.right() - arrow_width - margin.leftf() && self.fold.is_foldable(line) {
+                                self.fold.toggle(line);
+                            } else {
+                                select_line = Some(line);
+                            }
                         }
                     }
-                    let output = egui::TextEdit::multiline(&mut self.script_file.text)
+                    let mut output = egui::TextEdit::multiline(&mut self.script_file.text)
                         .code_editor()
                         .margin(margin)
                         .desired_width(text_width)
-                        .min_size(size)
+                        .min_size(egui::vec2(text_width, size.y))
                         .layouter(&mut layouter)
                         .show(ui);
+                    if let Some(row) = hover_row {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(output.response.rect.left(), row_top(row)),
+                            egui::vec2(output.response.rect.width(), row_height),
+                        );
+                        ui.painter().rect_filled(rect, 0.0, hover_fill.gamma_multiply(0.4));
+                    }
+                    if let Some(line) = select_line {
+                        let (start, end) = line_char_range(&self.script_file.text, line);
+                        let range = egui::text::CCursorRange::two(egui::text::CCursor::new(start), egui::text::CCursor::new(end));
+                        output.state.cursor.set_char_range(Some(range));
+                        output.state.clone().store(ui.ctx(), output.response.id);
+                        output.response.request_focus();
+                    }
                     if let Some(range) = output.state.cursor.char_range() {
                         self.fold.follow_cursor(&self.script_file.text, range.primary.index.0);
                     }
@@ -2604,6 +2652,19 @@ fn paint_arrow(painter: &egui::Painter, center: egui::Pos2, size: f32, folded: b
     painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
 }
 
+/// The char range of `line` (0-based) without its line break.
+fn line_char_range(text: &str, line: usize) -> (usize, usize) {
+    let mut start = 0;
+    for (i, content) in text.split('\n').enumerate() {
+        let len = content.trim_end_matches('\r').chars().count();
+        if i == line {
+            return (start, start + len);
+        }
+        start += content.chars().count() + 1;
+    }
+    (start, start)
+}
+
 /// Walks forward through a text, turning byte offsets asked for in increasing order into char indices and line numbers,
 /// so many offsets cost one pass over the text rather than one each.
 struct TextWalk<'a> {
@@ -2721,7 +2782,6 @@ impl eframe::App for LoaderApp {
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
 
-        let signed_in = self.auth.me().is_some();
         let narrow = ctx.content_rect().width() < SIDEBAR_MIN_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
             ui.add_space(6.0);
@@ -2730,14 +2790,7 @@ impl eframe::App for LoaderApp {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg")).fit_to_exact_size(egui::vec2(32.0, 32.0));
-                    if narrow && signed_in {
-                        // Below the breakpoint the logo opens the sidebar, as on the website.
-                        if ui.add(egui::Button::image(logo).selected(self.sidebar_open)).on_hover_text("Toggle the sidebar").clicked() {
-                            self.sidebar_open = !self.sidebar_open;
-                        }
-                    } else {
-                        ui.add(logo);
-                    }
+                    ui.add(logo);
                     ui.label(egui::RichText::new("VOLCREN").font(egui::FontId::new(22.0, crate::theme::bold_family())));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.account_ui(ui));
                 },
@@ -2753,7 +2806,10 @@ impl eframe::App for LoaderApp {
                 self.log_panel_ui(ui);
             });
         if self.auth.me().is_none() {
-            egui::CentralPanel::default_margins().show(ui, |ui| self.login_gate_ui(ui));
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                crate::logo::paint_background(ui, ui.max_rect());
+                self.login_gate_ui(ui);
+            });
             return;
         }
         if !narrow {
@@ -2762,35 +2818,63 @@ impl eframe::App for LoaderApp {
                 .exact_size(SIDEBAR_WIDTH)
                 .frame(crate::theme::sidebar_frame())
                 .show(ui, |ui| self.sidebar_ui(ui));
-        } else if self.sidebar_open {
-            // A drawer over the page, closed by a click outside it, Esc or the logo.
+        } else {
+            // Below the breakpoint the sidebar is a drawer over the page that slides in from the left. Its right edge is
+            // a skinny handle that stays visible when it is closed; an empty panel keeps the page clear of it.
             let area = ui.available_rect_before_wrap();
-            let backdrop = egui::Area::new("sidebar_backdrop".into())
-                .order(egui::Order::Foreground)
-                .fixed_pos(area.min)
-                .show(&ctx, |ui| {
-                    let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::click());
-                    ui.painter().rect_filled(area, egui::CornerRadius::ZERO, egui::Color32::from_black_alpha(130));
-                    response
-                })
-                .inner;
-            let drawer = egui::Area::new("sidebar_drawer".into())
-                .order(egui::Order::Foreground)
-                .fixed_pos(area.min)
-                .show(&ctx, |ui| {
-                    crate::theme::sidebar_frame().show(ui, |ui| {
-                        ui.set_width(SIDEBAR_WIDTH.min(area.width() * 0.85));
-                        ui.set_min_height(area.height() - 12.0);
-                        self.sidebar_ui(ui);
-                    });
-                })
-                .response;
-            let outside = backdrop.clicked() && !drawer.contains_pointer();
-            if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.sidebar_open = false;
+            egui::Panel::left("sidebar_handle_space")
+                .resizable(false)
+                .exact_size(SIDEBAR_HANDLE_WIDTH)
+                .frame(egui::Frame::NONE)
+                .show(ui, |_| {});
+            let slide = ctx.animate_bool_with_time_and_easing(
+                "sidebar_slide".into(),
+                self.sidebar_open,
+                0.2,
+                egui::emath::easing::cubic_out,
+            );
+            let width = SIDEBAR_WIDTH.min(area.width() * 0.85);
+            // Closed by a click outside it, Esc or the handle. The drawer sits on a higher layer than the backdrop,
+            // as clicking the backdrop would otherwise raise it over the drawer.
+            if slide > 0.0 {
+                let backdrop = egui::Area::new("sidebar_backdrop".into())
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(area.min)
+                    .show(&ctx, |ui| {
+                        let (_, response) = ui.allocate_exact_size(area.size(), egui::Sense::click());
+                        let shade = egui::Color32::from_black_alpha((130.0 * slide) as u8);
+                        ui.painter().rect_filled(area, egui::CornerRadius::ZERO, shade);
+                        response
+                    })
+                    .inner;
+                if backdrop.clicked() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.sidebar_open = false;
+                }
             }
+            egui::Area::new("sidebar_drawer".into())
+                .order(egui::Order::Tooltip)
+                // Closed, it sits left of the window so only the handle shows; areas are otherwise kept on screen.
+                .constrain(false)
+                .fixed_pos(egui::pos2(area.min.x - width * (1.0 - slide), area.min.y))
+                .show(&ctx, |ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
+                    ui.horizontal_top(|ui| {
+                        crate::theme::sidebar_frame().show(ui, |ui| {
+                            ui.set_width(width - f32::from(crate::theme::SIDEBAR_INSET));
+                            ui.set_min_height(area.height() - 12.0);
+                            // The frame inherits the row's horizontal layout; the page tree stacks top to bottom.
+                            ui.vertical(|ui| self.sidebar_ui(ui));
+                        });
+                        ui.allocate_ui(egui::vec2(SIDEBAR_HANDLE_WIDTH, area.height()), |ui| {
+                            if crate::theme::sidebar_handle(ui, slide).clicked() {
+                                self.sidebar_open = !self.sidebar_open;
+                            }
+                        });
+                    });
+                });
         }
         egui::CentralPanel::default_margins().show(ui, |ui| {
+            crate::logo::paint_background(ui, ui.max_rect());
             if let Some(label) = self.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
