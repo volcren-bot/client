@@ -971,6 +971,96 @@ pub fn varbit(pid: u32, id: i32) -> Result<Option<i32>, String> {
     Ok(varp_value(pid, def.varp as usize)?.map(|varp| def.value(varp)))
 }
 
+type LocTexts = (u32, std::collections::HashMap<u32, Option<(crate::collision::LocDef, crate::collision::LocText)>>);
+// Loc definitions only change with game updates, so each is read from the cache once per process.
+static LOC_TEXTS: Mutex<Option<LocTexts>> = Mutex::new(None);
+
+const CACHE_LOCS_MAX_SQUARES: i32 = 64;
+
+/// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
+pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
+    use crate::{cache::*, collision::*};
+    let [x1, y1, x2, y2] = area;
+    if x1 > x2 || y1 > y2 || x1 < 0 || y1 < 0 {
+        return Err(format!("{x1}, {y1} to {x2}, {y2} isn't an area"));
+    }
+    let squares = ((x2 >> 6) - (x1 >> 6) + 1) * ((y2 >> 6) - (y1 >> 6) + 1);
+    if squares > CACHE_LOCS_MAX_SQUARES {
+        return Err(format!("the area covers {squares} map squares, at most {CACHE_LOCS_MAX_SQUARES}"));
+    }
+    let mut regions = Vec::new();
+    for rx in (x1 >> 6)..=(x2 >> 6) {
+        for ry in (y1 >> 6)..=(y2 >> 6) {
+            regions.push((rx, ry));
+        }
+    }
+    let files: Vec<[i32; 2]> = regions.iter().map(|&(rx, ry)| [region_id(rx, ry) as i32, 1]).collect();
+    let mut found = Vec::new();
+    for (data, &(rx, ry)) in cache_files(pid, MAPS_INDEX, &files)?.into_iter().zip(&regions) {
+        let Some(data) = data else { continue };
+        let placements = decode_locs(&data).ok_or_else(|| format!("map square {}'s locs don't decode", region_id(rx, ry)))?;
+        for p in placements {
+            let (x, y, plane) = (rx * 64 + p.x as i32, ry * 64 + p.y as i32, p.plane as i32);
+            if x >= x1 && x <= x2 && y >= y1 && y <= y2 && filter.plane.is_none_or(|want| want == plane) {
+                found.push((p, x, y));
+            }
+        }
+    }
+
+    let mut ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let missing: Vec<u32> = {
+        let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
+        ids.iter().copied().filter(|id| !known.is_some_and(|defs| defs.contains_key(id))).collect()
+    };
+    if !missing.is_empty() {
+        let files: Vec<[i32; 2]> = missing.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
+        let defs = cache_files(pid, CONFIG_INDEX, &files)?;
+        let mut cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        if cached.as_ref().is_none_or(|(p, _)| *p != pid) {
+            *cached = Some((pid, std::collections::HashMap::new()));
+        }
+        if let Some((_, known)) = cached.as_mut() {
+            for (id, data) in missing.iter().zip(defs) {
+                known.insert(*id, data.as_deref().and_then(decode_loc_text));
+            }
+        }
+    }
+
+    let lower = |list: &Option<Vec<String>>| list.as_ref().map(|l| l.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>());
+    let (names, actions) = (lower(&filter.names), lower(&filter.actions));
+    let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+    let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
+    let mut out = Vec::new();
+    for (p, x, y) in found {
+        let Some((def, text)) = known.and_then(|defs| defs.get(&p.id)).and_then(|d| d.as_ref()) else { continue };
+        let name = text.name.to_lowercase();
+        if names.as_ref().is_some_and(|names| !names.iter().any(|n| name.contains(n.as_str()))) {
+            continue;
+        }
+        if actions.as_ref().is_some_and(|wanted| !text.actions.iter().any(|a| wanted.contains(&a.to_lowercase()))) {
+            continue;
+        }
+        let (size_x, size_y) = if p.rotation & 1 == 1 { (def.size_y, def.size_x) } else { (def.size_x, def.size_y) };
+        out.push(crate::CacheLoc {
+            id: p.id as i32,
+            name: text.name.clone(),
+            x,
+            y,
+            plane: p.plane as i32,
+            size_x,
+            size_y,
+            shape: p.shape,
+            rotation: p.rotation,
+            actions: text.actions.iter().filter(|a| !a.is_empty()).cloned().collect(),
+        });
+    }
+    out.sort_by_key(|l| (l.plane, l.x, l.y, l.id));
+    Ok(out)
+}
+
 pub fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::WorldCollision, String> {
     use crate::{cache::*, collision::*};
     let files: Vec<[i32; 2]> = regions.iter().flat_map(|&r| [[r as i32, 0], [r as i32, 1]]).collect();
@@ -1004,7 +1094,8 @@ pub fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::Wo
 const WORLD_SQUARE_BATCH: usize = 16;
 const WORLD_FORMAT: u64 = 2;
 
-static WORLD: Mutex<Option<(u64, std::sync::Arc<crate::collision::WorldCollision<crate::collision::Movement>>)>> = Mutex::new(None);
+// The key it was built for, and the process whose cache that key was read from: the cache only changes with a game update, so later calls for that process skip reading its indexes.
+static WORLD: Mutex<Option<(u64, u32, std::sync::Arc<crate::collision::WorldCollision<crate::collision::Movement>>)>> = Mutex::new(None);
 
 fn world_cache_dir() -> std::path::PathBuf {
     std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("injector")
@@ -1012,17 +1103,22 @@ fn world_cache_dir() -> std::path::PathBuf {
 
 pub fn world_movement(pid: u32) -> Result<std::sync::Arc<crate::collision::WorldCollision<crate::collision::Movement>>, String> {
     use crate::{cache::*, collision::*};
+    if let Some((_, _, world)) = WORLD.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|(_, p, _)| *p == pid) {
+        return Ok(world.clone());
+    }
     let maps = cache_archives(pid, MAPS_INDEX)?;
     let loc_ids = cache_archive_files(pid, CONFIG_INDEX, LOC_ARCHIVE)?;
     let key = maps.fingerprint ^ loc_ids.fingerprint.rotate_left(17) ^ WORLD_FORMAT.rotate_left(42);
     let mut cached = WORLD.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, world)) = cached.as_ref().filter(|(k, _)| *k == key) {
-        return Ok(world.clone());
+    if let Some((_, _, world)) = cached.as_ref().filter(|(k, _, _)| *k == key) {
+        let world = world.clone();
+        *cached = Some((key, pid, world.clone()));
+        return Ok(world);
     }
     let path = world_cache_dir().join(format!("collision-{key:016x}.bin"));
     if let Some(world) = std::fs::read(&path).ok().and_then(|bytes| WorldCollision::from_bytes(&bytes, key)) {
         let world = std::sync::Arc::new(world);
-        *cached = Some((key, world.clone()));
+        *cached = Some((key, pid, world.clone()));
         return Ok(world);
     }
 
@@ -1073,14 +1169,15 @@ pub fn world_movement(pid: u32) -> Result<std::sync::Arc<crate::collision::World
     }
     eprintln!("world collision built in {:.1} s ({} KB on disk)", started.elapsed().as_secs_f32(), bytes.len() / 1024);
     let world = std::sync::Arc::new(world);
-    *cached = Some((key, world.clone()));
+    *cached = Some((key, pid, world.clone()));
     Ok(world)
 }
 
-pub fn find_path(pid: u32, plane: i32, from: [i32; 2], to: [i32; 2]) -> Result<Vec<[i32; 2]>, String> {
+/// `max_tiles` caps how many tiles the search looks at (default `PATH_MAX_TILES`): a target that can't be reached would otherwise search every tile that can.
+pub fn find_path(pid: u32, plane: i32, from: [i32; 2], to: [i32; 2], max_tiles: Option<usize>) -> Result<Vec<[i32; 2]>, String> {
     use crate::pathfinding::{self, PathError};
     let world = world_movement(pid)?;
-    match pathfinding::find_path(&world, plane, (from[0], from[1]), (to[0], to[1]), PATH_MAX_TILES) {
+    match pathfinding::find_path(&world, plane, (from[0], from[1]), (to[0], to[1]), max_tiles.unwrap_or(PATH_MAX_TILES).min(PATH_MAX_TILES)) {
         Ok(path) => Ok(path.into_iter().map(|(x, y)| [x, y]).collect()),
         Err(PathError::Blocked((x, y))) => Err(format!("{x}, {y} (plane {plane}) can't be stood on")),
         Err(PathError::NoPath) => Err(format!("no walking path from {}, {} to {}, {} on plane {plane}", from[0], from[1], to[0], to[1])),

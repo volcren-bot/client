@@ -139,7 +139,7 @@ fn main() -> std::process::ExitCode {
                 _ => json::<()>(Err(format!("Invalid collision command (plane x1 y1 x2 y2): {args:?}"))),
             },
             ["path", pid, plane, x1, y1, x2, y2] => match (pid.parse(), plane.parse(), x1.parse(), y1.parse(), x2.parse(), y2.parse()) {
-                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => json(injector::find_path(pid, plane, [x1, y1], [x2, y2])),
+                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => json(injector::find_path(pid, plane, [x1, y1], [x2, y2], None)),
                 _ => json::<()>(Err(format!("Invalid path command (plane x1 y1 x2 y2): {args:?}"))),
             },
             ["route", pid, x1, y1, x2, y2, rest @ ..] => match (pid.parse(), x1.parse(), y1.parse(), x2.parse(), y2.parse(), rest) {

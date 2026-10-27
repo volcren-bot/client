@@ -98,11 +98,13 @@ fn inner_color(i: usize, j: usize, bias: f64) -> Color32 {
     FG.lerp_to_gamma(YELLOW, pct as f32)
 }
 
-/// Paints the art centered in `rect`, as large as fits, under whatever is drawn next.
+/// Font size of the art, in points; it only shrinks when the page is too narrow for it.
+const FONT_SIZE: f32 = 9.0;
+
+/// Paints the art centered in `rect` at a fixed size, under whatever is drawn next.
 pub fn paint_background(ui: &egui::Ui, rect: Rect) {
-    let lines = FLAME.len() + 1 + WORDMARK.len();
     let columns = WORDMARK.iter().map(|(_, line)| line.chars().count()).max().unwrap_or(0);
-    let size = (rect.height() * 0.92 / lines as f32).min(rect.width() * 0.92 / (columns as f32 * GLYPH_WIDTH));
+    let size = FONT_SIZE.min(rect.width() * 0.92 / (columns as f32 * GLYPH_WIDTH));
     if size < 5.0 {
         return;
     }
@@ -114,7 +116,10 @@ pub fn paint_background(ui: &egui::Ui, rect: Rect) {
         ..Default::default()
     };
     let mut job = LayoutJob::default();
+    // the flame is narrower than the lettering, so it is indented to sit over its middle
+    let indent = " ".repeat(columns.saturating_sub(width) / 2);
     for (i, line) in FLAME.iter().enumerate() {
+        job.append(&indent, 0.0, format(FG));
         // runs of one color, so a row is a few sections rather than one per character
         let mut run = String::new();
         let mut run_color = None;

@@ -2601,35 +2601,10 @@ impl LoaderApp {
         });
     }
 
-    fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
+    /// The tag filter and the Copy all / Clear buttons above the output (the filter only for the script's); meant to run inside a horizontal row.
+    fn log_controls_ui(&mut self, ui: &mut egui::Ui) {
         if self.log_tab == LogTab::Script {
-            // each side keeps to its own half however small the window gets, and clips what doesn't fit
-            let room = ui.available_width();
-            egui::Panel::right("script_tools")
-                .resizable(true)
-                .default_size(330.0_f32.min(room * 0.5))
-                .size_range(60.0..=(room * 0.5).max(60.0))
-                .show(ui, |ui| {
-                    ui.shrink_clip_rect(ui.max_rect());
-                    ui.horizontal_wrapped(|ui| {
-                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
-                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
-                    });
-                    ui.separator();
-                    match self.tools_tab {
-                        ToolsTab::Xp => self.xp_tracker_ui(ui),
-                        ToolsTab::Breaks => self.breaks_ui(ui),
-                    }
-                });
-        }
-        ui.shrink_clip_rect(ui.available_rect_before_wrap());
-        ui.horizontal_wrapped(|ui| {
-            crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
-            crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Script, "Script");
-            let log = match self.log_tab {
-                LogTab::Script => &mut self.script_log,
-                LogTab::Loader => &mut self.loader_log,
-            };
+            let log = &mut self.script_log;
             let mut filter = log.filter;
             egui::ComboBox::from_id_salt("log_tag")
                 .selected_text(filter.map_or("All", |index| log.tags[index].as_str()))
@@ -2640,29 +2615,13 @@ impl LoaderApp {
                     }
                 });
             log.set_filter(filter);
-            // the buttons sit at the right while they fit, and follow the filter (wrapping to the next row) when they don't
-            let button_font = egui::TextStyle::Button.resolve(ui.style());
-            let padding = 2.0 * ui.spacing().button_padding.x;
-            let needed = ["Copy all", "Clear"]
-                .iter()
-                .map(|label| ui.fonts_mut(|fonts| fonts.layout_no_wrap(label.to_string(), button_font.clone(), egui::Color32::WHITE).size().x) + padding)
-                .sum::<f32>()
-                + ui.spacing().item_spacing.x * 2.0;
-            let spare = ui.available_width() - needed;
-            if spare > 0.0 {
-                ui.add_space(spare);
-            }
+        }
+        // the buttons sit at the right edge, Copy all first
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let log = match self.log_tab {
                 LogTab::Script => &mut self.script_log,
                 LogTab::Loader => &mut self.loader_log,
             };
-            if ui
-                .add_enabled(!log.is_empty(), egui::Button::new("Copy all"))
-                .on_hover_text("Copies the shown output of the open tab.")
-                .clicked()
-            {
-                ui.ctx().copy_text(log.text.clone());
-            }
             if ui
                 .add_enabled(!log.is_empty(), egui::Button::new("Clear"))
                 .on_hover_text("Clears the output of the open tab.")
@@ -2670,8 +2629,49 @@ impl LoaderApp {
             {
                 log.clear();
             }
+            if ui
+                .add_enabled(!log.is_empty(), egui::Button::new("Copy all"))
+                .on_hover_text("Copies the shown output of the open tab.")
+                .clicked()
+            {
+                ui.ctx().copy_text(log.text.clone());
+            }
         });
-        ui.separator();
+    }
+
+    fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.shrink_clip_rect(ui.available_rect_before_wrap());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.horizontal_wrapped(|ui| {
+            crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
+            crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Script, "Script");
+        });
+        // the line under the tabs, across the whole width, so they read as tabs rather than buttons
+        let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().rect_filled(line, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+        ui.spacing_mut().item_spacing.y = 4.0;
+        if self.log_tab == LogTab::Script {
+            // the output keeps the left half; the XP tracker takes the right
+            egui::Panel::right("script_side")
+                .resizable(false)
+                .exact_size(ui.available_width() * 0.5)
+                .show(ui, |ui| {
+                    ui.shrink_clip_rect(ui.max_rect());
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.horizontal_wrapped(|ui| {
+                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
+                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
+                    });
+                    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                    ui.painter().rect_filled(line, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    match self.tools_tab {
+                        ToolsTab::Xp => self.xp_tracker_ui(ui),
+                        ToolsTab::Breaks => self.breaks_ui(ui),
+                    }
+                });
+        }
+        ui.horizontal(|ui| self.log_controls_ui(ui));
         self.log_ui(ui);
     }
 
@@ -2704,7 +2704,7 @@ impl LoaderApp {
                 let output = egui::TextEdit::multiline(&mut read_only)
                     .font(egui::TextStyle::Body)
                     .frame(egui::Frame::NONE)
-                    .desired_width(f32::INFINITY)
+                    .desired_width(ui.available_width())
                     .layouter(&mut layouter)
                     .show(ui);
 
@@ -2752,13 +2752,13 @@ impl LoaderApp {
                     return;
                 };
                 let band = egui::Rect::from_min_max(
-                    egui::pos2(output.text_clip_rect.left(), span.top()),
-                    egui::pos2(output.text_clip_rect.right(), span.bottom()),
+                    egui::pos2(output.response.rect.left(), span.top()),
+                    egui::pos2(output.response.rect.right(), span.bottom()),
                 );
                 ui.painter().rect_filled(band, 0.0, ui.visuals().text_color().gamma_multiply(0.08));
                 let line_rect = egui::Rect::from_min_max(
-                    egui::pos2(output.text_clip_rect.left(), rect.top()),
-                    egui::pos2(output.text_clip_rect.right(), rect.bottom()),
+                    egui::pos2(output.response.rect.left(), rect.top()),
+                    egui::pos2(output.response.rect.right(), rect.bottom()),
                 );
                 let copy = ui.put(line_rect, |ui: &mut egui::Ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.small_button("Copy"))

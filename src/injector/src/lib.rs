@@ -121,6 +121,33 @@ pub struct EntityModel {
     pub faces: Vec<[[f32; 2]; 3]>,
 }
 
+/// A loc placed on the map in the game cache, whether or not its map square is loaded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheLoc {
+    pub id: i32,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub plane: i32,
+    /// The tiles it covers, turned with its rotation.
+    pub size_x: u8,
+    pub size_y: u8,
+    pub shape: u8,
+    pub rotation: u8,
+    /// The right-click options it has, in menu order.
+    pub actions: Vec<String>,
+}
+
+/// What `cache_locs` keeps; every field that is `None` keeps everything.
+#[derive(Debug, Clone, Default)]
+pub struct CacheLocFilter {
+    pub plane: Option<i32>,
+    /// Names to match (case-insensitive, part of the name).
+    pub names: Option<Vec<String>>,
+    /// Options to match (case-insensitive, the whole option): a loc with any of them is kept.
+    pub actions: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Loc {
     pub id: i32,
@@ -150,7 +177,7 @@ mod win;
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
 pub use win::{
-    cache_archive_files, cache_archives, cache_files, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, npc_model, npc_words, npcs, player_model, players, screenshot, set_display_name, set_total_xp,
+    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, npc_model, npc_words, npcs, player_model, players, screenshot, set_display_name, set_total_xp,
     unload, varc, varp_value, varps, widget, widget_children, world_select,
 };
 

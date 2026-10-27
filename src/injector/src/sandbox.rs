@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
-use crate::{chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
+use crate::{cache_locs, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
 #[cfg(not(windows))]
 use offline::*;
 
@@ -94,7 +94,10 @@ mod offline {
     pub fn locs(_: u32) -> Result<Vec<Loc>, String> {
         Err(NO_WIN32.into())
     }
-    pub fn find_path(_: u32, _: i32, _: [i32; 2], _: [i32; 2]) -> Result<Vec<[i32; 2]>, String> {
+    pub fn cache_locs(_: u32, _: [i32; 4], _: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn find_path(_: u32, _: i32, _: [i32; 2], _: [i32; 2], _: Option<usize>) -> Result<Vec<[i32; 2]>, String> {
         Err(NO_WIN32.into())
     }
     pub fn player_plane(_: u32) -> Result<i32, String> {
@@ -678,13 +681,29 @@ pub fn run_with_modules(
     globals.set("chat_messages", query(&lua, pid, |pid, (): ()| chat_messages(pid))?)?;
     globals.set(
         "find_path",
-        query(&lua, pid, |pid, (from, to, plane): (mlua::Table, mlua::Table, Option<i32>)| {
+        query(&lua, pid, |pid, (from, to, plane, max_tiles): (mlua::Table, mlua::Table, Option<i32>, Option<usize>)| {
             let tile = |t: &mlua::Table| -> Result<[i32; 2], String> { Ok([t.get("x").map_err(|e| e.to_string())?, t.get("y").map_err(|e| e.to_string())?]) };
             let plane = match plane {
                 Some(plane) => plane,
                 None => player_plane(pid)?,
             };
-            Ok(find_path(pid, plane, tile(&from)?, tile(&to)?)?.into_iter().map(|[x, y]| PathTile { x, y }).collect::<Vec<_>>())
+            Ok(find_path(pid, plane, tile(&from)?, tile(&to)?, max_tiles)?.into_iter().map(|[x, y]| PathTile { x, y }).collect::<Vec<_>>())
+        })?,
+    )?;
+    globals.set(
+        "cache_locs",
+        query(&lua, pid, |pid, (area, filter): (mlua::Table, Option<mlua::Table>)| {
+            let corner = |name: &str| area.get::<i32>(name).map_err(|e| e.to_string());
+            let area = [corner("x1")?, corner("y1")?, corner("x2")?, corner("y2")?];
+            let filter = match filter {
+                Some(t) => crate::CacheLocFilter {
+                    plane: t.get::<Option<i32>>("plane").map_err(|e| e.to_string())?,
+                    names: t.get::<Option<Vec<String>>>("names").map_err(|e| e.to_string())?,
+                    actions: t.get::<Option<Vec<String>>>("actions").map_err(|e| e.to_string())?,
+                },
+                None => crate::CacheLocFilter::default(),
+            };
+            cache_locs(pid, area, &filter)
         })?,
     )?;
     globals.set(

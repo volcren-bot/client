@@ -81,6 +81,13 @@ impl<'a> Reader<'a> {
         Some(())
     }
 
+    fn text(&mut self) -> Option<String> {
+        let end = self.data.get(self.at..)?.iter().position(|&b| b == 0)?;
+        let text = String::from_utf8_lossy(&self.data[self.at..self.at + end]).into_owned();
+        self.at += end + 1;
+        Some(text)
+    }
+
     fn ushort_smart(&mut self) -> Option<u32> {
         if *self.data.get(self.at)? < 128 { self.u8().map(u32::from) } else { self.u16().map(|v| v as u32 - 0x8000) }
     }
@@ -151,7 +158,24 @@ pub fn decode_locs(data: &[u8]) -> Option<Vec<Placement>> {
     }
 }
 
+/// What a loc definition says about itself in the game: the name and the five right-click options (empty when it has none).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocText {
+    pub name: String,
+    pub actions: [String; 5],
+}
+
 pub fn decode_loc(data: &[u8]) -> Option<LocDef> {
+    decode_loc_with(data, None)
+}
+
+pub fn decode_loc_text(data: &[u8]) -> Option<(LocDef, LocText)> {
+    let mut text = LocText::default();
+    let def = decode_loc_with(data, Some(&mut text))?;
+    Some((def, text))
+}
+
+fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef> {
     let mut def = LocDef::default();
     let mut r = Reader::new(data);
     loop {
@@ -161,7 +185,10 @@ pub fn decode_loc(data: &[u8]) -> Option<LocDef> {
                 let n = r.u8()? as usize;
                 r.skip(n * 3)?;
             }
-            2 => r.string()?,
+            2 => match text.as_deref_mut() {
+                Some(text) => text.name = r.text()?,
+                None => r.string()?,
+            },
             5 => {
                 let n = r.u8()? as usize;
                 r.skip(n * 2)?;
@@ -185,7 +212,13 @@ pub fn decode_loc(data: &[u8]) -> Option<LocDef> {
             21 | 22 | 23 | 62 | 64 | 73 | 74 | 89 | 90 | 94 => {}
             24 | 61 | 65 | 66 | 67 | 68 | 70 | 71 | 72 | 82 => r.skip(2)?,
             27 => def.interact_type = 1,
-            30..=34 => r.string()?,
+            op @ 30..=34 => match text.as_deref_mut() {
+                Some(text) => {
+                    let action = r.text()?;
+                    text.actions[(op - 30) as usize] = if action.eq_ignore_ascii_case("hidden") { String::new() } else { action };
+                }
+                None => r.string()?,
+            },
             40 | 41 => {
                 let n = r.u8()? as usize;
                 r.skip(n * 4)?;
@@ -542,6 +575,8 @@ mod tests {
         data.extend_from_slice(b"Open\0");
         data.extend_from_slice(&[18, 249, 1, 0, 0, 0, 1, 0, 0, 0, 7, 0]);
         assert_eq!(decode_loc(&data), Some(LocDef { size_x: 2, size_y: 3, interact_type: 2, blocks_projectile: false }));
+        let (_, text) = decode_loc_text(&data).unwrap();
+        assert_eq!(text, LocText { name: "Door".into(), actions: ["Open".into(), String::new(), String::new(), String::new(), String::new()] });
         assert_eq!(decode_loc(&[17, 0]), Some(LocDef { size_x: 1, size_y: 1, interact_type: 0, blocks_projectile: false }));
         assert_eq!(decode_loc(&[200, 0]), None);
     }
