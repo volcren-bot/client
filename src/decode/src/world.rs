@@ -285,16 +285,31 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
     Some(npcs)
 }
 
-// Debug: the NPC actor with `index` (its address and first `count` 4-byte words), to find fields.
-pub fn npc_words(memory: &impl Memory, layout: &WorldLayout, index: i32, count: usize) -> Option<(u64, Vec<i32>)> {
+// The NPC definition's size in tiles (its side), checked against NPCs of size 1, 2 and 3.
+const DEFINITION_SIZE: u64 = 0x20;
+const MAX_NPC_SIZE: i32 = 10;
+
+/// The size in tiles of the NPC with `index`, from its definition; None when it's gone or the value is off.
+pub fn npc_size(memory: &impl Memory, layout: &WorldLayout, index: i32) -> Option<i32> {
     let client = client(memory, layout)?;
     let (view, _, _) = world_view(memory, layout, client)?;
     let npc = table_get(memory, view + layout.npc_table as u64, index)?;
+    let definition = memory.ptr(npc + layout.npc_definition as u64)?;
+    memory.i32(definition + DEFINITION_SIZE).filter(|s| (1..=MAX_NPC_SIZE).contains(s))
+}
+
+// Debug: the NPC actor with `index`, or its definition with `definition` (its address and first `count`
+// 4-byte words), to find fields.
+pub fn npc_words(memory: &impl Memory, layout: &WorldLayout, index: i32, count: usize, definition: bool) -> Option<(u64, Vec<i32>)> {
+    let client = client(memory, layout)?;
+    let (view, _, _) = world_view(memory, layout, client)?;
+    let npc = table_get(memory, view + layout.npc_table as u64, index)?;
+    let at = if definition { memory.ptr(npc + layout.npc_definition as u64)? } else { npc };
     let mut bytes = vec![0u8; count * 4];
-    if !memory.read(npc, &mut bytes) {
+    if !memory.read(at, &mut bytes) {
         return None;
     }
-    Some((npc, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()))
+    Some((at, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()))
 }
 
 pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>> {

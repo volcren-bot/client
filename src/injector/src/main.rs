@@ -106,9 +106,9 @@ fn main() -> std::process::ExitCode {
                 }
                 _ => json::<()>(Err(format!("Invalid project command (x y height ...): {args:?}"))),
             },
-            ["npc-words", pid, index, count] => match (pid.parse(), index.parse(), count.parse()) {
-                (Ok(pid), Ok(index), Ok(count)) => json(injector::npc_words(pid, index, count)),
-                _ => json::<()>(Err(format!("Invalid npc-words command (pid index count): {args:?}"))),
+            ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => match (pid.parse(), index.parse(), count.parse()) {
+                (Ok(pid), Ok(index), Ok(count)) => json(injector::npc_words(pid, index, count, rest == ["def"])),
+                _ => json::<()>(Err(format!("Invalid npc-words command (pid index count [def]): {args:?}"))),
             },
             ["npc-model", pid, index] => match (pid.parse(), index.parse()) {
                 (Ok(pid), Ok(index)) => json(injector::npc_model(pid, index)),

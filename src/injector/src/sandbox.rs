@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
-use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
+use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
 #[cfg(not(windows))]
 use offline::*;
 
@@ -109,6 +109,12 @@ mod offline {
     pub fn in_instance(_: u32) -> Result<bool, String> {
         Err(NO_WIN32.into())
     }
+    pub fn npc_sizes(_: u32, _: &[i32]) -> Result<std::collections::BTreeMap<i32, i32>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn scene_collision(_: u32) -> Result<(i32, i32, i32, Vec<Vec<u32>>), String> {
+        Err(NO_WIN32.into())
+    }
     pub fn scene_route(_: u32, _: [i32; 2], _: [i32; 2], _: Option<crate::scene_graph::Options>) -> Result<crate::pathfinding::Route, String> {
         Err(NO_WIN32.into())
     }
@@ -190,6 +196,31 @@ struct PathTile {
 struct SceneRoute {
     tiles: Vec<PathTile>,
     reached: bool,
+}
+
+// A part of the scene's collision map: `flags` column by column (west first), each column south first.
+#[derive(Serialize)]
+struct Collision {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    plane: i32,
+    flags: Vec<u32>,
+}
+
+// `scene` cut to `area` (x1, y1, x2, y2, corners included), or whole without one.
+fn collision_cut(scene: (i32, i32, i32, Vec<Vec<u32>>), area: Option<[i32; 4]>) -> Result<Collision, String> {
+    let (x0, y0, plane, columns) = scene;
+    let height = columns.first().map_or(0, |c| c.len() as i32);
+    let (x2_max, y2_max) = (x0 + columns.len() as i32 - 1, y0 + height - 1);
+    let [x1, y1, x2, y2] = area.unwrap_or([x0, y0, x2_max, y2_max]);
+    let (x1, y1, x2, y2) = (x1.min(x2).max(x0), y1.min(y2).max(y0), x1.max(x2).min(x2_max), y1.max(y2).min(y2_max));
+    if x1 > x2 || y1 > y2 {
+        return Err("the area is outside the loaded scene".into());
+    }
+    let flags = (x1..=x2).flat_map(|x| columns[(x - x0) as usize][(y1 - y0) as usize..=(y2 - y0) as usize].iter().copied()).collect();
+    Ok(Collision { x: x1, y: y1, width: x2 - x1 + 1, height: y2 - y1 + 1, plane, flags })
 }
 
 fn query<A: FromLuaMulti, T: Serialize>(
@@ -322,6 +353,8 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("projection", "main/projection/projection.luau"),
     lib_module!("camera", "main/camera.luau"),
     lib_module!("walker", "main/walker.luau"),
+    lib_module!("safespot", "main/safespot.luau"),
+    lib_module!("combat_safespot", "main/combat_safespot.luau"),
     lib_module!("players", "main/entities/players.luau"),
     lib_module!("bankmain", "main/interfaces/mainscreen/bankmain.luau"),
     lib_module!("bankpin_keypad", "main/interfaces/mainscreen/bankpin_keypad.luau"),
@@ -687,6 +720,7 @@ pub fn run_with_modules(
     globals.set("item_params", query(&lua, pid, |pid, ids: Vec<i32>| item_params(pid, &ids))?)?;
     globals.set("npcs", query(&lua, pid, |pid, (): ()| npcs(pid))?)?;
     globals.set("npc_model", query(&lua, pid, |pid, index: i32| Ok(npc_model(pid, index)?.map(script_model)))?)?;
+    globals.set("npc_sizes", query(&lua, pid, |pid, indices: Vec<i32>| npc_sizes(pid, &indices))?)?;
     globals.set("locs", query(&lua, pid, |pid, plane: Option<i32>| locs(pid, plane))?)?;
     globals.set("map_regions", query(&lua, pid, |pid, (): ()| map_regions(pid))?)?;
     globals.set("in_instance", query(&lua, pid, |pid, (): ()| in_instance(pid))?)?;
@@ -717,6 +751,19 @@ pub fn run_with_modules(
                 None => crate::CacheLocFilter::default(),
             };
             cache_locs(pid, area, &filter)
+        })?,
+    )?;
+    globals.set(
+        "collision",
+        query(&lua, pid, |pid, area: Option<mlua::Table>| {
+            let area = match area {
+                Some(t) => {
+                    let corner = |name: &str| t.get::<i32>(name).map_err(|e| e.to_string());
+                    Some([corner("x1")?, corner("y1")?, corner("x2")?, corner("y2")?])
+                }
+                None => None,
+            };
+            collision_cut(scene_collision(pid)?, area)
         })?,
     )?;
     globals.set(
@@ -941,6 +988,17 @@ mod tests {
         let collected = lines.clone();
         let result = run("test.luau", source, None, move |line| collected.borrow_mut().push(line));
         (Rc::try_unwrap(lines).unwrap().into_inner(), result)
+    }
+
+    #[test]
+    fn collision_cut_clips_the_area_to_the_scene() {
+        // 3 columns of 2, the flag being x * 10 + y
+        let scene = (100, 200, 0, (0..3).map(|x| (0..2).map(|y| x * 10 + y).collect()).collect());
+        let cut = collision_cut(scene.clone(), Some([101, 150, 105, 201])).unwrap();
+        assert_eq!((cut.x, cut.y, cut.width, cut.height), (101, 200, 2, 2));
+        assert_eq!(cut.flags, vec![10, 11, 20, 21]);
+        assert_eq!(collision_cut(scene.clone(), None).unwrap().flags.len(), 6);
+        assert!(collision_cut(scene, Some([90, 190, 95, 195])).is_err());
     }
 
     #[test]

@@ -1755,9 +1755,15 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
 }
 
 // Debug: the words of an NPC's actor, to find fields (see `world::npc_words`).
-pub fn npc_words(pid: u32, index: i32, count: usize) -> Result<(u64, Vec<i32>), String> {
+// The sizes of the NPCs with `indices`, by index; the ones gone or unreadable are left out.
+pub fn npc_sizes(pid: u32, indices: &[i32]) -> Result<std::collections::BTreeMap<i32, i32>, String> {
     let (layout, memory) = world_reader(pid)?;
-    world::npc_words(&memory, &layout.world, index, count).ok_or_else(|| format!("no NPC {index} in the scene"))
+    Ok(indices.iter().filter_map(|&i| Some((i, world::npc_size(&memory, &layout.world, i)?))).collect())
+}
+
+pub fn npc_words(pid: u32, index: i32, count: usize, definition: bool) -> Result<(u64, Vec<i32>), String> {
+    let (layout, memory) = world_reader(pid)?;
+    world::npc_words(&memory, &layout.world, index, count, definition).ok_or_else(|| format!("no NPC {index} in the scene"))
 }
 
 pub fn players(pid: u32) -> Result<Vec<Player>, String> {

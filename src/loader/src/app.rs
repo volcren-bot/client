@@ -160,6 +160,8 @@ const DEV_TOGGLES: [&str; 33] = [
 ];
 
 const DEV_COLUMNS: usize = 4;
+/// Below this width the script tab stacks the output and the tracker rather than putting them side by side.
+const SIDE_BY_SIDE_MIN_WIDTH: f32 = 560.0;
 
 const CURSOR_STYLES: [CursorStyle; 4] = [CursorStyle::Off, CursorStyle::Cross, CursorStyle::X, CursorStyle::Dot];
 
@@ -2509,7 +2511,7 @@ impl LoaderApp {
         let elapsed = self.run_time();
         ui.label(format!("{} · {} xp", duration(elapsed), thousands(self.xp.total())));
         let rows = self.xp.rows();
-        egui::ScrollArea::vertical().id_salt("xp_rows").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::both().id_salt("xp_rows").auto_shrink([false, false]).show(ui, |ui| {
             if rows.is_empty() {
                 ui.weak("No experience gained yet.");
             } else {
@@ -2565,7 +2567,7 @@ impl LoaderApp {
             ui.label(egui::RichText::new(format!("On a {} · {} left", active.kind, duration(active.remaining))).strong());
             ui.add_space(4.0);
         }
-        egui::ScrollArea::vertical().id_salt("breaks_rows").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::both().id_salt("breaks_rows").auto_shrink([false, false]).show(ui, |ui| {
             if !view.breaks.is_empty() {
                 ui.label(egui::RichText::new("Breaks").strong());
                 egui::Grid::new("breaks_grid").num_columns(2).spacing([12.0, 2.0]).show(ui, |ui| {
@@ -2654,25 +2656,29 @@ impl LoaderApp {
         ui.painter().rect_filled(line, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
         ui.spacing_mut().item_spacing.y = 4.0;
         if self.log_tab == LogTab::Script {
-            // the output keeps the left half; the XP tracker takes the right
-            egui::Panel::right("script_side")
-                .resizable(false)
-                .exact_size(ui.available_width() * 0.5)
-                .show(ui, |ui| {
-                    ui.shrink_clip_rect(ui.max_rect());
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.horizontal_wrapped(|ui| {
-                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
-                        crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
-                    });
-                    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-                    ui.painter().rect_filled(line, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    match self.tools_tab {
-                        ToolsTab::Xp => self.xp_tracker_ui(ui),
-                        ToolsTab::Breaks => self.breaks_ui(ui),
-                    }
+            // the output keeps the left half; the XP tracker takes the right. When the width can't fit both side by side
+            // the tracker goes under the output instead, so the two never draw over each other.
+            let stacked = ui.available_width() < SIDE_BY_SIDE_MIN_WIDTH;
+            let panel = if stacked {
+                egui::Panel::bottom("script_side").resizable(false).exact_size(ui.available_height() * 0.4)
+            } else {
+                egui::Panel::right("script_side").resizable(false).exact_size(ui.available_width() * 0.5)
+            };
+            panel.show(ui, |ui| {
+                ui.shrink_clip_rect(ui.max_rect());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.horizontal_wrapped(|ui| {
+                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
+                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
                 });
+                let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                ui.painter().rect_filled(line, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
+                ui.spacing_mut().item_spacing.y = 4.0;
+                match self.tools_tab {
+                    ToolsTab::Xp => self.xp_tracker_ui(ui),
+                    ToolsTab::Breaks => self.breaks_ui(ui),
+                }
+            });
         }
         ui.horizontal_wrapped(|ui| self.log_controls_ui(ui));
         self.log_ui(ui);
