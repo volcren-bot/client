@@ -35,6 +35,27 @@ impl SceneCollision {
 }
 
 pub fn read(memory: &impl Memory, layout: &Layout) -> Option<SceneCollision> {
+    let (plane, maps) = maps(memory, layout)?;
+    maps.read(memory, plane)
+}
+
+/// Every plane's collision map (the loaded scene has four), with the player's plane first in the tuple.
+pub fn read_all(memory: &impl Memory, layout: &Layout) -> Option<(i32, Vec<Option<SceneCollision>>)> {
+    let (plane, maps) = maps(memory, layout)?;
+    Some((plane, (0..maps.count.min(PLANES)).map(|p| maps.read(memory, p)).collect()))
+}
+
+const PLANES: i32 = 4;
+
+struct Maps {
+    begin: u64,
+    count: i32,
+    stride: u64,
+    base_x: i32,
+    base_y: i32,
+}
+
+fn maps(memory: &impl Memory, layout: &Layout) -> Option<(i32, Maps)> {
     if !layout.has(part::COLLISION | part::PROJECTION | part::PLAYER) {
         return None;
     }
@@ -47,31 +68,37 @@ pub fn read(memory: &impl Memory, layout: &Layout) -> Option<SceneCollision> {
     let c = &layout.collision;
     let begin = memory.ptr(scene + c.maps as u64)?;
     let end = memory.ptr(scene + c.maps as u64 + 8)?;
-    let count = end.checked_sub(begin)? / c.stride.max(1) as u64;
-    if !(0..count.min(MAX_MAPS) as i32).contains(&plane) {
-        return None;
-    }
-    let map = begin + plane as u64 * c.stride as u64;
-    let width = memory.i32(map + collision_map::WIDTH as u64)?;
-    let height = memory.i32(map + collision_map::HEIGHT as u64)?;
-    if !(1..=MAX_SIZE).contains(&width) || !(1..=MAX_SIZE).contains(&height) {
-        return None;
-    }
-    let columns = map + collision_map::COLUMNS as u64;
-    if memory.u64(columns + array::COUNT as u64)? != width as u64 {
-        return None;
-    }
-    let data = memory.ptr(columns + array::DATA as u64)?;
-    let mut flags = Vec::with_capacity((width * height) as usize);
-    for x in 0..width as u64 {
-        let column = data + x * collision_map::COLUMN_SIZE as u64;
-        if memory.u64(column + array::COUNT as u64)? != height as u64 {
+    let count = (end.checked_sub(begin)? / c.stride.max(1) as u64).min(MAX_MAPS) as i32;
+    Some((plane, Maps { begin, count, stride: c.stride as u64, base_x, base_y }))
+}
+
+impl Maps {
+    fn read(&self, memory: &impl Memory, plane: i32) -> Option<SceneCollision> {
+        if !(0..self.count).contains(&plane) {
             return None;
         }
-        let values = memory.i32s(memory.ptr(column + array::DATA as u64)?, height as usize)?;
-        flags.extend(values.into_iter().map(|v| v as u32));
+        let map = self.begin + plane as u64 * self.stride;
+        let width = memory.i32(map + collision_map::WIDTH as u64)?;
+        let height = memory.i32(map + collision_map::HEIGHT as u64)?;
+        if !(1..=MAX_SIZE).contains(&width) || !(1..=MAX_SIZE).contains(&height) {
+            return None;
+        }
+        let columns = map + collision_map::COLUMNS as u64;
+        if memory.u64(columns + array::COUNT as u64)? != width as u64 {
+            return None;
+        }
+        let data = memory.ptr(columns + array::DATA as u64)?;
+        let mut flags = Vec::with_capacity((width * height) as usize);
+        for x in 0..width as u64 {
+            let column = data + x * collision_map::COLUMN_SIZE as u64;
+            if memory.u64(column + array::COUNT as u64)? != height as u64 {
+                return None;
+            }
+            let values = memory.i32s(memory.ptr(column + array::DATA as u64)?, height as usize)?;
+            flags.extend(values.into_iter().map(|v| v as u32));
+        }
+        Some(SceneCollision { base_x: self.base_x, base_y: self.base_y, plane, width, height, flags })
     }
-    Some(SceneCollision { base_x, base_y, plane, width, height, flags })
 }
 
 #[cfg(test)]
@@ -156,5 +183,11 @@ mod tests {
         assert_eq!(read.flags(3201, 3099), Some(20));
         assert_eq!(read.flags(3202, 3100), None);
         assert_eq!(read.bounds(), (3199, 3099, 3201, 3100));
+        let (plane, all) = read_all(&m, &layout).expect("read all");
+        assert_eq!(plane, 1);
+        assert_eq!(all.len(), 2);
+        // plane 0's map has no size
+        assert_eq!(all[0], None);
+        assert_eq!(all[1].as_ref(), Some(&read));
     }
 }

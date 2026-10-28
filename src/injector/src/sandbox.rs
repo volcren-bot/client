@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
-use crate::{cache_locs, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
+use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
 #[cfg(not(windows))]
 use offline::*;
 
@@ -91,7 +91,7 @@ mod offline {
     pub fn chat_messages(_: u32) -> Result<Vec<ChatMessage>, String> {
         Err(NO_WIN32.into())
     }
-    pub fn locs(_: u32) -> Result<Vec<Loc>, String> {
+    pub fn locs(_: u32, _: Option<i32>) -> Result<Vec<Loc>, String> {
         Err(NO_WIN32.into())
     }
     pub fn cache_locs(_: u32, _: [i32; 4], _: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
@@ -110,6 +110,9 @@ mod offline {
         Err(NO_WIN32.into())
     }
     pub fn scene_route(_: u32, _: [i32; 2], _: [i32; 2], _: Option<crate::scene_graph::Options>) -> Result<crate::pathfinding::Route, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn nav_plan(_: u32, _: crate::nav::Point, _: crate::nav::Point, _: &crate::nav::Request) -> Result<crate::nav::NavPlan, String> {
         Err(NO_WIN32.into())
     }
     pub fn player_model(_: u32, _: i32) -> Result<Option<EntityModel>, String> {
@@ -435,6 +438,15 @@ fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
     Ok((file, source))
 }
 
+// `require("@lib/main/walker")` is `require("../lib/main/walker")`, so a script can name the lib without counting folders.
+// It matches the `lib` alias in a script's `.luaurc`, which is what `luau-analyze` reads.
+fn alias_lib(path: String) -> String {
+    match path.strip_prefix("@lib/") {
+        Some(rest) => format!("../lib/{rest}"),
+        None => path,
+    }
+}
+
 // What `require("../lib/main/walker")` asks for inside the lib, when the path names a `lib` folder: `main/walker`.
 fn lib_relative(path: &str) -> Option<&str> {
     let mut rest = path;
@@ -500,6 +512,7 @@ pub fn run_with_modules(
     globals.set(
         "require",
         lua.create_function(move |lua, path: String| {
+            let path = alias_lib(path);
             let relative = path.starts_with("./") || path.starts_with("../");
             let from = lua.inspect_stack(1, |d| d.source().source.map(|s| s.into_owned())).flatten();
             let from_script = from.is_some() && from == script_chunk;
@@ -674,7 +687,7 @@ pub fn run_with_modules(
     globals.set("item_params", query(&lua, pid, |pid, ids: Vec<i32>| item_params(pid, &ids))?)?;
     globals.set("npcs", query(&lua, pid, |pid, (): ()| npcs(pid))?)?;
     globals.set("npc_model", query(&lua, pid, |pid, index: i32| Ok(npc_model(pid, index)?.map(script_model)))?)?;
-    globals.set("locs", query(&lua, pid, |pid, (): ()| locs(pid))?)?;
+    globals.set("locs", query(&lua, pid, |pid, plane: Option<i32>| locs(pid, plane))?)?;
     globals.set("map_regions", query(&lua, pid, |pid, (): ()| map_regions(pid))?)?;
     globals.set("in_instance", query(&lua, pid, |pid, (): ()| in_instance(pid))?)?;
     globals.set("ground_items", query(&lua, pid, |pid, (): ()| ground_items(pid))?)?;
@@ -728,6 +741,39 @@ pub fn run_with_modules(
             });
             let route = scene_route(pid, tile(&from)?, tile(&to)?, options.transpose()?)?;
             Ok(SceneRoute { tiles: route.tiles.into_iter().map(|(x, y)| PathTile { x, y }).collect(), reached: route.reached })
+        })?,
+    )?;
+    globals.set(
+        "nav_plan",
+        query(&lua, pid, |pid, (from, to, options): (mlua::Table, mlua::Table, Option<mlua::Table>)| {
+            let err = |e: mlua::Error| e.to_string();
+            let point = |t: &mlua::Table| -> Result<crate::nav::Point, String> {
+                let plane = match t.get::<Option<i32>>("plane").map_err(err)? {
+                    Some(plane) => plane,
+                    None => player_plane(pid)?,
+                };
+                Ok((t.get("x").map_err(err)?, t.get("y").map_err(err)?, plane))
+            };
+            let mut request = crate::nav::Request::default();
+            if let Some(t) = options {
+                let o = &mut request.options;
+                o.near = t.get::<Option<i32>>("near").map_err(err)?.unwrap_or(o.near);
+                o.door_cost = t.get::<Option<u32>>("door_cost").map_err(err)?.unwrap_or(o.door_cost);
+                o.climb_cost = t.get::<Option<u32>>("climb_cost").map_err(err)?.unwrap_or(o.climb_cost);
+                o.rnd = t.get::<Option<f64>>("rnd").map_err(err)?.unwrap_or(o.rnd);
+                o.seed = t.get::<Option<f64>>("seed").map_err(err)?.map(|s| s as u64);
+                if let Some(options) = t.get::<Option<Vec<String>>>("door_options").map_err(err)? {
+                    request.door_options = options;
+                }
+                if let Some(options) = t.get::<Option<std::collections::BTreeMap<String, i32>>>("climb_options").map_err(err)? {
+                    request.climb_options = options.into_iter().collect();
+                }
+                for loc in t.get::<Option<Vec<mlua::Table>>>("avoid").map_err(err)?.unwrap_or_default() {
+                    let field = |name: &str| loc.get::<i32>(name).map_err(err);
+                    request.avoid.push((field("id")?, field("x")?, field("y")?, field("plane")?));
+                }
+            }
+            nav_plan(pid, point(&from)?, point(&to)?, &request)
         })?,
     )?;
     globals.set(
@@ -998,6 +1044,13 @@ mod tests {
         let name = path.file_name().unwrap().to_string_lossy();
         let result = run_with_form(&name, source, None, move |line| collected.borrow_mut().push(line), None, Some(path), Some(lib));
         (Rc::try_unwrap(lines).unwrap().into_inner(), result)
+    }
+
+    #[test]
+    fn alias_lib_points_at_the_lib_beside_the_script() {
+        assert_eq!(alias_lib("@lib/main/walker".into()), "../lib/main/walker");
+        assert_eq!(alias_lib("../lib/host".into()), "../lib/host");
+        assert_eq!(alias_lib("@library/host".into()), "@library/host");
     }
 
     #[test]

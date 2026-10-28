@@ -695,7 +695,7 @@ pub fn project_moved(pid: u32, points: &[projection::Point], shift: [i32; 2]) ->
 }
 
 fn decorations(pid: u32) -> Vec<projection::Decoration> {
-    let Ok(reply) = locs_reply(pid) else { return Vec::new() };
+    let Ok(reply) = locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE) else { return Vec::new() };
     reply.locs[..(reply.count as usize).min(reply.locs.len())]
         .iter()
         .filter(|l| l.kind == projection::GROUND_DECORATION && l.decoration_height != 0)
@@ -765,12 +765,13 @@ pub fn loc_model(pid: u32, kind: u8, scene_x: i32, scene_y: i32, id: i32) -> Res
     model(pid, ModelRequest { target: model_target::LOC, loc_kind: kind as u32, loc_x: scene_x, loc_y: scene_y, loc_id: id, ..Default::default() })
 }
 
-fn locs_reply(pid: u32) -> Result<Box<LocsReply>, String> {
+// `request` is an `ipc::state::locs_request` value.
+fn locs_reply(pid: u32, request: i32) -> Result<Box<LocsReply>, String> {
     reader(pid, 0, "")?;
     let reply = ask(
         pid,
         ipc::input::LOCS_MESSAGE,
-        |shared| shared.write_locs_request(),
+        |shared| shared.write_locs_request(request),
         |shared| {
             let mut reply: Box<LocsReply> = unsafe { Box::new_zeroed().assume_init() };
             shared.read_locs_reply_into(&mut reply, 100).then_some((reply.sequence, reply))
@@ -808,15 +809,31 @@ fn cached<T: Clone>(cache: &TickCache<T>, pid: u32, fetch: impl FnOnce() -> Resu
 }
 
 fn cached_locs_reply(pid: u32) -> Result<Arc<LocsReply>, String> {
-    cached(&LOCS_CACHE, pid, || locs_reply(pid).map(Arc::from))
+    cached(&LOCS_CACHE, pid, || locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE).map(Arc::from))
 }
 
-pub fn locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
-    let reply = locs_reply(pid)?;
+/// The locs of the loaded scene on `plane` (the player's when `None`).
+pub fn locs(pid: u32, plane: Option<i32>) -> Result<Vec<crate::Loc>, String> {
+    let request = match plane {
+        Some(plane @ 0..=3) => plane,
+        Some(plane) => return Err(format!("there is no plane {plane}")),
+        None => ipc::state::locs_request::PLAYER_PLANE,
+    };
+    Ok(decode_locs_reply(&*locs_reply(pid, request)?))
+}
+
+/// The clickable locs of the loaded scene on every plane: what doors and ladders are.
+pub fn clickable_locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
+    use ipc::state::locs_request::*;
+    Ok(decode_locs_reply(&*locs_reply(pid, ALL_PLANES | CLICKABLE_ONLY)?))
+}
+
+fn decode_locs_reply(reply: &LocsReply) -> Vec<crate::Loc> {
+    use ipc::state::{LOC_CLICKABLE, LOC_PLANE_MASK, LOC_PLANE_SHIFT};
     let names: Vec<String> =
         reply.names[..(reply.name_count as usize).min(reply.names.len())].iter().map(|n| String::from_utf8_lossy(ipc::state::text(n)).replace('\u{a0}', " ")).collect();
     let known = |v: u8| (v != 0xff).then_some(v);
-    Ok(reply.locs[..(reply.count as usize).min(reply.locs.len())]
+    reply.locs[..(reply.count as usize).min(reply.locs.len())]
         .iter()
         .map(|l| crate::Loc {
             id: l.id,
@@ -824,16 +841,16 @@ pub fn locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
             kind: l.kind,
             x: reply.base_x + l.x as i32,
             y: reply.base_y + l.y as i32,
-            plane: reply.plane,
+            plane: ((l.flags >> LOC_PLANE_SHIFT) & LOC_PLANE_MASK) as i32,
             scene_x: l.x as i32,
             scene_y: l.y as i32,
             size_x: l.size_x,
             size_y: l.size_y,
             shape: known(l.shape),
             rotation: known(l.rotation),
-            clickable: l.flags & ipc::state::LOC_CLICKABLE != 0,
+            clickable: l.flags & LOC_CLICKABLE != 0,
         })
-        .collect())
+        .collect()
 }
 
 fn cache_request(pid: u32, request: &CacheRequest) -> Result<Box<CacheReply>, String> {
@@ -977,6 +994,74 @@ static LOC_TEXTS: Mutex<Option<LocTexts>> = Mutex::new(None);
 
 const CACHE_LOCS_MAX_SQUARES: i32 = 64;
 
+// Reads the definitions of `ids` the process hasn't read yet into `LOC_TEXTS`.
+fn read_loc_texts(pid: u32, ids: &[u32]) -> Result<(), String> {
+    use crate::{cache::*, collision::*};
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let missing: Vec<u32> = {
+        let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
+        ids.iter().copied().filter(|id| !known.is_some_and(|defs| defs.contains_key(id))).collect()
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let files: Vec<[i32; 2]> = missing.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
+    let defs = cache_files(pid, CONFIG_INDEX, &files)?;
+    let mut cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+    if cached.as_ref().is_none_or(|(p, _)| *p != pid) {
+        *cached = Some((pid, std::collections::HashMap::new()));
+    }
+    if let Some((_, known)) = cached.as_mut() {
+        for (id, data) in missing.iter().zip(defs) {
+            known.insert(*id, data.as_deref().and_then(decode_loc_text));
+        }
+    }
+    Ok(())
+}
+
+type ShownLoc = (crate::collision::LocDef, crate::collision::LocText);
+
+/// The definitions of `ids` as the player sees them now: a loc that transforms with a varbit or a varp shows the one its
+/// value picks (missing when it shows nothing).
+fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, ShownLoc>, String> {
+    let lookup = |ids: &[u32]| -> Result<Vec<Option<ShownLoc>>, String> {
+        read_loc_texts(pid, ids)?;
+        let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
+        Ok(ids.iter().map(|id| known.and_then(|defs| defs.get(id)).cloned().flatten()).collect())
+    };
+    let mut shown = std::collections::HashMap::new();
+    let mut transformed: Vec<(u32, u32)> = Vec::new();
+    for (&id, def) in ids.iter().zip(lookup(ids)?) {
+        let Some(def) = def else { continue };
+        match &def.1.transforms {
+            None => {
+                shown.insert(id, def);
+            }
+            Some(t) => {
+                let value = match (t.varbit, t.varp) {
+                    (Some(bit), _) => varbit(pid, bit as i32)?,
+                    (None, Some(varp)) => varp_value(pid, varp as usize)?,
+                    (None, None) => None,
+                };
+                if let Some(to) = t.pick(value) {
+                    transformed.push((id, to));
+                }
+            }
+        }
+    }
+    let targets: Vec<u32> = transformed.iter().map(|&(_, to)| to).collect();
+    for ((id, _), def) in transformed.into_iter().zip(lookup(&targets)?) {
+        if let Some(def) = def {
+            shown.insert(id, def);
+        }
+    }
+    Ok(shown)
+}
+
 /// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
 pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
     use crate::{cache::*, collision::*};
@@ -1007,27 +1092,8 @@ pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> R
         }
     }
 
-    let mut ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    let missing: Vec<u32> = {
-        let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-        let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
-        ids.iter().copied().filter(|id| !known.is_some_and(|defs| defs.contains_key(id))).collect()
-    };
-    if !missing.is_empty() {
-        let files: Vec<[i32; 2]> = missing.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
-        let defs = cache_files(pid, CONFIG_INDEX, &files)?;
-        let mut cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-        if cached.as_ref().is_none_or(|(p, _)| *p != pid) {
-            *cached = Some((pid, std::collections::HashMap::new()));
-        }
-        if let Some((_, known)) = cached.as_mut() {
-            for (id, data) in missing.iter().zip(defs) {
-                known.insert(*id, data.as_deref().and_then(decode_loc_text));
-            }
-        }
-    }
+    let ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
+    read_loc_texts(pid, &ids)?;
 
     let lower = |list: &Option<Vec<String>>| list.as_ref().map(|l| l.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>());
     let (names, actions) = (lower(&filter.names), lower(&filter.actions));
@@ -1092,7 +1158,7 @@ pub fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::Wo
 }
 
 const WORLD_SQUARE_BATCH: usize = 16;
-const WORLD_FORMAT: u64 = 2;
+const WORLD_FORMAT: u64 = 3;
 
 // The key it was built for, and the process whose cache that key was read from: the cache only changes with a game update, so later calls for that process skip reading its indexes.
 static WORLD: Mutex<Option<(u64, u32, std::sync::Arc<crate::collision::WorldCollision<crate::collision::Movement>>)>> = Mutex::new(None);
@@ -1267,6 +1333,93 @@ pub fn scene_route(pid: u32, from: [i32; 2], to: [i32; 2], options: Option<crate
         }
     };
     route.ok_or_else(|| format!("no route from {}, {} to {}, {} or near it", from.0, from.1, to.0, to.1))
+}
+
+pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, request: &crate::nav::Request) -> Result<crate::nav::NavPlan, String> {
+    use crate::{
+        collision::{flag, REGION_SIZE},
+        nav::{NavAction, NavPlan, NavTile},
+    };
+    // the largest box planned over in one go, a scene's size, and how many of its outermost tiles the cache knows better
+    const MAX_WINDOW: i32 = 400;
+    const SCENE_SIZE: i32 = 104;
+    const SCENE_EDGE: i32 = 4;
+    // how far past the goal (or the world path's stop) the box reaches
+    const MARGIN: i32 = 16;
+    let (layout, memory) = reader(pid, part::COLLISION, "the scene's collision maps")?;
+    if state::current(&memory, &layout) != Some(LOGGED_IN) {
+        return Err("not logged in".into());
+    }
+    let (_, live) = crate::scene_collision::read_all(&memory, &layout).ok_or("the scene's collision maps can't be read")?;
+    let scene = live.iter().flatten().next().ok_or("the scene has no collision maps")?;
+    let (base_x, base_y) = (scene.base_x, scene.base_y);
+    let instance = in_instance(pid).unwrap_or(true);
+    let in_scene = |x: i32, y: i32, edge: i32| (base_x + edge..base_x + SCENE_SIZE - edge).contains(&x) && (base_y + edge..base_y + SCENE_SIZE - edge).contains(&y);
+    if !in_scene(from.0, from.1, 0) {
+        return Err(format!("{}, {} isn't in the loaded scene", from.0, from.1));
+    }
+
+    // the box: the scene, grown to the goal when the cache can fill the rest, else to a stop along the world path
+    let scene_box = (base_x, base_y, base_x + SCENE_SIZE - 1, base_y + SCENE_SIZE - 1);
+    let grown = |(x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)| (x1.min(x - MARGIN), y1.min(y - MARGIN), x2.max(x + MARGIN), y2.max(y + MARGIN));
+    let fits = |(x1, y1, x2, y2): (i32, i32, i32, i32)| x2 - x1 < MAX_WINDOW && y2 - y1 < MAX_WINDOW;
+    let mut goal = to;
+    let mut bounds = scene_box;
+    if !in_scene(to.0, to.1, 0) && !instance {
+        if fits(grown(scene_box, (to.0, to.1))) {
+            bounds = grown(scene_box, (to.0, to.1));
+        } else if from.2 == to.2 {
+            let world = world_movement(pid)?;
+            let path = crate::pathfinding::find_path_with(&world, to.2, (from.0, from.1), (to.0, to.1), PATH_MAX_TILES, true).unwrap_or_default();
+            if let Some(&(x, y)) = path.iter().rev().find(|&&(x, y)| fits(grown(scene_box, (x, y)))) {
+                goal = (x, y, to.2);
+                bounds = grown(scene_box, (x, y));
+            }
+        }
+    }
+    let regions = if instance || bounds == scene_box {
+        Vec::new()
+    } else {
+        let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
+        cache_regions(pid, (square(bounds.0), square(bounds.1), square(bounds.2) + REGION_SIZE - 1, square(bounds.3) + REGION_SIZE - 1))?
+    };
+    let region_of = |x: i32, y: i32| crate::collision::region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
+    // the cache's tiles where the scene's aren't trusted (or there are none), its closed doors open
+    let cache = |x: i32, y: i32, plane: i32| {
+        let region = region_of(x, y);
+        let flags = regions.iter().find(|(r, _)| *r == region).and_then(|(_, world)| world.flags(plane, x, y))?;
+        Some(flags & !flag::door_blocks(flags) & !flag::DOORS)
+    };
+    let edge = if regions.is_empty() { 0 } else { SCENE_EDGE };
+    let flags = |x: i32, y: i32, plane: i32| -> Option<u32> {
+        let scene = live.get(plane as usize).and_then(Option::as_ref);
+        if in_scene(x, y, edge) {
+            return scene.and_then(|s| s.flags(x, y));
+        }
+        cache(x, y, plane).or_else(|| scene.and_then(|s| s.flags(x, y)).filter(|_| in_scene(x, y, 0)))
+    };
+
+    let locs = clickable_locs(pid)?;
+    let mut ids: Vec<u32> = locs.iter().map(|l| l.id as u32).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let defs = shown_locs(pid, &ids)?;
+    let lookup = |id: i32| defs.get(&(id as u32));
+    let (doors, climbables) = crate::nav::scene_locs(&flags, &locs, &lookup, request);
+    let climbs = crate::nav::climbs(&flags, &climbables);
+    let plan = crate::nav::plan(&flags, bounds, &doors, &climbs, from, goal, &request.options)
+        .ok_or_else(|| format!("no way from {}, {} (plane {}) toward {}, {} (plane {})", from.0, from.1, from.2, to.0, to.1, to.2))?;
+
+    let tile = |(x, y, plane): crate::nav::Point| NavTile { x, y, plane };
+    let actions = plan
+        .actions
+        .into_iter()
+        .map(|a| match a.what {
+            crate::nav::Use::Door(loc) => NavAction { at: a.at + 1, kind: "door", to_plane: loc.plane, loc },
+            crate::nav::Use::Climb(loc, to_plane) => NavAction { at: a.at + 1, kind: "climb", loc, to_plane },
+        })
+        .collect();
+    Ok(NavPlan { tiles: plan.tiles.into_iter().map(tile).collect(), actions, reached: plan.reached && goal == to, goal: tile(goal) })
 }
 
 // The client's collision flags of the scene: `flags[x][y]` is world tile (x1 + x, y1 + y), edge ring included.

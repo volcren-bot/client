@@ -218,6 +218,61 @@ pub fn find_game_object_layout(image: &[u8], scene: &Scene) -> Result<GameObject
     one(found)
 }
 
+// Where walls and decorations keep their config byte (shape in the low 6 bits, rotation in the next 2), from Java's
+// `Scene.getConfig(plane, x, y, tag)`: each slot's object is checked against the tag, then its config is the
+// `movzx` that follows. The game object branch reads the config `find_game_object_layout` found, which makes the match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LocConfigs {
+    pub wall: u32,
+    pub wall_decoration: u32,
+    pub ground_decoration: u32,
+}
+
+fn config_after(instrs: &[Instruction], from: usize, tag: u32) -> Option<u32> {
+    let cmp = instrs[from..].iter().position(|i| {
+        i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Memory && i.memory_base() != Register::RIP && i.memory_displacement64() as u32 == tag
+    })?;
+    let base = instrs[from + cmp].memory_base();
+    instrs[from + cmp + 1..(from + cmp + 4).min(instrs.len())].iter().find_map(|i| {
+        (i.mnemonic() == Mnemonic::Movzx && i.op1_kind() == OpKind::Memory && i.memory_size() == iced_x86::MemorySize::UInt8 && i.memory_base() == base)
+            .then(|| i.memory_displacement64() as u32)
+    })
+}
+
+pub fn find_loc_configs(image: &[u8], scene: &Scene, game: &GameObjectLayout) -> Result<LocConfigs, ScanError> {
+    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+    let mut found = Vec::new();
+    for &(begin, end) in &pe.functions {
+        let code = pe.bytes(begin, end);
+        if code.len() > 0x200 || !code.windows(4).any(|w| w == scene.game_tag.to_le_bytes()) {
+            continue;
+        }
+        let instrs: Vec<Instruction> = Decoder::with_ip(64, code, begin as u64, DecoderOptions::NONE).into_iter().collect();
+        // `lea rcx,[tile + slot]` before each slot's check
+        let slot_at = |slot: u32| {
+            instrs.iter().position(|i| i.mnemonic() == Mnemonic::Lea && i.memory_base() != Register::RIP && i.memory_displacement64() as u32 == slot)
+        };
+        let (Some(wall), Some(decoration), Some(ground)) = (slot_at(scene.wall), slot_at(scene.wall_decoration), slot_at(scene.ground_decoration)) else {
+            continue;
+        };
+        if !(wall < decoration && decoration < ground) {
+            continue;
+        }
+        let configs = (config_after(&instrs, wall, scene.tag), config_after(&instrs, decoration, scene.tag), config_after(&instrs, ground, scene.tag));
+        let (Some(wall), Some(wall_decoration), Some(ground_decoration)) = configs else { continue };
+        let games = instrs.iter().position(|i| i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Memory && i.memory_displacement64() as u32 == scene.game_tag);
+        let game_config = games.and_then(|at| {
+            instrs[at..].iter().find_map(|i| {
+                (i.mnemonic() == Mnemonic::Movzx && i.op1_kind() == OpKind::Memory && i.memory_size() == iced_x86::MemorySize::UInt8).then(|| i.memory_displacement64() as u32)
+            })
+        });
+        if game_config == Some(game.config) {
+            found.push(LocConfigs { wall, wall_decoration, ground_decoration });
+        }
+    }
+    one(found)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DecorationLayout {
     pub x: u32,

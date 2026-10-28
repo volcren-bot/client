@@ -19,7 +19,43 @@ pub mod flag {
     pub const FLOOR_DECORATION: u32 = 0x40000;
     pub const FLOOR: u32 = 0x200000;
     pub const BLOCKED: u32 = OBJECT | FLOOR_DECORATION | FLOOR;
+    // Not the client's: which of a tile's walls belong to a closed door (the cache has every door closed), and a door
+    // that fills the tile (a diagonal one). The game's route masks leave these bits alone.
+    pub const DOOR_NORTH: u32 = 1 << 24;
+    pub const DOOR_EAST: u32 = 1 << 25;
+    pub const DOOR_SOUTH: u32 = 1 << 26;
+    pub const DOOR_WEST: u32 = 1 << 27;
+    pub const DOOR_OBJECT: u32 = 1 << 28;
+    pub const DOORS: u32 = 0x1f << 24;
+
+    /// The door bit of a straight wall's bit; 0 for a corner.
+    pub fn door_of(wall: u32) -> u32 {
+        match wall {
+            WALL_NORTH => DOOR_NORTH,
+            WALL_EAST => DOOR_EAST,
+            WALL_SOUTH => DOOR_SOUTH,
+            WALL_WEST => DOOR_WEST,
+            _ => 0,
+        }
+    }
+
+    /// The walls and the block a tile's door bits stand for: what opening its doors takes away.
+    pub fn door_blocks(flags: u32) -> u32 {
+        let mut blocks = 0;
+        for (door, wall) in [(DOOR_NORTH, WALL_NORTH), (DOOR_EAST, WALL_EAST), (DOOR_SOUTH, WALL_SOUTH), (DOOR_WEST, WALL_WEST)] {
+            if flags & door != 0 {
+                blocks |= wall;
+            }
+        }
+        if flags & DOOR_OBJECT != 0 {
+            blocks |= OBJECT;
+        }
+        blocks
+    }
 }
+
+/// The menu option that opens a door, any case.
+pub const DOOR_OPTION: &str = "open";
 
 const SETTING_BLOCKED: u8 = 1;
 const SETTING_BRIDGE: u8 = 2;
@@ -30,11 +66,15 @@ pub struct LocDef {
     pub size_y: u8,
     pub interact_type: u8,
     pub blocks_projectile: bool,
+    // Java's `int1` (op 19, else whether it has models of shape 10 or any option): what makes the minimap draw a wall red
+    pub interactive: bool,
+    // interactive with a `DOOR_OPTION`: a wall of it is a closed door
+    pub door: bool,
 }
 
 impl Default for LocDef {
     fn default() -> Self {
-        Self { size_x: 1, size_y: 1, interact_type: 2, blocks_projectile: true }
+        Self { size_x: 1, size_y: 1, interact_type: 2, blocks_projectile: true, interactive: false, door: false }
     }
 }
 
@@ -163,6 +203,26 @@ pub fn decode_locs(data: &[u8]) -> Option<Vec<Placement>> {
 pub struct LocText {
     pub name: String,
     pub actions: [String; 5],
+    pub transforms: Option<Transforms>,
+}
+
+/// A loc that shows as another one depending on a varbit or a varp (Java's `ObjectComposition.transform`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Transforms {
+    pub varbit: Option<u16>,
+    pub varp: Option<u16>,
+    // by value; the last is for any other value. `None` shows nothing.
+    pub ids: Vec<Option<u32>>,
+}
+
+impl Transforms {
+    pub fn pick(&self, value: Option<i32>) -> Option<u32> {
+        let last = self.ids.len().checked_sub(1)?;
+        match value {
+            Some(v) if v >= 0 && (v as usize) < last => self.ids[v as usize],
+            _ => self.ids[last],
+        }
+    }
 }
 
 pub fn decode_loc(data: &[u8]) -> Option<LocDef> {
@@ -178,12 +238,29 @@ pub fn decode_loc_text(data: &[u8]) -> Option<(LocDef, LocText)> {
 fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef> {
     let mut def = LocDef::default();
     let mut r = Reader::new(data);
+    let mut int1: Option<u8> = None;
+    // whether it has models, and the shape of the first when they say
+    let mut models: Option<Option<u8>> = None;
+    let mut options = [false; 5];
+    let mut opens = false;
     loop {
         match r.u8()? {
-            0 => return Some(def),
+            0 => {
+                let interactive = match int1 {
+                    Some(v) => v != 0,
+                    None => models.is_some_and(|shape| shape.is_none_or(|s| s == 10)) || options.iter().any(|&o| o),
+                };
+                def.interactive = interactive;
+                def.door = interactive && opens;
+                return Some(def);
+            }
             1 => {
                 let n = r.u8()? as usize;
-                r.skip(n * 3)?;
+                if n > 0 {
+                    r.skip(2)?;
+                    models = Some(Some(r.u8()?));
+                    r.skip((n - 1) * 3)?;
+                }
             }
             2 => match text.as_deref_mut() {
                 Some(text) => text.name = r.text()?,
@@ -191,6 +268,9 @@ fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef
             },
             5 => {
                 let n = r.u8()? as usize;
+                if n > 0 {
+                    models = Some(None);
+                }
                 r.skip(n * 2)?;
             }
             6 => {
@@ -208,25 +288,38 @@ fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef
                 def.blocks_projectile = false;
             }
             18 => def.blocks_projectile = false,
-            19 | 28 | 29 | 39 | 69 | 75 | 91 | 95 | 96 => r.skip(1)?,
+            19 => int1 = Some(r.u8()?),
+            28 | 29 | 39 | 69 | 75 | 91 | 95 | 96 => r.skip(1)?,
             21 | 22 | 23 | 62 | 64 | 73 | 74 | 89 | 90 | 94 => {}
             24 | 61 | 65 | 66 | 67 | 68 | 70 | 71 | 72 | 82 => r.skip(2)?,
             27 => def.interact_type = 1,
-            op @ 30..=34 => match text.as_deref_mut() {
-                Some(text) => {
-                    let action = r.text()?;
-                    text.actions[(op - 30) as usize] = if action.eq_ignore_ascii_case("hidden") { String::new() } else { action };
+            op @ 30..=34 => {
+                let action = r.text()?;
+                let shown = !action.eq_ignore_ascii_case("hidden");
+                options[(op - 30) as usize] = shown;
+                opens |= shown && action.eq_ignore_ascii_case(DOOR_OPTION);
+                if let Some(text) = text.as_deref_mut() {
+                    text.actions[(op - 30) as usize] = if shown { action } else { String::new() };
                 }
-                None => r.string()?,
-            },
+            }
             40 | 41 => {
                 let n = r.u8()? as usize;
                 r.skip(n * 4)?;
             }
             op @ (77 | 92) => {
-                r.skip(if op == 92 { 6 } else { 4 })?;
+                let id = |v: u16| (v != 0xffff).then_some(v);
+                let varbit = id(r.u16()?);
+                let varp = id(r.u16()?);
+                let default = if op == 92 { id(r.u16()?).map(u32::from) } else { None };
                 let n = r.u8()? as usize;
-                r.skip((n + 1) * 2)?;
+                let mut ids = Vec::with_capacity(n + 2);
+                for _ in 0..=n {
+                    ids.push(id(r.u16()?).map(u32::from));
+                }
+                ids.push(default);
+                if let Some(text) = text.as_deref_mut() {
+                    text.transforms = Some(Transforms { varbit, varp, ids });
+                }
             }
             78 => r.skip(4)?,
             79 => {
@@ -280,11 +373,21 @@ pub struct Movement(pub u16);
 
 impl Movement {
     pub const BLOCKS: u16 = 0x100;
+    // the `flag::DOORS` bits, moved down
+    const DOOR_SHIFT: u32 = 24 - 9;
+
+    /// What it blocks with its closed doors open.
+    pub fn opened(self) -> Movement {
+        let doors = (self.0 as u32) << Self::DOOR_SHIFT & flag::DOORS;
+        let blocks = flag::door_blocks(doors);
+        Movement(self.0 & !(blocks as u16 & 0xff) & !if blocks & flag::OBJECT != 0 { Self::BLOCKS } else { 0 })
+    }
 }
 
 impl Cell for Movement {
     fn with(self, flags: u32) -> Self {
-        Movement(self.0 | (flags & 0xff) as u16 | if flags & flag::BLOCKED != 0 { Self::BLOCKS } else { 0 })
+        let doors = ((flags & flag::DOORS) >> Self::DOOR_SHIFT) as u16;
+        Movement(self.0 | (flags & 0xff) as u16 | doors | if flags & flag::BLOCKED != 0 { Self::BLOCKS } else { 0 })
     }
 }
 
@@ -403,10 +506,11 @@ impl<T: Cell> WorldCollision<T> {
                     self.add(plane, x, y, flag::FLOOR_DECORATION);
                 }
             }
-            0..=3 if def.interact_type != 0 => self.add_wall(plane, x, y, shape, rotation, def.blocks_projectile),
+            0..=3 if def.interact_type != 0 => self.add_wall(plane, x, y, shape, rotation, def),
             9..=21 if def.interact_type != 0 => {
                 let (w, h) = if rotation == 1 || rotation == 3 { (def.size_y, def.size_x) } else { (def.size_x, def.size_y) };
-                let flags = flag::OBJECT | if def.blocks_projectile { flag::OBJECT_PROJECTILE } else { 0 };
+                let door = if shape == 9 && def.door { flag::DOOR_OBJECT } else { 0 };
+                let flags = flag::OBJECT | door | if def.blocks_projectile { flag::OBJECT_PROJECTILE } else { 0 };
                 for dx in 0..w as i32 {
                     for dy in 0..h as i32 {
                         self.add(plane, x + dx, y + dy, flags);
@@ -417,9 +521,19 @@ impl<T: Cell> WorldCollision<T> {
         }
     }
 
-    fn add_wall(&mut self, plane: i32, x: i32, y: i32, shape: u8, rotation: u8, blocks_projectile: bool) {
-        use flag::*;
-        let marks: &[(i32, i32, u32)] = match (shape, rotation & 3) {
+    fn add_wall(&mut self, plane: i32, x: i32, y: i32, shape: u8, rotation: u8, def: &LocDef) {
+        for &(dx, dy, wall) in wall_marks(shape, rotation) {
+            let doors = if def.door { (0..8).map(|bit| flag::door_of(wall & (1 << bit))).fold(0, |a, b| a | b) } else { 0 };
+            let flags = wall | if def.blocks_projectile { wall << flag::PROJECTILE_SHIFT } else { 0 } | doors;
+            self.add(plane, x + dx, y + dy, flags);
+        }
+    }
+}
+
+/// The wall bits a wall of `shape` and `rotation` puts on its tile and the tiles across it, as (dx, dy, bits).
+pub fn wall_marks(shape: u8, rotation: u8) -> &'static [(i32, i32, u32)] {
+    use flag::*;
+    match (shape, rotation & 3) {
             (0, 0) => &[(0, 0, WALL_WEST), (-1, 0, WALL_EAST)],
             (0, 1) => &[(0, 0, WALL_NORTH), (0, 1, WALL_SOUTH)],
             (0, 2) => &[(0, 0, WALL_EAST), (1, 0, WALL_WEST)],
@@ -433,11 +547,6 @@ impl<T: Cell> WorldCollision<T> {
             (2, 2) => &[(0, 0, WALL_EAST | WALL_SOUTH), (1, 0, WALL_WEST), (0, -1, WALL_NORTH)],
             (2, _) => &[(0, 0, WALL_SOUTH | WALL_WEST), (0, -1, WALL_NORTH), (-1, 0, WALL_EAST)],
             _ => &[],
-        };
-        for &(dx, dy, wall) in marks {
-            let flags = wall | if blocks_projectile { wall << PROJECTILE_SHIFT } else { 0 };
-            self.add(plane, x + dx, y + dy, flags);
-        }
     }
 }
 
@@ -574,11 +683,71 @@ mod tests {
         data.extend_from_slice(&[14, 2, 15, 3, 30]);
         data.extend_from_slice(b"Open\0");
         data.extend_from_slice(&[18, 249, 1, 0, 0, 0, 1, 0, 0, 0, 7, 0]);
-        assert_eq!(decode_loc(&data), Some(LocDef { size_x: 2, size_y: 3, interact_type: 2, blocks_projectile: false }));
+        assert_eq!(decode_loc(&data), Some(LocDef { size_x: 2, size_y: 3, interact_type: 2, blocks_projectile: false, interactive: true, door: true }));
         let (_, text) = decode_loc_text(&data).unwrap();
-        assert_eq!(text, LocText { name: "Door".into(), actions: ["Open".into(), String::new(), String::new(), String::new(), String::new()] });
-        assert_eq!(decode_loc(&[17, 0]), Some(LocDef { size_x: 1, size_y: 1, interact_type: 0, blocks_projectile: false }));
+        assert_eq!(
+            text,
+            LocText { name: "Door".into(), actions: ["Open".into(), String::new(), String::new(), String::new(), String::new()], transforms: None }
+        );
+        assert_eq!(decode_loc(&[17, 0]), Some(LocDef { size_x: 1, size_y: 1, interact_type: 0, blocks_projectile: false, interactive: false, door: false }));
         assert_eq!(decode_loc(&[200, 0]), None);
+    }
+
+    #[test]
+    fn interactive_is_the_minimaps_red_wall_rule() {
+        // a wall model (op 1, shape 0) and no options: a plain wall
+        let wall = [1, 1, 0, 5, 0, 0];
+        assert_eq!(decode_loc(&wall).map(|d| (d.interactive, d.door)), Some((false, false)));
+        // the same with "Open": a door; with only "Search": interactive, not a door
+        let mut door = vec![1, 1, 0, 5, 0, 30];
+        door.extend_from_slice(b"Open\0");
+        door.push(0);
+        assert_eq!(decode_loc(&door).map(|d| (d.interactive, d.door)), Some((true, true)));
+        let mut search = vec![1, 1, 0, 5, 0, 30];
+        search.extend_from_slice(b"Search\0");
+        search.push(0);
+        assert_eq!(decode_loc(&search).map(|d| (d.interactive, d.door)), Some((true, false)));
+        // op 19 says otherwise
+        let mut not = vec![19, 0, 30];
+        not.extend_from_slice(b"Open\0");
+        not.push(0);
+        assert_eq!(decode_loc(&not).map(|d| (d.interactive, d.door)), Some((false, false)));
+    }
+
+    #[test]
+    fn decodes_and_picks_transforms() {
+        // op 92: varbit 7, no varp, default 30, ids [10, none]
+        let data = [92, 0, 7, 0xff, 0xff, 0, 30, 1, 0, 10, 0xff, 0xff, 0];
+        let (_, text) = decode_loc_text(&data).unwrap();
+        let t = text.transforms.unwrap();
+        assert_eq!((t.varbit, t.varp), (Some(7), None));
+        assert_eq!(t.pick(Some(0)), Some(10));
+        assert_eq!(t.pick(Some(1)), None);
+        assert_eq!(t.pick(Some(5)), Some(30));
+        assert_eq!(t.pick(None), Some(30));
+    }
+
+    #[test]
+    fn marks_doors_and_opens_them_for_paths() {
+        let region = region_id(50, 50);
+        let (bx, by) = (50 * 64, 50 * 64);
+        let settings = Box::new([[[0u8; 64]; 64]; PLANES]);
+        // a door on the east edge of (5, 5), and a plain wall on the east edge of (5, 6)
+        let locs = [Placement { id: 1, x: 5, y: 5, plane: 0, shape: 0, rotation: 2 }, Placement { id: 2, x: 5, y: 6, plane: 0, shape: 0, rotation: 2 }];
+        let defs = |id: u32| Some(LocDef { door: id == 1, interactive: id == 1, ..LocDef::default() });
+        let mut world = WorldCollision::<Movement>::default();
+        world.add_square(region);
+        world.add_terrain_and_locs(region, &settings, &locs, &defs);
+        let door = world.flags(0, bx + 5, by + 5).unwrap();
+        assert_eq!(door.opened().0 & flag::WALL_EAST as u16, 0);
+        assert_ne!(door.0 & flag::WALL_EAST as u16, 0);
+        let wall = world.flags(0, bx + 5, by + 6).unwrap();
+        assert_eq!(wall.opened(), wall);
+        let mut u32_world = WorldCollision::<u32>::default();
+        u32_world.add_square(region);
+        u32_world.add_terrain_and_locs(region, &settings, &locs, &defs);
+        let flags = u32_world.flags(0, bx + 6, by + 5).unwrap();
+        assert_eq!(flag::door_blocks(flags), flag::WALL_WEST);
     }
 
     #[test]
@@ -596,7 +765,7 @@ mod tests {
             Placement { id: 3, x: 10, y: 10, plane: 1, shape: 10, rotation: 0 },
         ];
         let defs = |id: u32| match id {
-            2 => Some(LocDef { size_x: 2, size_y: 1, interact_type: 2, blocks_projectile: false }),
+            2 => Some(LocDef { size_x: 2, size_y: 1, interact_type: 2, blocks_projectile: false, ..LocDef::default() }),
             _ => Some(LocDef::default()),
         };
         let mut world = WorldCollision::<u32>::default();

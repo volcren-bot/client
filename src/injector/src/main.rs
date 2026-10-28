@@ -156,7 +156,7 @@ fn main() -> std::process::ExitCode {
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
             ["locs", pid] => match pid.parse() {
-                Ok(pid) => json(injector::locs(pid)),
+                Ok(pid) => json(injector::locs(pid, None)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
             ["loc-model", pid, kind, x, y, id] => match (pid.parse(), kind.parse(), x.parse(), y.parse(), id.parse()) {

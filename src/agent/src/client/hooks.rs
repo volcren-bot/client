@@ -45,7 +45,7 @@ use super::graphics::{
 use super::offsets::{
     find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
     find_varps, find_interfaces, find_item_containers, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
-    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_ground_items, find_item_pile, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
+    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_ground_items, find_item_pile, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
     find_world_select, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
@@ -788,12 +788,14 @@ unsafe fn find_offsets() {
         let names = found("Loc names", find_loc_names(image));
         let item_pile = decoration.and_then(|d| found("Item pile", find_item_pile(image, &d)));
         if let (Some(game), Some(decoration), Some(names)) = (game, decoration, names) {
+            let configs = found("Loc configs", find_loc_configs(image, &scene, &game));
             super::scene::set_scene(super::scene::Rules {
                 module_base,
                 scene,
                 game,
                 decoration,
                 names,
+                configs,
                 plane: projection.plane,
                 decoration_height: local_projection.map(|l| l.decoration_height),
                 item_pile,

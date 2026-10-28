@@ -10,6 +10,8 @@ use crate::collision::{flag, Movement, WorldCollision};
 const BLOCKS: u16 = Movement::BLOCKS;
 const STRAIGHT: u32 = 10;
 const DIAGONAL: u32 = 11;
+// what opening a door on the way adds, in tenths of a tile
+pub const DOOR_COST: u32 = 30;
 
 // Tile keys are never iterated, so a multiplicative hash is much cheaper than SipHash on the hot path.
 #[derive(Default)]
@@ -43,14 +45,20 @@ const FROM_SOUTH: u16 = BLOCKS | flag::WALL_SOUTH as u16;
 
 pub type Tile = (i32, i32);
 
-fn walkable(world: &WorldCollision<Movement>, plane: i32, x: i32, y: i32, mask: u16) -> bool {
-    world.flags(plane, x, y).is_some_and(|m| m.0 & mask == 0)
+fn walkable(world: &WorldCollision<Movement>, plane: i32, x: i32, y: i32, mask: u16, doors: bool) -> bool {
+    world.flags(plane, x, y).is_some_and(|m| if doors { m.opened() } else { m }.0 & mask == 0)
 }
 
 pub fn can_step(world: &WorldCollision<Movement>, plane: i32, x: i32, y: i32, dx: i32, dy: i32) -> bool {
+    can_step_with(world, plane, x, y, dx, dy, false)
+}
+
+/// `can_step`, with every closed door open when `doors`.
+pub fn can_step_with(world: &WorldCollision<Movement>, plane: i32, x: i32, y: i32, dx: i32, dy: i32, doors: bool) -> bool {
     use flag::*;
-    let straight_x = |dx: i32| walkable(world, plane, x + dx, y, if dx < 0 { FROM_EAST } else { FROM_WEST });
-    let straight_y = |dy: i32| walkable(world, plane, x, y + dy, if dy < 0 { FROM_NORTH } else { FROM_SOUTH });
+    let walkable = |x: i32, y: i32, mask: u16| walkable(world, plane, x, y, mask, doors);
+    let straight_x = |dx: i32| walkable(x + dx, y, if dx < 0 { FROM_EAST } else { FROM_WEST });
+    let straight_y = |dy: i32| walkable(x, y + dy, if dy < 0 { FROM_NORTH } else { FROM_SOUTH });
     match (dx, dy) {
         (0, 0) => true,
         (dx, 0) => straight_x(dx),
@@ -62,7 +70,7 @@ pub fn can_step(world: &WorldCollision<Movement>, plane: i32, x: i32, y: i32, dx
                 (true, false) => WALL_SOUTH | WALL_SOUTH_EAST | WALL_EAST,
                 (false, false) => WALL_SOUTH | WALL_SOUTH_WEST | WALL_WEST,
             };
-            walkable(world, plane, x + dx, y + dy, BLOCKS | corner as u16) && straight_x(dx) && straight_y(dy)
+            walkable(x + dx, y + dy, BLOCKS | corner as u16) && straight_x(dx) && straight_y(dy)
         }
     }
 }
@@ -88,8 +96,13 @@ pub enum PathError {
 }
 
 pub fn find_path(world: &WorldCollision<Movement>, plane: i32, from: Tile, to: Tile, max_tiles: usize) -> Result<Vec<Tile>, PathError> {
+    find_path_with(world, plane, from, to, max_tiles, false)
+}
+
+/// `find_path`; with `doors` it goes through closed doors as well, each costing `DOOR_COST` more.
+pub fn find_path_with(world: &WorldCollision<Movement>, plane: i32, from: Tile, to: Tile, max_tiles: usize, doors: bool) -> Result<Vec<Tile>, PathError> {
     for t in [from, to] {
-        if !walkable(world, plane, t.0, t.1, BLOCKS) {
+        if !walkable(world, plane, t.0, t.1, BLOCKS, false) {
             return Err(PathError::Blocked(t));
         }
     }
@@ -120,11 +133,15 @@ pub fn find_path(world: &WorldCollision<Movement>, plane: i32, from: Tile, to: T
         }
         let (x, y) = tile(at);
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
-            if !can_step(world, plane, x, y, dx, dy) {
+            let door = if can_step(world, plane, x, y, dx, dy) {
+                0
+            } else if doors && can_step_with(world, plane, x, y, dx, dy, true) {
+                DOOR_COST
+            } else {
                 continue;
-            }
+            };
             let next = (x + dx, y + dy);
-            let cost = cost + if dx != 0 && dy != 0 { DIAGONAL } else { STRAIGHT };
+            let cost = cost + door + if dx != 0 && dy != 0 { DIAGONAL } else { STRAIGHT };
             match seen.entry(key(next)) {
                 Entry::Occupied(mut e) if e.get().0 > cost => {
                     e.insert((cost, at));
@@ -273,7 +290,7 @@ pub fn game_route(flags: impl Fn(i32, i32) -> Option<u32>, from: Tile, to: Tile)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collision::{region_id, Square};
+    use crate::collision::{region_id, Cell, Square};
 
     fn square(rows: &[&str]) -> (WorldCollision<Movement>, i32, i32) {
         let mut world = WorldCollision::<Movement>::default();
@@ -376,6 +393,25 @@ mod tests {
         // a blocked click: the nearest free tile
         let r = route(&rows, (0, 2), (1, 2)).unwrap();
         assert_eq!(r.tiles, vec![(0, 2)]);
+    }
+
+    #[test]
+    fn goes_through_doors_when_asked() {
+        let mut world = WorldCollision::<Movement>::default();
+        let region = region_id(50, 50);
+        world.add_square(region);
+        let mut tiles = Box::new([Movement::default(); 64 * 64]);
+        // a column of walls on the east edge of x 0, the one at y 0 a door
+        for y in 0..64 {
+            let door = if y == 0 { flag::DOOR_EAST } else { 0 };
+            tiles[y] = Movement::default().with(flag::WALL_EAST | door);
+            tiles[64 + y] = Movement::default().with(flag::WALL_WEST | if y == 0 { flag::DOOR_WEST } else { 0 });
+        }
+        world.set_square(0, region, Square::Tiles(tiles));
+        let (bx, by) = (50 * 64, 50 * 64);
+        assert!(find_path(&world, 0, (bx, by + 3), (bx + 1, by + 3), 100_000).is_err());
+        let path = find_path_with(&world, 0, (bx, by + 3), (bx + 1, by + 3), 100_000, true).unwrap();
+        assert!(path.contains(&(bx, by)) && path.contains(&(bx + 1, by)), "{path:?}");
     }
 
     #[test]

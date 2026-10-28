@@ -750,8 +750,19 @@ pub mod loc_status {
 pub const MAX_LOCS: usize = 8192;
 pub const MAX_LOC_NAMES: usize = 1024;
 pub const LOC_NAME_SIZE: usize = 32;
+// `LocInfo::flags`: whether the client lets the loc be clicked (the minimap draws such walls red: doors), and its plane
 pub const LOC_CLICKABLE: u8 = 1;
+pub const LOC_PLANE_SHIFT: u8 = 1;
+pub const LOC_PLANE_MASK: u8 = 3;
 pub const NO_NAME: u16 = 0xffff;
+
+/// What a locs request asks for: a plane (0 to 3) or `PLAYER_PLANE` or `ALL_PLANES`, optionally `| CLICKABLE_ONLY`.
+pub mod locs_request {
+    pub const PLAYER_PLANE: i32 = -1;
+    pub const ALL_PLANES: i32 = 4;
+    pub const CLICKABLE_ONLY: i32 = 0x100;
+    pub const PLANES: i32 = 0xff;
+}
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -974,7 +985,7 @@ pub struct LayoutMemory {
     pub reserved14: u32,
     pub model_reply: ModelReply,
     pub locs_request_sequence: u32,
-    pub reserved15: u32,
+    pub locs_request: i32,
     pub locs_reply_sequence: u32,
     pub reserved16: u32,
     pub locs_reply: LocsReply,
@@ -1399,28 +1410,28 @@ impl<'a> Shared<'a> {
         }
     }
 
-    pub fn write_locs_request(self) -> u32 {
+    /// `request` is a `locs_request` value.
+    pub fn write_locs_request(self, request: i32) -> u32 {
         let this = self.this();
         // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
         unsafe {
             seqlock_write(
                 addr_of_mut!((*this).locs_request_sequence),
-                addr_of_mut!((*this).reserved15),
-                &0,
+                addr_of_mut!((*this).locs_request),
+                &request,
             )
         }
     }
 
-    pub fn read_locs_request(self) -> Option<u32> {
+    pub fn read_locs_request(self) -> Option<(u32, i32)> {
         let this = self.this();
         // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
         unsafe {
             seqlock_read(
                 addr_of!((*this).locs_request_sequence),
-                addr_of!((*this).reserved15),
+                addr_of!((*this).locs_request),
                 1,
             )
-            .map(|(s, _)| s)
         }
     }
 

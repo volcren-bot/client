@@ -22,7 +22,8 @@ pub use local_projection::find_local_projection;
 pub use projection::{find_projection, Projection};
 pub use scene_loader::find_instance_flag;
 pub use scene::{
-    find_collision_maps, find_decoration_layout, find_game_object_layout, find_loc_names, find_scene, loc_kind, DecorationLayout, GameObjectLayout, LocNames, Scene,
+    find_collision_maps, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, loc_kind, DecorationLayout, GameObjectLayout,
+    LocConfigs, LocNames, Scene,
 };
 pub use menu::{find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, Menu, MenuClick, MenuLayout, Selection};
 pub use camera::find_camera;
@@ -1453,6 +1454,8 @@ mod tests {
         println!("{camera:x?}");
         assert_eq!(camera, camera::Camera { position: 0x895c8, pitch: 0x895dc, yaw: 0x895e0 });
         let scene = find_scene(&image).expect("scene not found");
+        let game = find_game_object_layout(&image, &scene).expect("game object layout not found");
+        assert_eq!(find_loc_configs(&image, &scene, &game), Ok(scene::LocConfigs { wall: 0x48, wall_decoration: 0x428, ground_decoration: 0x228 }));
         let decoration = find_decoration_layout(&image, &scene).expect("decoration layout not found");
         assert_eq!(find_item_pile(&image, &decoration), Ok(0x120));
         let local = find_local_projection(&image, player.client, interfaces.canvas, &projection, &scene).expect("local projection not found");
@@ -1623,7 +1626,9 @@ mod tests {
             println!("{}: {scene:x?}", build.display());
             let collision = find_collision_maps(&image, &scene).unwrap_or_else(|error| panic!("collision maps not found in {}: {error:?}", build.display()));
             assert_eq!(collision, scene::CollisionMaps { maps: 0x2f8, stride: 0x28 });
-            println!("{}: {:x?}", build.display(), find_game_object_layout(&image, &scene).expect("game object layout"));
+            let game = find_game_object_layout(&image, &scene).expect("game object layout");
+            println!("{}: {game:x?}", build.display());
+            println!("{}: {:x?}", build.display(), find_loc_configs(&image, &scene, &game).expect("loc configs"));
             let decoration = find_decoration_layout(&image, &scene).expect("decoration layout");
             println!("{}: {decoration:x?}", build.display());
             println!("{}: item pile {:x?}", build.display(), find_item_pile(&image, &decoration));
