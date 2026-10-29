@@ -10,7 +10,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use injector::{Client, Connection, Cursor, DisplayName, GameState, Input, Item, LoadReport, Npc, Overlay, Player, Widget};
+use injector::{Client, Connection, Cursor, DisplayName, GameState, Input, Item, LoadReport, Npc, Overlay, PacketPage, Player, Widget};
 
 use super::{Scan, Settings, Target};
 
@@ -270,6 +270,11 @@ pub fn npcs(target: &Target, settings: &Settings) -> Result<Vec<Npc>, String> {
 pub fn players(target: &Target, settings: &Settings) -> Result<Vec<Player>, String> {
     let helper = helper(settings)?;
     run(&target.location, &helper, &["players", &target.client.pid.to_string()])
+}
+
+pub fn packets(target: &Target, settings: &Settings, since: u64) -> Result<PacketPage, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["packets", &target.client.pid.to_string(), &since.to_string()])
 }
 
 /// `lib` is only for scripts run from a local file: store scripts get the downloaded lib beside them.

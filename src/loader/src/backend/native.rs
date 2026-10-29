@@ -1,7 +1,7 @@
 use std::{path::Path, process::Command};
 
 use serde::{Deserialize, Serialize};
-use injector::{Connection, Cursor, DisplayName, GameState, Input, Item, LoadReport, Npc, Overlay, Player, Widget};
+use injector::{Connection, Cursor, DisplayName, GameState, Input, Item, LoadReport, Npc, Overlay, PacketPage, Player, Widget};
 
 use super::{Scan, Settings, Target};
 
@@ -87,6 +87,11 @@ pub fn npcs(target: &Target, _settings: &Settings) -> Result<Vec<Npc>, String> {
 
 pub fn players(target: &Target, _settings: &Settings) -> Result<Vec<Player>, String> {
     injector::players(target.client.pid)
+}
+
+/// One read of the packet log is at most `PACKETS_PER_READ` packets, as through the helper.
+pub fn packets(target: &Target, _settings: &Settings, since: u64) -> Result<PacketPage, String> {
+    injector::packets(target.client.pid, since, 1000)
 }
 
 pub fn connection(target: &Target, _settings: &Settings) -> Result<Option<Connection>, String> {

@@ -41,6 +41,7 @@ injector list                                      game clients
 injector load <pid> <dll> | unload <pid>           inject / reload / unload the agent
 injector status <pid>                              connection, version, protocol, offsets state
 injector state <pid>                               full game state
+injector packets <pid> <since>                     packet log from sequence number <since> (0: oldest kept): `{packets, next, dropped}`
 injector run [--script <path>] <pid> < x.luau      run a script; --script enables disk `require`
 injector serve                                     JSON-lines server (the loader's Wine backend)
 ```

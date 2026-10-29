@@ -19,6 +19,7 @@ mod terminal;
 mod theme;
 mod libs;
 mod logo;
+mod packets;
 mod update;
 mod xp;
 

@@ -45,7 +45,7 @@ use super::graphics::{
 use super::offsets::{
     find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
     find_varps, find_interfaces, find_item_containers, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
-    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
+    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_packets, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
     find_world_select, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
@@ -265,6 +265,7 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
             unhook_wgl_swap_buffers();
             super::name::unhook_decoder();
             super::total_xp::unhook();
+            super::packets::unhook();
             unhook_wndproc();
 
             return LRESULT(0);
@@ -545,6 +546,7 @@ unsafe fn find_offsets() {
     let chat = found("Chat", find_chat(image));
     let projectiles = found("Projectiles", find_projectiles(image));
     let spot_anims = found("Spot animations", find_spot_anims(image));
+    let packets = found("Packets", find_packets(image));
     let camera = player.and_then(|p| found("Camera", find_camera(image, p.client)));
     let projection = player.and_then(|p| found("Projection", find_projection(image, p.client)));
     let scene = projection.and_then(|_| found("Scene", find_scene(image)));
@@ -819,6 +821,9 @@ unsafe fn find_offsets() {
             super::total_xp::hook(module_base, rule);
         }
     }
+    if let Some(rule) = packets {
+        super::packets::hook(module_base, rule);
+    }
     if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(image)) {
         super::items::set_lookup(module_base, rule);
         if let Some(game_vals) = player.and_then(|p| found("Game vals", find_game_vals(image, p.client, &rule))) {
@@ -887,6 +892,7 @@ pub unsafe fn reenable_hooks() {
 
     super::name::rehook_decoder();
     super::total_xp::rehook();
+    super::packets::rehook();
     hook_wndproc(HOOKED_HWND.load(Ordering::SeqCst) as u64);
 }
 pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {

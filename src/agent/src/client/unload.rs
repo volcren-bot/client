@@ -46,12 +46,14 @@ pub unsafe fn unload(events: &[HANDLE]) {
     unhook_wgl_swap_buffers();
     super::name::unhook_decoder();
     super::total_xp::unhook();
+    super::packets::unhook();
 
     if !wait_for_hook_calls() {
         println!("[Agent]: Cannot unload: a hook call is still running. agent stays loaded with its hooks off.\r\n");
         return;
     }
 
+    super::packets::close();
     if let Some(layout) = LAYOUT_MAP.get() {
         layout.close();
     }

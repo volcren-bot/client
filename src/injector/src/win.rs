@@ -52,6 +52,7 @@ use windows_sys::{
 use ipc::{
     HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, overlay_mode, overlay_offset, shared_memory_name,
     frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name,
+    packets::{self as packet_log, direction, packets_memory_name, Log, LOG_SIZE},
     read::short_string_text,
     state::{
         item_name_status, loc_status, menu_status, model_status, model_target, project_status, cache_kind, cache_status, CacheReply, CacheRequest, GameValRequest, ItemNameRequest, LocsReply, ModelRequest, NamesReply, worker_kind, worker_status, WorkerRequest, ProjectRequest, CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, ITEM_NAME_BATCH, PROJECT_BATCH,
@@ -1870,6 +1871,38 @@ pub fn spot_anims(pid: u32) -> Result<Vec<crate::SpotAnim>, String> {
     }
     let (layout, memory) = reader(pid, worker::SPOT_ANIM_PARTS, "where spot animations are")?;
     Ok(worker::spot_anims(&memory, &layout))
+}
+
+/// The packets the client logged from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
+pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, String> {
+    let name = wide(packets_memory_name(pid));
+    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
+        .ok_or_else(|| format!("No packet log in client {pid}: the agent isn't loaded, is too old, or didn't find the packet functions"))?;
+    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, LOG_SIZE) };
+    if view.Value.is_null() {
+        return Err(format!("Cannot map the packet log of client {pid}"));
+    }
+    let log = view.Value as *const Log;
+    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
+    let page = unsafe { packet_log::is_compatible(log).then(|| packet_log::read_since(log, since, limit)) };
+    unsafe { UnmapViewOfFile(view) };
+    let page = page.ok_or_else(|| format!("The packet log of client {pid} has another layout: restart the client and load a matching agent"))?;
+    Ok(crate::PacketPage {
+        next: page.next,
+        dropped: page.dropped,
+        packets: page
+            .entries
+            .into_iter()
+            .map(|entry| crate::Packet {
+                sequence: entry.sequence,
+                time_ms: entry.time_ms,
+                sent: entry.direction == direction::SENT,
+                opcode: entry.opcode,
+                length: entry.length,
+                payload: entry.payload.iter().map(|byte| format!("{byte:02x}")).collect(),
+            })
+            .collect(),
+    })
 }
 
 pub fn world_select(pid: u32) -> Result<Option<WorldSelect>, String> {

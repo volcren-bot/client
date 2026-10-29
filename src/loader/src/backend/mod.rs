@@ -7,7 +7,7 @@ use injector::Client;
 mod native;
 #[cfg(windows)]
 pub use native::{
-    Location, connection, console, draw, input, item_container, load, npcs, players, scan, script_command, set_cursor, set_display_name, shutdown,
+    Location, connection, console, draw, input, item_container, load, npcs, packets, players, scan, script_command, set_cursor, set_display_name, shutdown,
     scene_tiles_next_frame, state, unload, varc, varp, varps, widget,
 };
 
@@ -15,7 +15,7 @@ pub use native::{
 mod wine;
 #[cfg(not(windows))]
 pub use wine::{
-    Location, connection, console, draw, input, item_container, load, npcs, players, scan, script_command, set_cursor, set_display_name, shutdown,
+    Location, connection, console, draw, input, item_container, load, npcs, packets, players, scan, script_command, set_cursor, set_display_name, shutdown,
     scene_tiles_next_frame, state, unload, varc, varp, varps, widget,
 };
 

@@ -5,6 +5,9 @@ fn main() -> std::process::ExitCode {
         path::Path,
     };
 
+    // One read of the packet log; the loader polls often enough that a page is a second or two of a busy client.
+    const PACKETS_PER_READ: usize = 1000;
+
     fn json<T: serde::Serialize>(result: Result<T, String>) -> String {
         serde_json::to_string(&result).unwrap()
     }
@@ -227,6 +230,10 @@ fn main() -> std::process::ExitCode {
                 Ok(pid) => json(injector::spot_anims(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
+            ["packets", pid, since] => match (pid.parse(), since.parse()) {
+                (Ok(pid), Ok(since)) => json(injector::packets(pid, since, PACKETS_PER_READ)),
+                _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
+            },
             ["chat", pid] => match pid.parse() {
                 Ok(pid) => json(injector::chat_messages(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
@@ -297,7 +304,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("Usage: injector list | load <pid> <dll> [<style> <r> <g> <b> <size>] | unload <pid> | status <pid> | state <pid> | console <pid>");
         eprintln!("       injector widget <pid> <group> <child> | children <pid> <group> <child> | interfaces <pid> | screenshot <pid> <file.bmp>");
         eprintln!("       injector varp <pid> <id> | varps <pid> | varbit <pid> <id> | enum <pid> <id> | item-params <pid> <ids...> | name <pid> <display name>");
-        eprintln!("       injector container <pid> <id> | item-names <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
+        eprintln!("       injector container <pid> <id> | item-names <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
         eprintln!("       injector move <pid> <x> <y> | click <pid> left|right|middle <x> <y> | type <pid> <text> [hold ms]");
         eprintln!("       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up");
         eprintln!("       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms>");

@@ -8,6 +8,7 @@ mod local_projection;
 mod menu;
 mod minimap;
 mod model;
+mod packets;
 mod projection;
 mod projectiles;
 mod scene;
@@ -31,6 +32,7 @@ pub use scene::{
 pub use menu::{find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, Menu, MenuClick, MenuLayout, Selection};
 pub use camera::find_camera;
 pub use chat::find_chat;
+pub use packets::{find_packets, Packets, BUFFER_SIZE};
 pub use spot_anims::find_spot_anims;
 pub use ground_items::{find_ground_items, find_item_pile};
 pub use minimap::{find_destination, find_minimap};
@@ -1551,6 +1553,36 @@ mod tests {
             let image = map_image(&std::fs::read(&build).unwrap());
             let flag = find_instance_flag(&image).unwrap_or_else(|error| panic!("instance flag not found in {}: {error:?}", build.display()));
             println!("{}: instance flag {flag:x}", build.display());
+        }
+    }
+
+    #[test]
+    fn finds_packets_in_archived_builds() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let manifest = if cfg!(windows) && manifest.starts_with('/') { format!("Z:{manifest}") } else { manifest.into() };
+        let archive = std::path::Path::new(&manifest).join("../../archive");
+        let Ok(entries) = std::fs::read_dir(&archive) else {
+            eprintln!("skipped, no {}", archive.display());
+            return;
+        };
+        let mut builds: Vec<_> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
+            .collect();
+        builds.sort();
+        for build in builds {
+            let image = map_image(&std::fs::read(&build).unwrap());
+            let packets = find_packets(&image).unwrap_or_else(|error| panic!("packets not found in {}: {error:?}", build.display()));
+            println!("{}: {packets:x?}", build.display());
+            // the layout is the same in every build; the addresses move with the code
+            let name = build.file_name().unwrap().to_string_lossy();
+            let (receive, send) = if name.contains("166231c8") { (0x202740, 0x204010) } else { (0x202840, 0x204110) };
+            assert_eq!(
+                packets,
+                Packets { receive, receive_opcode: 0, receive_buffer: 8, send, send_type: 0, send_buffer: 8, buffer_data: 0x10, buffer_cursor: 0x18 },
+                "{}",
+                build.display()
+            );
         }
     }
 

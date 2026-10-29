@@ -166,6 +166,31 @@ pub struct Loc {
     pub clickable: bool,
 }
 
+/// One packet of the client's packet log (`ipc::packets`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Packet {
+    pub sequence: u64,
+    /// milliseconds since the agent started logging: only good for ordering and spacing packets
+    pub time_ms: u64,
+    /// true for client to server
+    pub sent: bool,
+    /// the packet id (received: server packet, sent: client packet)
+    pub opcode: u16,
+    /// the whole payload length; a sent packet's variable length prefix counts, its opcode byte doesn't
+    pub length: u32,
+    /// the start of the payload (up to `ipc::packets::PAYLOAD_SIZE` bytes) as lowercase hex
+    pub payload: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PacketPage {
+    pub packets: Vec<Packet>,
+    /// pass this as `since` to read what comes after
+    pub next: u64,
+    /// packets that were overwritten before they were read
+    pub dropped: u64,
+}
+
 pub use decode::chat::ChatMessage;
 pub use decode::world::{GroundItem, Hitsplat, Item, Npc, Player, Projectile, SpotAnim};
 pub use decode::world_select::{World, WorldSelect};
@@ -178,7 +203,7 @@ mod win;
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
 pub use win::{
-    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims,
+    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims, packets,
     unload, varc, varp_value, varps, widget, widget_children, world_select,
 };
 

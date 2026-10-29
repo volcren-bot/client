@@ -19,6 +19,7 @@ The user-facing desktop app (`eframe`/egui), a native binary. It never touches t
 - Edits scripts with Luau syntax highlighting.
 - On Run, compares the file on disk with what the editor last synced (`ScriptFile::disk`: set on open, save, startup) and prompts to reload if it changed; the prompt also warns about unsaved edits.
 - Dev tools: RuneLite-style checkboxes (`DEV_TOGGLES` in `app.rs`) that draw scene layers through `injector::scene_tiles_next_frame`, once per frame the client presents (`TilesWorker`); a checkbox with no entry in `DEV_LAYERS` isn't ported yet.
+- Packets (collapsed section of the Development page, `Monitor` in `src/packets.rs`): with Capture on, `poll_packets` reads the selected client's packet log (`injector packets <pid> <since>`, `backend::packets`) every `POLL_EVERY` and keeps the last `KEEP` packets. Received and sent packets show as `time  ←/→  opcode  length  payload hex` (sent in the link colour); the Opcodes box takes ids to show (`40, 2`) or hide (`!40`). Opcodes are raw numbers: they change with game updates. A sent packet's length excludes its opcode byte.
 - Persists `Settings { dll, helper }` (paths of `agent.dll` and `injector.exe`), auto-detected next to the executable or in `target/x86_64-pc-windows-gnu/{release,debug}`. Also persists the mouse cursor preference (`Cursor`, storage key `cursor`), which is passed to `injector load` so the agent starts with it (the injector leaves it in an `AGENT_CURSOR_<pid>` mapping the agent reads while building its header).
 
 ## Layout
@@ -33,6 +34,7 @@ The user-facing desktop app (`eframe`/egui), a native binary. It never touches t
 | `src/store.rs` | The Scripts tab: list, filters, redeem box, community tags, price and balance text, and `Confirmed`, the community warnings the user accepted. |
 | `src/update.rs` | Update check against `latest.json` and the version comparison. |
 | `src/session.rs` | Starting a store run: cache layout (`<cache>/scripts/<script-id>/<revision>/`), download with name/checksum checks, pruning; and `Beat`, the heartbeat state machine (retries with backoff, give-up, stats pending). |
+| `src/packets.rs` | The packet monitor's buffer and filter (`Monitor`, `Filter`); the UI is `packets_ui` in `app.rs`. |
 | `src/terminal.rs` | The Terminal page: pty session, key and mouse encoding, painting. |
 | `src/highlight.rs` | Luau highlighter. |
 | `src/backend/mod.rs` | `Settings`, `Target`, `Scan`; re-exports one function set (`connection`, `load`, `state`, `input`, `draw`, ...) from the compiled backend, so `app.rs` is platform independent. |

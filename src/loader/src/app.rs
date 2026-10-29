@@ -61,6 +61,11 @@ enum Event {
         pid: u32,
         result: Result<usize, String>,
     },
+    /// A read of the packet log for the packet monitor.
+    Packets {
+        pid: u32,
+        result: Result<injector::PacketPage, String>,
+    },
     Restored(Result<Option<Me>, ApiError>),
     SignedIn(Result<Me, String>),
     Me(Result<Me, ApiError>),
@@ -578,6 +583,7 @@ pub struct LoaderApp {
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
     tiles: Option<TilesWorker>,
+    packets: crate::packets::Monitor,
     api: Api,
     auth: Auth,
     store: Store,
@@ -656,6 +662,7 @@ impl LoaderApp {
                 .and_then(|s| eframe::get_value(s, CURSOR_KEY))
                 .unwrap_or(DEFAULT_CURSOR),
             tiles: None,
+            packets: crate::packets::Monitor::default(),
             api: Api::new(Config::from_env()),
             auth: Auth::Restoring,
             store: Store::default(),
@@ -1098,6 +1105,70 @@ impl LoaderApp {
         }
     }
 
+    // Reads the selected client's packet log while the monitor is capturing, a page at a time.
+    fn poll_packets(&mut self, ctx: &egui::Context) {
+        if !self.packets.capture {
+            return;
+        }
+        let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else { return };
+        let now = Instant::now();
+        // look again when the next read is due, even if nothing else repaints
+        ctx.request_repaint_after(crate::packets::POLL_EVERY);
+        if !self.packets.due(target.client.pid, now) {
+            return;
+        }
+        let (pid, since) = (target.client.pid, self.packets.start(target.client.pid));
+        self.background(ctx, move |settings| Event::Packets { pid, result: backend::packets(&target, &settings, since) });
+    }
+
+    fn packets_ui(&mut self, ui: &mut egui::Ui) {
+        let target = self.loaded_target_ui(ui);
+        let monitor = &mut self.packets;
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut monitor.capture, "Capture");
+            ui.checkbox(&mut monitor.received, "Received");
+            ui.checkbox(&mut monitor.sent, "Sent");
+            ui.label("Opcodes");
+            ui.add(egui::TextEdit::singleline(&mut monitor.filter).desired_width(120.0).hint_text("40, 2 or !40"))
+                .on_hover_text("Only these opcodes, or with a ! in front, all but these. Separate with commas or spaces.");
+            if ui.button("Clear").clicked() {
+                monitor.clear();
+            }
+        });
+        if target.is_none() {
+            return;
+        }
+        let visible = monitor.visible();
+        ui.weak(format!(
+            "{} shown of {} kept{}",
+            visible.len(),
+            monitor.kept(),
+            if monitor.dropped > 0 { format!(", {} missed", monitor.dropped) } else { String::new() }
+        ));
+        if let Some(error) = &monitor.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        ui.add_space(4.0);
+
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
+        let sent_color = ui.visuals().hyperlink_color;
+        egui::ScrollArea::both().id_salt("packets").max_height(360.0).auto_shrink([false, true]).stick_to_bottom(true).show_rows(ui, row_height, visible.len(), |ui, rows| {
+            for packet in &visible[rows] {
+                let text = format!(
+                    "{:>9.3}  {}  {:>3}  {:>5}  {}",
+                    packet.time_ms as f64 / 1000.0,
+                    if packet.sent { "→" } else { "←" },
+                    packet.opcode,
+                    packet.length,
+                    crate::packets::payload_text(packet)
+                );
+                let text = egui::RichText::new(text).font(font.clone());
+                ui.label(if packet.sent { text.color(sent_color) } else { text });
+            }
+        });
+    }
+
     fn scan(&mut self, ctx: &egui::Context) {
         self.spawn(ctx, "Looking for clients…", |settings| {
             let mut scan = backend::scan(&settings);
@@ -1175,7 +1246,7 @@ impl LoaderApp {
     fn handle_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
             // Tiles and the XP tracker's reads run in the background, so they must not clear another job's busy label.
-            if !matches!(event, Event::Tiles { .. } | Event::XpState(_)) {
+            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::Packets { .. }) {
                 self.busy = None;
             }
             match event {
@@ -1356,6 +1427,7 @@ impl LoaderApp {
                         self.xp.update(skills, self.run_time());
                     }
                 }
+                Event::Packets { pid, result } => self.packets.finish(pid, Instant::now(), result),
                 Event::State { pid, read, result } => match result {
                     Ok(state) => self.report_state(pid, read, &state),
                     Err(error) => self.error(format!("Reading the game state of {pid} failed: {error}")),
@@ -2475,6 +2547,7 @@ impl LoaderApp {
     fn development_ui(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Game state").default_open(true).show(ui, |ui| self.state_ui(ui));
         egui::CollapsingHeader::new("Varps").default_open(true).show(ui, |ui| self.varps_ui(ui));
+        egui::CollapsingHeader::new("Packets").default_open(false).show(ui, |ui| self.packets_ui(ui));
         ui.separator();
         // Drop columns as the window narrows, down to a single vertical stack.
         let gap = 24.0;
@@ -2933,6 +3006,7 @@ impl eframe::App for LoaderApp {
         self.form_ui(&ctx);
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
+        self.poll_packets(&ctx);
 
         let narrow = ctx.content_rect().width() < SIDEBAR_MIN_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
