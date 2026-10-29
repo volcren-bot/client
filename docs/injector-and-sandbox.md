@@ -42,6 +42,8 @@ injector load <pid> <dll> | unload <pid>           inject / reload / unload the 
 injector status <pid>                              connection, version, protocol, offsets state
 injector state <pid>                               full game state
 injector packets <pid> <since>                     packet log from sequence number <since> (0: oldest kept): `{packets, next, dropped}`
+injector scripts <pid> <since>                     script log from sequence number <since> (0: oldest kept): `{runs, next, dropped}`; each run has the event type, argument count, nesting depth and the first arguments as text
+injector varc-changes <pid> <since>                varc log from sequence number <since> (0: oldest kept): `{changes, next, dropped}`; each change has the varc index, whether it is a string, the old value (none when unknown) and the new one
 injector run [--script <path>] <pid> < x.luau      run a script; --script enables disk `require`
 injector serve                                     JSON-lines server (the loader's Wine backend)
 ```

@@ -44,6 +44,10 @@ pub struct Monitor {
     /// Packets lost to the log's ring overwriting them before the loader read them, since the last clear.
     pub dropped: u64,
     pub error: Option<String>,
+    /// The packet picked in the list (its sequence number), shown in full in the detail pane.
+    pub selected: Option<u64>,
+    /// Keep the list scrolled to the newest packet.
+    pub follow: bool,
     packets: VecDeque<Packet>,
     /// The client the packets are from, and the sequence number to ask it for next.
     pid: Option<u32>,
@@ -54,7 +58,7 @@ pub struct Monitor {
 
 impl Default for Monitor {
     fn default() -> Self {
-        Self { capture: false, received: true, sent: true, filter: String::new(), dropped: 0, error: None, packets: VecDeque::new(), pid: None, next: 0, reading: false, next_poll: None }
+        Self { capture: false, received: true, sent: true, filter: String::new(), dropped: 0, error: None, selected: None, follow: true, packets: VecDeque::new(), pid: None, next: 0, reading: false, next_poll: None }
     }
 }
 
@@ -65,6 +69,7 @@ impl Monitor {
 
     pub fn clear(&mut self) {
         self.packets.clear();
+        self.selected = None;
         self.dropped = 0;
     }
 
@@ -115,6 +120,47 @@ impl Monitor {
         let filter = Filter::parse(&self.filter);
         self.packets.iter().filter(|p| (if p.sent { self.sent } else { self.received }) && filter.allows(p.opcode)).collect()
     }
+}
+
+/// The selected packet, if it is still kept.
+impl Monitor {
+    pub fn selected_packet(&self) -> Option<&Packet> {
+        let sequence = self.selected?;
+        self.packets.iter().rev().find(|p| p.sequence == sequence)
+    }
+}
+
+/// The payload bytes the log kept.
+pub fn payload_bytes(packet: &Packet) -> Vec<u8> {
+    packet.payload.as_bytes().chunks(2).filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()).collect()
+}
+
+/// The payload as `offset  16 hex bytes  ascii` lines, like a hex editor.
+pub fn hex_dump(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .chunks(16)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            let ascii: String = chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+            format!("{:04x}  {:<47}  {ascii}", row * 16, hex.join(" "))
+        })
+        .collect()
+}
+
+/// The first bytes read as the client's big endian numbers, for spotting ids, coordinates and flags by eye.
+pub fn leading_values(bytes: &[u8]) -> Vec<(&'static str, String)> {
+    let mut values = Vec::new();
+    if let Some(&b) = bytes.first() {
+        values.push(("byte", format!("{b} ({})", b as i8)));
+    }
+    if let Some(b) = bytes.get(..2) {
+        values.push(("short", format!("{}", u16::from_be_bytes([b[0], b[1]]))));
+    }
+    if let Some(b) = bytes.get(..4) {
+        values.push(("int", format!("{}", i32::from_be_bytes([b[0], b[1], b[2], b[3]]))));
+    }
+    values
 }
 
 /// The payload hex in bytes separated by spaces, with an ellipsis when the log kept only the start of it.
@@ -231,6 +277,30 @@ mod tests {
         monitor.start(32);
         monitor.finish(32, now, Ok(page(vec![], 0)));
         assert_eq!(monitor.error, None);
+    }
+
+    #[test]
+    fn selection_follows_the_kept_packets() {
+        let now = Instant::now();
+        let mut monitor = Monitor { capture: true, ..Monitor::default() };
+        monitor.start(32);
+        monitor.finish(32, now, Ok(page(vec![packet(4, false, 40, "", 0), packet(5, true, 75, "", 0)], 0)));
+        monitor.selected = Some(5);
+        assert_eq!(monitor.selected_packet().map(|p| p.opcode), Some(75));
+        monitor.clear();
+        assert!(monitor.selected_packet().is_none());
+    }
+
+    #[test]
+    fn dumps_and_reads_payload_bytes() {
+        let p = packet(0, false, 40, "00010203414243", 7);
+        let bytes = payload_bytes(&p);
+        assert_eq!(bytes, [0, 1, 2, 3, 0x41, 0x42, 0x43]);
+        assert_eq!(hex_dump(&bytes), ["0000  00 01 02 03 41 42 43                             ....ABC"]);
+        let values = leading_values(&bytes);
+        assert_eq!(values[1].1, "1");
+        assert_eq!(values[2].1, "66051");
+        assert!(leading_values(&[]).is_empty());
     }
 
     #[test]

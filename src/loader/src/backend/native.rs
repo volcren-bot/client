@@ -73,6 +73,10 @@ pub fn item_container(target: &Target, _settings: &Settings, id: i32) -> Result<
     injector::item_container(target.client.pid, id)
 }
 
+pub fn varbits_of(target: &Target, _settings: &Settings, varp: u16) -> Result<Vec<(i32, injector::config::VarbitDef, Option<String>)>, String> {
+    injector::varbits_of(target.client.pid, varp)
+}
+
 pub fn varc(target: &Target, _settings: &Settings, id: i32) -> Result<Option<i32>, String> {
     injector::varc(target.client.pid, id)
 }
@@ -92,6 +96,15 @@ pub fn players(target: &Target, _settings: &Settings) -> Result<Vec<Player>, Str
 /// One read of the packet log is at most `PACKETS_PER_READ` packets, as through the helper.
 pub fn packets(target: &Target, _settings: &Settings, since: u64) -> Result<PacketPage, String> {
     injector::packets(target.client.pid, since, 1000)
+}
+
+/// One read of the script log is at most `SCRIPT_RUNS_PER_READ` runs, as through the helper.
+pub fn script_runs(target: &Target, _settings: &Settings, since: u64) -> Result<injector::ScriptPage, String> {
+    injector::script_runs(target.client.pid, since, 2000)
+}
+
+pub fn varc_changes(target: &Target, _settings: &Settings, since: u64) -> Result<injector::VarcPage, String> {
+    injector::varc_changes(target.client.pid, since, 1000)
 }
 
 pub fn connection(target: &Target, _settings: &Settings) -> Result<Option<Connection>, String> {

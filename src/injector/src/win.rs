@@ -53,6 +53,8 @@ use ipc::{
     HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, overlay_mode, overlay_offset, shared_memory_name,
     frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name,
     packets::{self as packet_log, direction, packets_memory_name, Log, LOG_SIZE},
+    script_runs::{self as script_log, arg_kind, script_runs_memory_name},
+    varc_log::{self, varc_log_memory_name},
     read::short_string_text,
     state::{
         item_name_status, loc_status, menu_status, model_status, model_target, project_status, cache_kind, cache_status, CacheReply, CacheRequest, GameValRequest, ItemNameRequest, LocsReply, ModelRequest, NamesReply, worker_kind, worker_status, WorkerRequest, ProjectRequest, CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, ITEM_NAME_BATCH, PROJECT_BATCH,
@@ -2904,4 +2906,87 @@ unsafe fn put_pixel(buf: *mut u8, width: i32, height: i32, x: i32, y: i32, color
         *pixel.add(2) = color.r;
         *pixel.add(3) = color.a;
     }
+}
+
+/// The scripts the client ran for events, from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
+pub fn script_runs(pid: u32, since: u64, limit: usize) -> Result<crate::ScriptPage, String> {
+    let name = wide(script_runs_memory_name(pid));
+    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
+        .ok_or_else(|| format!("No script log in client {pid}: the agent isn't loaded, is too old, or didn't find the script runner"))?;
+    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, script_log::LOG_SIZE) };
+    if view.Value.is_null() {
+        return Err(format!("Cannot map the script log of client {pid}"));
+    }
+    let log = view.Value as *const script_log::Log;
+    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
+    let page = unsafe { script_log::is_compatible(log).then(|| script_log::read_since(log, since, limit)) };
+    unsafe { UnmapViewOfFile(view) };
+    let page = page.ok_or_else(|| format!("The script log of client {pid} has another layout: restart the client and load a matching agent"))?;
+    Ok(crate::ScriptPage {
+        next: page.next,
+        dropped: page.dropped,
+        runs: page
+            .entries
+            .into_iter()
+            .map(|entry| crate::ScriptRun {
+                sequence: entry.sequence,
+                time_ms: entry.time_ms,
+                event_type: entry.event_type,
+                arg_count: entry.arg_count,
+                depth: entry.depth,
+                args: entry
+                    .args
+                    .into_iter()
+                    .map(|(kind, value)| match kind {
+                        arg_kind::INT => value.to_string(),
+                        arg_kind::STRING => "\"…\"".into(),
+                        _ => "?".into(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+/// The client variable changes the scripts made, from sequence number `since` on (0 for the oldest the log still holds), at most `limit` of them.
+pub fn varc_changes(pid: u32, since: u64, limit: usize) -> Result<crate::VarcPage, String> {
+    let name = wide(varc_log_memory_name(pid));
+    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
+        .ok_or_else(|| format!("No varc log in client {pid}: the agent isn't loaded, is too old, or didn't find the varc setters"))?;
+    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, varc_log::LOG_SIZE) };
+    if view.Value.is_null() {
+        return Err(format!("Cannot map the varc log of client {pid}"));
+    }
+    let log = view.Value as *const varc_log::Log;
+    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
+    let page = unsafe { varc_log::is_compatible(log).then(|| varc_log::read_since(log, since, limit)) };
+    unsafe { UnmapViewOfFile(view) };
+    let page = page.ok_or_else(|| format!("The varc log of client {pid} has another layout: restart the client and load a matching agent"))?;
+    // the text a string keeps, with a mark when the log kept only the start of it
+    let text = |bytes: &[u8], length: u32| {
+        let mut text = String::from_utf8_lossy(bytes).into_owned();
+        if (bytes.len() as u32) < length {
+            text.push('…');
+        }
+        text
+    };
+    Ok(crate::VarcPage {
+        next: page.next,
+        dropped: page.dropped,
+        changes: page
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let string = entry.kind == varc_log::kind::STRING;
+                crate::VarcChange {
+                    sequence: entry.sequence,
+                    time_ms: entry.time_ms,
+                    index: entry.index,
+                    string,
+                    old: entry.old_known.then(|| if string { text(&entry.old_text, entry.old_length) } else { entry.old_int.to_string() }),
+                    new: if string { text(&entry.new_text, entry.new_length) } else { entry.new_int.to_string() },
+                }
+            })
+            .collect(),
+    })
 }

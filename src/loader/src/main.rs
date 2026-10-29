@@ -13,6 +13,7 @@ mod form;
 mod fold;
 mod highlight;
 mod script;
+mod script_log;
 mod session;
 mod store;
 mod terminal;
@@ -21,6 +22,7 @@ mod libs;
 mod logo;
 mod packets;
 mod update;
+mod vars;
 mod xp;
 
 use eframe::egui;

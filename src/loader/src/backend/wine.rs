@@ -238,6 +238,11 @@ pub fn varp(target: &Target, settings: &Settings, id: usize) -> Result<Option<i3
     run(&target.location, &helper, &["varp", &target.client.pid.to_string(), &id.to_string()])
 }
 
+pub fn varbits_of(target: &Target, settings: &Settings, varp: u16) -> Result<Vec<(i32, injector::config::VarbitDef, Option<String>)>, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["varbits-of", &target.client.pid.to_string(), &varp.to_string()])
+}
+
 pub fn widget(target: &Target, settings: &Settings, group: u16, child: u16) -> Result<Option<Widget>, String> {
     let helper = helper(settings)?;
     let (pid, group, child) = (target.client.pid.to_string(), group.to_string(), child.to_string());
@@ -275,6 +280,16 @@ pub fn players(target: &Target, settings: &Settings) -> Result<Vec<Player>, Stri
 pub fn packets(target: &Target, settings: &Settings, since: u64) -> Result<PacketPage, String> {
     let helper = helper(settings)?;
     run(&target.location, &helper, &["packets", &target.client.pid.to_string(), &since.to_string()])
+}
+
+pub fn script_runs(target: &Target, settings: &Settings, since: u64) -> Result<injector::ScriptPage, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["scripts", &target.client.pid.to_string(), &since.to_string()])
+}
+
+pub fn varc_changes(target: &Target, settings: &Settings, since: u64) -> Result<injector::VarcPage, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["varc-changes", &target.client.pid.to_string(), &since.to_string()])
 }
 
 /// `lib` is only for scripts run from a local file: store scripts get the downloaded lib beside them.

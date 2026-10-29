@@ -13,9 +13,11 @@ mod projection;
 mod projectiles;
 mod scene;
 mod scene_loader;
+mod script_runs;
 mod scripts;
 mod spot_anims;
 mod values;
+mod varc_setters;
 mod world_select;
 pub use values::{
     find_actor_lists, find_actor_names, find_appearance_decoder, find_item_containers, find_run_energy, find_varcs, AppearanceDecoder, World,
@@ -33,6 +35,8 @@ pub use menu::{find_menu, find_menu_click, find_menu_layout, find_menu_open, fin
 pub use camera::find_camera;
 pub use chat::find_chat;
 pub use packets::{find_packets, Packets, BUFFER_SIZE};
+pub use varc_setters::{find_varc_setters, VarcSetters, VARIANT_KIND, VARIANT_STRING};
+pub use script_runs::{find_script_runs, ScriptRuns, ARG_KIND, ARG_SIZE, KIND_INT};
 pub use spot_anims::find_spot_anims;
 pub use ground_items::{find_ground_items, find_item_pile};
 pub use minimap::{find_destination, find_minimap};
@@ -1583,6 +1587,55 @@ mod tests {
                 "{}",
                 build.display()
             );
+        }
+    }
+
+    #[test]
+    fn finds_script_runs_in_archived_builds() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let manifest = if cfg!(windows) && manifest.starts_with('/') { format!("Z:{manifest}") } else { manifest.into() };
+        let archive = std::path::Path::new(&manifest).join("../../archive");
+        let Ok(entries) = std::fs::read_dir(&archive) else {
+            eprintln!("skipped, no {}", archive.display());
+            return;
+        };
+        let mut builds: Vec<_> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
+            .collect();
+        builds.sort();
+        for build in builds {
+            let image = map_image(&std::fs::read(&build).unwrap());
+            let runs = find_script_runs(&image).unwrap_or_else(|error| panic!("script runs not found in {}: {error:?}", build.display()));
+            println!("{}: {runs:x?}", build.display());
+            // the layout is the same in every build; the address moves with the code
+            let name = build.file_name().unwrap().to_string_lossy();
+            let function = if name.contains("a2636a01") { 0x1995c0 } else { runs.function };
+            assert_eq!(runs, ScriptRuns { function, event_type: 0x8c, args: 0x10, arg_count: 8 }, "{}", build.display());
+        }
+    }
+
+    #[test]
+    fn finds_varc_setters_in_archived_builds() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let manifest = if cfg!(windows) && manifest.starts_with('/') { format!("Z:{manifest}") } else { manifest.into() };
+        let archive = std::path::Path::new(&manifest).join("../../archive");
+        let Ok(entries) = std::fs::read_dir(&archive) else {
+            eprintln!("skipped, no {}", archive.display());
+            return;
+        };
+        let mut builds: Vec<_> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
+            .collect();
+        builds.sort();
+        for build in builds {
+            let image = map_image(&std::fs::read(&build).unwrap());
+            let setters = find_varc_setters(&image).unwrap_or_else(|error| panic!("varc setters not found in {}: {error:?}", build.display()));
+            println!("{}: {setters:x?}", build.display());
+            if build.to_string_lossy().contains("a2636a01") {
+                assert_eq!(setters, VarcSetters { get_int: 0x33220, set_int: 0x33130, set_object: 0x333f0 }, "{}", build.display());
+            }
         }
     }
 

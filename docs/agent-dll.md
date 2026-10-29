@@ -26,6 +26,8 @@ The DLL is also a [Simba](https://github.com/Villavu/Simba) plugin: `src/simba/`
 | `src/client/offsets.rs`, `offsets/*.rs` | Offset rules, one module per feature. |
 | `src/client/own.rs` | In-process `Memory` impl, the global `Layout`, game-thread tracking. |
 | `src/client/packets.rs` | The packet log: creates `AGENT_PACKETS_<pid>` and detours the client's packet receive and send functions (rule in `offsets/packets.rs`). The hooks run on the game thread (receive) and the network thread (send), copy at most 104 payload bytes and return. |
+| `src/client/script_runs.rs` | The script log: creates `AGENT_SCRIPTS_<pid>` and detours the client's event script runner (rule in `offsets/script_runs.rs`; see "CS2 interpreter" in `reverse-engineering.md`). The hook runs on the game thread, reads the event's type and first arguments and calls through; a thread local counts nesting. Scripts started by the client without an event (by trigger lookup) aren't logged. |
+| `src/client/varc_log.rs` | The varc log: creates `AGENT_VARCS_<pid>` and detours the client's int and object (string) varc setters (rule in `offsets/varc_setters.rs`). An int's old value comes from the client's own getter before the call; a string's from what the hook last saw it set to. A set to the same value isn't logged. |
 | `src/client/*.rs` | Readers that use the rules' results (`state`, `scene`, `model`, `menu`, `items`, `cache`, `projection`, ...); `graphics.rs` does frame capture and overlay drawing. |
 | `src/simba/` | Simba plugin glue and per-pid input targets. |
 

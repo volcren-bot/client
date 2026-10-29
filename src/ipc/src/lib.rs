@@ -5,10 +5,12 @@ extern crate alloc;
 use alloc::{format, string::String};
 
 pub mod packets;
+pub mod script_runs;
+pub mod varc_log;
 pub mod read;
 pub mod state;
 
-pub const PROTOCOL_VERSION: u8 = 49;
+pub const PROTOCOL_VERSION: u8 = 50;
 
 pub const SHARED_MEMORY_PREFIX: &str = "AGENT_DATA_";
 
