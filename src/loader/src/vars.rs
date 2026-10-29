@@ -1,11 +1,13 @@
 //! The Var Inspector on the Development page: watches the client's varps and logs what changes, as RuneLite's does.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     time::{Duration, Instant},
 };
 
 use injector::{config::VarbitDef, VarcPage};
+
+use crate::log_view::{Filtered, Log, View};
 
 /// Entries kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
@@ -58,7 +60,9 @@ pub struct Inspector {
     pub follow: bool,
     pub error: Option<String>,
     pub varc_error: Option<String>,
-    log: VecDeque<Entry>,
+    log: Log<Entry>,
+    /// The entries `visible` shows, for the type boxes they were picked with (varbit, varp, varc int, varc string).
+    shown: Filtered<[bool; 4]>,
     /// The client the log is from; another client starts over.
     pid: Option<u32>,
     previous: Option<Vec<i32>>,
@@ -72,7 +76,7 @@ pub struct Inspector {
 
 impl Default for Inspector {
     fn default() -> Self {
-        Self { enabled: false, varbits: true, varps: true, varc_ints: true, varc_strings: true, follow: true, error: None, varc_error: None, log: VecDeque::new(), pid: None, previous: None, varc_next: None, known: HashMap::new(), reading: false, next_poll: None }
+        Self { enabled: false, varbits: true, varps: true, varc_ints: true, varc_strings: true, follow: true, error: None, varc_error: None, log: Log::default(), shown: Filtered::default(), pid: None, previous: None, varc_next: None, known: HashMap::new(), reading: false, next_poll: None }
     }
 }
 
@@ -173,25 +177,21 @@ impl Inspector {
                 } else {
                     self.previous = None;
                 }
-                while self.log.len() > KEEP {
-                    self.log.pop_front();
-                }
+                self.log.keep(KEEP);
             }
             Err(error) => self.error = Some(error),
         }
     }
 
     /// The kept entries that pass the type boxes, oldest first.
-    pub fn visible(&self) -> Vec<&Entry> {
-        self.log
-            .iter()
-            .filter(|e| match e.kind {
-                Kind::Varbit => self.varbits,
-                Kind::Varp => self.varps,
-                Kind::VarcInt => self.varc_ints,
-                Kind::VarcStr => self.varc_strings,
-            })
-            .collect()
+    pub fn visible(&self) -> View<'_, Entry, [bool; 4]> {
+        let boxes = [self.varbits, self.varps, self.varc_ints, self.varc_strings];
+        self.shown.view(&self.log, boxes, |e| match e.kind {
+            Kind::Varbit => boxes[0],
+            Kind::Varp => boxes[1],
+            Kind::VarcInt => boxes[2],
+            Kind::VarcStr => boxes[3],
+        })
     }
 }
 

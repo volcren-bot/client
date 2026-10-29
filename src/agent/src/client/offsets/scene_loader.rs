@@ -6,8 +6,8 @@ const NEIGHBOURS: u32 = 0x400;
 const MIN_OFFSET: i32 = 0x1000;
 const MAX_OFFSET: i32 = 0x10000;
 
-pub fn find_instance_flag(image: &[u8]) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_instance_flag(pe: &Pe) -> Result<u32, ScanError> {
+    let image = pe.image;
 
     // flag offset -> (functions that store 0, functions that store 1)
     let mut stores: HashMap<i32, (HashSet<u32>, HashSet<u32>)> = HashMap::new();
@@ -33,7 +33,7 @@ pub fn find_instance_flag(image: &[u8]) -> Result<u32, ScanError> {
     for (&disp, (zeros, ones)) in &stores {
         for &zero in zeros {
             for &one in ones {
-                if zero != one && zero.abs_diff(one) <= NEIGHBOURS && shared_calls(&pe, zero, one) >= SHARED_CALLS {
+                if zero != one && zero.abs_diff(one) <= NEIGHBOURS && shared_calls(pe, zero, one) >= SHARED_CALLS {
                     found.push(disp as u32);
                 }
             }

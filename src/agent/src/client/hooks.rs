@@ -46,7 +46,7 @@ use super::offsets::{
     find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
     find_varps, find_interfaces, find_item_containers, find_item_setter, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
     find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_packets, find_script_runs, find_varc_setters, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
-    find_world_select, ScanError, World,
+    find_world_select, Pe, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
 use ipc::{cursor_style, overlay_mode};
@@ -517,46 +517,52 @@ unsafe fn find_offsets() {
         set_found(false);
         return;
     };
+    let Some(pe) = Pe::parse(image) else {
+        println!("[Agent]: Client image isn't a 64-bit PE.\r\n");
+        set_found(false);
+        return;
+    };
+    let pe = &pe;
 
-    let actor = found("Actor position", find_actor_position(image));
-    let player = found("Local player", find_local_player(image));
-    let game_state = found("Game state", find_game_state(image));
-    let skills = player.and_then(|p| found("Skills", find_skills(image, p.client)));
-    let tick_count = player.and_then(|p| found("Tick count", find_tick_count(image, p.client)));
-    let varps = found("Varps", find_varps(image));
-    let login = game_state.and_then(|offset| found("Login panel", find_login_panel(image, offset)));
-    let interfaces = found("Interfaces", find_interfaces(image));
-    let sprite = interfaces.and_then(|_| found("Component sprite", find_component_sprite(image)));
-    let invalidate = found("Component invalidation", find_component_invalidate(image));
-    let fields = interfaces.and_then(|_| found("Component fields", find_component_fields(image)));
-    let world_select = player.and_then(|p| found("World select", find_world_select(image, p.client)));
-    let minimap = player.and_then(|p| found("Minimap", find_minimap(image, p.client)));
-    let destination = minimap.and_then(|m| found("Destination", find_destination(image, m.object)));
-    let ground_items = found("Ground items", find_ground_items(image));
-    let chat = found("Chat", find_chat(image));
-    let projectiles = found("Projectiles", find_projectiles(image));
-    let spot_anims = found("Spot animations", find_spot_anims(image));
-    let packets = found("Packets", find_packets(image));
-    let script_runs = found("Script runs", find_script_runs(image));
-    let varc_setters = found("Varc setters", find_varc_setters(image));
-    let containers = find_item_containers(image);
-    let item_setter = containers.ok().and_then(|c| found("Item setter", find_item_setter(image, &c)).map(|rule| (rule, c)));
-    let camera = player.and_then(|p| found("Camera", find_camera(image, p.client)));
-    let projection = player.and_then(|p| found("Projection", find_projection(image, p.client)));
-    let scene = projection.and_then(|_| found("Scene", find_scene(image)));
-    let collision = scene.and_then(|s| found("Collision maps", find_collision_maps(image, &s)));
-    let instance_flag = found("Instance flag", find_instance_flag(image));
+    let actor = found("Actor position", find_actor_position(pe));
+    let player = found("Local player", find_local_player(pe));
+    let game_state = found("Game state", find_game_state(pe));
+    let skills = player.and_then(|p| found("Skills", find_skills(pe, p.client)));
+    let tick_count = player.and_then(|p| found("Tick count", find_tick_count(pe, p.client)));
+    let varps = found("Varps", find_varps(pe));
+    let login = game_state.and_then(|offset| found("Login panel", find_login_panel(pe, offset)));
+    let interfaces = found("Interfaces", find_interfaces(pe));
+    let sprite = interfaces.and_then(|_| found("Component sprite", find_component_sprite(pe)));
+    let invalidate = found("Component invalidation", find_component_invalidate(pe));
+    let fields = interfaces.and_then(|_| found("Component fields", find_component_fields(pe)));
+    let world_select = player.and_then(|p| found("World select", find_world_select(pe, p.client)));
+    let minimap = player.and_then(|p| found("Minimap", find_minimap(pe, p.client)));
+    let destination = minimap.and_then(|m| found("Destination", find_destination(pe, m.object)));
+    let ground_items = found("Ground items", find_ground_items(pe));
+    let chat = found("Chat", find_chat(pe));
+    let projectiles = found("Projectiles", find_projectiles(pe));
+    let spot_anims = found("Spot animations", find_spot_anims(pe));
+    let packets = found("Packets", find_packets(pe));
+    let script_runs = found("Script runs", find_script_runs(pe));
+    let varc_setters = found("Varc setters", find_varc_setters(pe));
+    let containers = find_item_containers(pe);
+    let item_setter = containers.ok().and_then(|c| found("Item setter", find_item_setter(pe, &c)).map(|rule| (rule, c)));
+    let camera = player.and_then(|p| found("Camera", find_camera(pe, p.client)));
+    let projection = player.and_then(|p| found("Projection", find_projection(pe, p.client)));
+    let scene = projection.and_then(|_| found("Scene", find_scene(pe)));
+    let collision = scene.and_then(|s| found("Collision maps", find_collision_maps(pe, &s)));
+    let instance_flag = found("Instance flag", find_instance_flag(pe));
     let local_projection = player.zip(interfaces).zip(projection.zip(scene)).and_then(|((p, i), (projection, scene))| {
-        found("Local projection", find_local_projection(image, p.client, i.canvas, &projection, &scene))
+        found("Local projection", find_local_projection(pe, p.client, i.canvas, &projection, &scene))
     });
     let world = player.zip(actor).and_then(|(player, actor)| {
         let world = (|| {
             Ok::<_, (&str, ScanError)>(World {
                 containers: containers.map_err(|e| ("item containers", e))?,
-                varcs: find_varcs(image, player.client).map_err(|e| ("varcs", e))?,
-                run_energy: find_run_energy(image).map_err(|e| ("run energy", e))?,
-                lists: find_actor_lists(image).map_err(|e| ("NPC and player lists", e))?,
-                names: find_actor_names(image).map_err(|e| ("actor names", e))?,
+                varcs: find_varcs(pe, player.client).map_err(|e| ("varcs", e))?,
+                run_energy: find_run_energy(pe).map_err(|e| ("run energy", e))?,
+                lists: find_actor_lists(pe).map_err(|e| ("NPC and player lists", e))?,
+                names: find_actor_names(pe).map_err(|e| ("actor names", e))?,
                 player,
                 actor,
             })
@@ -806,7 +812,7 @@ unsafe fn find_offsets() {
     }
     let _ = super::own::LAYOUT.set(layout);
     if let Some(w) = world {
-        if let Some(decoder) = found("Appearance decoder", find_appearance_decoder(image, w.names.player_name, w.player.player_index)) {
+        if let Some(decoder) = found("Appearance decoder", find_appearance_decoder(pe, w.names.player_name, w.player.player_index)) {
             super::name::hook_decoder(module_base, decoder);
         }
     }
@@ -827,9 +833,9 @@ unsafe fn find_offsets() {
     if let Some((rule, containers)) = item_setter {
         super::item_log::hook(module_base, rule, containers, player.zip(tick_count).map(|(p, offset)| (p.client, offset)));
     }
-    if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(image)) {
+    if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(pe)) {
         super::items::set_lookup(module_base, rule);
-        if let Some(game_vals) = player.and_then(|p| found("Game vals", find_game_vals(image, p.client, &rule))) {
+        if let Some(game_vals) = player.and_then(|p| found("Game vals", find_game_vals(pe, p.client, &rule))) {
             super::items::set_game_vals(module_base, game_vals);
         }
     }
@@ -837,12 +843,12 @@ unsafe fn find_offsets() {
         super::projection::set_projection(module_base, rule);
     }
     if let (Some(projection), Some(scene)) = (projection, scene) {
-        let game = found("Game objects", find_game_object_layout(image, &scene));
-        let decoration = found("Decorations", find_decoration_layout(image, &scene));
-        let names = found("Loc names", find_loc_names(image));
-        let item_pile = decoration.and_then(|d| found("Item pile", find_item_pile(image, &d)));
+        let game = found("Game objects", find_game_object_layout(pe, &scene));
+        let decoration = found("Decorations", find_decoration_layout(pe, &scene));
+        let names = found("Loc names", find_loc_names(pe));
+        let item_pile = decoration.and_then(|d| found("Item pile", find_item_pile(pe, &d)));
         if let (Some(game), Some(decoration), Some(names)) = (game, decoration, names) {
-            let configs = found("Loc configs", find_loc_configs(image, &scene, &game));
+            let configs = found("Loc configs", find_loc_configs(pe, &scene, &game));
             super::scene::set_scene(super::scene::Rules {
                 module_base,
                 scene,
@@ -856,26 +862,26 @@ unsafe fn find_offsets() {
             });
         }
     }
-    if let Some(rule) = found("Menu", find_menu(image)) {
+    if let Some(rule) = found("Menu", find_menu(pe)) {
         super::menu::set_menu(module_base, rule);
-        if let Some(click) = found("Menu click", find_menu_click(image, &rule)) {
+        if let Some(click) = found("Menu click", find_menu_click(pe, &rule)) {
             super::menu::set_menu_click(click);
-            if let Some(open) = found("Menu open", find_menu_open(image, &click)) {
+            if let Some(open) = found("Menu open", find_menu_open(pe, &click)) {
                 super::menu::set_menu_open(open);
             }
-            if let Some(layout) = found("Menu layout", find_menu_layout(image, &click)) {
+            if let Some(layout) = found("Menu layout", find_menu_layout(pe, &click)) {
                 super::menu::set_menu_layout(layout);
             }
         }
-        if let Some(selection) = found("Selection", find_selection(image, &rule)) {
+        if let Some(selection) = found("Selection", find_selection(pe, &rule)) {
             super::menu::set_selection(selection);
         }
     }
-    if let Some(rule) = world.and_then(|w| found("NPC model", find_npc_model(image, w.names.npc_definition))) {
-        let vertices = found("Model vertices", find_model_vertices(image, &rule));
-        let orientation = found("Actor orientation", find_actor_orientation(image));
-        let height = world.and_then(|w| found("Animation height", find_animation_height(image, w.names.npc_definition)));
-        let faces = vertices.and_then(|v| found("Model faces", find_model_faces(image, &v)));
+    if let Some(rule) = world.and_then(|w| found("NPC model", find_npc_model(pe, w.names.npc_definition))) {
+        let vertices = found("Model vertices", find_model_vertices(pe, &rule));
+        let orientation = found("Actor orientation", find_actor_orientation(pe));
+        let height = world.and_then(|w| found("Animation height", find_animation_height(pe, w.names.npc_definition)));
+        let faces = vertices.and_then(|v| found("Model faces", find_model_faces(pe, &v)));
         if let (Some(vertices), Some(faces), Some(orientation), Some(height)) = (vertices, faces, orientation, height) {
             super::model::set_npc_model(module_base, image, rule, vertices, faces, orientation, height);
         }

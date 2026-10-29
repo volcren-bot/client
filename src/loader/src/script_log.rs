@@ -1,11 +1,10 @@
 //! The Script Inspector on the Development page: the scripts the client ran for events, kept and filtered for display.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use injector::{ScriptPage, ScriptRun};
+
+use crate::log_view::{Filtered, Log, View};
 
 /// Runs kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
@@ -84,7 +83,9 @@ pub struct Inspector {
     /// Runs lost to the log's ring overwriting them before the loader read them, since the last clear.
     pub dropped: u64,
     pub error: Option<String>,
-    rows: VecDeque<Row>,
+    rows: Log<Row>,
+    /// The rows `visible` shows, for the trigger box they were picked with.
+    shown: Filtered<bool>,
     /// The client the rows are from, and the sequence number to ask it for next.
     pid: Option<u32>,
     next: u64,
@@ -101,7 +102,8 @@ impl Default for Inspector {
             blacklist: DEFAULT_BLACKLIST.into(),
             dropped: 0,
             error: None,
-            rows: VecDeque::new(),
+            rows: Log::default(),
+            shown: Filtered::default(),
             pid: None,
             next: 0,
             reading: false,
@@ -161,13 +163,11 @@ impl Inspector {
                     } else {
                         let row = Row { run, duration_us: None };
                         if !blacklist.hides(&row) {
-                            self.rows.push_back(row);
+                            self.rows.push(row);
                         }
                     }
                 }
-                while self.rows.len() > KEEP {
-                    self.rows.pop_front();
-                }
+                self.rows.keep(KEEP);
             }
             Err(error) => self.error = Some(error),
         }
@@ -189,8 +189,9 @@ impl Inspector {
     }
 
     /// The kept rows that pass the trigger box, oldest first.
-    pub fn visible(&self) -> Vec<&Row> {
-        self.rows.iter().filter(|row| self.triggers || row.script_id().is_some()).collect()
+    pub fn visible(&self) -> View<'_, Row, bool> {
+        let triggers = self.triggers;
+        self.shown.view(&self.rows, triggers, |row| triggers || row.script_id().is_some())
     }
 }
 

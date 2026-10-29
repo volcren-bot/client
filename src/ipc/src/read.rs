@@ -105,29 +105,50 @@ pub fn current_game_state(memory: &impl Memory, layout: &Layout) -> Option<i32> 
 }
 
 pub fn table_get(memory: &impl Memory, table: u64, key: i32) -> Option<u64> {
-    let buckets = memory.ptr(table + TABLE_BUCKETS)?;
-    let count = memory.i32(table + TABLE_COUNT)? as u32 as u64;
-    if count == 0 || key < 0 {
-        return None;
-    }
-    let end = memory.u64(buckets + count * 8)?;
-    let mut node = memory.u64(buckets + (key as u64 % count) * 8)?;
-    for _ in 0..MAX_CHAIN {
-        if node == 0 || node == end {
+    Table::open(memory, table)?.get(memory, key)
+}
+
+/// A table `table_get` reads, its header read once for looking up many keys.
+#[derive(Clone, Copy)]
+pub struct Table {
+    buckets: u64,
+    count: u64,
+    end: u64,
+}
+
+impl Table {
+    pub fn open(memory: &impl Memory, table: u64) -> Option<Self> {
+        let buckets = memory.ptr(table + TABLE_BUCKETS)?;
+        let count = memory.i32(table + TABLE_COUNT)? as u32 as u64;
+        if count == 0 {
             return None;
         }
-        // one read covers the node's key, value and next pointer
-        let mut fields = [0u8; NODE_SIZE];
-        if !memory.read(node, &mut fields) {
+        let end = memory.u64(buckets + count * 8)?;
+        Some(Self { buckets, count, end })
+    }
+
+    pub fn get(&self, memory: &impl Memory, key: i32) -> Option<u64> {
+        if key < 0 {
             return None;
         }
-        if i32::from_le_bytes(fields[..4].try_into().ok()?) == key {
-            let value = u64::from_le_bytes(fields[NODE_VALUE as usize..][..8].try_into().ok()?);
-            return (value != 0).then_some(value);
+        let mut node = memory.u64(self.buckets + (key as u64 % self.count) * 8)?;
+        for _ in 0..MAX_CHAIN {
+            if node == 0 || node == self.end {
+                return None;
+            }
+            // one read covers the node's key, value and next pointer
+            let mut fields = [0u8; NODE_SIZE];
+            if !memory.read(node, &mut fields) {
+                return None;
+            }
+            if i32::from_le_bytes(fields[..4].try_into().ok()?) == key {
+                let value = u64::from_le_bytes(fields[NODE_VALUE as usize..][..8].try_into().ok()?);
+                return (value != 0).then_some(value);
+            }
+            node = u64::from_le_bytes(fields[NODE_NEXT as usize..].try_into().ok()?);
         }
-        node = u64::from_le_bytes(fields[NODE_NEXT as usize..].try_into().ok()?);
+        None
     }
-    None
 }
 
 /// Every (key, value) in a table `table_get` reads, in no order.

@@ -51,7 +51,7 @@ use windows_sys::{
 
 use ipc::{
     HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, overlay_mode, overlay_offset, shared_memory_name,
-    frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name,
+    frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name, worker_reply_event_name,
     packets::{self as packet_log, direction, packets_memory_name, Log, LOG_SIZE},
     script_runs::{self as script_log, arg_kind, phase as script_runs_phase, script_runs_memory_name},
     varc_log::{self, varc_log_memory_name},
@@ -490,6 +490,8 @@ struct Session {
     work: OnceLock<Option<Handle>>,
     // The mutex guarding the worker's request slot, opened on first use.
     slot: OnceLock<Option<Handle>>,
+    // The event the agent sets after answering the worker's request, opened on first use (`None` when it has none).
+    reply: OnceLock<Option<Handle>>,
     // The agent's frame event, opened on first use (`None` when it has none).
     frame: OnceLock<Option<Handle>>,
 }
@@ -511,7 +513,7 @@ fn session(pid: u32) -> Result<Arc<Session>, String> {
     let view = StateView::open(pid, true)?;
     let process = Handle::new(unsafe { OpenProcess(PROCESS_VM_READ, 0, pid) })
         .ok_or_else(|| format!("Cannot open client {pid} to read it"))?;
-    let session = Arc::new(Session { process: Arc::new(process), view, born: Instant::now(), work: OnceLock::new(), slot: OnceLock::new(), frame: OnceLock::new() });
+    let session = Arc::new(Session { process: Arc::new(process), view, born: Instant::now(), work: OnceLock::new(), slot: OnceLock::new(), reply: OnceLock::new(), frame: OnceLock::new() });
     sessions.push((pid, session.clone()));
     Ok(session)
 }
@@ -1710,8 +1712,7 @@ pub fn npcs(pid: u32) -> Result<Vec<Npc>, String> {
     Ok(worker::npcs(&memory, &layout))
 }
 
-// How long to yield while the worker answers, then sleep between checks, and how long a request may take before the caller reads the memory itself.
-const WORKER_SPIN: Duration = Duration::from_micros(500);
+// How long a request may take before the caller reads the memory itself.
 const WORKER_TIMEOUT: Duration = Duration::from_millis(50);
 
 thread_local! {
@@ -1750,6 +1751,13 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
             Handle::new(unsafe { CreateMutexW(null(), 0, name.as_ptr()) })
         })
         .as_ref()?;
+    let reply = session
+        .reply
+        .get_or_init(|| {
+            let name = wide(worker_reply_event_name(pid));
+            Handle::new(unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) })
+        })
+        .as_ref()?;
     let wait = WORKER_TIMEOUT.as_millis() as u32;
     // An abandoned mutex (its owner died with it) is ours all the same; the slot is rewritten below.
     if !matches!(unsafe { WaitForSingleObject(mutex.0, wait) }, WAIT_OBJECT_0 | WAIT_ABANDONED) {
@@ -1770,15 +1778,12 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
             {
                 break status;
             }
-            let waited = start.elapsed();
-            if waited >= WORKER_TIMEOUT {
+            let left = WORKER_TIMEOUT.saturating_sub(start.elapsed());
+            if left.is_zero() {
                 return None;
             }
-            if waited < WORKER_SPIN {
-                std::thread::yield_now();
-            } else {
-                sleep(Duration::from_micros(100));
-            }
+            // A wake left over from an answer its asker gave up on finds no answer here and waits again.
+            unsafe { WaitForSingleObject(reply.0, left.as_millis().max(1) as u32) };
         };
         if status != worker_status::OK {
             return None;

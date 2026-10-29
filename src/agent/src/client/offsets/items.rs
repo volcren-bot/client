@@ -82,11 +82,10 @@ fn string_fields_assigned(pe: &Pe, function: u32) -> Option<(HashSet<u32>, bool)
     Some((fields, recursive))
 }
 
-pub fn find_obj_type_lookup(image: &[u8]) -> Result<ObjTypeLookup, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let wrapper = usertype_member(&pe, "osrs.ObjType", "getDesc")?;
-    let (function, desc) = lookup_in_wrapper(&pe, wrapper).ok_or(ScanError::NotFound)?;
-    let (fields, recursive) = string_fields_assigned(&pe, function).ok_or(ScanError::NotFound)?;
+pub fn find_obj_type_lookup(pe: &Pe) -> Result<ObjTypeLookup, ScanError> {
+    let wrapper = usertype_member(pe, "osrs.ObjType", "getDesc")?;
+    let (function, desc) = lookup_in_wrapper(pe, wrapper).ok_or(ScanError::NotFound)?;
+    let (fields, recursive) = string_fields_assigned(pe, function).ok_or(ScanError::NotFound)?;
     let name = desc.checked_sub(STRING_SIZE).ok_or(ScanError::NotFound)?;
     if !recursive || !fields.contains(&name) {
         return Err(ScanError::NotFound);
@@ -198,11 +197,10 @@ fn cache_table(pe: &Pe, reader: u32) -> Option<CacheTable> {
     })
 }
 
-pub fn find_game_vals(image: &[u8], client: u32, lookup: &ObjTypeLookup) -> Result<GameVals, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let reader = cache_reader(&pe, lookup.function).ok_or(ScanError::NotFound)?;
-    let index = gamevals_index(&pe, client)?;
-    let table = cache_table(&pe, reader).ok_or(ScanError::NotFound)?;
+pub fn find_game_vals(pe: &Pe, client: u32, lookup: &ObjTypeLookup) -> Result<GameVals, ScanError> {
+    let reader = cache_reader(pe, lookup.function).ok_or(ScanError::NotFound)?;
+    let index = gamevals_index(pe, client)?;
+    let table = cache_table(pe, reader).ok_or(ScanError::NotFound)?;
     Ok(GameVals { index, reader, table })
 }
 

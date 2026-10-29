@@ -90,7 +90,7 @@ fn layout_function(pe: &Pe) -> Result<(u32, u32), ScanError> {
 
 fn draw_function(pe: &Pe, layout: u32) -> Result<(u32, u32), ScanError> {
     let mut found = Vec::new();
-    for (site, target) in direct_calls(pe) {
+    for &(site, target) in direct_calls(pe) {
         if target != layout {
             continue;
         }
@@ -223,7 +223,7 @@ fn open_function(pe: &Pe, max_offset: u32) -> Result<(u32, u32), ScanError> {
 
 fn login_draw(pe: &Pe, draw: u32, open: u32, client: u32, format: u32) -> Result<(u32, u32, u32), ScanError> {
     let mut found = Vec::new();
-    for (site, target) in direct_calls(pe) {
+    for &(site, target) in direct_calls(pe) {
         if target != draw {
             continue;
         }
@@ -272,16 +272,15 @@ fn login_draw(pe: &Pe, draw: u32, open: u32, client: u32, format: u32) -> Result
     one(found)
 }
 
-pub fn find_world_select(image: &[u8], client: u32) -> Result<WorldSelect, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let (layout, count) = layout_function(&pe)?;
-    let (begin, end) = draw_function(&pe, layout)?;
-    let instrs = function_instrs(&pe, begin, end);
+pub fn find_world_select(pe: &Pe, client: u32) -> Result<WorldSelect, ScanError> {
+    let (layout, count) = layout_function(pe)?;
+    let (begin, end) = draw_function(pe, layout)?;
+    let instrs = function_instrs(pe, begin, end);
     let max_offset = max_offset(&instrs)?;
     let hovered = hovered(&instrs)?;
     let (worlds, loads) = world_loads(&instrs)?;
-    let (world, format) = world_fields(&pe, &instrs, &loads)?;
-    let (open, offset) = open_function(&pe, max_offset)?;
-    let (current_world, background, background_height) = login_draw(&pe, begin, open, client, format)?;
+    let (world, format) = world_fields(pe, &instrs, &loads)?;
+    let (open, offset) = open_function(pe, max_offset)?;
+    let (current_world, background, background_height) = login_draw(pe, begin, open, client, format)?;
     Ok(WorldSelect { open, count, worlds, offset, max_offset, hovered, current_world, background, background_height, world })
 }

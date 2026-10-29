@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ipc::state::worker_status;
+use windows::Win32::{Foundation::HANDLE, System::Threading::SetEvent};
 
 use super::{
     own::{OwnMemory, LAYOUT},
@@ -13,8 +14,8 @@ fn shared() -> Option<Arc<Mapping>> {
     LAYOUT_MAP.get().and_then(|map| map.memory())
 }
 
-/// Answers the request in the slot unless it was answered already.
-pub fn on_work() {
+/// Answers the request in the slot unless it was answered already, then sets `done` (`ipc::worker_reply_event_name`) for the asker.
+pub fn on_work(done: HANDLE) {
     let Some(mapping) = shared() else { return };
     let shared = mapping.shared();
     let Some((sequence, request)) = shared.read_worker_request().filter(|(s, _)| shared.worker_reply_answers() != Some(*s)) else {
@@ -34,4 +35,5 @@ pub fn on_work() {
             },
         };
     });
+    let _ = unsafe { SetEvent(done) };
 }

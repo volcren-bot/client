@@ -39,19 +39,18 @@ fn container_slot_getter(instrs: &[Instruction]) -> Option<(u32, u32, u32, u32, 
     compares_key.then_some((*count, *buckets, next, vector, miss))
 }
 
-pub fn find_item_containers(image: &[u8]) -> Result<ItemContainers, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_item_containers(pe: &Pe) -> Result<ItemContainers, ScanError> {
     const INTERFACE_THRESHOLD: u32 = -70000i32 as u32;
 
-    let handlers: HashSet<(u32, u32)> = dword_hits(&pe, INTERFACE_THRESHOLD)
+    let handlers: HashSet<(u32, u32)> = dword_hits(pe, INTERFACE_THRESHOLD)
         .into_iter()
         .filter_map(|hit| pe.function_containing(hit))
         .collect();
-    let calls = direct_calls(&pe);
+    let calls = direct_calls(pe);
     let mut getters = Vec::new();
-    for &(site, target) in &calls {
+    for &(site, target) in calls {
         if handlers.iter().any(|&(begin, end)| (begin..end).contains(&site)) {
-            getters.extend(container_slot_getter(&decode_at(&pe, target, 30)));
+            getters.extend(container_slot_getter(&decode_at(pe, target, 30)));
         }
     }
     let ids = one(getters.iter().filter(|g| g.4).map(|g| (g.1, g.2, g.3)).collect())?;
@@ -72,10 +71,9 @@ pub struct Varcs {
     pub kind: u32,
 }
 
-pub fn find_varcs(image: &[u8], client: u32) -> Result<Varcs, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let getter = lua_binding(&pe, "getIntegerVarc")?;
-    let instrs = decode_at(&pe, getter, 3);
+pub fn find_varcs(pe: &Pe, client: u32) -> Result<Varcs, ScanError> {
+    let getter = lua_binding(pe, "getIntegerVarc")?;
+    let instrs = decode_at(pe, getter, 3);
     let [global, object, jmp, ..] = instrs.as_slice() else { return Err(ScanError::NotFound) };
     let reads_client = global.is_ip_rel_memory_operand() && global.ip_rel_memory_address() as u32 == client;
     let object = load_from(object, Register::RAX).filter(|_| object.op0_register() == Register::RCX);
@@ -83,7 +81,7 @@ pub fn find_varcs(image: &[u8], client: u32) -> Result<Varcs, ScanError> {
         return Err(ScanError::NotFound);
     };
 
-    let lookup = decode_at(&pe, jmp.near_branch_target() as u32, 24);
+    let lookup = decode_at(pe, jmp.near_branch_target() as u32, 24);
     let begin = lookup.iter().find_map(|i| load_from(i, Register::RCX).filter(|_| i.op0_register() == Register::RCX));
     let end = lookup.iter().find_map(|i| load_from(i, Register::RCX).filter(|_| i.op0_register() == Register::RDX));
     let entry_size = lookup.iter().find_map(|i| {
@@ -109,8 +107,7 @@ pub struct RunEnergy {
     pub weight: u32,
 }
 
-pub fn find_run_energy(image: &[u8]) -> Result<RunEnergy, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_run_energy(pe: &Pe) -> Result<RunEnergy, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let instrs: Vec<Instruction> =
@@ -154,10 +151,9 @@ fn object_operand(instr: &Instruction, operand: u32) -> Option<u32> {
         .then(|| instr.memory_displacement64() as u32)
 }
 
-pub fn find_actor_lists(image: &[u8]) -> Result<ActorLists, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_actor_lists(pe: &Pe) -> Result<ActorLists, ScanError> {
 
-    let npc_all = decode_at(&pe, lua_binding(&pe, "getNpcIdAll")?, 80);
+    let npc_all = decode_at(pe, lua_binding(pe, "getNpcIdAll")?, 80);
     let counts: Vec<u32> = npc_all
         .iter()
         .filter(|i| i.mnemonic() == Mnemonic::Cmp && i.op1_kind() == OpKind::Memory && i.op0_register().size() == 4)
@@ -170,7 +166,7 @@ pub fn find_actor_lists(image: &[u8]) -> Result<ActorLists, ScanError> {
         .collect();
     let npc_indices = one(counts.iter().filter(|&&c| c >= 8 && lists.contains(&(c - 8))).map(|&c| c - 8).collect())?;
 
-    let player_all = decode_at(&pe, lua_binding(&pe, "getPlayerIdAll")?, 30);
+    let player_all = decode_at(pe, lua_binding(pe, "getPlayerIdAll")?, 30);
     let player_count = player_all
         .iter()
         .find_map(|i| (i.mnemonic() == Mnemonic::Movsxd).then(|| object_operand(i, 1)).flatten())
@@ -257,15 +253,14 @@ fn npc_name_getter(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
     })
 }
 
-pub fn find_actor_names(image: &[u8]) -> Result<ActorNames, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let by_name = lua_binding(&pe, "getNpcIdByName")?;
-    let calls = direct_calls(&pe);
+pub fn find_actor_names(pe: &Pe) -> Result<ActorNames, ScanError> {
+    let by_name = lua_binding(pe, "getNpcIdByName")?;
+    let calls = direct_calls(pe);
     let (begin, end) = (by_name, by_name + 0x800);
     let getters: Vec<(u32, u32, u32)> = calls
         .iter()
         .filter(|&&(site, _)| (begin..end).contains(&site))
-        .filter_map(|&(_, target)| npc_name_getter(&decode_at(&pe, target, 120)))
+        .filter_map(|&(_, target)| npc_name_getter(&decode_at(pe, target, 120)))
         .collect();
     let (npc_name_override, npc_definition, definition_name) = one(getters)?;
 
@@ -308,8 +303,7 @@ pub struct AppearanceDecoder {
     pub actor_id: u32,
 }
 
-pub fn find_appearance_decoder(image: &[u8], player_name: u32, player_index: u32) -> Result<AppearanceDecoder, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_appearance_decoder(pe: &Pe, player_name: u32, player_index: u32) -> Result<AppearanceDecoder, ScanError> {
     let pointer = player_name.checked_sub(8).ok_or(ScanError::NotFound)?;
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {

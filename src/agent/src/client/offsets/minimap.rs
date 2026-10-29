@@ -110,12 +110,11 @@ fn focal_reads(instrs: &[Instruction], client: u32) -> Vec<u32> {
     floats.iter().copied().filter(|d| floats.contains(&(d + 8))).collect()
 }
 
-pub fn find_minimap(image: &[u8], client: u32) -> Result<Minimap, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let calls = content_type_calls(&pe);
+pub fn find_minimap(pe: &Pe, client: u32) -> Result<Minimap, ScanError> {
+    let calls = content_type_calls(pe);
     let object = one(calls.iter().map(|&(object, _)| object).collect())?;
     let targets: HashSet<u32> = calls.iter().map(|&(_, target)| target).collect();
-    let functions: Vec<Vec<Instruction>> = targets.iter().map(|&target| whole_function(&pe, target, 0x4000)).collect();
+    let functions: Vec<Vec<Instruction>> = targets.iter().map(|&target| whole_function(pe, target, 0x4000)).collect();
     let draw = one(functions.iter().enumerate().filter(|(_, f)| !zoom_reads(f).is_empty()).map(|(at, _)| at).collect())?;
     let zoom = one(zoom_reads(&functions[draw]))?;
     let focal_x = one(focal_reads(&functions[draw], client))?;
@@ -167,14 +166,13 @@ fn destination_compares(instrs: &[Instruction], object: u32) -> Vec<u32> {
         .collect()
 }
 
-pub fn find_destination(image: &[u8], object: u32) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_destination(pe: &Pe, object: u32) -> Result<u32, ScanError> {
     let mut seen = HashSet::new();
     let mut found = Vec::new();
-    for hit in dword_hits(&pe, object) {
+    for hit in dword_hits(pe, object) {
         let Some((begin, _)) = pe.function_containing(hit) else { continue };
         if seen.insert(begin) {
-            found.extend(destination_compares(&whole_function(&pe, begin, 0x400), object));
+            found.extend(destination_compares(&whole_function(pe, begin, 0x400), object));
         }
     }
     one(found)

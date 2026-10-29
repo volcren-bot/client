@@ -1484,7 +1484,7 @@ impl LoaderApp {
         let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
         egui::ScrollArea::both().id_salt("script_log").auto_shrink([false, false]).stick_to_bottom(inspector.follow).show_rows(ui, row_height, visible.len(), |ui, rows| {
             for index in rows {
-                let row = visible[index];
+                let row = &visible[index];
                 let first = index == 0 || visible[index - 1].run.tick != row.run.tick;
                 ui.label(egui::RichText::new(format!("{}{}", tick_column(first, row.run.tick), row.text())).font(font.clone()));
             }
@@ -1525,7 +1525,7 @@ impl LoaderApp {
         let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
         egui::ScrollArea::both().id_salt("vars").auto_shrink([false, false]).stick_to_bottom(inspector.follow).show_rows(ui, row_height, visible.len(), |ui, rows| {
             for index in rows {
-                let entry = visible[index];
+                let entry = &visible[index];
                 // the tick is shown on the first entry of each tick (a row of its own would break the fixed row height)
                 let first = index == 0 || visible[index - 1].tick != entry.tick;
                 let kind = match entry.kind {
@@ -1582,7 +1582,7 @@ impl LoaderApp {
                 .auto_shrink([false, false])
                 .stick_to_bottom(monitor.follow)
                 .show_rows(ui, row_height, visible.len(), |ui, rows| {
-                    for packet in &visible[rows] {
+                    for packet in visible.range(rows) {
                         let text = format!(
                             "{:>9.3}  {}  {:>3}  {:>5}  {}",
                             packet.time_ms as f64 / 1000.0,
@@ -1598,6 +1598,7 @@ impl LoaderApp {
                         }
                     }
                 });
+            drop(visible);
             if picked.is_some() {
                 monitor.selected = picked;
                 // looking at a packet while the list keeps scrolling is no use

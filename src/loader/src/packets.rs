@@ -1,11 +1,10 @@
 //! The packet monitor on the Development page: what the client's packet log returned, kept and filtered for display.
 
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use injector::{Packet, PacketPage};
+
+use crate::log_view::{Filtered, Log, View};
 
 /// Packets kept for display; the oldest go first.
 pub const KEEP: usize = 5000;
@@ -48,7 +47,9 @@ pub struct Monitor {
     pub selected: Option<u64>,
     /// Keep the list scrolled to the newest packet.
     pub follow: bool,
-    packets: VecDeque<Packet>,
+    packets: Log<Packet>,
+    /// The rows `visible` shows, for the direction boxes and filter text they were picked with.
+    shown: Filtered<(bool, bool, String)>,
     /// The client the packets are from, and the sequence number to ask it for next.
     pid: Option<u32>,
     next: u64,
@@ -58,7 +59,7 @@ pub struct Monitor {
 
 impl Default for Monitor {
     fn default() -> Self {
-        Self { capture: false, received: true, sent: true, filter: String::new(), dropped: 0, error: None, selected: None, follow: true, packets: VecDeque::new(), pid: None, next: 0, reading: false, next_poll: None }
+        Self { capture: false, received: true, sent: true, filter: String::new(), dropped: 0, error: None, selected: None, follow: true, packets: Log::default(), shown: Filtered::default(), pid: None, next: 0, reading: false, next_poll: None }
     }
 }
 
@@ -107,18 +108,17 @@ impl Monitor {
                     self.packets.clear();
                 }
                 self.packets.extend(page.packets);
-                while self.packets.len() > KEEP {
-                    self.packets.pop_front();
-                }
+                self.packets.keep(KEEP);
             }
             Err(error) => self.error = Some(error),
         }
     }
 
     /// The kept packets that pass the direction boxes and the opcode filter, oldest first.
-    pub fn visible(&self) -> Vec<&Packet> {
+    pub fn visible(&self) -> View<'_, Packet, (bool, bool, String)> {
         let filter = Filter::parse(&self.filter);
-        self.packets.iter().filter(|p| (if p.sent { self.sent } else { self.received }) && filter.allows(p.opcode)).collect()
+        let (sent, received) = (self.sent, self.received);
+        self.shown.view(&self.packets, (sent, received, self.filter.clone()), |p| (if p.sent { sent } else { received }) && filter.allows(p.opcode))
     }
 }
 

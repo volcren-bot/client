@@ -72,8 +72,7 @@ fn sets_flag(i: &Instruction) -> Option<u32> {
         .then(|| i.memory_displacement64() as u32)
 }
 
-pub fn find_npc_model(image: &[u8], npc_definition: u32) -> Result<NpcModel, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_npc_model(pe: &Pe, npc_definition: u32) -> Result<NpcModel, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
@@ -84,7 +83,7 @@ pub fn find_npc_model(image: &[u8], npc_definition: u32) -> Result<NpcModel, Sca
                 continue;
             }
             let Some(flag) = sets_flag(&w[3]) else { continue };
-            if let Some(root) = chunk_root(&pe, begin) {
+            if let Some(root) = chunk_root(pe, begin) {
                 found.push((root, size, flag));
             }
         }
@@ -165,15 +164,14 @@ fn bounds_cylinder(instrs: &[Instruction], height: u32, bounds_slot: u32) -> Opt
     loads_count_from_base.then_some(ModelVertices { bounds, bounds_slot, height, count, x, y: x + 0x18, z: x + 0x30 })
 }
 
-pub fn find_model_vertices(image: &[u8], rule: &NpcModel) -> Result<ModelVertices, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let (height, bounds_slot) = model_height(&pe, rule.get_model, rule.bounding_box).ok_or(ScanError::NotFound)?;
+pub fn find_model_vertices(pe: &Pe, rule: &NpcModel) -> Result<ModelVertices, ScanError> {
+    let (height, bounds_slot) = model_height(pe, rule.get_model, rule.bounding_box).ok_or(ScanError::NotFound)?;
     let mut found = Vec::new();
     for &(begin, _, _) in &pe.raw_functions {
-        if !is_root(&pe, begin) {
+        if !is_root(pe, begin) {
             continue;
         }
-        let instrs = whole_function(&pe, begin, 0x400);
+        let instrs = whole_function(pe, begin, 0x400);
         found.extend(bounds_cylinder(&instrs, height, bounds_slot));
     }
     // the same layout from every model class, each with its own function
@@ -216,10 +214,9 @@ fn reg_load(instrs: &[Instruction], reg: Register) -> Option<(Register, u32)> {
     None
 }
 
-pub fn find_actor_orientation(image: &[u8]) -> Result<ActorOrientation, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_actor_orientation(pe: &Pe) -> Result<ActorOrientation, ScanError> {
     let mut found = Vec::new();
-    for at in dword_hits(&pe, 0x7ff) {
+    for at in dword_hits(pe, 0x7ff) {
         let Some((begin, end)) = pe.function_containing(at) else { continue };
         let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
         for (n, and) in instrs.iter().enumerate() {
@@ -252,8 +249,7 @@ pub fn find_actor_orientation(image: &[u8]) -> Result<ActorOrientation, ScanErro
     one(found)
 }
 
-pub fn find_animation_height(image: &[u8], npc_definition: u32) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_animation_height(pe: &Pe, npc_definition: u32) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         if end - begin > 0x60 {
@@ -318,14 +314,13 @@ fn model_faces(instrs: &[Instruction], vertices: &ModelVertices) -> Option<Model
     })
 }
 
-pub fn find_model_faces(image: &[u8], vertices: &ModelVertices) -> Result<ModelFaces, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_model_faces(pe: &Pe, vertices: &ModelVertices) -> Result<ModelFaces, ScanError> {
     let mut found = Vec::new();
     for &(begin, _, _) in &pe.raw_functions {
-        if !is_root(&pe, begin) {
+        if !is_root(pe, begin) {
             continue;
         }
-        let instrs = whole_function(&pe, begin, 0x300);
+        let instrs = whole_function(pe, begin, 0x300);
         // a straight run of loads into the call's arguments, no loops
         if instrs.len() > 120 || instrs.iter().any(|i| i.is_jcc_short_or_near() && i.near_branch_target() < i.ip()) {
             continue;

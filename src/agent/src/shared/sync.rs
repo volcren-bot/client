@@ -11,7 +11,7 @@ use windows::{
     },
 };
 
-use ipc::{unload_event_name, work_event_name};
+use ipc::{unload_event_name, work_event_name, worker_reply_event_name};
 
 use crate::client::{hooks::reenable_hooks, unload::unload};
 
@@ -24,6 +24,7 @@ pub fn event_listener(hwnd: u64, pid: u32) {
     let event_name_ptr = PCWSTR(event_name.as_ptr());
     let unload_name = to_wide_null_terminated(&unload_event_name(pid));
     let work_name = to_wide_null_terminated(&work_event_name(pid));
+    let reply_name = to_wide_null_terminated(&worker_reply_event_name(pid));
 
     unsafe {
         let restart = CreateEventW(Some(null_mut()), true, false, event_name_ptr)
@@ -32,6 +33,8 @@ pub fn event_listener(hwnd: u64, pid: u32) {
             .expect("[Agent]: Failed to create the unload event.\r\n");
         let work_event = CreateEventW(None, false, false, PCWSTR(work_name.as_ptr()))
             .expect("[Agent]: Failed to create the work event.\r\n");
+        let reply_event = CreateEventW(None, false, false, PCWSTR(reply_name.as_ptr()))
+            .expect("[Agent]: Failed to create the worker reply event.\r\n");
         let events = [restart, unload_event, work_event];
 
         loop {
@@ -40,9 +43,9 @@ pub fn event_listener(hwnd: u64, pid: u32) {
                 reenable_hooks();
                 let _ = ResetEvent(restart);
             } else if signaled.0 == WAIT_OBJECT_0.0 + 1 {
-                unload(&events);
+                unload(&[restart, unload_event, work_event, reply_event]);
             } else if signaled.0 == WAIT_OBJECT_0.0 + 2 {
-                let _ = std::panic::catch_unwind(crate::client::worker::on_work);
+                let _ = std::panic::catch_unwind(|| crate::client::worker::on_work(reply_event));
             } else {
                 println!("[Agent]: Waiting for events failed, stopping the listener.\r\n");
                 return;

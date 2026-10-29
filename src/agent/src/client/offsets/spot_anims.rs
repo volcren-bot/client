@@ -124,21 +124,20 @@ fn creation_site(instrs: &[Instruction], call: usize) -> Option<(u32, u32)> {
     Some((list, cycle))
 }
 
-pub fn find_spot_anims(image: &[u8]) -> Result<SpotAnims, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_spot_anims(pe: &Pe) -> Result<SpotAnims, ScanError> {
     let mut constructors = Vec::new();
     for &(begin, end) in &pe.functions {
         if end - begin > 0x200 {
             continue;
         }
-        let instrs = whole_function(&pe, begin, end - begin);
+        let instrs = whole_function(pe, begin, end - begin);
         constructors.extend(constructor_fields(&instrs).map(|fields| (begin, fields)));
     }
     let (constructor, fields) = one(constructors)?;
 
 // `std::make_shared` reaches the constructor through a thunk; the packet handler calls it directly or through a wrapper.
-    let thunks = jumps_to(&pe, constructor);
-    let calls = direct_calls(&pe);
+    let thunks = jumps_to(pe, constructor);
+    let calls = direct_calls(pe);
     let mut sites = Vec::new();
     for thunk in thunks.iter().filter_map(|&at| pe.function_containing(at)).map(|(begin, _)| begin) {
         for &(site, _) in calls.iter().filter(|&&(_, target)| target == thunk) {
@@ -153,7 +152,7 @@ pub fn find_spot_anims(image: &[u8]) -> Result<SpotAnims, ScanError> {
     let mut found = Vec::new();
     for site in sites {
         let Some((begin, end)) = pe.function_containing(site) else { continue };
-        let instrs = whole_function(&pe, begin, end - begin);
+        let instrs = whole_function(pe, begin, end - begin);
         let Some(call) = instrs.iter().position(|i| i.ip() == site as u64) else { continue };
         if let Some((list, cycle)) = creation_site(&instrs, call) {
             found.push((list, cycle));

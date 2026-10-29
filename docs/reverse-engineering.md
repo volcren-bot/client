@@ -13,6 +13,8 @@ A rule finds a field offset or function from structure that survives game update
 
 Rules scan the file image only, so every build in `archive/` is regression data: does the rule still find exactly one match on each?
 
+A rule is `find_<name>(pe: &Pe, ...)`: `find_offsets` (`client/hooks.rs`) parses the image once with `Pe::parse` and hands every rule the same `Pe`, whose `direct_calls` are scanned on first use and kept. Tests do the same with `Pe::parse(&image)`.
+
 ## Reference material
 
 ### `standalone/`: decompiled Java client

@@ -53,15 +53,14 @@ fn direct_targets(instrs: &[Instruction]) -> Vec<u32> {
     instrs.iter().filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64).map(|i| i.near_branch_target() as u32).collect()
 }
 
-pub fn find_ground_items(image: &[u8]) -> Result<GroundItems, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let implementation = lua_binding(&pe, "objFind")?;
+pub fn find_ground_items(pe: &Pe) -> Result<GroundItems, ScanError> {
+    let implementation = lua_binding(pe, "objFind")?;
     let mut found = Vec::new();
-    for find in direct_targets(&whole_function(&pe, implementation, 0x800)) {
-        let instrs = whole_function(&pe, find, 0x200);
+    for find in direct_targets(&whole_function(pe, implementation, 0x800)) {
+        let instrs = whole_function(pe, find, 0x200);
         let compares = id_compares(&instrs);
         for lookup in direct_targets(&instrs) {
-            if let Some((items, level)) = tile_lookup(&whole_function(&pe, lookup, 0x80)) {
+            if let Some((items, level)) = tile_lookup(&whole_function(pe, lookup, 0x80)) {
                 found.extend(compares.iter().map(|&(node_item, id)| GroundItems { items, level, node_item, id }));
             }
         }
@@ -102,8 +101,7 @@ fn pile_store(instrs: &[Instruction], decoration: &DecorationLayout) -> Option<u
     })
 }
 
-pub fn find_item_pile(image: &[u8], decoration: &DecorationLayout) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_item_pile(pe: &Pe, decoration: &DecorationLayout) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         if end - begin > 0x800 {

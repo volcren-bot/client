@@ -222,9 +222,8 @@ fn constructor_id(instrs: &[Instruction], fields: &Projectiles) -> Option<u32> {
     })
 }
 
-pub fn find_projectiles(image: &[u8]) -> Result<Projectiles, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let slope_rvas = constant_rvas(&pe, SLOPE_FACTOR);
+pub fn find_projectiles(pe: &Pe) -> Result<Projectiles, ScanError> {
+    let slope_rvas = constant_rvas(pe, SLOPE_FACTOR);
     if slope_rvas.is_empty() {
         return Err(ScanError::NotFound);
     }
@@ -232,16 +231,16 @@ pub fn find_projectiles(image: &[u8]) -> Result<Projectiles, ScanError> {
     for &(begin, end) in &pe.functions {
         let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
         if instrs.iter().any(|i| i.is_ip_rel_memory_operand() && slope_rvas.contains(&(i.ip_rel_memory_address() as u32))) {
-            updates.extend(chunk_root(&pe, begin));
+            updates.extend(chunk_root(pe, begin));
         }
     }
     let update = one(updates)?;
-    let mut fields = update_fields(&whole_function(&pe, update, 0x800), &slope_rvas).ok_or(ScanError::NotFound)?;
+    let mut fields = update_fields(&whole_function(pe, update, 0x800), &slope_rvas).ok_or(ScanError::NotFound)?;
 
-    let callers: Vec<u32> = direct_calls(&pe).into_iter().filter(|&(_, target)| target == update).filter_map(|(site, _)| pe.function_containing(site)).filter_map(|(begin, _)| chunk_root(&pe, begin)).collect();
+    let callers: Vec<u32> = direct_calls(pe).iter().copied().filter(|&(_, target)| target == update).filter_map(|(site, _)| pe.function_containing(site)).filter_map(|(begin, _)| chunk_root(pe, begin)).collect();
     let mut loops = Vec::new();
     for caller in callers {
-        if let Some((node, cycle)) = loop_fields(&whole_function(&pe, caller, 0x400), fields.end_cycle) {
+        if let Some((node, cycle)) = loop_fields(&whole_function(pe, caller, 0x400), fields.end_cycle) {
             loops.push((caller, node, cycle));
         }
     }
@@ -256,7 +255,7 @@ pub fn find_projectiles(image: &[u8]) -> Result<Projectiles, ScanError> {
         // `mov rdx, rcx` (48 8b d1 or 48 89 ca) starts the thunk
         for (offset, w) in data.windows(3).enumerate() {
             if w == [0x48, 0x8b, 0xd1] || w == [0x48, 0x89, 0xca] {
-                lists.extend(list_thunk(&decode_at(&pe, (section.rva + offset) as u32, 3), loop_rva));
+                lists.extend(list_thunk(&decode_at(pe, (section.rva + offset) as u32, 3), loop_rva));
             }
         }
     }

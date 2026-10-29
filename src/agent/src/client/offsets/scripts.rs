@@ -98,10 +98,9 @@ fn invalidate_at(pe: &Pe, rva: u32) -> Option<(u32, u32)> {
     Some((rva, holder))
 }
 
-pub fn find_component_invalidate(image: &[u8]) -> Result<ComponentInvalidate, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let case = setter_case(&pe, setter_handler(&pe)?, SET_TEXT)?;
-    let instrs = decode_at(&pe, case, 250);
+pub fn find_component_invalidate(pe: &Pe) -> Result<ComponentInvalidate, ScanError> {
+    let case = setter_case(pe, setter_handler(pe)?, SET_TEXT)?;
+    let instrs = decode_at(pe, case, 250);
 
     let mut adds: HashMap<u32, usize> = HashMap::new();
     for i in &instrs {
@@ -123,7 +122,7 @@ pub fn find_component_invalidate(image: &[u8]) -> Result<ComponentInvalidate, Sc
         let moves = |i: &Instruction| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Register && i.op0_register().size() == 8;
         let args = moves(a) && moves(b) && [a.op0_register(), b.op0_register()].contains(&Register::RCX) && [a.op0_register(), b.op0_register()].contains(&Register::RDX);
         (args && call.mnemonic() == Mnemonic::Call && call.op0_kind() == OpKind::NearBranch64)
-            .then(|| invalidate_at(&pe, call.near_branch_target() as u32))
+            .then(|| invalidate_at(pe, call.near_branch_target() as u32))
             .flatten()
     });
     let (function, holder_component) = found.ok_or(ScanError::NotFound)?;
@@ -131,10 +130,9 @@ pub fn find_component_invalidate(image: &[u8]) -> Result<ComponentInvalidate, Sc
 }
 
 
-pub fn find_component_sprite(image: &[u8]) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let case = setter_case(&pe, setter_handler(&pe)?, SET_GRAPHIC)?;
-    let instrs = decode_at(&pe, case, 8);
+pub fn find_component_sprite(pe: &Pe) -> Result<u32, ScanError> {
+    let case = setter_case(pe, setter_handler(pe)?, SET_GRAPHIC)?;
+    let instrs = decode_at(pe, case, 8);
     instrs
         .windows(2)
         .take_while(|w| w[0].mnemonic() != Mnemonic::Jmp)
@@ -223,14 +221,13 @@ fn children(pe: &Pe) -> Result<u32, ScanError> {
     one(found)
 }
 
-pub fn find_component_fields(image: &[u8]) -> Result<ComponentFields, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let handler = setter_handler(&pe)?;
-    let colour = decode_at(&pe, setter_case(&pe, handler, SET_COLOUR)?, 8);
+pub fn find_component_fields(pe: &Pe) -> Result<ComponentFields, ScanError> {
+    let handler = setter_handler(pe)?;
+    let colour = decode_at(pe, setter_case(pe, handler, SET_COLOUR)?, 8);
     let text_color = one(popped_store(&colour).into_iter().map(|(_, field)| field).collect())?;
 
     // CC_SETSCROLLSIZE stores width then height, then compares the child index before reading the id's group half.
-    let scroll = decode_at(&pe, setter_case(&pe, handler, SET_SCROLL_SIZE)?, 30);
+    let scroll = decode_at(pe, setter_case(pe, handler, SET_SCROLL_SIZE)?, 30);
     let stores = popped_store(&scroll);
     let [(_, scroll_width), (_, scroll_height), ..] = stores.as_slice() else { return Err(ScanError::NotFound) };
     if *scroll_height != scroll_width + 4 {
@@ -247,5 +244,5 @@ pub fn find_component_fields(image: &[u8]) -> Result<ComponentFields, ScanError>
         })
         .collect())?;
 
-    Ok(ComponentFields { hidden: hidden(&pe)?, text_color, scroll_width: *scroll_width, index, children: children(&pe)? })
+    Ok(ComponentFields { hidden: hidden(pe)?, text_color, scroll_width: *scroll_width, index, children: children(pe)? })
 }

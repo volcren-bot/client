@@ -131,8 +131,7 @@ fn receive_fields(instrs: &[Instruction]) -> Option<(u32, u32)> {
     Some((opcode, buffer))
 }
 
-pub fn find_packets(image: &[u8]) -> Result<Packets, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_packets(pe: &Pe) -> Result<Packets, ScanError> {
 
     let mut writers = Vec::new();
     let mut receivers = Vec::new();
@@ -141,7 +140,7 @@ pub fn find_packets(image: &[u8]) -> Result<Packets, ScanError> {
         if end - begin > 0x200 {
             continue;
         }
-        let instrs = whole_function(&pe, begin, end - begin);
+        let instrs = whole_function(pe, begin, end - begin);
         if end - begin <= 0x80 {
             writers.extend(opcode_writer(begin, &instrs).map(|w| (w.function, w.data, w.cursor)));
         }
@@ -154,10 +153,10 @@ pub fn find_packets(image: &[u8]) -> Result<Packets, ScanError> {
     let (writer, data, cursor) = one(writers)?;
 
     // the one place that builds a packet: it writes the opcode through the writer
-    let sites: Vec<u32> = direct_calls(&pe).into_iter().filter(|&(_, target)| target == writer).map(|(site, _)| site).collect();
+    let sites: Vec<u32> = direct_calls(pe).iter().copied().filter(|&(_, target)| target == writer).map(|(site, _)| site).collect();
     let site = one(sites)?;
     let (begin, end) = pe.function_containing(site).ok_or(ScanError::NotFound)?;
-    let instrs = whole_function(&pe, begin, end - begin);
+    let instrs = whole_function(pe, begin, end - begin);
     let call = instrs.iter().position(|i| i.ip() == site as u64).ok_or(ScanError::NotFound)?;
     let (send_type, send_buffer) = constructor_fields(&instrs, call).ok_or(ScanError::NotFound)?;
 

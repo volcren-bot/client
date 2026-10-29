@@ -112,15 +112,14 @@ fn client_clock(pe: &Pe) -> Result<u32, ScanError> {
         .ok_or(ScanError::NotFound)
 }
 
-pub fn find_chat(image: &[u8]) -> Result<Chat, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let cases = switch_cases(&pe, range_handler(&pe, CHAT_OPS + 100)?, CHAT_OPS)?;
-    let by_uid = case_code(&pe, &cases, HISTORY_BY_UID).ok_or(ScanError::NotFound)?;
-    let History { messages, kind, cycle, strings } = history(&pe, &by_uid).ok_or(ScanError::NotFound)?;
+pub fn find_chat(pe: &Pe) -> Result<Chat, ScanError> {
+    let cases = switch_cases(pe, range_handler(pe, CHAT_OPS + 100)?, CHAT_OPS)?;
+    let by_uid = case_code(pe, &cases, HISTORY_BY_UID).ok_or(ScanError::NotFound)?;
+    let History { messages, kind, cycle, strings } = history(pe, &by_uid).ok_or(ScanError::NotFound)?;
     let [name, sender, display] = strings;
 
     // HISTORY_EX reads the same strings from another register, and the text as received after them
-    let ex = case_code(&pe, &cases, HISTORY_EX).ok_or(ScanError::NotFound)?;
+    let ex = case_code(pe, &cases, HISTORY_EX).ok_or(ScanError::NotFound)?;
     let mut leas: HashMap<Register, Vec<u32>> = HashMap::new();
     for i in ex.iter().filter(|i| i.mnemonic() == Mnemonic::Lea && i.memory_index() == Register::None && !i.is_ip_rel_memory_operand()) {
         leas.entry(i.memory_base()).or_default().push(i.memory_displacement64() as u32);
@@ -132,7 +131,7 @@ pub fn find_chat(image: &[u8]) -> Result<Chat, ScanError> {
         .collect();
     let text = one(texts)?;
     let calls = ex.iter().filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64);
-    let (time_utc, time_local) = one(calls.filter_map(|i| stamps(&pe, i.near_branch_target() as u32)).collect())?;
+    let (time_utc, time_local) = one(calls.filter_map(|i| stamps(pe, i.near_branch_target() as u32)).collect())?;
 
-    Ok(Chat { messages, cycle: client_clock(&pe)?, message_cycle: cycle, kind, name, sender, text, time_utc, time_local })
+    Ok(Chat { messages, cycle: client_clock(pe)?, message_cycle: cycle, kind, name, sender, text, time_utc, time_local })
 }

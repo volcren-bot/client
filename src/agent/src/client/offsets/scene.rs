@@ -113,13 +113,12 @@ fn game_find(pe: &Pe, rva: u32) -> Option<(u32, u32, u32, u32, u32)> {
     Some((count, array, tag, x, y))
 }
 
-pub fn find_scene(image: &[u8]) -> Result<Scene, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let loc_find = lua_binding(&pe, "locFind")?;
-    let instrs = whole_function(&pe, loc_find, 0x400);
+pub fn find_scene(pe: &Pe) -> Result<Scene, ScanError> {
+    let loc_find = lua_binding(pe, "locFind")?;
+    let instrs = whole_function(pe, loc_find, 0x400);
     let mut found = Vec::new();
     for (n, target) in calls(&instrs) {
-        let Some(find) = scene_find(&pe, target) else { continue };
+        let Some(find) = scene_find(pe, target) else { continue };
         let Some(scene) = instrs[n.saturating_sub(10)..n].iter().rev().find_map(|i| mem_load(i, 8).filter(|l| l.0 == Register::RCX).map(|l| l.2))
         else {
             continue;
@@ -133,7 +132,7 @@ pub fn find_scene(image: &[u8]) -> Result<Scene, ScanError> {
             continue;
         }
         let (Some((game_count, game_array, game_tag, game_origin_x, game_origin_y)), Some(id_shift)) =
-            (game_find(&pe, find.game_find), id_shift(&pe, find.id_decoder))
+            (game_find(pe, find.game_find), id_shift(pe, find.id_decoder))
         else {
             continue;
         };
@@ -199,8 +198,7 @@ fn placement_call(instrs: &[Instruction], call: usize, tag: u32) -> Option<GameO
         .then_some(GameObjectLayout { renderable, x, height, y, orientation, config: orientation + 4 })
 }
 
-pub fn find_game_object_layout(image: &[u8], scene: &Scene) -> Result<GameObjectLayout, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_game_object_layout(pe: &Pe, scene: &Scene) -> Result<GameObjectLayout, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let code = pe.bytes(begin, end);
@@ -237,8 +235,7 @@ fn config_after(instrs: &[Instruction], from: usize, tag: u32) -> Option<u32> {
     })
 }
 
-pub fn find_loc_configs(image: &[u8], scene: &Scene, game: &GameObjectLayout) -> Result<LocConfigs, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_loc_configs(pe: &Pe, scene: &Scene, game: &GameObjectLayout) -> Result<LocConfigs, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let code = pe.bytes(begin, end);
@@ -280,8 +277,7 @@ pub struct DecorationLayout {
     pub y_offset: u32,
 }
 
-pub fn find_decoration_layout(image: &[u8], scene: &Scene) -> Result<DecorationLayout, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_decoration_layout(pe: &Pe, scene: &Scene) -> Result<DecorationLayout, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
@@ -310,9 +306,8 @@ pub struct LocNames {
     pub transform: u32,
 }
 
-pub fn find_loc_names(image: &[u8]) -> Result<LocNames, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let colors = string_rvas(&pe, "<col=00FFFF>");
+pub fn find_loc_names(pe: &Pe) -> Result<LocNames, ScanError> {
+    let colors = string_rvas(pe, "<col=00FFFF>");
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
@@ -363,9 +358,8 @@ pub struct CollisionMaps {
     pub stride: u32,
 }
 
-pub fn find_collision_maps(image: &[u8], scene: &Scene) -> Result<CollisionMaps, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let instrs = whole_function(&pe, lua_binding(&pe, "getCollisionMap")?, 0x100);
+pub fn find_collision_maps(pe: &Pe, scene: &Scene) -> Result<CollisionMaps, ScanError> {
+    let instrs = whole_function(pe, lua_binding(pe, "getCollisionMap")?, 0x100);
     let mut found = Vec::new();
     for (n, i) in instrs.iter().enumerate() {
         let Some((holder, _, scene_field)) = mem_load(i, 8) else { continue };

@@ -46,14 +46,13 @@ fn fields(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
     Some((event_type, args, count))
 }
 
-pub fn find_script_runs(image: &[u8]) -> Result<ScriptRuns, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_script_runs(pe: &Pe) -> Result<ScriptRuns, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         if !(0x200..=0x800).contains(&(end - begin)) {
             continue;
         }
-        let instrs = whole_function(&pe, begin, end - begin);
+        let instrs = whole_function(pe, begin, end - begin);
         if !is_event_runner(&instrs) {
             continue;
         }

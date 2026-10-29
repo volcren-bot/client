@@ -12,7 +12,7 @@ pub mod varc_log;
 pub mod read;
 pub mod state;
 
-pub const PROTOCOL_VERSION: u8 = 53;
+pub const PROTOCOL_VERSION: u8 = 54;
 
 pub const SHARED_MEMORY_PREFIX: &str = "AGENT_DATA_";
 
@@ -59,6 +59,11 @@ pub fn unload_event_name(pid: u32) -> String {
 /// The event that wakes the agent's worker thread to answer read-only requests without waiting for a frame.
 pub fn work_event_name(pid: u32) -> String {
     format!("AGENT_WORK_{pid}")
+}
+
+/// An auto-reset event the agent sets after writing the worker's answer, so the asker waits on it instead of polling.
+pub fn worker_reply_event_name(pid: u32) -> String {
+    format!("AGENT_WORK_DONE_{pid}")
 }
 
 /// An auto-reset event the agent sets each presented frame, after bumping `Header::frame_serial`.
@@ -247,5 +252,6 @@ mod tests {
     fn names_are_per_process() {
         assert_eq!(shared_memory_name(32), "AGENT_DATA_32");
         assert_eq!(frame_event_name(32), "AGENT_FRAME_32");
+        assert_eq!(worker_reply_event_name(32), "AGENT_WORK_DONE_32");
     }
 }

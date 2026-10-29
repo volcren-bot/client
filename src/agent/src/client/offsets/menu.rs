@@ -139,7 +139,7 @@ fn entry_constructor(pe: &Pe, priority: u32) -> Result<EntryLayout, ScanError> {
 }
 
 fn calls_to(pe: &Pe, target: u32) -> Vec<u32> {
-    direct_calls(pe).into_iter().filter(|&(_, t)| t == target).map(|(site, _)| site).collect()
+    direct_calls(pe).iter().copied().filter(|&(_, t)| t == target).map(|(site, _)| site).collect()
 }
 
 fn entry_size(pe: &Pe, constructor: u32) -> Result<(u32, u32), ScanError> {
@@ -260,19 +260,18 @@ fn slot_owner_vtable(pe: &Pe, entry_constructor: u32, slot: u32) -> Result<u32, 
     one(found)
 }
 
-pub fn find_menu_click(image: &[u8], menu: &Menu) -> Result<MenuClick, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_menu_click(pe: &Pe, menu: &Menu) -> Result<MenuClick, ScanError> {
     let mut seen = HashSet::new();
     let mut found = Vec::new();
-    for hit in dword_hits(&pe, menu.option).into_iter().filter(|&hit| lea_rdx_disp32(&pe, hit)) {
+    for hit in dword_hits(pe, menu.option).into_iter().filter(|&hit| lea_rdx_disp32(pe, hit)) {
         let Some((begin, end)) = pe.function_containing(hit) else { continue };
         if seen.insert(begin) {
-            found.extend(click_setter(&function_instrs(&pe, begin, end.min(begin + 0x800)), menu));
+            found.extend(click_setter(&function_instrs(pe, begin, end.min(begin + 0x800)), menu));
         }
     }
     let (entry, click_x, counter) = one(found)?;
-    let constructor = entry_constructor(&pe, menu.priority)?.function;
-    let minimenu_vtable = slot_owner_vtable(&pe, constructor, entry)?;
+    let constructor = entry_constructor(pe, menu.priority)?.function;
+    let minimenu_vtable = slot_owner_vtable(pe, constructor, entry)?;
     Ok(MenuClick { minimenu_vtable, entry, click_x, counter })
 }
 
@@ -385,34 +384,33 @@ fn selection_setter(instrs: &[Instruction], selected: u32) -> Option<(u32, u32, 
     }
 }
 
-pub fn find_selection(image: &[u8], menu: &Menu) -> Result<Selection, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_selection(pe: &Pe, menu: &Menu) -> Result<Selection, ScanError> {
     let mut getters = HashSet::new();
     let mut sub_objects: HashMap<u32, u32> = HashMap::new();
     // the menu getter is a leaf without unwind info, so it's found by its bytes (`mov rax, [rcx+disp32]`)
-    for hit in dword_hits(&pe, menu.object) {
+    for hit in dword_hits(pe, menu.object) {
         let Some(begin) = hit.checked_sub(3) else { continue };
-        if pe.image[begin as usize..hit as usize] == [0x48, 0x8b, 0x81] && menu_getter(&decode_at(&pe, begin, 2), menu.object) {
+        if pe.image[begin as usize..hit as usize] == [0x48, 0x8b, 0x81] && menu_getter(&decode_at(pe, begin, 2), menu.object) {
             getters.insert(begin);
         }
     }
-    let heads: Vec<(u32, Vec<Instruction>)> = pe.functions.iter().map(|&(begin, end)| (begin, decode_at(&pe, begin, 8).into_iter().filter(|i| i.ip32() < end).collect())).collect();
+    let heads: Vec<(u32, Vec<Instruction>)> = pe.functions.iter().map(|&(begin, end)| (begin, decode_at(pe, begin, 8).into_iter().filter(|i| i.ip32() < end).collect())).collect();
     for (begin, instrs) in &heads {
         if let Some(offset) = sub_object_getter(instrs, &getters) {
             sub_objects.insert(*begin, offset);
         }
     }
-    let calls = direct_calls(&pe);
+    let calls = direct_calls(pe);
     let mut found = Vec::new();
-    for &(site, target) in &calls {
+    for &(site, target) in calls {
         let Some(&offset) = sub_objects.get(&target) else { continue };
-        let after = decode_at(&pe, site, 5);
+        let after = decode_at(pe, site, 5);
         let passes_rax = after.iter().skip(1).take(3).take_while(|i| i.mnemonic() != Mnemonic::Call).any(|i| {
             i.mnemonic() == Mnemonic::Mov && i.op0_register() == Register::RCX && i.op1_kind() == OpKind::Register && i.op1_register() == Register::RAX
         });
         let Some(next) = after.iter().skip(1).take(4).find(|i| i.mnemonic() == Mnemonic::Call) else { continue };
         if passes_rax && next.op0_kind() == OpKind::NearBranch64 {
-            if let Some(flag) = deselect_flag(&decode_at(&pe, next.near_branch_target() as u32, 8)) {
+            if let Some(flag) = deselect_flag(&decode_at(pe, next.near_branch_target() as u32, 8)) {
                 found.push((offset, flag));
             }
         }
@@ -420,17 +418,16 @@ pub fn find_selection(image: &[u8], menu: &Menu) -> Result<Selection, ScanError>
     found.sort_unstable();
     found.dedup();
     let (offset, selected) = one(found)?;
-    let setters = pe.functions.iter().filter_map(|&(begin, end)| selection_setter(&function_instrs(&pe, begin, end.min(begin + 0x200)), selected)).collect();
+    let setters = pe.functions.iter().filter_map(|&(begin, end)| selection_setter(&function_instrs(pe, begin, end.min(begin + 0x200)), selected)).collect();
     let (verb, name, id, child, item, flags) = one(setters)?;
     Ok(Selection { offset, verb, name, id, child, item, flags, selected })
 }
 
 /// The menu's open flag: the pointer field set to the minimenu while open, found as the 64-bit store of a `lea` in the open-at-point routine.
-pub fn find_menu_open(image: &[u8], click: &MenuClick) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_menu_open(pe: &Pe, click: &MenuClick) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = function_instrs(&pe, begin, end);
+        let instrs = function_instrs(pe, begin, end);
         let loads_entry = instrs.iter().any(|i| i.mnemonic() == Mnemonic::Lea && i.memory_base() != Register::RIP && i.memory_displacement64() == click.entry as u64);
         if !loads_entry {
             continue;
@@ -631,43 +628,42 @@ fn is_layout_routine(pe: &Pe, begin: u32) -> bool {
     checks_depth && instrs.iter().any(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64 && i.near_branch_target() == begin as u64)
 }
 
-pub fn find_menu_layout(image: &[u8], click: &MenuClick) -> Result<MenuLayout, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_menu_layout(pe: &Pe, click: &MenuClick) -> Result<MenuLayout, ScanError> {
+    let image = pe.image;
     let nt = u32_at(image, 0x3c).ok_or(ScanError::InvalidImage)? as usize;
     let base = image.get(nt + 48..nt + 56).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes).ok_or(ScanError::InvalidImage)?;
     let mut views = Vec::new();
     for &(begin, end) in &pe.functions {
-        let Some(slot) = placement_setter(&function_instrs(&pe, begin, end.min(begin + 0x100))) else { continue };
+        let Some(slot) = placement_setter(&function_instrs(pe, begin, end.min(begin + 0x100))) else { continue };
         let at = click.minimenu_vtable as usize + slot as usize;
         let Some(getter) = image.get(at..at + 8).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes).and_then(|va| va.checked_sub(base)) else { continue };
-        views.extend(sub_object_at(&decode_at(&pe, getter as u32, 2)));
+        views.extend(sub_object_at(&decode_at(pe, getter as u32, 2)));
     }
     views.sort_unstable();
     views.dedup();
     let view = one(views)?;
-    let function = one(pe.functions.iter().map(|&(begin, _)| begin).filter(|&begin| is_layout_routine(&pe, begin)).collect())?;
+    let function = one(pe.functions.iter().map(|&(begin, _)| begin).filter(|&begin| is_layout_routine(pe, begin)).collect())?;
     let methods: Vec<u32> = (0..16)
         .filter_map(|slot| {
             let at = click.minimenu_vtable as usize + slot * 8;
             Some(image.get(at..at + 8).and_then(|b| b.try_into().ok()).map(u64::from_le_bytes)?.checked_sub(base)? as u32)
         })
         .collect();
-    let rows = one(methods.iter().filter_map(|&method| row_counter(&decode_at(&pe, method, 4))).collect())?;
-    let submenu = one(methods.iter().filter_map(|&method| submenu_check(&decode_at(&pe, method, 16), rows)).collect())?;
-    let (check, field) = find_stay_open_check(&pe, function)?;
-    let margin = find_margin(&pe, image, base, check, field)?;
+    let rows = one(methods.iter().filter_map(|&method| row_counter(&decode_at(pe, method, 4))).collect())?;
+    let submenu = one(methods.iter().filter_map(|&method| submenu_check(&decode_at(pe, method, 16), rows)).collect())?;
+    let (check, field) = find_stay_open_check(pe, function)?;
+    let margin = find_margin(pe, image, base, check, field)?;
     let end = pe.functions.iter().find(|&&(begin, _)| begin == check).map_or(check, |&(_, end)| end);
-    let (path, open_row) = open_path(&function_instrs(&pe, check, end)).ok_or(ScanError::NotFound)?;
+    let (path, open_row) = open_path(&function_instrs(pe, check, end)).ok_or(ScanError::NotFound)?;
     Ok(MenuLayout { view, function, rows, margin, path, open_row, submenu })
 }
 
-pub fn find_menu(image: &[u8]) -> Result<Menu, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let (cancel, priority, kind) = ranker(&pe)?;
-    let entry = entry_constructor(&pe, priority)?;
-    let (entry_size, inner) = entry_size(&pe, entry.function)?;
-    let outer = one(calls_to(&pe, inner).into_iter().filter_map(|site| pe.function_containing(site).map(|(b, _)| b)).collect())?;
-    let object = one(stored_after_call(&pe, outer).into_iter().map(|(_, d)| d).collect())?;
+pub fn find_menu(pe: &Pe) -> Result<Menu, ScanError> {
+    let (cancel, priority, kind) = ranker(pe)?;
+    let entry = entry_constructor(pe, priority)?;
+    let (entry_size, inner) = entry_size(pe, entry.function)?;
+    let outer = one(calls_to(pe, inner).into_iter().filter_map(|site| pe.function_containing(site).map(|(b, _)| b)).collect())?;
+    let object = one(stored_after_call(pe, outer).into_iter().map(|(_, d)| d).collect())?;
     Ok(Menu {
         object,
         entry_vtable: entry.vtable,

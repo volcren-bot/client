@@ -54,8 +54,7 @@ fn angles(pe: &Pe, client: u32) -> Result<(u32, u32), ScanError> {
     one(found)
 }
 
-pub fn find_camera(image: &[u8], client: u32) -> Result<Camera, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let (pitch, yaw) = angles(&pe, client)?;
-    Ok(Camera { position: position(&pe, client)?, pitch, yaw })
+pub fn find_camera(pe: &Pe, client: u32) -> Result<Camera, ScanError> {
+    let (pitch, yaw) = angles(pe, client)?;
+    Ok(Camera { position: position(pe, client)?, pitch, yaw })
 }

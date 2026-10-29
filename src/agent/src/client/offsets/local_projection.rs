@@ -291,22 +291,21 @@ fn tile_model(pe: &Pe) -> Result<(u32, u32), ScanError> {
     one(found.into_iter().collect())
 }
 
-pub fn find_local_projection(image: &[u8], client: u32, canvas: u32, projection: &Projection, scene: &Scene) -> Result<LocalProjection, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let instrs = whole_function(&pe, projection.world_to_screen, 0x300);
+pub fn find_local_projection(pe: &Pe, client: u32, canvas: u32, projection: &Projection, scene: &Scene) -> Result<LocalProjection, ScanError> {
+    let instrs = whole_function(pe, projection.world_to_screen, 0x300);
     let zoom = zoom(&instrs, client)?;
-    let view_holder = view_holder(&pe, &instrs, canvas)?;
-    let view = view_slot(&pe, view_holder)?;
-    let projectors: Vec<_> = calls(&instrs).filter_map(|(_, target)| projector(&pe, target)).collect();
+    let view_holder = view_holder(pe, &instrs, canvas)?;
+    let view = view_slot(pe, view_holder)?;
+    let projectors: Vec<_> = calls(&instrs).filter_map(|(_, target)| projector(pe, target)).collect();
     let [ref p] = projectors[..] else { return Err(if projectors.is_empty() { ScanError::NotFound } else { ScanError::Ambiguous(projectors.len()) }) };
-    let (canvas_size, ui_size) = canvas_sizes(&pe, &instrs)?;
+    let (canvas_size, ui_size) = canvas_sizes(pe, &instrs)?;
 
     // the tile height function, behind the jump of `getFineCoordinate`'s callee
-    let tile_height = decode_at(&pe, projection.tile_height, 8)
+    let tile_height = decode_at(pe, projection.tile_height, 8)
         .iter()
         .find(|i| i.mnemonic() == Mnemonic::Jmp && i.op0_kind() == OpKind::NearBranch64)
         .map_or(projection.tile_height, |i| i.near_branch_target() as u32);
-    let instrs = whole_function(&pe, tile_height, 0x400);
+    let instrs = whole_function(pe, tile_height, 0x400);
     // `lea rcx,[tile+model]`, `lea rcx,[tile+paint]`, then `add rcx,decoration`, before the definition's reference counting
     let mut slots: Vec<u32> = Vec::new();
     for i in &instrs {
@@ -330,11 +329,11 @@ pub fn find_local_projection(image: &[u8], client: u32, canvas: u32, projection:
         .collect();
     let decoration_height = one(heights.into_iter().collect())?;
 
-    let functions = reachable(&pe, tile_height, 3);
-    let heights = one(scene_arrays(&pe, &functions, scene, 4))?;
-    let settings = one(scene_arrays(&pe, &functions, scene, 1))?;
-    let tile_x = tile_x(&pe, &reachable(&pe, tile_height, 2))?;
-    let (model_vertices, model_triangles) = tile_model(&pe)?;
+    let functions = reachable(pe, tile_height, 3);
+    let heights = one(scene_arrays(pe, &functions, scene, 4))?;
+    let settings = one(scene_arrays(pe, &functions, scene, 1))?;
+    let tile_x = tile_x(pe, &reachable(pe, tile_height, 2))?;
+    let (model_vertices, model_triangles) = tile_model(pe)?;
 
     Ok(LocalProjection {
         zoom,

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, HashSet},
+};
 
 mod camera;
 mod chat;
@@ -100,11 +103,13 @@ struct Section {
     size: usize,
 }
 
-struct Pe<'a> {
+// The client image parsed once for every rule: its code sections, functions and, scanned on first use, its direct calls.
+pub struct Pe<'a> {
     image: &'a [u8],
     code: Vec<Section>,
     functions: Vec<(u32, u32)>,
     raw_functions: Vec<(u32, u32, u32)>,
+    calls: OnceCell<Vec<(u32, u32)>>,
 }
 
 fn u16_at(data: &[u8], at: usize) -> Option<u16> {
@@ -116,7 +121,7 @@ fn u32_at(data: &[u8], at: usize) -> Option<u32> {
 }
 
 impl<'a> Pe<'a> {
-    fn parse(image: &'a [u8]) -> Option<Self> {
+    pub fn parse(image: &'a [u8]) -> Option<Self> {
         let nt = u32_at(image, 0x3c)? as usize;
         if image.get(nt..nt + 4)? != b"PE\0\0" || u16_at(image, nt + 24)? != PE32_PLUS {
             return None;
@@ -155,7 +160,7 @@ impl<'a> Pe<'a> {
         functions.sort_unstable();
         raw_functions.sort_unstable();
 
-        Some(Self { image, code, functions, raw_functions })
+        Some(Self { image, code, functions, raw_functions, calls: OnceCell::new() })
     }
 
     fn function_containing(&self, rva: u32) -> Option<(u32, u32)> {
@@ -264,10 +269,9 @@ fn world_base_in(code: &[u8], rva: u32) -> Option<u32> {
     }
 }
 
-pub fn find_actor_position(image: &[u8]) -> Result<ActorPosition, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_actor_position(pe: &Pe) -> Result<ActorPosition, ScanError> {
 
-    let mut candidates: Vec<(u32, u32)> = dword_hits(&pe, LOCAL_MIN)
+    let mut candidates: Vec<(u32, u32)> = dword_hits(pe, LOCAL_MIN)
         .into_iter()
         .filter_map(|hit| pe.function_containing(hit))
         .collect();
@@ -345,8 +349,7 @@ fn field_compares(code: &[u8], rva: u32) -> HashMap<Load, HashSet<u32>> {
     compares
 }
 
-pub fn find_game_state(image: &[u8]) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_game_state(pe: &Pe) -> Result<u32, ScanError> {
 
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
@@ -433,7 +436,12 @@ fn hash_table_offset(pe: &Pe, rva: u32) -> Option<u32> {
     tables.next().is_none().then_some(table)
 }
 
-fn direct_calls(pe: &Pe) -> Vec<(u32, u32)> {
+// Every `call rel32` into code, as (site, target), scanned once per image.
+fn direct_calls<'p>(pe: &'p Pe) -> &'p [(u32, u32)] {
+    pe.calls.get_or_init(|| scan_direct_calls(pe))
+}
+
+fn scan_direct_calls(pe: &Pe) -> Vec<(u32, u32)> {
     let mut calls = Vec::new();
     for section in &pe.code {
         let data = &pe.image[section.rva..section.rva + section.size];
@@ -535,17 +543,16 @@ fn client_global(pe: &Pe, offsets: &[u32]) -> Result<u32, ScanError> {
     }
 }
 
-pub fn find_local_player(image: &[u8]) -> Result<LocalPlayer, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_local_player(pe: &Pe) -> Result<LocalPlayer, ScanError> {
 
-    let calls = direct_calls(&pe);
+    let calls = direct_calls(pe);
     let mut targets: Vec<u32> = calls.iter().map(|&(_, target)| target).collect();
     targets.sort_unstable();
     targets.dedup();
 
     let getters: Vec<(u32, (u32, u32, u32))> = targets
         .into_iter()
-        .filter_map(|target| Some((target, world_view_getter(&decode_at(&pe, target, 3))?)))
+        .filter_map(|target| Some((target, world_view_getter(&decode_at(pe, target, 3))?)))
         .collect();
     let (getter, (world_view_id, manager, lookup)) = match getters.as_slice() {
         [] => return Err(ScanError::NotFound),
@@ -553,15 +560,15 @@ pub fn find_local_player(image: &[u8]) -> Result<LocalPlayer, ScanError> {
         many => return Err(ScanError::Ambiguous(many.len())),
     };
     let world_views = manager
-        .checked_add(hash_table_offset(&pe, lookup).ok_or(ScanError::NotFound)?)
+        .checked_add(hash_table_offset(pe, lookup).ok_or(ScanError::NotFound)?)
         .ok_or(ScanError::NotFound)?;
 
     let mut player = None;
     for &(site, _) in calls.iter().filter(|&&(_, target)| target == getter) {
-        let Some((index, lookup)) = player_getter(&pe, site) else {
+        let Some((index, lookup)) = player_getter(pe, site) else {
             continue;
         };
-        let found = (index, hash_table_offset(&pe, lookup).ok_or(ScanError::NotFound)?);
+        let found = (index, hash_table_offset(pe, lookup).ok_or(ScanError::NotFound)?);
         if player.is_some_and(|p| p != found) {
             return Err(ScanError::Ambiguous(2));
         }
@@ -569,7 +576,7 @@ pub fn find_local_player(image: &[u8]) -> Result<LocalPlayer, ScanError> {
     }
     let (player_index, players) = player.ok_or(ScanError::NotFound)?;
 
-    let client = client_global(&pe, &[world_view_id, player_index, manager])?;
+    let client = client_global(pe, &[world_view_id, player_index, manager])?;
 
     Ok(LocalPlayer { client, world_view_id, player_index, world_views, players })
 }
@@ -643,19 +650,17 @@ fn global_field_getter(instrs: &[Instruction]) -> Option<(u32, u32)> {
     (is_global && ret.mnemonic() == Mnemonic::Ret).then(|| (global.ip_rel_memory_address() as u32, disp))
 }
 
-pub fn find_tick_count(image: &[u8], client: u32) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let getter = lua_binding(&pe, "getTickCount")?;
-    match global_field_getter(&decode_at(&pe, getter, 3)) {
+pub fn find_tick_count(pe: &Pe, client: u32) -> Result<u32, ScanError> {
+    let getter = lua_binding(pe, "getTickCount")?;
+    match global_field_getter(&decode_at(pe, getter, 3)) {
         Some((global, disp)) if global == client => Ok(disp),
         _ => Err(ScanError::NotFound),
     }
 }
 
-pub fn find_varps(image: &[u8]) -> Result<u32, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
-    let getter = lua_binding(&pe, "getVarp")?;
-    let instrs = decode_at(&pe, getter, 4);
+pub fn find_varps(pe: &Pe) -> Result<u32, ScanError> {
+    let getter = lua_binding(pe, "getVarp")?;
+    let instrs = decode_at(pe, getter, 4);
     let [data, _index, load, ret, ..] = instrs.as_slice() else {
         return Err(ScanError::NotFound);
     };
@@ -702,11 +707,10 @@ fn client_array_getter(instrs: &[Instruction], client: u32) -> Option<u32> {
     None
 }
 
-pub fn find_skills(image: &[u8], client: u32) -> Result<Skills, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_skills(pe: &Pe, client: u32) -> Result<Skills, ScanError> {
     let array = |name: &str| -> Result<u32, ScanError> {
-        let getter = lua_binding(&pe, name)?;
-        client_array_getter(&decode_at(&pe, getter, 12), client).ok_or(ScanError::NotFound)
+        let getter = lua_binding(pe, name)?;
+        client_array_getter(&decode_at(pe, getter, 12), client).ok_or(ScanError::NotFound)
     };
     let levels = array("getStatEffectiveLevel")?;
     let real_levels = array("getStatBaseLevel")?;
@@ -939,8 +943,7 @@ fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
     found
 }
 
-pub fn find_login_panel(image: &[u8], game_state: u32) -> Result<LoginPanel, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_login_panel(pe: &Pe, game_state: u32) -> Result<LoginPanel, ScanError> {
 
     let (mut panel_x_candidates, mut screen_candidates, mut y_candidates) = (Vec::new(), Vec::new(), Vec::new());
     for &(begin, end) in &pe.functions {
@@ -1116,8 +1119,7 @@ fn group_getter(instrs: &[Instruction]) -> Option<u32> {
     ok.then(|| load_from(load, Register::RCX)).flatten()
 }
 
-pub fn find_interfaces(image: &[u8]) -> Result<Interfaces, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
 
     let mut layouts = Vec::new();
     let mut lookups = Vec::new();
@@ -1131,7 +1133,7 @@ pub fn find_interfaces(image: &[u8]) -> Result<Interfaces, ScanError> {
     let (layout_rva, (_, x, width)) = one(layouts)?;
     let (kind, id, sub_interfaces) = one(lookups)?;
 
-    let calls = direct_calls(&pe);
+    let calls = direct_calls(pe);
     let callers_of = |target: u32| -> Vec<(u32, (u32, u32))> {
         calls
             .iter()
@@ -1158,8 +1160,8 @@ pub fn find_interfaces(image: &[u8]) -> Result<Interfaces, ScanError> {
             .filter(|&&(site, _)| (begin..end).contains(&site))
             .map(|&(_, target)| target)
             .collect();
-        let manager = targets.iter().find_map(|&t| pointer_getter(&decode_at(&pe, t, 2)));
-        let groups = targets.iter().find_map(|&t| group_getter(&decode_at(&pe, t, 5)));
+        let manager = targets.iter().find_map(|&t| pointer_getter(&decode_at(pe, t, 2)));
+        let groups = targets.iter().find_map(|&t| group_getter(&decode_at(pe, t, 5)));
         if let (Some(manager), Some(groups)) = (manager, groups) {
             roots.push((begin, manager, groups));
         }
@@ -1169,7 +1171,7 @@ pub fn find_interfaces(image: &[u8]) -> Result<Interfaces, ScanError> {
     let mut root_candidates = Vec::new();
     for &(site, _) in calls.iter().filter(|&&(_, t)| t == resize_root) {
         let before = (8..=40).rev().find_map(|back| {
-            let instrs = decode_at(&pe, site.saturating_sub(back), 16);
+            let instrs = decode_at(pe, site.saturating_sub(back), 16);
             instrs.iter().any(|i| i.ip() as u32 == site).then_some(instrs)
         });
         let Some(before) = before else { continue };
@@ -1200,7 +1202,7 @@ pub fn find_interfaces(image: &[u8]) -> Result<Interfaces, ScanError> {
     targets.sort_unstable();
     targets.dedup();
     let scales = targets.into_iter().filter_map(|t| {
-        let instrs = decode_at(&pe, t, 6);
+        let instrs = decode_at(pe, t, 6);
         let loads_canvas = instrs.first().is_some_and(|i| {
             i.op0_kind() == OpKind::Register && i.op0_register() == Register::RAX && load_from(i, Register::RCX) == Some(canvas)
         });
@@ -1347,27 +1349,28 @@ mod tests {
         };
 
         let image = map_image(&file);
-        let position = find_actor_position(&image).expect("actor position not found");
+        let pe = Pe::parse(&image).unwrap();
+        let position = find_actor_position(&pe).expect("actor position not found");
         println!("{position:x?}");
         assert_eq!(position.y, position.x + 4);
 
-        let player = find_local_player(&image).expect("local player not found");
+        let player = find_local_player(&pe).expect("local player not found");
         println!("{player:x?}");
         assert_ne!(player.world_view_id, player.player_index);
 
-        let game_state = find_game_state(&image).expect("game state not found");
+        let game_state = find_game_state(&pe).expect("game state not found");
         println!("game state +{game_state:#x}");
 
-        let skills = find_skills(&image, player.client).expect("skills not found");
+        let skills = find_skills(&pe, player.client).expect("skills not found");
         println!("{skills:x?}");
         assert_eq!(skills.count, 25);
 
-        let tick_count = find_tick_count(&image, player.client).expect("tick count not found");
+        let tick_count = find_tick_count(&pe, player.client).expect("tick count not found");
         println!("tick count +{tick_count:#x}");
-        let varps = find_varps(&image).expect("varps not found");
+        let varps = find_varps(&pe).expect("varps not found");
         println!("varps RVA {varps:#x}");
 
-        let interfaces = find_interfaces(&image).expect("interfaces not found");
+        let interfaces = find_interfaces(&pe).expect("interfaces not found");
         println!("{interfaces:x?}");
         assert_eq!(
             interfaces,
@@ -1383,40 +1386,40 @@ mod tests {
             }
         );
 
-        let containers = find_item_containers(&image).expect("item containers not found");
+        let containers = find_item_containers(&pe).expect("item containers not found");
         println!("{containers:x?}");
         assert_eq!(containers, ItemContainers { table: 0x154fae0, ids: 0x8, quantities: 0x20, next: 0x38 });
-        let varcs = find_varcs(&image, player.client).expect("varcs not found");
+        let varcs = find_varcs(&pe, player.client).expect("varcs not found");
         println!("{varcs:x?}");
         assert_eq!(varcs, Varcs { object: 0x417ca8, begin: 0x48, entry_size: 0x30, value: 0x8, kind: 0x28 });
-        let energy = find_run_energy(&image).expect("run energy not found");
+        let energy = find_run_energy(&pe).expect("run energy not found");
         println!("{energy:x?}");
         assert_eq!(energy, RunEnergy { energy: 0x34e0, weight: 0x34e4 });
-        let actors = find_actor_lists(&image).expect("actor lists not found");
+        let actors = find_actor_lists(&pe).expect("actor lists not found");
         println!("{actors:x?}");
         assert_eq!(actors, ActorLists { npc_indices: 0xd0, npc_table: 0x90, player_count: 0xccd0 });
-        let names = find_actor_names(&image).expect("actor names not found");
+        let names = find_actor_names(&pe).expect("actor names not found");
         println!("{names:x?}");
         assert_eq!(
             names,
             ActorNames { npc_name_override: 0x710, npc_definition: 0x730, definition_id: 0, definition_name: 0x8, player_name: 0x718, npc_animation: 0x4d8 }
         );
-        let decoder = find_appearance_decoder(&image, names.player_name, player.player_index).expect("appearance decoder not found");
+        let decoder = find_appearance_decoder(&pe, names.player_name, player.player_index).expect("appearance decoder not found");
         println!("{decoder:x?}");
         assert_eq!(decoder, AppearanceDecoder { function: 0xa1420, actor_id: 0x79c });
-        let invalidate = find_component_invalidate(&image).expect("component invalidation not found");
+        let invalidate = find_component_invalidate(&pe).expect("component invalidation not found");
         println!("{invalidate:x?}");
         assert_eq!(invalidate, ComponentInvalidate { function: 0x7c270, holder_component: 0x8, text: 0x158 });
-        let fields = find_component_fields(&image).expect("component fields not found");
+        let fields = find_component_fields(&pe).expect("component fields not found");
         println!("{fields:x?}");
         assert_eq!(fields, scripts::ComponentFields { hidden: 0x78, text_color: 0x98, scroll_width: 0x8c, index: 0x8, children: 0xb50 });
-        let sprite = find_component_sprite(&image).expect("component sprite not found");
+        let sprite = find_component_sprite(&pe).expect("component sprite not found");
         println!("component sprite +{sprite:#x}");
         assert_eq!(sprite, 0xc8);
-        let lookup = find_obj_type_lookup(&image).expect("obj type lookup not found");
+        let lookup = find_obj_type_lookup(&pe).expect("obj type lookup not found");
         println!("{lookup:x?}");
         assert_eq!(lookup, ObjTypeLookup { function: 0x5f5e20, name: 0x8, desc: 0x20 });
-        let game_vals = find_game_vals(&image, player.client, &lookup).expect("game vals not found");
+        let game_vals = find_game_vals(&pe, player.client, &lookup).expect("game vals not found");
         println!("{game_vals:x?}");
         assert_eq!(
             game_vals,
@@ -1435,54 +1438,54 @@ mod tests {
                 },
             }
         );
-        let projection = find_projection(&image, player.client).expect("projection not found");
+        let projection = find_projection(&pe, player.client).expect("projection not found");
         println!("{projection:x?}");
-        let menu = find_menu(&image).expect("menu not found");
+        let menu = find_menu(&pe).expect("menu not found");
         println!("{menu:x?}");
         assert_eq!(menu.object, 0x4133f0);
         assert_eq!((menu.entry_size, menu.target, menu.option, menu.ids, menu.priority, menu.kind, menu.cancel), (0x150, 0x50, 0xb8, 0x128, 0x134, 0x146, 0x14d));
-        let click = find_menu_click(&image, &menu).expect("menu click not found");
+        let click = find_menu_click(&pe, &menu).expect("menu click not found");
         println!("{click:x?}");
         assert_eq!(click, MenuClick { minimenu_vtable: 0xbcc438, entry: 0x298, click_x: 0x3e8, counter: 0x3f4 });
-        assert_eq!(find_menu_open(&image, &click), Ok(0x7c0));
-        assert_eq!(find_menu_layout(&image, &click), Ok(MenuLayout { view: 0x158, function: 0x612770, rows: 0x140, margin: 10, path: 0x10, open_row: 0x58, submenu: 0x10 }));
-        let selection = find_selection(&image, &menu).expect("selection not found");
+        assert_eq!(find_menu_open(&pe, &click), Ok(0x7c0));
+        assert_eq!(find_menu_layout(&pe, &click), Ok(MenuLayout { view: 0x158, function: 0x612770, rows: 0x140, margin: 10, path: 0x10, open_row: 0x58, submenu: 0x10 }));
+        let selection = find_selection(&pe, &menu).expect("selection not found");
         println!("{selection:x?}");
         assert_eq!(selection, Selection { offset: 0x7d0, verb: 0, name: 0x48, id: 0x90, child: 0x94, item: 0x98, flags: 0x9e, selected: 0x9f });
         assert_eq!(projection, Projection { world_to_screen: 0x21ec80, tile_height: 0x97ad0, top_world_view: 0xca80, plane: 0x18 });
-        let minimap = find_minimap(&image, player.client).expect("minimap not found");
+        let minimap = find_minimap(&pe, player.client).expect("minimap not found");
         println!("{minimap:x?}");
         assert_eq!(minimap, minimap::Minimap { object: 0x40eab0, zoom: 0x6470, angle: 0x895e0, focal_x: 0x8964c, focal_y: 0x89654 });
-        assert_eq!(find_destination(&image, minimap.object), Ok(0));
-        let chat = find_chat(&image);
+        assert_eq!(find_destination(&pe, minimap.object), Ok(0));
+        let chat = find_chat(&pe);
         println!("{chat:x?}");
         assert_eq!(
             chat,
             Ok(chat::Chat { messages: 0x154fa48, cycle: 0xe98c14, message_cycle: 0x8, kind: 0x40, name: 0x48, sender: 0x70, text: 0xa0, time_utc: 0x28, time_local: 0x10 })
         );
-        let projectiles = find_projectiles(&image).expect("projectiles not found");
+        let projectiles = find_projectiles(&pe).expect("projectiles not found");
         println!("{projectiles:x?}");
         assert_eq!((projectiles.list, projectiles.node, projectiles.cycle), (0xcc70, 0x18, 0xe98c14));
         assert_eq!((projectiles.source_level, projectiles.target_actor, projectiles.start_cycle, projectiles.end_cycle, projectiles.id), (0x260, 0x284, 0x288, 0x28c, 0x298));
         assert_eq!((projectiles.x, projectiles.z, projectiles.y, projectiles.orientation, projectiles.moving), (0x2a0, 0x2a8, 0x2b0, 0x2b8, 0x2c0));
-        let spot_anims = find_spot_anims(&image).expect("spot animations not found");
+        let spot_anims = find_spot_anims(&pe).expect("spot animations not found");
         println!("{spot_anims:x?}");
         assert_eq!(
             spot_anims,
             SpotAnims { list: 0x160, cycle: 0xe98c14, start_cycle: 0x260, level: 0x264, x: 0x268, y: 0x26c, z: 0x270, id: 0x274 }
         );
-        let ground_items = find_ground_items(&image);
+        let ground_items = find_ground_items(&pe);
         println!("{ground_items:x?}");
         assert_eq!(ground_items, Ok(ground_items::GroundItems { items: 0x140, level: 0x10, node_item: 0x18, id: 0x20 }));
-        let camera = find_camera(&image, player.client).expect("camera not found");
+        let camera = find_camera(&pe, player.client).expect("camera not found");
         println!("{camera:x?}");
         assert_eq!(camera, camera::Camera { position: 0x895c8, pitch: 0x895dc, yaw: 0x895e0 });
-        let scene = find_scene(&image).expect("scene not found");
-        let game = find_game_object_layout(&image, &scene).expect("game object layout not found");
-        assert_eq!(find_loc_configs(&image, &scene, &game), Ok(scene::LocConfigs { wall: 0x48, wall_decoration: 0x428, ground_decoration: 0x228 }));
-        let decoration = find_decoration_layout(&image, &scene).expect("decoration layout not found");
-        assert_eq!(find_item_pile(&image, &decoration), Ok(0x120));
-        let local = find_local_projection(&image, player.client, interfaces.canvas, &projection, &scene).expect("local projection not found");
+        let scene = find_scene(&pe).expect("scene not found");
+        let game = find_game_object_layout(&pe, &scene).expect("game object layout not found");
+        assert_eq!(find_loc_configs(&pe, &scene, &game), Ok(scene::LocConfigs { wall: 0x48, wall_decoration: 0x428, ground_decoration: 0x228 }));
+        let decoration = find_decoration_layout(&pe, &scene).expect("decoration layout not found");
+        assert_eq!(find_item_pile(&pe, &decoration), Ok(0x120));
+        let local = find_local_projection(&pe, player.client, interfaces.canvas, &projection, &scene).expect("local projection not found");
         println!("{local:x?}");
         assert_eq!(
             local,
@@ -1507,14 +1510,14 @@ mod tests {
             }
         );
 
-        let login_panel = find_login_panel(&image, game_state).expect("login panel not found");
+        let login_panel = find_login_panel(&pe, game_state).expect("login panel not found");
         println!("{login_panel:x?}");
         assert_eq!(
             login_panel,
             LoginPanel { panel_x: 0xe98bd8, box_x: 0x154fc64, center_x: 0xe98bdc, y: 0xcfb094, screen: 0xe98c10 }
         );
 
-        let world_select = find_world_select(&image, player.client).expect("world select not found");
+        let world_select = find_world_select(&pe, player.client).expect("world select not found");
         println!("{world_select:x?}");
         assert_eq!(
             world_select,
@@ -1532,7 +1535,6 @@ mod tests {
             }
         );
 
-        let pe = Pe::parse(&image).unwrap();
         let logged_in = decode_at(&pe, lua_binding(&pe, "isLoggedIn").unwrap(), 6);
         let state_compare = logged_in
             .iter()
@@ -1557,7 +1559,8 @@ mod tests {
         builds.sort();
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
-            let flag = find_instance_flag(&image).unwrap_or_else(|error| panic!("instance flag not found in {}: {error:?}", build.display()));
+            let pe = Pe::parse(&image).unwrap();
+            let flag = find_instance_flag(&pe).unwrap_or_else(|error| panic!("instance flag not found in {}: {error:?}", build.display()));
             println!("{}: instance flag {flag:x}", build.display());
         }
     }
@@ -1578,7 +1581,8 @@ mod tests {
         builds.sort();
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
-            let packets = find_packets(&image).unwrap_or_else(|error| panic!("packets not found in {}: {error:?}", build.display()));
+            let pe = Pe::parse(&image).unwrap();
+            let packets = find_packets(&pe).unwrap_or_else(|error| panic!("packets not found in {}: {error:?}", build.display()));
             println!("{}: {packets:x?}", build.display());
             // the layout is the same in every build; the addresses move with the code
             let name = build.file_name().unwrap().to_string_lossy();
@@ -1608,7 +1612,8 @@ mod tests {
         builds.sort();
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
-            let runs = find_script_runs(&image).unwrap_or_else(|error| panic!("script runs not found in {}: {error:?}", build.display()));
+            let pe = Pe::parse(&image).unwrap();
+            let runs = find_script_runs(&pe).unwrap_or_else(|error| panic!("script runs not found in {}: {error:?}", build.display()));
             println!("{}: {runs:x?}", build.display());
             // the layout is the same in every build; the address moves with the code
             let name = build.file_name().unwrap().to_string_lossy();
@@ -1633,7 +1638,8 @@ mod tests {
         builds.sort();
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
-            let setters = find_varc_setters(&image).unwrap_or_else(|error| panic!("varc setters not found in {}: {error:?}", build.display()));
+            let pe = Pe::parse(&image).unwrap();
+            let setters = find_varc_setters(&pe).unwrap_or_else(|error| panic!("varc setters not found in {}: {error:?}", build.display()));
             println!("{}: {setters:x?}", build.display());
             if build.to_string_lossy().contains("a2636a01") {
                 assert_eq!(setters, VarcSetters { get_int: 0x33220, set_int: 0x33130, set_object: 0x333f0 }, "{}", build.display());
@@ -1657,8 +1663,9 @@ mod tests {
         builds.sort();
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
-            let containers = find_item_containers(&image).unwrap_or_else(|error| panic!("item containers not found in {}: {error:?}", build.display()));
-            let setter = find_item_setter(&image, &containers).unwrap_or_else(|error| panic!("item setter not found in {}: {error:?}", build.display()));
+            let pe = Pe::parse(&image).unwrap();
+            let containers = find_item_containers(&pe).unwrap_or_else(|error| panic!("item containers not found in {}: {error:?}", build.display()));
+            let setter = find_item_setter(&pe, &containers).unwrap_or_else(|error| panic!("item setter not found in {}: {error:?}", build.display()));
             println!("{}: item setter {setter:#x}", build.display());
             if build.to_string_lossy().contains("a2636a01") {
                 assert_eq!(setter, 0x30f60, "{}", build.display());
@@ -1682,90 +1689,91 @@ mod tests {
         builds.sort();
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
-            let game_state = find_game_state(&image).expect("game state not found");
-            let panel = find_login_panel(&image, game_state)
+            let pe = Pe::parse(&image).unwrap();
+            let game_state = find_game_state(&pe).expect("game state not found");
+            let panel = find_login_panel(&pe, game_state)
                 .unwrap_or_else(|error| panic!("login panel not found in {}: {error:?}", build.display()));
             println!("{}: {panel:x?}", build.display());
-            let interfaces = find_interfaces(&image)
+            let interfaces = find_interfaces(&pe)
                 .unwrap_or_else(|error| panic!("interfaces not found in {}: {error:?}", build.display()));
             println!("{}: {interfaces:x?}", build.display());
-            let player = find_local_player(&image).unwrap();
+            let player = find_local_player(&pe).unwrap();
             println!(
                 "{}: {:x?} {:x?} {:x?} {:x?}",
                 build.display(),
-                find_item_containers(&image),
-                find_varcs(&image, player.client),
-                find_run_energy(&image),
-                find_actor_lists(&image)
+                find_item_containers(&pe),
+                find_varcs(&pe, player.client),
+                find_run_energy(&pe),
+                find_actor_lists(&pe)
             );
-            let names = find_actor_names(&image);
+            let names = find_actor_names(&pe);
             println!("{}: {names:x?}", build.display());
-            println!("{}: {:x?}", build.display(), find_component_invalidate(&image));
-            println!("{}: sprite {:x?}", build.display(), find_component_sprite(&image));
-            println!("{}: {:x?}", build.display(), find_component_fields(&image));
-            let lookup = find_obj_type_lookup(&image);
+            println!("{}: {:x?}", build.display(), find_component_invalidate(&pe));
+            println!("{}: sprite {:x?}", build.display(), find_component_sprite(&pe));
+            println!("{}: {:x?}", build.display(), find_component_fields(&pe));
+            let lookup = find_obj_type_lookup(&pe);
             println!("{}: {lookup:x?}", build.display());
-            println!("{}: {:x?}", build.display(), find_projection(&image, player.client));
-            let menu = find_menu(&image);
+            println!("{}: {:x?}", build.display(), find_projection(&pe, player.client));
+            let menu = find_menu(&pe);
             println!("{}: {menu:x?}", build.display());
             if let Ok(menu) = menu {
-                let click = find_menu_click(&image, &menu);
+                let click = find_menu_click(&pe, &menu);
                 println!("{}: {click:x?}", build.display());
                 if let Ok(click) = click {
-                    println!("{}: menu layout {:x?}", build.display(), find_menu_layout(&image, &click));
+                    println!("{}: menu layout {:x?}", build.display(), find_menu_layout(&pe, &click));
                 }
-                println!("{}: {:x?}", build.display(), find_selection(&image, &menu));
+                println!("{}: {:x?}", build.display(), find_selection(&pe, &menu));
             }
-            let minimap = find_minimap(&image, player.client)
+            let minimap = find_minimap(&pe, player.client)
                 .unwrap_or_else(|error| panic!("minimap not found in {}: {error:?}", build.display()));
             println!("{}: {minimap:x?}", build.display());
-            println!("{}: destination {:x?}", build.display(), find_destination(&image, minimap.object));
-            println!("{}: {:x?}", build.display(), find_ground_items(&image));
-            println!("{}: {:x?}", build.display(), find_projectiles(&image).unwrap_or_else(|error| panic!("projectiles not found in {}: {error:?}", build.display())));
-            println!("{}: {:x?}", build.display(), find_spot_anims(&image).unwrap_or_else(|error| panic!("spot animations not found in {}: {error:?}", build.display())));
-            println!("{}: {:x?}", build.display(), find_chat(&image).unwrap_or_else(|error| panic!("chat not found in {}: {error:?}", build.display())));
-            let camera = find_camera(&image, player.client)
+            println!("{}: destination {:x?}", build.display(), find_destination(&pe, minimap.object));
+            println!("{}: {:x?}", build.display(), find_ground_items(&pe));
+            println!("{}: {:x?}", build.display(), find_projectiles(&pe).unwrap_or_else(|error| panic!("projectiles not found in {}: {error:?}", build.display())));
+            println!("{}: {:x?}", build.display(), find_spot_anims(&pe).unwrap_or_else(|error| panic!("spot animations not found in {}: {error:?}", build.display())));
+            println!("{}: {:x?}", build.display(), find_chat(&pe).unwrap_or_else(|error| panic!("chat not found in {}: {error:?}", build.display())));
+            let camera = find_camera(&pe, player.client)
                 .unwrap_or_else(|error| panic!("camera not found in {}: {error:?}", build.display()));
             println!("{}: {camera:x?}", build.display());
             assert_eq!(camera.yaw, minimap.angle);
-            let world_select = find_world_select(&image, player.client)
+            let world_select = find_world_select(&pe, player.client)
                 .unwrap_or_else(|error| panic!("world select not found in {}: {error:?}", build.display()));
             println!("{}: {world_select:x?}", build.display());
             if let Ok(lookup) = lookup {
-                println!("{}: {:x?}", build.display(), find_game_vals(&image, player.client, &lookup));
+                println!("{}: {:x?}", build.display(), find_game_vals(&pe, player.client, &lookup));
             }
             if let Ok(names) = names {
-                println!("{}: {:x?}", build.display(), find_appearance_decoder(&image, names.player_name, player.player_index));
-                let model = find_npc_model(&image, names.npc_definition)
+                println!("{}: {:x?}", build.display(), find_appearance_decoder(&pe, names.player_name, player.player_index));
+                let model = find_npc_model(&pe, names.npc_definition)
                     .unwrap_or_else(|error| panic!("NPC model not found in {}: {error:?}", build.display()));
                 println!("{}: {model:x?}", build.display());
-                let vertices = find_model_vertices(&image, &model)
+                let vertices = find_model_vertices(&pe, &model)
                     .unwrap_or_else(|error| panic!("model vertices not found in {}: {error:?}", build.display()));
                 println!("{}: {vertices:x?}", build.display());
-                let faces = find_model_faces(&image, &vertices)
+                let faces = find_model_faces(&pe, &vertices)
                     .unwrap_or_else(|error| panic!("model faces not found in {}: {error:?}", build.display()));
                 println!("{}: {faces:x?}", build.display());
-                let orientation = find_actor_orientation(&image)
+                let orientation = find_actor_orientation(&pe)
                     .unwrap_or_else(|error| panic!("actor orientation not found in {}: {error:?}", build.display()));
                 println!("{}: {orientation:x?}", build.display());
-                let height = find_animation_height(&image, names.npc_definition)
+                let height = find_animation_height(&pe, names.npc_definition)
                     .unwrap_or_else(|error| panic!("animation height not found in {}: {error:?}", build.display()));
                 println!("{}: animation height {height:x}", build.display());
             }
-            let scene = find_scene(&image).unwrap_or_else(|error| panic!("scene not found in {}: {error:?}", build.display()));
+            let scene = find_scene(&pe).unwrap_or_else(|error| panic!("scene not found in {}: {error:?}", build.display()));
             println!("{}: {scene:x?}", build.display());
-            let collision = find_collision_maps(&image, &scene).unwrap_or_else(|error| panic!("collision maps not found in {}: {error:?}", build.display()));
+            let collision = find_collision_maps(&pe, &scene).unwrap_or_else(|error| panic!("collision maps not found in {}: {error:?}", build.display()));
             assert_eq!(collision, scene::CollisionMaps { maps: 0x2f8, stride: 0x28 });
-            let game = find_game_object_layout(&image, &scene).expect("game object layout");
+            let game = find_game_object_layout(&pe, &scene).expect("game object layout");
             println!("{}: {game:x?}", build.display());
-            println!("{}: {:x?}", build.display(), find_loc_configs(&image, &scene, &game).expect("loc configs"));
-            let decoration = find_decoration_layout(&image, &scene).expect("decoration layout");
+            println!("{}: {:x?}", build.display(), find_loc_configs(&pe, &scene, &game).expect("loc configs"));
+            let decoration = find_decoration_layout(&pe, &scene).expect("decoration layout");
             println!("{}: {decoration:x?}", build.display());
-            println!("{}: item pile {:x?}", build.display(), find_item_pile(&image, &decoration));
-            println!("{}: {:x?}", build.display(), find_loc_names(&image).expect("loc names"));
-            let interfaces = find_interfaces(&image).unwrap();
-            let projection = find_projection(&image, player.client).unwrap();
-            let local = find_local_projection(&image, player.client, interfaces.canvas, &projection, &scene)
+            println!("{}: item pile {:x?}", build.display(), find_item_pile(&pe, &decoration));
+            println!("{}: {:x?}", build.display(), find_loc_names(&pe).expect("loc names"));
+            let interfaces = find_interfaces(&pe).unwrap();
+            let projection = find_projection(&pe, player.client).unwrap();
+            let local = find_local_projection(&pe, player.client, interfaces.canvas, &projection, &scene)
                 .unwrap_or_else(|error| panic!("local projection not found in {}: {error:?}", build.display()));
             println!("{}: {local:x?}", build.display());
             {

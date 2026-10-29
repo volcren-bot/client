@@ -17,18 +17,17 @@ fn imm1(i: &Instruction) -> Option<u64> {
     matches!(i.op1_kind(), OpKind::Immediate8 | OpKind::Immediate8to32 | OpKind::Immediate8to64 | OpKind::Immediate32 | OpKind::Immediate32to64).then(|| i.immediate(1))
 }
 
-pub fn find_varc_setters(image: &[u8]) -> Result<VarcSetters, ScanError> {
-    let pe = Pe::parse(image).ok_or(ScanError::InvalidImage)?;
+pub fn find_varc_setters(pe: &Pe) -> Result<VarcSetters, ScanError> {
 
     // the getter: `mov rax, [client]; mov rcx, [rax + varcs]; jmp lookup`
-    let binding = decode_at(&pe, lua_binding(&pe, "getIntegerVarc")?, 3);
+    let binding = decode_at(pe, lua_binding(pe, "getIntegerVarc")?, 3);
     let [_, _, jmp, ..] = binding.as_slice() else { return Err(ScanError::NotFound) };
     if jmp.mnemonic() != Mnemonic::Jmp || jmp.op0_kind() != OpKind::NearBranch64 {
         return Err(ScanError::NotFound);
     }
     let get_int = jmp.near_branch_target() as u32;
     let (begin, end) = pe.function_containing(get_int).ok_or(ScanError::NotFound)?;
-    let lookup = whole_function(&pe, begin, end - begin);
+    let lookup = whole_function(pe, begin, end - begin);
 
     // the map search every varc function calls, and the two map fields it is given (loaded from `rcx`)
     let search = lookup.iter().find(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64).ok_or(ScanError::NotFound)?.near_branch_target() as u32;
@@ -42,7 +41,7 @@ pub fn find_varc_setters(image: &[u8]) -> Result<VarcSetters, ScanError> {
         if !(0x80..=0x130).contains(&(end - begin)) {
             continue;
         }
-        let instrs = whole_function(&pe, begin, end - begin);
+        let instrs = whole_function(pe, begin, end - begin);
         let calls_search = instrs.iter().any(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64 && i.near_branch_target() as u32 == search);
         let uses_fields = fields.iter().all(|&field| instrs.iter().any(|i| i.memory_displacement64() as u32 == field && i.memory_base() != Register::None));
         // ends by marking the varcs as changed: `mov byte [varcs + n], 1`

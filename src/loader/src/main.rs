@@ -20,6 +20,7 @@ mod store;
 mod terminal;
 mod theme;
 mod libs;
+mod log_view;
 mod logo;
 mod packets;
 mod update;
