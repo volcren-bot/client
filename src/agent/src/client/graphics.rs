@@ -63,7 +63,6 @@ type GlLinkProgramFn = unsafe extern "system" fn(program: GLuint);
 type GlDeleteShaderFn = unsafe extern "system" fn(shader: GLuint);
 type GlBindVertexArrayFn = unsafe extern "system" fn(array: GLuint);
 type GlUseProgramFn = unsafe extern "system" fn(program: GLuint);
-type GlCreateVertexArraysFn = unsafe extern "system" fn(n: GLsizei, arrays: *mut GLuint);
 type GlGenVertexArraysFn = unsafe extern "system" fn(n: GLsizei, arrays: *mut GLuint);
 type GLUniform2FvFn =
     unsafe extern "system" fn(location: GLint, count: GLsizei, value: *const GLfloat);
@@ -76,9 +75,6 @@ type GLTexStorage2DFn = unsafe extern "system" fn(
 );
 type GLActiveTextureFn = unsafe extern "system" fn(texture: GLenum);
 type GLBindTextureFn = unsafe extern "system" fn(target: GLenum, texture: GLuint);
-type GLUniform1iFn = unsafe extern "system" fn(location: GLint, v0: GLint);
-type GLGetUniformLocationFn =
-    unsafe extern "system" fn(program: GLuint, name: *const GLchar) -> GLint;
 
 static GL_GEN_BUFFERS: OnceLock<GlGenBuffersFn> = OnceLock::new();
 static GL_DELETE_BUFFERS: OnceLock<GlDeleteBuffersFn> = OnceLock::new();
@@ -97,14 +93,11 @@ static GL_LINK_PROGRAM: OnceLock<GlLinkProgramFn> = OnceLock::new();
 static GL_DELETE_SHADER: OnceLock<GlDeleteShaderFn> = OnceLock::new();
 static GL_BIND_VERTEX_ARRAY: OnceLock<GlBindVertexArrayFn> = OnceLock::new();
 static GL_USE_PROGRAM: OnceLock<GlUseProgramFn> = OnceLock::new();
-static GL_CREATE_VERTEX_ARRAYS: OnceLock<GlCreateVertexArraysFn> = OnceLock::new();
 static GL_GEN_VERTEX_ARRAYS: OnceLock<GlGenVertexArraysFn> = OnceLock::new();
 static GL_UNIFORM_2FV: OnceLock<GLUniform2FvFn> = OnceLock::new();
 static GL_TEX_STORAGE_2D: OnceLock<GLTexStorage2DFn> = OnceLock::new();
 static GL_ACTIVE_TEXTURE: OnceLock<GLActiveTextureFn> = OnceLock::new();
 static GL_BIND_TEXTURE: OnceLock<GLBindTextureFn> = OnceLock::new();
-static GL_UNIFORM_1I: OnceLock<GLUniform1iFn> = OnceLock::new();
-static GL_GET_UNIFORM_LOCATION: OnceLock<GLGetUniformLocationFn> = OnceLock::new();
 
 static POINT_SHADER: OnceLock<GLuint> = OnceLock::new();
 static VAO: OnceLock<GLuint> = OnceLock::new();
@@ -173,11 +166,6 @@ pub unsafe fn load_opengl_extensions() -> bool {
         )
         && load!(GL_USE_PROGRAM, GlUseProgramFn, "glUseProgram")
         && load!(
-            GL_CREATE_VERTEX_ARRAYS,
-            GlCreateVertexArraysFn,
-            "glCreateVertexArrays"
-        )
-        && load!(
             GL_GEN_VERTEX_ARRAYS,
             GlGenVertexArraysFn,
             "glGenVertexArrays"
@@ -186,12 +174,6 @@ pub unsafe fn load_opengl_extensions() -> bool {
         && load!(GL_TEX_STORAGE_2D, GLTexStorage2DFn, "glTexStorage2D")
         && load!(GL_ACTIVE_TEXTURE, GLActiveTextureFn, "glActiveTexture")
         && load!(GL_BIND_TEXTURE, GLBindTextureFn, "glBindTexture")
-        && load!(GL_UNIFORM_1I, GLUniform1iFn, "glUniform1i")
-        && load!(
-            GL_GET_UNIFORM_LOCATION,
-            GLGetUniformLocationFn,
-            "glGetUniformLocation"
-        )
 }
 
 // Two PBOs mapped for life: each frame reads into one and copies the other (the previous frame) to shared memory, a fence per PBO.

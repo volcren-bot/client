@@ -30,11 +30,9 @@ pub fn ranges(source: &str) -> Vec<(usize, usize)> {
                     }
                     "do" if loop_do => loop_do = false,
                     "do" => stack.push((Open::Block, line)),
-                    "end" | "until" => {
-                        if stack.last().is_some_and(|(open, _)| *open == Open::Block) {
-                            let (_, start) = stack.pop().unwrap();
-                            found.push((start, line));
-                        }
+                    "end" | "until" if stack.last().is_some_and(|(open, _)| *open == Open::Block) => {
+                        let (_, start) = stack.pop().unwrap();
+                        found.push((start, line));
                     }
                     _ => {}
                 }
@@ -222,7 +220,7 @@ mod tests {
         folds.toggle(0);
         let view = folds.view(text);
         assert_eq!(view.visible, [0, 3]);
-        assert_eq!(view.hidden, [12..text.find("\ny()").unwrap()]);
+        assert_eq!(view.hidden, vec![12..text.find("\ny()").unwrap()]);
         assert_eq!(view.headers, [(0, 12)]);
     }
 

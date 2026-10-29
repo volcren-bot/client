@@ -82,7 +82,7 @@ impl XpTracker {
                 Some(XpRow { name: skill.name.clone(), level: skill.level, gained, per_hour, to_level })
             })
             .collect();
-        rows.sort_by(|a, b| b.gained.cmp(&a.gained));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.gained));
         rows
     }
 }
@@ -91,7 +91,7 @@ pub fn thousands(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);

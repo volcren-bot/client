@@ -201,7 +201,7 @@ pub fn in_instance(memory: &impl Memory, layout: &Layout) -> Option<bool> {
 }
 
 fn plausible(pointer: u64) -> bool {
-    pointer % 8 == 0 && (0x1000..0x7fff_ffff_0000).contains(&pointer)
+    pointer.is_multiple_of(8) && (0x1000..0x7fff_ffff_0000).contains(&pointer)
 }
 
 fn scene_loader(memory: &impl Memory, client: u64, view: u64) -> Option<(u64, Vec<[i32; 2]>)> {
@@ -259,9 +259,8 @@ fn region_vector(
     capacity: u64,
 ) -> Option<Vec<[i32; 2]>> {
     let bytes = end.checked_sub(begin)?;
-    if begin % 8 != 0
-        || bytes < REGION_MIN_STRIDE
-        || bytes > REGION_MAX_BYTES
+    if !begin.is_multiple_of(8)
+        || !(REGION_MIN_STRIDE..=REGION_MAX_BYTES).contains(&bytes)
         || capacity < end
         || capacity - begin > 16 * REGION_MAX_BYTES
     {
@@ -274,7 +273,7 @@ fn region_vector(
     let int = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
     (REGION_MIN_STRIDE..=REGION_MAX_STRIDE.min(bytes))
         .step_by(8)
-        .filter(|stride| bytes % stride == 0 && (capacity - begin) % stride == 0)
+        .filter(|stride| bytes % stride == 0 && (capacity - begin).is_multiple_of(*stride))
         .find_map(|stride| {
             let stride = stride as usize;
             let count = data.len() / stride;

@@ -1,6 +1,6 @@
 use std::{
     ffi::c_void,
-    collections::hash_map::DefaultHasher,
+    collections::{HashMap, hash_map::DefaultHasher},
     fs, io,
     hash::{Hash, Hasher},
     iter::once,
@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     ptr::{copy_nonoverlapping, null, null_mut, write_bytes, NonNull},
     thread::sleep,
-    sync::{Arc, Mutex, OnceLock, atomic::{Ordering, fence}},
+    sync::{Arc, LazyLock, Mutex, OnceLock, atomic::{Ordering, fence}},
     time::{Duration, Instant},
 };
 
@@ -1184,13 +1184,14 @@ const WORLD_SQUARE_BATCH: usize = 16;
 const WORLD_FORMAT: u64 = 3;
 
 // The key it was built for, and the process whose cache that key was read from: the cache only changes with a game update, so later calls for that process skip reading its indexes.
-static WORLD: Mutex<Option<(u64, u32, std::sync::Arc<crate::collision::WorldCollision<crate::collision::Movement>>)>> = Mutex::new(None);
+type WorldMovement = Arc<crate::collision::WorldCollision<crate::collision::Movement>>;
+static WORLD: Mutex<Option<(u64, u32, WorldMovement)>> = Mutex::new(None);
 
 fn world_cache_dir() -> std::path::PathBuf {
     std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("injector")
 }
 
-pub fn world_movement(pid: u32) -> Result<std::sync::Arc<crate::collision::WorldCollision<crate::collision::Movement>>, String> {
+pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
     use crate::{cache::*, collision::*};
     if let Some((_, _, world)) = WORLD.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|(_, p, _)| *p == pid) {
         return Ok(world.clone());
@@ -1674,7 +1675,7 @@ pub fn chat_messages(pid: u32) -> Result<Vec<crate::ChatMessage>, String> {
 }
 
 // Item names don't change while the client runs, so each found name is looked up once and kept.
-static ITEM_NAMES: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+static ITEM_NAMES: LazyLock<Mutex<HashMap<i32, String>>> = LazyLock::new(Default::default);
 
 pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
     let mut items = match ask_worker(pid, worker_kind::GROUND_ITEMS, [0; 4]) {
@@ -1688,19 +1689,15 @@ pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
     ids.sort_unstable();
     ids.dedup();
     let mut known = ITEM_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let missing: Vec<i32> = ids.iter().copied().filter(|id| !known.iter().any(|(k, _)| k == id)).collect();
+    let missing: Vec<i32> = ids.iter().copied().filter(|id| !known.contains_key(id)).collect();
     if !missing.is_empty() {
         drop(known);
         let found = item_names(pid, &missing)?;
         known = ITEM_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-        for (id, name) in missing.into_iter().zip(found) {
-            if let Some(name) = name {
-                known.push((id, name));
-            }
-        }
+        known.extend(missing.into_iter().zip(found).filter_map(|(id, name)| Some((id, name?))));
     }
     for item in &mut items {
-        item.name = known.iter().find(|(id, _)| *id == item.id).map(|(_, name)| name.clone());
+        item.name = known.get(&item.id).cloned();
     }
     Ok(items)
 }
@@ -1733,7 +1730,8 @@ impl Drop for SlotGuard {
 // Asks the agent's worker to read inside the client in one request; `None` when it can't answer, and the caller reads the memory itself.
 fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4]) -> Option<T> {
     // VOLCREN_NO_WORKER forces the injector's own reads, to compare the two paths.
-    if std::env::var_os("VOLCREN_NO_WORKER").is_some() {
+    static NO_WORKER: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VOLCREN_NO_WORKER").is_some());
+    if *NO_WORKER {
         return None;
     }
     let start = Instant::now();
@@ -1835,7 +1833,7 @@ pub fn widget_words(pid: u32, group: u16, child: u16, index: i32, count: usize) 
     if !memory.read(component, &mut bytes) {
         return Err(format!("can't read the component at {component:#x}"));
     }
-    Ok((component, bytes.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()))
+    Ok((component, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()))
 }
 
 // Debug: the first `count` words of every component of the open interfaces and of their dynamic children, by component id and index.
@@ -1846,7 +1844,7 @@ pub fn widget_dump(pid: u32, count: usize) -> Result<Vec<(i32, i32, Vec<i32>)>, 
     for (id, index, address) in decode::widgets::component_addresses(&memory, &layout.interfaces, root).ok_or("can't list the components")? {
         let mut bytes = vec![0u8; count * 4];
         if memory.read(address, &mut bytes) {
-            dump.push((id, index, bytes.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()));
+            dump.push((id, index, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()));
         }
     }
     Ok(dump)

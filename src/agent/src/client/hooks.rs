@@ -288,19 +288,6 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
                 let vkey = LAST_CHAR.lock().unwrap();
                 let key = rebuild_key(*vkey as u8, *shift, *ctrl, *alt);
                 let new_wparam = get_updated_wparam((key & 0xFF) as u32, *shift, *ctrl, *alt);
-
-                //
-                println!(
-                    "[Agent]: ch: {:?}: key: {:?}, i16Key: {:?}\r\n",
-                    wparam,
-                    key,
-                    key & 0xFF
-                );
-                println!(
-                    "[Agent]: updated message: WM_CHAR, wparam: {:?}, lparam: {:?}\r\n",
-                    new_wparam, lparam
-                );
-
                 return call_original(hwnd, msg, new_wparam, lparam);
             }
 
@@ -552,8 +539,8 @@ unsafe fn find_offsets() {
     let packets = found("Packets", find_packets(image));
     let script_runs = found("Script runs", find_script_runs(image));
     let varc_setters = found("Varc setters", find_varc_setters(image));
-    let containers = find_item_containers(image).ok();
-    let item_setter = containers.and_then(|c| found("Item setter", find_item_setter(image, &c)).map(|rule| (rule, c)));
+    let containers = find_item_containers(image);
+    let item_setter = containers.ok().and_then(|c| found("Item setter", find_item_setter(image, &c)).map(|rule| (rule, c)));
     let camera = player.and_then(|p| found("Camera", find_camera(image, p.client)));
     let projection = player.and_then(|p| found("Projection", find_projection(image, p.client)));
     let scene = projection.and_then(|_| found("Scene", find_scene(image)));
@@ -565,7 +552,7 @@ unsafe fn find_offsets() {
     let world = player.zip(actor).and_then(|(player, actor)| {
         let world = (|| {
             Ok::<_, (&str, ScanError)>(World {
-                containers: find_item_containers(image).map_err(|e| ("item containers", e))?,
+                containers: containers.map_err(|e| ("item containers", e))?,
                 varcs: find_varcs(image, player.client).map_err(|e| ("varcs", e))?,
                 run_energy: find_run_energy(image).map_err(|e| ("run energy", e))?,
                 lists: find_actor_lists(image).map_err(|e| ("NPC and player lists", e))?,

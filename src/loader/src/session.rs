@@ -155,8 +155,11 @@ fn fetch(api: &Api, id: &str, session: &StartedSession, url: &str, name: &str, s
     }
 }
 
+// The entry path, its source, and the other modules as (name, source).
+type Downloaded = (PathBuf, String, Vec<(String, String)>);
+
 /// A premium script's files, kept in memory (an earlier cached copy is removed); the entry path points into an empty folder.
-fn download_to_memory(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<(PathBuf, String, Vec<(String, String)>), String> {
+fn download_to_memory(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<Downloaded, String> {
     let names = session
         .files
         .iter()

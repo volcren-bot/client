@@ -1286,10 +1286,12 @@ impl LoaderApp {
             None => ui.label("Select a client with agent loaded in the Clients tab."),
         };
         // the first look at the tab reads the interfaces without being asked
-        if let Some(target) = target {
-            if !self.widgets.has_read() && !self.widgets.reading() && self.widgets.error.is_none() {
-                self.refresh_widgets(&ctx, target);
-            }
+        if let Some(target) = target
+            && !self.widgets.has_read()
+            && !self.widgets.reading()
+            && self.widgets.error.is_none()
+        {
+            self.refresh_widgets(&ctx, target);
         }
         if let Some(error) = &self.widgets.error {
             ui.colored_label(ui.visuals().error_fg_color, error);
