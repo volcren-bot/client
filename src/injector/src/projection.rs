@@ -442,13 +442,14 @@ fn scene_terrain(
     Ok((key, trig))
 }
 
-/// Projects `points` with the client's camera, first moved by `shift` (fine x and y) as it follows the player.
+/// Projects `points` with the client's camera, first moved by `shift` as it follows the player: fine x and y, and the plane the
+/// player will stand on (negative: this one), since the camera rises or sinks with the ground there.
 pub fn project(
     memory: &impl Memory,
     layout: &Layout,
     terrain: &mut Option<Terrain>,
     points: &[Point],
-    shift: Option<[i32; 2]>,
+    shift: Option<[i32; 3]>,
     clip: bool,
     decorations: impl FnOnce() -> Vec<Decoration>,
 ) -> Result<Vec<[f32; 2]>, Failure> {
@@ -459,10 +460,10 @@ pub fn project(
     let (key, trig) = scene_terrain(memory, layout, client, terrain, decorations)?;
     let mut camera = Camera::read_with(memory, layout, client, trig).ok_or_else(|| unavailable("camera"))?;
     let terrain = terrain.as_mut().unwrap();
-    if let Some([dx, dy]) = shift {
+    if let Some([dx, dy, plane]) = shift {
         let [fx, _, fy] = i32s::<3>(memory, client + layout.camera.focal as u64).ok_or_else(|| unavailable("camera's focal point"))?;
         let from = terrain.ground_on(memory, layout, fx, fy, key.plane, None);
-        let to = terrain.ground_on(memory, layout, fx.wrapping_add(dx), fy.wrapping_add(dy), key.plane, None);
+        let to = terrain.ground_on(memory, layout, fx.wrapping_add(dx), fy.wrapping_add(dy), if plane < 0 { key.plane } else { plane }, None);
         let [x, z, y] = camera.position;
         camera.position = [x.wrapping_add(dx), z.wrapping_add(to.wrapping_sub(from)), y.wrapping_add(dy)];
     }
@@ -721,7 +722,7 @@ mod tests {
         }
         let mut terrain = None;
         let points = [Point::new(300, 200, -40)];
-        let shifted = project(&m, &layout, &mut terrain, &points, Some([128, 0]), false, Vec::new).unwrap();
+        let shifted = project(&m, &layout, &mut terrain, &points, Some([128, 0, -1]), false, Vec::new).unwrap();
         let t = terrain.as_mut().unwrap();
         let rise = t.ground_on(&m, &layout, 192, 64, 0, None) - t.ground_on(&m, &layout, 64, 64, 0, None);
         assert_eq!(rise, -10);

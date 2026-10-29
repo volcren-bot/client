@@ -671,7 +671,7 @@ fn names(
 
 static TERRAIN: Mutex<Option<(u32, Terrain)>> = Mutex::new(None);
 
-fn project_locally(pid: u32, points: &[projection::Point], shift: Option<[i32; 2]>, clip: bool) -> Result<Vec<[f32; 2]>, Failure> {
+fn project_locally(pid: u32, points: &[projection::Point], shift: Option<[i32; 3]>, clip: bool) -> Result<Vec<[f32; 2]>, Failure> {
     let (layout, memory) = reader(pid, 0, "").map_err(Failure::Unavailable)?;
     let mut cache = TERRAIN.lock().unwrap_or_else(|e| e.into_inner());
     let mut terrain = cache.take().filter(|(p, _)| *p == pid).map(|(_, terrain)| terrain);
@@ -700,8 +700,8 @@ pub fn project_clipped(pid: u32, points: &[projection::Point]) -> Result<Vec<[f3
     }
 }
 
-// `project` with the camera moved by `shift` first; only the local projection can move the camera.
-pub fn project_moved(pid: u32, points: &[projection::Point], shift: [i32; 2]) -> Result<Vec<[f32; 2]>, String> {
+// `project` with the camera moved by `shift` first (fine x, y and the plane it ends on, negative for this one); only the local projection can move the camera.
+pub fn project_moved(pid: u32, points: &[projection::Point], shift: [i32; 3]) -> Result<Vec<[f32; 2]>, String> {
     match project_locally(pid, points, Some(shift), false) {
         Ok(screen) => Ok(screen),
         Err(Failure::Unavailable(why)) => Err(format!("local projection: {why}")),

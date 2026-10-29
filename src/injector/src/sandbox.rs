@@ -60,7 +60,7 @@ mod offline {
     pub fn project(_: u32, _: &[crate::projection::Point], _: crate::projection::Via) -> Result<Vec<[f32; 2]>, String> {
         Err(NO_WIN32.into())
     }
-    pub fn project_moved(_: u32, _: &[crate::projection::Point], _: [i32; 2]) -> Result<Vec<[f32; 2]>, String> {
+    pub fn project_moved(_: u32, _: &[crate::projection::Point], _: [i32; 3]) -> Result<Vec<[f32; 2]>, String> {
         Err(NO_WIN32.into())
     }
     pub fn game_val_names(_: u32, _: u32, _: &[i32]) -> Result<Vec<Option<String>>, String> {
@@ -814,7 +814,15 @@ pub fn run_with_modules(
             let screen = match shift {
                 None => project(pid, &points, via)?,
                 Some(_) if via == Via::Client => return Err("the client's projection can't move the camera".into()),
-                Some(s) => project_moved(pid, &points, [s.get("x").map_err(|e| e.to_string())?, s.get("y").map_err(|e| e.to_string())?])?,
+                Some(s) => project_moved(
+                    pid,
+                    &points,
+                    [
+                        s.get("x").map_err(|e| e.to_string())?,
+                        s.get("y").map_err(|e| e.to_string())?,
+                        s.get::<Option<i32>>("plane").map_err(|e| e.to_string())?.unwrap_or(-1),
+                    ],
+                )?,
             };
             Ok(screen.into_iter().map(|[x, y]| ScreenPoint { x, y }).collect::<Vec<_>>())
         })?,
