@@ -64,6 +64,9 @@ pub struct GameState {
     pub position: Option<Position>,
     #[serde(default)]
     pub player_name: Option<String>,
+    /// The logged in account's normalized name; unlike `player_name` it is never the overridden display name.
+    #[serde(default)]
+    pub account_name: Option<String>,
     pub game_state: Option<i32>,
     #[serde(default)]
     pub skills: Option<Vec<Skill>>,

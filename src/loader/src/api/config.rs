@@ -1,5 +1,6 @@
-/// Where the loader talks to: embedded at build time from `client/.env` (see `build.rs`), overridable at run time by the same variables.
-#[derive(Clone, Debug)]
+/// Where the loader talks to: compiled in from `src/loader/config.json`, overridable at run time by the `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SITE_URL` environment variables.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// The webapp, which serves `/api/launcher/*`.
     pub api_url: String,
@@ -13,18 +14,15 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let var = |name: &str, embedded: Option<&str>| {
-            std::env::var(name)
-                .ok()
-                .or_else(|| embedded.map(str::to_owned))
-                .map(|value| value.trim().trim_end_matches('/').to_owned())
-                .unwrap_or_default()
+        let compiled: Self = serde_json::from_str(include_str!("../../config.json")).expect("config.json is valid");
+        let var = |name: &str, compiled: String| {
+            std::env::var(name).ok().unwrap_or(compiled).trim().trim_end_matches('/').to_owned()
         };
         Self {
-            api_url: var("API_URL", option_env!("VOLCREN_API_URL")),
-            supabase_url: var("SUPABASE_URL", option_env!("VOLCREN_SUPABASE_URL")),
-            anon_key: var("SUPABASE_ANON_KEY", option_env!("VOLCREN_SUPABASE_ANON_KEY")),
-            site_url: var("SITE_URL", option_env!("VOLCREN_SITE_URL")),
+            api_url: var("API_URL", compiled.api_url),
+            supabase_url: var("SUPABASE_URL", compiled.supabase_url),
+            anon_key: var("SUPABASE_ANON_KEY", compiled.anon_key),
+            site_url: var("SITE_URL", compiled.site_url),
         }
     }
 
@@ -49,6 +47,12 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_compiled_config_is_complete() {
+        let config: Config = serde_json::from_str(include_str!("../../config.json")).unwrap();
+        assert!(config.missing().is_empty());
+    }
 
     #[test]
     fn urls_join_without_double_slashes() {

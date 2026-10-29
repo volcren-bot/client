@@ -34,14 +34,6 @@ jobs:
                           target/release/injector
                           target/release/loader
 
-        # The loader embeds these at build time (see src/loader/build.rs). They are public values, so they are repository
-        # variables, not secrets. Builds without them (forks, pull requests) still compile; sign-in just isn't configured.
-        env:
-            API_URL: ${{ vars.API_URL }}
-            SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-            SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
-            SITE_URL: ${{ vars.SITE_URL }}
-
         steps:
             - uses: actions/checkout@v4
 

@@ -75,8 +75,9 @@ Outputs:
 4. Press **Sign in with Discord** (in your browser); the loader needs a signed-in account. Then either pick a
    script in the **Scripts** tab and press **Run**, or open a local Luau script in the **Editor** tab and run it.
 
-The loader reads `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and optionally `SITE_URL` from `.env`
-in the repository root at build time and embeds them; the same names in the environment override them at run time.
+The loader's endpoints (`api_url`, `supabase_url`, the public `anon_key` and optionally `site_url`) are in
+`src/loader/config.json` and compiled in; the environment variables `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`
+and `SITE_URL` override them at run time, e.g. to point at a local backend.
 
 The injector can also be used on its own, for example `injector list` to list game clients,
 `injector load <pid> <dll>` to load the agent and `injector run --script script.luau <pid> < script.luau`
