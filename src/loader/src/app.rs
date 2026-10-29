@@ -52,6 +52,8 @@ enum Event {
     },
     /// A read for the XP tracker, taken while a script runs.
     XpState(Result<GameState, String>),
+    /// The account name of the selected client, for the Accounts page.
+    AccountName(Result<Option<String>, String>),
     Name {
         pid: u32,
         name: String,
@@ -135,6 +137,7 @@ enum Tab {
     Scripts,
     Development,
     Terminal,
+    Accounts,
     Settings,
 }
 
@@ -642,6 +645,7 @@ pub struct LoaderApp {
     api: Api,
     auth: Auth,
     store: Store,
+    accounts: crate::accounts::Accounts,
     /// Community scripts the user agreed to run, by revision (persisted).
     confirmed: Confirmed,
     /// A community script waiting for the user to accept the warning before it starts.
@@ -726,6 +730,7 @@ impl LoaderApp {
             api: Api::new(Config::from_env()),
             auth: Auth::Restoring,
             store: Store::default(),
+            accounts: crate::accounts::Accounts::load(),
             confirmed: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, CONFIRMED_KEY))
@@ -990,6 +995,7 @@ impl LoaderApp {
             (Tab::Scripts, "\u{f044}", "editor".to_owned()),
             (Tab::Development, "\u{f188}", "development".to_owned()),
             (Tab::Terminal, "\u{f120}", "terminal".to_owned()),
+            (Tab::Accounts, "\u{f007}", "accounts".to_owned()),
             (Tab::Settings, "\u{f013}", "settings".to_owned()),
         ];
         for (i, (tab, icon, name)) in items.iter().enumerate() {
@@ -1698,6 +1704,18 @@ impl LoaderApp {
         });
     }
 
+    fn accounts_ui(&mut self, ui: &mut egui::Ui) {
+        let target = self.selected_target().filter(|t| t.client.loaded.is_some());
+        if let Some(crate::accounts::Action::ReadClientName) = self.accounts.ui(ui, target.is_some())
+            && let Some(target) = target
+        {
+            let ctx = ui.ctx().clone();
+            self.background(&ctx, move |settings| {
+                Event::AccountName(backend::state(&target, &settings).map(|state| state.account_name))
+            });
+        }
+    }
+
     fn set_display_name(&mut self, ctx: &egui::Context, target: Target) {
         let pid = target.client.pid;
         let name = self.display_name.trim().to_owned();
@@ -1710,7 +1728,7 @@ impl LoaderApp {
     fn handle_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
             // Tiles and the XP tracker's reads run in the background, so they must not clear another job's busy label.
-            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::Packets { .. } | Event::Vars { .. } | Event::ScriptRuns { .. } | Event::Inventory { .. } | Event::Widgets { .. } | Event::WidgetMouse { .. }) {
+            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::AccountName(_) | Event::Packets { .. } | Event::Vars { .. } | Event::ScriptRuns { .. } | Event::Inventory { .. } | Event::Widgets { .. } | Event::WidgetMouse { .. }) {
                 self.busy = None;
             }
             match event {
@@ -1878,6 +1896,7 @@ impl LoaderApp {
                     Ok(DisplayName::Off) => self.info(format!("{pid}: the real display name shows.")),
                     Err(error) => self.error(format!("Setting the display name in {pid} failed: {error}")),
                 },
+                Event::AccountName(result) => self.accounts.client_name(result),
                 Event::XpState(result) => {
                     self.xp_reading = false;
                     self.xp_next = std::time::Instant::now() + XP_READ_EVERY;
@@ -3614,6 +3633,7 @@ impl eframe::App for LoaderApp {
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),
                 Tab::Terminal => self.terminal_ui(ui),
+                Tab::Accounts => self.accounts_ui(ui),
                 Tab::Settings => self.settings_ui(ui),
             }
         });

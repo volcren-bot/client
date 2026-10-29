@@ -57,6 +57,12 @@ fn player_name(memory: &impl Memory, layout: &Layout) -> Option<String> {
     Some(read_string(memory, name)?.replace('\u{a0}', " ")).filter(|name| !name.is_empty())
 }
 
+/// The logged in account's normalized name (lowercase, spaces as `_`), which the display name override never touches.
+fn account_name(memory: &impl Memory, layout: &Layout) -> Option<String> {
+    let object = local_name_object(memory, layout)?;
+    Some(read_string(memory, object + NAME_CLEAN)?.replace('\u{a0}', " ")).filter(|name| !name.is_empty())
+}
+
 pub const MAX_NAME_BYTES: usize = SHORT_STRING_MAX;
 
 pub fn name_request(memory: &impl Memory, layout: &Layout, name: &str) -> Result<NameRequest, String> {
@@ -169,6 +175,7 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
     GameState {
         position: position(memory, layout),
         player_name: player_name(memory, layout),
+        account_name: account_name(memory, layout),
         game_state: state,
         skills: (logged_in && layout.has(part::SKILLS)).then(|| skills(memory, layout, client)).flatten(),
         tick_count: layout.has(part::TICK_COUNT).then(|| memory.i32(client + layout.tick_count as u64)).flatten(),
@@ -336,6 +343,10 @@ mod tests {
         assert_eq!(state.position, Some(Position { local_x: 6592, local_y: 6784, x: 3163, y: 3388, plane: Some(1) }));
         assert_eq!(state.tick_count, Some(1234));
         assert_eq!(state.player_name.as_deref(), Some("P 4I N"));
+        assert_eq!(state.account_name, None, "the fixture has no normalized name");
+        let mut named = logged_in();
+        named.put_short_string(0x24_0018, "p_4i_n");
+        assert_eq!(game_state(&named, &layout()).account_name.as_deref(), Some("p_4i_n"));
         let skills = state.skills.unwrap();
         assert_eq!(skills.len(), 24, "the unused 25th slot has no xp");
         assert_eq!(skills[3], Skill { name: "Hitpoints".into(), level: 90, real_level: 99, xp: 13_034_431 });

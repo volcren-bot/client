@@ -1,0 +1,6 @@
+{
+  "api_url": "https://api.volcren.com",
+  "supabase_url": "https://db.volcren.com",
+  "anon_key": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdXBhYmFzZSIsImlhdCI6MTc5Mjc2MDI4MCwiZXhwIjo0OTQ4NDMzODgwLCJyb2xlIjoiYW5vbiJ9.e8TpTOwDQGaExDTmcK8HeWvBWyDHFvKf3PYj5OPYAZ8",
+  "site_url": ""
+}
