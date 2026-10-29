@@ -12,6 +12,7 @@ mod flow_tests;
 mod form;
 mod fold;
 mod highlight;
+mod inventory;
 mod script;
 mod script_log;
 mod session;
@@ -23,6 +24,7 @@ mod logo;
 mod packets;
 mod update;
 mod vars;
+mod widgets;
 mod xp;
 
 use eframe::egui;

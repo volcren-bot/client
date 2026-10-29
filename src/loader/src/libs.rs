@@ -1,5 +1,4 @@
-//! The Luau lib that store scripts `require("../lib/...")`: published to the public `client` bucket by the lib project's
-//! workflow as `lib/<version>/lib-<version>.zip` plus `lib/index.json`, and kept in the cache next to the script folders.
+//! The Luau lib that store scripts `require("../lib/...")`: published to the `client` bucket and kept in the cache beside the script folders.
 
 use std::{
     fs,
@@ -48,8 +47,7 @@ pub struct Lib {
 
 const OUTDATED: &str = "A newer script library is available but needs a newer loader, so this script runs with an older one and may not work properly. Update the loader.";
 
-/// Makes sure `<root>/lib` is the newest published lib this loader can run. Offline, or with nothing published yet, a lib
-/// already in the cache is used.
+/// Makes sure `<root>/lib` is the newest published lib this loader can run; offline, a cached lib is used.
 pub fn ensure(api: &Api, root: &Path) -> Result<Lib, String> {
     let dir = root.join("lib");
     let installed = fs::read_to_string(dir.join(VERSION_FILE)).ok().map(|v| v.trim().to_owned());

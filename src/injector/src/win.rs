@@ -16,7 +16,7 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND, INVALID_HANDLE_VALUE,
+            CloseHandle, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND, INVALID_HANDLE_VALUE,
             LPARAM, POINT, WAIT_ABANDONED, WAIT_OBJECT_0,
         },
         Graphics::Gdi::ClientToScreen,
@@ -35,7 +35,7 @@ use windows_sys::{
                 VirtualFreeEx,
             },
             Threading::{
-                CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE, ReleaseMutex, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
+                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE, ReleaseMutex, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
                 PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
                 PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
                 QueryFullProcessImageNameW, SetEvent, WaitForSingleObject,
@@ -53,8 +53,9 @@ use ipc::{
     HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, overlay_mode, overlay_offset, shared_memory_name,
     frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name,
     packets::{self as packet_log, direction, packets_memory_name, Log, LOG_SIZE},
-    script_runs::{self as script_log, arg_kind, script_runs_memory_name},
+    script_runs::{self as script_log, arg_kind, phase as script_runs_phase, script_runs_memory_name},
     varc_log::{self, varc_log_memory_name},
+    item_log::{self, item_log_memory_name, item_wake_event_name},
     read::short_string_text,
     state::{
         item_name_status, loc_status, menu_status, model_status, model_target, project_status, cache_kind, cache_status, CacheReply, CacheRequest, GameValRequest, ItemNameRequest, LocsReply, ModelRequest, NamesReply, worker_kind, worker_status, WorkerRequest, ProjectRequest, CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, ITEM_NAME_BATCH, PROJECT_BATCH,
@@ -955,6 +956,18 @@ pub fn item_params(pid: u32, ids: &[i32]) -> Result<Vec<Option<std::collections:
         .collect()
 }
 
+/// Whether each item stacks, from its definition.
+pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String> {
+    let files = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?;
+    ids.iter()
+        .zip(files)
+        .map(|(id, data)| match data {
+            None => Ok(None),
+            Some(data) => crate::config::decode_obj(&data).map(|def| Some(def.stackable)).ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
+        })
+        .collect()
+}
+
 // Every varbit stored in `varp`: (id, definition, gameval name), by lowest bit.
 pub fn varbits_of(pid: u32, varp: u16) -> Result<Vec<(i32, crate::config::VarbitDef, Option<String>)>, String> {
     let ids: Vec<i32> = cache_archive_files(pid, crate::cache::CONFIG_INDEX, crate::config::VARBIT_ARCHIVE)?.ids.iter().map(|&id| id as i32).collect();
@@ -1035,8 +1048,7 @@ fn read_loc_texts(pid: u32, ids: &[u32]) -> Result<(), String> {
 
 type ShownLoc = (crate::collision::LocDef, crate::collision::LocText);
 
-/// The definitions of `ids` as the player sees them now: a loc that transforms with a varbit or a varp shows the one its
-/// value picks (missing when it shows nothing).
+/// The definitions of `ids` as the player sees them now (a transforming loc shows the one its varbit or varp picks).
 fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, ShownLoc>, String> {
     let lookup = |ids: &[u32]| -> Result<Vec<Option<ShownLoc>>, String> {
         read_loc_texts(pid, ids)?;
@@ -1609,6 +1621,12 @@ pub fn widget(pid: u32, group: u16, child: u16) -> Result<Option<Widget>, String
     Ok(worker::widget(&memory, &layout, group, child))
 }
 
+/// Every open interface with all of its components and their dynamic children, read straight from the client's memory.
+pub fn widget_tree(pid: u32) -> Result<decode::widgets::WidgetTree, String> {
+    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    worker::widget_tree(&memory, &layout).ok_or_else(|| format!("Cannot read the interfaces of client {pid} (not logged in?)"))
+}
+
 pub fn widget_children(pid: u32, group: u16, child: u16) -> Result<Option<Vec<Widget>>, String> {
     if let Some(children) = ask_worker(pid, worker_kind::WIDGET_CHILDREN, [group as i32, child as i32, 0, 0]) {
         return Ok(children);
@@ -1627,6 +1645,12 @@ pub fn item_container(pid: u32, id: i32) -> Result<Option<Vec<Item>>, String> {
     }
     let (layout, memory) = world_reader(pid)?;
     Ok(worker::item_container(&memory, &layout, id))
+}
+
+/// Every item container the client holds, by id. Read from the client's memory directly: it is for the inspector, not for scripts.
+pub fn item_containers(pid: u32) -> Result<Vec<(i32, Vec<Item>)>, String> {
+    let (layout, memory) = world_reader(pid)?;
+    worker::item_containers(&memory, &layout).ok_or_else(|| format!("Cannot read the item containers of client {pid}"))
 }
 
 pub fn varc(pid: u32, id: i32) -> Result<Option<i32>, String> {
@@ -1792,6 +1816,40 @@ pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, St
 pub fn npc_words(pid: u32, index: i32, count: usize, definition: bool) -> Result<(u64, Vec<i32>), String> {
     let (layout, memory) = world_reader(pid)?;
     world::npc_words(&memory, &layout.world, index, count, definition).ok_or_else(|| format!("no NPC {index} in the scene"))
+}
+
+// Debug: the first `count` 4-byte words of a component (or of its dynamic child `index`, when that is not -1), with its address.
+pub fn widget_words(pid: u32, group: u16, child: u16, index: i32, count: usize) -> Result<(u64, Vec<i32>), String> {
+    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let layout = &layout.interfaces;
+    let client = memory.ptr(layout.module_base + layout.client as u64).ok_or("no client")?;
+    let mut component = ipc::read::component(&memory, layout, client, (group as i32) << 16 | child as i32).ok_or_else(|| format!("no component {group}.{child}"))?;
+    if index >= 0 {
+        use ipc::state::interfaces::{CHILDREN_DATA, ENTRY_COMPONENT, ENTRY_SIZE};
+        let entries = memory.ptr(component + layout.children as u64 + CHILDREN_DATA as u64).ok_or("no dynamic children")?;
+        component = memory
+            .ptr(entries + index as u64 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
+            .ok_or_else(|| format!("{group}.{child} has no dynamic child {index}"))?;
+    }
+    let mut bytes = vec![0u8; count * 4];
+    if !memory.read(component, &mut bytes) {
+        return Err(format!("can't read the component at {component:#x}"));
+    }
+    Ok((component, bytes.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()))
+}
+
+// Debug: the first `count` words of every component of the open interfaces and of their dynamic children, by component id and index.
+pub fn widget_dump(pid: u32, count: usize) -> Result<Vec<(i32, i32, Vec<i32>)>, String> {
+    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (root, _) = decode::state::root_interface(&memory, &layout, decode::state::current(&memory, &layout)).map(|root| (root, 1.0f32)).ok_or("no root interface")?;
+    let mut dump = Vec::new();
+    for (id, index, address) in decode::widgets::component_addresses(&memory, &layout.interfaces, root).ok_or("can't list the components")? {
+        let mut bytes = vec![0u8; count * 4];
+        if memory.read(address, &mut bytes) {
+            dump.push((id, index, bytes.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()));
+        }
+    }
+    Ok(dump)
 }
 
 // Debug: watches `bytes` of the client object for `seconds` and reports each 4-byte word that changed, with its first
@@ -2148,6 +2206,26 @@ struct Plan {
     labels: Vec<Label>,
     texts: Vec<Text>,
     arrows: Vec<Arrow>,
+    rects: Vec<Rect>,
+}
+
+// A box at canvas coordinates.
+struct Rect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: Rgba,
+}
+
+/// A layer that boxes a canvas area, `widget:x,y,width,height,rrggbb`: the area and the colour.
+fn widget_layer(layer: &str) -> Option<(i32, i32, i32, i32, Rgba)> {
+    let mut parts = layer.strip_prefix("widget:")?.split(',');
+    let mut number = || parts.next()?.parse::<i32>().ok();
+    let (x, y, width, height) = (number()?, number()?, number()?, number()?);
+    let hex = parts.next().filter(|hex| hex.len() == 6)?;
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    parts.next().is_none().then_some((x, y, width, height, Rgba { r: (value >> 16) as u8, g: (value >> 8) as u8, b: value as u8, a: 255 }))
 }
 
 // A line through the points, or around them when `closed`; a `marker` outline counts towards the `scene_tiles` result.
@@ -2419,9 +2497,7 @@ fn next_frame(pid: u32, after: u32, timeout: Duration) -> Result<Option<u32>, St
     }
 }
 
-/// Draws `layers` as `scene_tiles` does, once client `pid` has presented a frame after `after`, so a loop of these paints
-/// once per frame. Returns the frame it painted after, to pass as the next `after`, or `None` (nothing painted) when no
-/// frame came within `FRAME_WAIT` (the client is minimized or loading).
+/// Draws `layers` once client `pid` has presented a frame after `after`; returns that frame, or `None` if none came within `FRAME_WAIT`.
 pub fn scene_tiles_next_frame(pid: u32, layers: &[&str], after: u32) -> Result<Option<u32>, String> {
     let Some(frame) = next_frame(pid, after, FRAME_WAIT)? else { return Ok(None) };
     scene_tiles(pid, layers)?;
@@ -2430,7 +2506,7 @@ pub fn scene_tiles_next_frame(pid: u32, layers: &[&str], after: u32) -> Result<O
 
 // Draws the layers named in `layers` (see `LAYERS`); returns how many tile outlines were drawn in full on the canvas.
 pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
-    if let Some(unknown) = layers.iter().find(|layer| !LAYERS.contains(layer)) {
+    if let Some(unknown) = layers.iter().find(|layer| !LAYERS.contains(layer) && widget_layer(layer).is_none()) {
         return Err(format!("unknown tile layer {unknown:?}"));
     }
     let on = |name: &str| layers.contains(&name);
@@ -2441,6 +2517,11 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     let here = || state.position.ok_or("the player's position isn't known (not logged in?)");
 
     let mut plan = Plan::default();
+
+    // boxes on the canvas, such as the widget inspector's selection
+    for (x, y, width, height, color) in layers.iter().filter_map(|layer| widget_layer(layer)) {
+        plan.rects.push(Rect { x, y, width, height, color });
+    }
 
     if on("grid") {
         let here = here()?;
@@ -2515,7 +2596,8 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("spot-anims") {
         let here = here()?;
-        for object in spot_anims(pid)?.iter().filter(|object| Some(object.plane) == here.plane) {
+        // the points are projected in the main world, so the effects inside a boat (their own coordinates) are left out
+        for object in spot_anims(pid)?.iter().filter(|object| object.view_id == 0 && Some(object.plane) == here.plane) {
             let tile = [object.local_x >> 7, object.local_y >> 7];
             plan.path(&tile_corners(tile), SPOT_ANIM_COLOR, true, true);
             plan.label(tile_centre(tile), format!("(ID: {})", object.id), TEXT_COLOR);
@@ -2715,6 +2797,9 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     for text in &plan.texts {
         (text.x, text.y, &text.text, text.color).hash(&mut hasher);
     }
+    for rect in &plan.rects {
+        (rect.x, rect.y, rect.width, rect.height, rect.color).hash(&mut hasher);
+    }
 
     with_overlay(pid, overlay_mode::ON_SERIAL, false, Some(hasher.finish()), |buf, width, height| unsafe {
         for path in &plan.paths {
@@ -2747,6 +2832,15 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
             let top = ay.round() as i32 - font.max_height * LABEL_SCALE;
             font.plot(&label.text, left + 1, top + 1, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, LABEL_SHADOW));
             font.plot(&label.text, left, top, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, label.color));
+        }
+        for rect in &plan.rects {
+            let (left, top, right, bottom) = (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+            for [x1, y1, x2, y2] in [[left, top, right, top], [right, top, right, bottom], [right, bottom, left, bottom], [left, bottom, left, top]] {
+                for shift in 0..STROKE_WIDTH {
+                    draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], rect.color);
+                    draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], rect.color);
+                }
+            }
         }
         for text in &plan.texts {
             font.plot(&text.text, text.x + 1, text.y + 1, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, LABEL_SHADOW));
@@ -2930,7 +3024,9 @@ pub fn script_runs(pid: u32, since: u64, limit: usize) -> Result<crate::ScriptPa
             .into_iter()
             .map(|entry| crate::ScriptRun {
                 sequence: entry.sequence,
-                time_ms: entry.time_ms,
+                time_us: entry.time_us,
+                tick: entry.tick,
+                end: entry.phase == script_runs_phase::END,
                 event_type: entry.event_type,
                 arg_count: entry.arg_count,
                 depth: entry.depth,
@@ -2989,4 +3085,155 @@ pub fn varc_changes(pid: u32, since: u64, limit: usize) -> Result<crate::VarcPag
             })
             .collect(),
     })
+}
+
+/// The item container changes from `since` on (0 for the oldest), at most `limit`; `ITEM_CHANGES_NOW` returns where the log is now.
+pub fn item_changes(pid: u32, since: u64, limit: usize) -> Result<crate::ItemPage, String> {
+    let name = wide(item_log_memory_name(pid));
+    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
+        .ok_or_else(|| format!("No item log in client {pid}: the agent isn't loaded, is too old, or didn't find the item container writes"))?;
+    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, item_log::LOG_SIZE) };
+    if view.Value.is_null() {
+        return Err(format!("Cannot map the item log of client {pid}"));
+    }
+    let log = view.Value as *const item_log::Log;
+    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
+    let page = unsafe {
+        item_log::is_compatible(log).then(|| {
+            if since == crate::ITEM_CHANGES_NOW {
+                item_log::Page { next: item_log::written(log), ..Default::default() }
+            } else {
+                item_log::read_since(log, since, limit)
+            }
+        })
+    };
+    unsafe { UnmapViewOfFile(view) };
+    let page = page.ok_or_else(|| format!("The item log of client {pid} has another layout: restart the client and load a matching agent"))?;
+    Ok(item_page(page))
+}
+
+/// A reader of the item log that waits on the agent's wake event; it claims a subscriber slot and gives it back on drop.
+pub struct ItemWatcher {
+    pid: u32,
+    mapping: Handle,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    event: Handle,
+    slot: u32,
+    next: u64,
+}
+
+// SAFETY: the view is a shared mapping used only through atomics and volatile accesses, and the handles may cross threads.
+unsafe impl Send for ItemWatcher {}
+
+impl ItemWatcher {
+    pub fn new(pid: u32) -> Result<Self, String> {
+        let name = wide(item_log_memory_name(pid));
+        let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) })
+            .ok_or_else(|| format!("No item log in client {pid}: the agent isn't loaded, is too old, or didn't find the item container writes"))?;
+        let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, item_log::LOG_SIZE) };
+        if view.Value.is_null() {
+            return Err(format!("Cannot map the item log of client {pid}"));
+        }
+        let log = view.Value as *const item_log::Log;
+        // SAFETY: the mapping is LOG_SIZE bytes, writable, and stays mapped until the watcher is dropped.
+        if !unsafe { item_log::is_compatible(log) } {
+            unsafe { UnmapViewOfFile(view) };
+            return Err(format!("The item log of client {pid} has another layout: restart the client and load a matching agent"));
+        }
+        // A slot is ours once its event is new and the mask bit is ours; a stale bit is cleared by the agent later.
+        let mut event = None;
+        let slot = unsafe {
+            item_log::subscribe(log, |slot| {
+                let name = wide(item_wake_event_name(pid, slot));
+                let handle = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
+                let taken = GetLastError() == ERROR_ALREADY_EXISTS;
+                match Handle::new(handle) {
+                    Some(handle) if !taken => {
+                        event = Some(handle);
+                        true
+                    }
+                    _ => false,
+                }
+            })
+        };
+        let (Some(slot), Some(event)) = (slot, event) else {
+            unsafe { UnmapViewOfFile(view) };
+            return Err(format!("Too many readers are waiting for item changes in client {pid}"));
+        };
+        let next = unsafe { item_log::written(log) };
+        Ok(Self { pid, mapping, view, event, slot, next })
+    }
+
+    fn log(&self) -> *const item_log::Log {
+        self.view.Value as *const item_log::Log
+    }
+
+    /// Waits up to `timeout` for the agent to log a change; true when it did (or one is already waiting to be read).
+    pub fn wait(&self, timeout: Duration) -> bool {
+        // SAFETY: the view stays mapped while `self` lives.
+        if unsafe { item_log::written(self.log()) } > self.next {
+            return true;
+        }
+        unsafe { WaitForSingleObject(self.event.0, timeout.as_millis().min(u32::MAX as u128 - 1) as u32) == WAIT_OBJECT_0 }
+    }
+
+    /// The changes logged since the last read, at most `limit`.
+    pub fn read(&mut self, limit: usize) -> crate::ItemPage {
+        // SAFETY: as in `wait`, and the log was checked compatible when the watcher was made.
+        let page = unsafe { item_log::read_since(self.log(), self.next, limit) };
+        self.next = page.next;
+        item_page(page)
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+}
+
+impl Drop for ItemWatcher {
+    fn drop(&mut self) {
+        // SAFETY: the view is still mapped; the event handle closes after the slot is given back (when `event` drops).
+        unsafe {
+            item_log::unsubscribe(self.log(), self.slot);
+            UnmapViewOfFile(self.view);
+        }
+        let _ = &self.mapping;
+    }
+}
+
+fn item_page(page: item_log::Page) -> crate::ItemPage {
+    crate::ItemPage {
+        next: page.next,
+        dropped: page.dropped,
+        changes: page
+            .entries
+            .into_iter()
+            .map(|entry| crate::ItemChange {
+                sequence: entry.sequence,
+                time_ms: entry.time_ms,
+                tick: Some(entry.change.tick).filter(|&tick| tick != item_log::NO_TICK),
+                container: entry.change.container,
+                slot: entry.change.slot,
+                old_known: entry.change.old_known,
+                old_item: entry.change.old_item,
+                old_quantity: entry.change.old_quantity,
+                new_item: entry.change.new_item,
+                new_quantity: entry.change.new_quantity,
+            })
+            .collect(),
+    }
+}
+
+/// Like `item_changes`, but blocks up to `wait` for the agent to log something when nothing is new.
+pub fn item_changes_wait(pid: u32, since: u64, limit: usize, wait: Duration) -> Result<crate::ItemPage, String> {
+    let ready = item_changes(pid, since, 1)?;
+    if since == crate::ITEM_CHANGES_NOW || !ready.changes.is_empty() || ready.dropped > 0 || ready.next != since || wait.is_zero() {
+        return item_changes(pid, since, limit);
+    }
+    // nothing yet: claim an event, then look once more so a change made meanwhile isn't waited for
+    let watcher = ItemWatcher::new(pid)?;
+    if item_changes(pid, since, 1)?.changes.is_empty() {
+        watcher.wait(wait);
+    }
+    item_changes(pid, since, limit)
 }

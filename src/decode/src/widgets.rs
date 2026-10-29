@@ -203,7 +203,18 @@ pub fn find_children(memory: &impl Memory, layout: &InterfaceLayout, root: i32, 
     let client = memory.ptr(layout.module_base + layout.client as u64)?;
     let tree = Tree { memory, layout, client };
     let parent = tree.component((group as i32) << 16 | child as i32)?;
-    let (x, y, hidden) = place(&tree, parent, root)?;
+    let placed = place(&tree, parent, root)?;
+    dynamic_children(&tree, parent, placed)
+}
+
+// The dynamic children of `parent`, which stands at `placed` (see `place`).
+fn dynamic_children<M: Memory>(tree: &Tree<M>, parent: u64, placed: (i32, i32, bool)) -> Option<Vec<Widget>> {
+    Some(dynamic_children_with_components(tree, parent, placed)?.into_iter().map(|(widget, _)| widget).collect())
+}
+
+// The same with the address of each child's component.
+fn dynamic_children_with_components<M: Memory>(tree: &Tree<M>, parent: u64, (x, y, hidden): (i32, i32, bool)) -> Option<Vec<(Widget, u64)>> {
+    let (memory, layout) = (tree.memory, tree.layout);
     let (x, y) = (x - tree.field(parent, layout.scroll_x)?, y - tree.field(parent, layout.scroll_x + 4)?);
     let count = memory.u64(parent + layout.children as u64)?;
     if count == 0 {
@@ -217,20 +228,231 @@ pub fn find_children(memory: &impl Memory, layout: &InterfaceLayout, root: i32, 
     for i in 0..count {
         let Some(component) = memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64) else { continue };
         let at = (x + tree.field(component, layout.x)?, y + tree.field(component, layout.x + 4)?, hidden);
-        let mut widget = widget_at(&tree, component, at)?;
+        let mut widget = widget_at(tree, component, at)?;
         if layout.hidden != 0 {
             let mut b = [0u8];
             widget.hidden |= memory.read(component + layout.hidden as u64, &mut b) && b[0] != 0;
         }
-        children.push(widget);
+        children.push((widget, component));
     }
     Some(children)
+}
+
+/// Component fields read at fixed offsets, found by matching decoded cache definitions against memory (build a2636a01); redo after a client update.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WidgetDetail {
+    pub content_type: i32,
+    /// the widget's own hidden flag; `Widget::hidden` is also set when an ancestor is hidden
+    pub self_hidden: bool,
+    /// the settings it was laid out from: positions and sizes, and the modes that say how they are used
+    pub original_x: i32,
+    pub original_y: i32,
+    pub original_width: i32,
+    pub original_height: i32,
+    pub x_position_mode: i32,
+    pub y_position_mode: i32,
+    pub width_mode: i32,
+    pub height_mode: i32,
+    /// where it was put in its parent, in client pixels (before the interface scale)
+    pub relative_x: i32,
+    pub relative_y: i32,
+    pub relative_width: i32,
+    pub relative_height: i32,
+    /// 255 is invisible, 0 opaque
+    pub opacity: i32,
+    pub font_id: i32,
+    pub line_height: i32,
+    pub x_text_alignment: i32,
+    pub y_text_alignment: i32,
+    pub text_shadowed: bool,
+    pub filled: bool,
+    pub sprite_tiling: bool,
+    pub no_click_through: bool,
+    pub item_id: i32,
+    pub item_quantity: i32,
+}
+
+const DETAIL_CONTENT_TYPE: u64 = 0x30;
+const DETAIL_X_MODE: u64 = 0x3c;
+const DETAIL_ORIGINAL: u64 = 0x4c;
+const DETAIL_RELATIVE: u64 = 0x5c;
+const DETAIL_FILLED: u64 = 0xa8;
+const DETAIL_OPACITY: u64 = 0xb0;
+const DETAIL_SPRITE_TILING: u64 = 0xec;
+const DETAIL_FONT: u64 = 0x150;
+const DETAIL_LINE_HEIGHT: u64 = 0x188;
+const DETAIL_X_ALIGNMENT: u64 = 0x18c;
+const DETAIL_TEXT_SHADOWED: u64 = 0x194;
+const DETAIL_ITEM_ID: u64 = 0xb38;
+const DETAIL_NO_CLICK_THROUGH: u64 = 0xb98;
+
+fn detail_at<M: Memory>(tree: &Tree<M>, component: u64) -> WidgetDetail {
+    let memory = tree.memory;
+    let int = |offset: u64| memory.i32(component + offset).unwrap_or(0);
+    let byte = |offset: u64| {
+        let mut b = [0u8];
+        memory.read(component + offset, &mut b) && b[0] != 0
+    };
+    let mut opacity = [0u8];
+    memory.read(component + DETAIL_OPACITY, &mut opacity);
+    WidgetDetail {
+        content_type: int(DETAIL_CONTENT_TYPE),
+        self_hidden: tree.layout.hidden != 0 && byte(tree.layout.hidden as u64),
+        original_x: int(DETAIL_ORIGINAL),
+        original_y: int(DETAIL_ORIGINAL + 4),
+        original_width: int(DETAIL_ORIGINAL + 8),
+        original_height: int(DETAIL_ORIGINAL + 12),
+        x_position_mode: int(DETAIL_X_MODE),
+        y_position_mode: int(DETAIL_X_MODE + 4),
+        width_mode: int(DETAIL_X_MODE + 8),
+        height_mode: int(DETAIL_X_MODE + 12),
+        relative_x: int(DETAIL_RELATIVE),
+        relative_y: int(DETAIL_RELATIVE + 4),
+        relative_width: int(DETAIL_RELATIVE + 8),
+        relative_height: int(DETAIL_RELATIVE + 12),
+        opacity: opacity[0] as i32,
+        font_id: int(DETAIL_FONT),
+        line_height: int(DETAIL_LINE_HEIGHT),
+        x_text_alignment: int(DETAIL_X_ALIGNMENT),
+        y_text_alignment: int(DETAIL_X_ALIGNMENT + 4),
+        text_shadowed: byte(DETAIL_TEXT_SHADOWED),
+        filled: byte(DETAIL_FILLED),
+        sprite_tiling: byte(DETAIL_SPRITE_TILING),
+        no_click_through: byte(DETAIL_NO_CLICK_THROUGH),
+        item_id: int(DETAIL_ITEM_ID),
+        item_quantity: int(DETAIL_ITEM_ID + 4),
+    }
+}
+
+/// A widget of the inspector's tree: a component of an interface (static) or a child a script made for one (dynamic).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeWidget {
+    pub widget: Widget,
+    pub detail: WidgetDetail,
+    /// true for a dynamic child, which hangs off the component with id `owner`
+    pub dynamic: bool,
+    pub owner: i32,
+}
+
+/// Every open interface with all its components and dynamic children, linked by `parent` and `sub_interfaces`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WidgetTree {
+    pub root: i32,
+    pub sub_interfaces: Vec<SubInterface>,
+    pub widgets: Vec<TreeWidget>,
+}
+
+/// The most components one group is taken to hold.
+const MAX_GROUP: u64 = 1 << 14;
+
+// How many components `group` has.
+fn group_size<M: Memory>(tree: &Tree<M>, group: i32) -> Option<u64> {
+    let manager = tree.memory.ptr(tree.client + tree.layout.manager as u64)?;
+    let groups = tree.memory.ptr(manager + tree.layout.groups as u64)?;
+    let count = tree.memory.u64(groups + group as u64 * GROUP_SIZE as u64 + ARRAY_COUNT as u64)?;
+    (count <= MAX_GROUP).then_some(count)
+}
+
+/// The id, index and address of every component of the open groups, for reverse engineering fields.
+pub fn component_addresses(memory: &impl Memory, layout: &InterfaceLayout, root: i32) -> Option<Vec<(i32, i32, u64)>> {
+    let client = memory.ptr(layout.module_base + layout.client as u64)?;
+    let tree = Tree { memory, layout, client };
+    let mut groups = vec![root];
+    for sub in sub_interfaces(memory, layout)? {
+        if !groups.contains(&sub.group) {
+            groups.push(sub.group);
+        }
+    }
+    let mut found = Vec::new();
+    for group in groups {
+        for child in 0..group_size(&tree, group).unwrap_or(0) {
+            let id = group << 16 | child as i32;
+            if let Some(component) = tree.component(id) {
+                found.push((id, -1, component));
+                let count = memory.u64(component + layout.children as u64).filter(|&count| count <= MAX_CHILDREN).unwrap_or(0);
+                let entries = if count == 0 { None } else { memory.ptr(component + layout.children as u64 + CHILDREN_DATA as u64) };
+                for i in 0..count {
+                    if let Some(child) = entries.and_then(|entries| memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)) {
+                        found.push((id, i as i32, child));
+                    }
+                }
+            }
+        }
+    }
+    Some(found)
+}
+
+pub fn find_tree(memory: &impl Memory, layout: &InterfaceLayout, root: i32, scale: f32) -> Option<WidgetTree> {
+    if root < 0 {
+        return None;
+    }
+    let client = memory.ptr(layout.module_base + layout.client as u64)?;
+    let tree = Tree { memory, layout, client };
+    let sub_interfaces = sub_interfaces(memory, layout)?;
+    let mut groups = vec![root];
+    for sub in &sub_interfaces {
+        if !groups.contains(&sub.group) {
+            groups.push(sub.group);
+        }
+    }
+    let mut widgets = Vec::new();
+    for group in groups {
+        for child in 0..group_size(&tree, group).unwrap_or(0) {
+            let id = group << 16 | child as i32;
+            let Some(component) = tree.component(id) else { continue };
+            let Some(placed) = place(&tree, component, root) else { continue };
+            let Some(widget) = widget_at(&tree, component, placed) else { continue };
+            widgets.push(TreeWidget { widget: widget.scaled(scale), detail: detail_at(&tree, component), dynamic: false, owner: -1 });
+            for (child, address) in dynamic_children_with_components(&tree, component, placed).unwrap_or_default() {
+                widgets.push(TreeWidget { widget: child.scaled(scale), detail: detail_at(&tree, address), dynamic: true, owner: id });
+            }
+        }
+    }
+    Some(WidgetTree { root, sub_interfaces, widgets })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::Fake;
+
+    #[test]
+    fn reads_the_detail_fields_at_their_offsets() {
+        let mut m = Fake::default();
+        let c = 0x20_0000u64;
+        let words = [
+            (DETAIL_CONTENT_TYPE, 7),
+            (DETAIL_X_MODE, 1),
+            (DETAIL_X_MODE + 4, 2),
+            (DETAIL_X_MODE + 8, 1),
+            (DETAIL_X_MODE + 12, 0),
+            (DETAIL_ORIGINAL, 4),
+            (DETAIL_ORIGINAL + 4, 16),
+            (DETAIL_ORIGINAL + 8, 23),
+            (DETAIL_ORIGINAL + 12, 13),
+            (DETAIL_RELATIVE, 5),
+            (DETAIL_RELATIVE + 12, 14),
+            (DETAIL_FONT, 494),
+            (DETAIL_LINE_HEIGHT, 3),
+            (DETAIL_X_ALIGNMENT, 1),
+            (DETAIL_X_ALIGNMENT + 4, 2),
+            (DETAIL_ITEM_ID, 1891),
+            (DETAIL_ITEM_ID + 4, 28),
+        ];
+        for (offset, value) in words {
+            m.put_i32(c + offset, value);
+        }
+        for (offset, value) in [(LAYOUT.hidden as u64, 1u8), (DETAIL_OPACITY, 200), (DETAIL_FILLED, 1), (DETAIL_TEXT_SHADOWED, 1), (DETAIL_SPRITE_TILING, 0)] {
+            m.put(c + offset, &[value]);
+        }
+        let tree = Tree { memory: &m, layout: &LAYOUT, client: 0 };
+        let d = detail_at(&tree, c);
+        assert_eq!((d.content_type, d.self_hidden, d.opacity, d.filled, d.text_shadowed, d.sprite_tiling, d.no_click_through), (7, true, 200, true, true, false, false));
+        assert_eq!((d.x_position_mode, d.y_position_mode, d.width_mode, d.height_mode), (1, 2, 1, 0));
+        assert_eq!((d.original_x, d.original_y, d.original_width, d.original_height), (4, 16, 23, 13));
+        assert_eq!((d.relative_x, d.relative_y, d.relative_width, d.relative_height), (5, 0, 0, 14));
+        assert_eq!((d.font_id, d.line_height, d.x_text_alignment, d.y_text_alignment, d.item_id, d.item_quantity), (494, 3, 1, 2, 1891, 28));
+    }
 
     const LAYOUT: InterfaceLayout = InterfaceLayout {
         module_base: 0x1_4000_0000,

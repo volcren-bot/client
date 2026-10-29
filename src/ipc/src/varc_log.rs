@@ -1,8 +1,4 @@
-//! The varc log: the last client variables (varcs) the client's scripts changed, in a ring in its own shared memory (`AGENT_VARCS_<pid>`).
-//!
-//! Same scheme as the packet log (`packets.rs`): writers claim a sequence number, blank the slot's `commit`, fill the slot and
-//! publish the sequence number in `commit`; a reader keeps an entry only if `commit` named the sequence it wanted before and after
-//! the copy.
+//! The varc log: the last varcs the client's scripts changed, in a ring in shared memory (`AGENT_VARCS_<pid>`), using the packet log's scheme.
 
 use alloc::{format, string::String, vec::Vec};
 use core::{
@@ -55,8 +51,7 @@ pub struct Log {
 
 pub const LOG_SIZE: usize = core::mem::size_of::<Log>();
 
-/// One varc change. For an int the values are in `old_int`/`new_int`; for a string in `old_text`/`new_text` (the first
-/// `TEXT_SIZE` bytes, with the whole length beside).
+/// One varc change: ints in `old_int`/`new_int`, strings in `old_text`/`new_text` (first `TEXT_SIZE` bytes plus the length).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub sequence: u64,
@@ -95,19 +90,13 @@ pub struct Page {
     pub dropped: u64,
 }
 
-/// Sets up a freshly created (zeroed) mapping.
-///
-/// # Safety
-/// `log` must point to `LOG_SIZE` writable bytes nobody else is using yet.
+/// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
     write_volatile(addr_of_mut!((*log).slot_size), core::mem::size_of::<Slot>() as u32);
 }
 
-/// Whether the mapping was set up by an agent that agrees with this layout.
-///
-/// # Safety
-/// `log` must point to `LOG_SIZE` readable bytes.
+/// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
     read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32 && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
 }
@@ -124,10 +113,7 @@ unsafe fn read_text(source: *const [u8; TEXT_SIZE], stored: u8) -> Vec<u8> {
     (0..(stored as usize).min(TEXT_SIZE)).map(|i| read_volatile(addr_of!((*source)[i]))).collect()
 }
 
-/// Appends a change.
-///
-/// # Safety
-/// `log` must point to an initialised `Log` that stays mapped for the call.
+/// Appends a change; `log` must point to an initialised `Log`.
 pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
     let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
     let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
@@ -149,12 +135,7 @@ pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
     (*slot).commit.store(sequence + 1, Ordering::Release);
 }
 
-/// Copies out up to `limit` entries from sequence number `since` on.
-///
-/// A `since` ahead of the log (the agent was reloaded and started a new one) starts again from the oldest entry.
-///
-/// # Safety
-/// `log` must point to a `Log` the agent initialised (see `is_compatible`) that stays mapped for the call.
+/// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     let written = (*log).written.load(Ordering::Acquire);
     let mut at = if since > written { 0 } else { since };

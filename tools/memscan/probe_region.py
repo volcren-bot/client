@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Probe the minimenu's stay-open region: open at an anchor, teleport to probe
-points, and watch the client's menu-open flag to see which points keep it open.
-
-The stay-open region is (per static analysis) the menu rect grown by a margin on
-all sides; its boundary is found by bisection along the axes through the anchor.
-
-Usage: WINEPREFIX=<prefix> [INJECTOR=<injector.exe>] probe_region.py <linux_pid> <wine_pid> <anchor_x> <anchor_y> [probe_x probe_y]
-       (coordinates are physical canvas pixels; without a probe, runs bisection)
-"""
+"""Bisect the minimenu's stay-open region: probe_region.py <linux_pid> <wine_pid> <anchor_x> <anchor_y> [probe_x probe_y]"""
 import json
 import os
 import struct
@@ -79,8 +71,7 @@ def probe(px, py, settle=0.45):
     return open_flag()
 
 def bisect(lo, hi, fixed_x, horizontal, inside_low):
-    """Bisect along an axis. (lo, hi) physical range; inside is at the low end
-    (inside_low) or high end. Returns the boundary (last inside value)."""
+    """Bisect (lo, hi) along an axis and return the last inside value."""
     assert probe(*((lo, fixed_x) if horizontal else (fixed_x, lo))) == inside_low
     assert probe(*((hi, fixed_x) if horizontal else (fixed_x, hi))) != inside_low
     while abs(hi - lo) > 2:

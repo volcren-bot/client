@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 mod camera;
 mod chat;
 mod ground_items;
+mod item_setter;
 mod items;
 mod local_projection;
 mod menu;
@@ -20,7 +21,7 @@ mod values;
 mod varc_setters;
 mod world_select;
 pub use values::{
-    find_actor_lists, find_actor_names, find_appearance_decoder, find_item_containers, find_run_energy, find_varcs, AppearanceDecoder, World,
+    find_actor_lists, find_actor_names, find_appearance_decoder, find_item_containers, find_run_energy, find_varcs, AppearanceDecoder, ItemContainers, World,
 };
 pub use items::{find_game_vals, find_obj_type_lookup, CacheTable, GameVals, ObjTypeLookup};
 pub use local_projection::find_local_projection;
@@ -35,6 +36,7 @@ pub use menu::{find_menu, find_menu_click, find_menu_layout, find_menu_open, fin
 pub use camera::find_camera;
 pub use chat::find_chat;
 pub use packets::{find_packets, Packets, BUFFER_SIZE};
+pub use item_setter::find_item_setter;
 pub use varc_setters::{find_varc_setters, VarcSetters, VARIANT_KIND, VARIANT_STRING};
 pub use script_runs::{find_script_runs, ScriptRuns, ARG_KIND, ARG_SIZE, KIND_INT};
 pub use spot_anims::find_spot_anims;
@@ -1635,6 +1637,31 @@ mod tests {
             println!("{}: {setters:x?}", build.display());
             if build.to_string_lossy().contains("a2636a01") {
                 assert_eq!(setters, VarcSetters { get_int: 0x33220, set_int: 0x33130, set_object: 0x333f0 }, "{}", build.display());
+            }
+        }
+    }
+
+    #[test]
+    fn finds_item_setter_in_archived_builds() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let manifest = if cfg!(windows) && manifest.starts_with('/') { format!("Z:{manifest}") } else { manifest.into() };
+        let archive = std::path::Path::new(&manifest).join("../../archive");
+        let Ok(entries) = std::fs::read_dir(&archive) else {
+            eprintln!("skipped, no {}", archive.display());
+            return;
+        };
+        let mut builds: Vec<_> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
+            .collect();
+        builds.sort();
+        for build in builds {
+            let image = map_image(&std::fs::read(&build).unwrap());
+            let containers = find_item_containers(&image).unwrap_or_else(|error| panic!("item containers not found in {}: {error:?}", build.display()));
+            let setter = find_item_setter(&image, &containers).unwrap_or_else(|error| panic!("item setter not found in {}: {error:?}", build.display()));
+            println!("{}: item setter {setter:#x}", build.display());
+            if build.to_string_lossy().contains("a2636a01") {
+                assert_eq!(setter, 0x30f60, "{}", build.display());
             }
         }
     }

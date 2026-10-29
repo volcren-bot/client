@@ -10,7 +10,7 @@ use std::{
 };
 
 use ipc::{
-    script_runs::{arg_kind, script_runs_memory_name, Log, ARG_COUNT, LOG_SIZE},
+    script_runs::{arg_kind, phase, script_runs_memory_name, Log, Run, ARG_COUNT, LOG_SIZE},
     read::Memory,
 };
 use retour::GenericDetour;
@@ -34,9 +34,12 @@ use super::{
 // An event has a handful of arguments; a count beyond this is a misread, not an event.
 const MAX_ARGS: i32 = 4096;
 
-type Run = unsafe extern "system" fn(*mut c_void, *mut c_void, i32, i32);
+type RunScript = unsafe extern "system" fn(*mut c_void, *mut c_void, i32, i32);
 
-static RUN: OnceLock<(GenericDetour<Run>, ScriptRuns)> = OnceLock::new();
+static RUN: OnceLock<(GenericDetour<RunScript>, ScriptRuns)> = OnceLock::new();
+
+// Where the game tick is: the global that holds the client object and the tick's offset in it (module base added).
+static TICK: OnceLock<(u64, u32)> = OnceLock::new();
 
 thread_local! {
     // How many scripts this thread is running through the hook: a script that starts another is its parent.
@@ -83,17 +86,31 @@ pub unsafe fn close() {
     }
 }
 
-fn log(event_type: i32, depth: u8, arg_count: u16, args: &[(u8, i32)]) {
+fn log(run: &Run) {
     let log = LOG.load(Ordering::Acquire);
     if log.is_null() {
         return;
     }
-    let time_ms = START.get().map_or(0, |start| start.elapsed().as_millis() as u64);
-    unsafe { ipc::script_runs::push(log, time_ms, event_type, depth, arg_count, args) };
+    let time_us = START.get().map_or(0, |start| start.elapsed().as_micros() as u64);
+    unsafe { ipc::script_runs::push(log, time_us, run) };
 }
 
-// `event` is about to be run: its type, how many arguments it has and the first few of them.
-fn record(event: u64, depth: u8, rule: &ScriptRuns) -> Option<()> {
+// The game tick now: the client object's tick counter, which the game thread (where scripts run) is the only writer of.
+fn tick() -> Option<i32> {
+    let &(client, offset) = TICK.get()?;
+    let memory = OwnMemory;
+    let client = memory.u64(client)?;
+    (client != 0).then(|| memory.i32(client + offset as u64)).flatten()
+}
+
+// What the log records of an event: its type, how many arguments it has and the first few of them.
+struct Event {
+    event_type: i32,
+    arg_count: u16,
+    args: Vec<(u8, i32)>,
+}
+
+fn read_event(event: u64, rule: &ScriptRuns) -> Option<Event> {
     let memory = OwnMemory;
     let event_type = memory.i32(event + rule.event_type as u64)?;
     let count = memory.i32(event + rule.arg_count as u64)?;
@@ -116,26 +133,34 @@ fn record(event: u64, depth: u8, rule: &ScriptRuns) -> Option<()> {
             });
         }
     }
-    log(event_type, depth, count as u16, &kept);
-    Some(())
+    Some(Event { event_type, arg_count: count as u16, args: kept })
 }
 
 unsafe extern "system" fn run(client: *mut c_void, event: *mut c_void, max_operations: i32, flags: i32) {
     let _call = HookCall::enter();
     let (detour, rule) = RUN.get().unwrap();
     let depth = DEPTH.with(|depth| depth.replace(depth.get().saturating_add(1)));
-    if !event.is_null() {
-        let _ = catch_unwind(AssertUnwindSafe(|| record(event as u64, depth, rule)));
+    // what was read before the script ran is logged again when it ends, so the two entries always match
+    let read = if event.is_null() { None } else { catch_unwind(AssertUnwindSafe(|| read_event(event as u64, rule))).ok().flatten() };
+    if let Some(Event { event_type, arg_count, args }) = &read {
+        let _ = catch_unwind(AssertUnwindSafe(|| log(&Run { phase: phase::START, event_type: *event_type, tick: tick(), depth, arg_count: *arg_count, args })));
     }
     detour.call(client, event, max_operations, flags);
     DEPTH.with(|d| d.set(depth));
+    if let Some(Event { event_type, arg_count, args }) = &read {
+        let _ = catch_unwind(AssertUnwindSafe(|| log(&Run { phase: phase::END, event_type: *event_type, tick: tick(), depth, arg_count: *arg_count, args })));
+    }
 }
 
-pub unsafe fn hook(module_base: u64, rule: ScriptRuns) {
+/// `tick` is the RVA of the global holding the client object and the offset of the tick counter in it, when both were found.
+pub unsafe fn hook(module_base: u64, rule: ScriptRuns, tick: Option<(u32, u32)>) {
     if RUN.get().is_some() || !open_log() {
         return;
     }
-    let function: Run = std::mem::transmute((module_base + rule.function as u64) as *const c_void);
+    if let Some((client, offset)) = tick {
+        let _ = TICK.set((module_base + client as u64, offset));
+    }
+    let function: RunScript = std::mem::transmute((module_base + rule.function as u64) as *const c_void);
     match GenericDetour::new(function, run) {
         Ok(detour) => {
             let _ = RUN.set((detour, rule));

@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr::NonNull;
@@ -36,8 +38,7 @@ static WINDOW_HWND: LazyLock<Mutex<Option<u64>>> = LazyLock::new(|| Mutex::new(N
 
 // dll functions
 
-/// # Safety
-/// `path` must be null or point to a valid nul-terminated string.
+/// `path` must be null or a valid nul-terminated string.
 #[no_mangle]
 pub unsafe extern "system" fn Inject(path: Option<NonNull<c_char>>, pid: u32) -> bool {
     let Some(path) = path else {

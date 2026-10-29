@@ -1,6 +1,4 @@
-// Walking plans over every plane at once: the closed doors on the way are taken out of the collision while planning and
-// opened by the walk when it gets to them, ladders and staircases join the planes. Pure logic over a collision lookup
-// and the doors and climbs the caller found in the scene, so it is tested natively.
+// Walking plans over every plane: closed doors are opened by the walk, ladders and staircases join the planes; pure logic, tested natively.
 
 use std::{cmp::Reverse, collections::BinaryHeap};
 
@@ -107,9 +105,7 @@ impl Default for Request {
 const WALL: u8 = 0;
 const GAME: u8 = 2;
 
-/// The closed doors and the climbable locs of the scene. A door is what the minimap draws red: a wall (or a diagonal
-/// one, shape 9) the client lets be clicked, which blocks and has a door option, and is closed (its walls are in
-/// `flags`). A climbable is a clickable loc with a climbing option.
+/// The closed doors and climbable locs of the scene.
 pub fn scene_locs<'a>(flags: Flags, locs: &[Loc], defs: &dyn Fn(i32) -> Option<&'a (LocDef, LocText)>, request: &Request) -> (Vec<Door>, Vec<Climbable>) {
     let (mut doors, mut climbables) = (Vec::new(), Vec::new());
     for loc in locs.iter().filter(|l| l.clickable && !request.avoid.contains(&(l.id, l.x, l.y, l.plane))) {
@@ -179,8 +175,7 @@ fn wall_toward(dx: i32, dy: i32) -> u32 {
     }
 }
 
-/// The tiles a loc can be used from, as the game reaches it: next to its footprint on a side without a wall between,
-/// and inside it when it can be stood in.
+/// The tiles a loc can be used from: beside its footprint without a wall between, and inside it when walkable.
 pub fn reach(flags: &dyn Fn(i32, i32) -> Option<u32>, x: i32, y: i32, size_x: i32, size_y: i32, solid: bool) -> Vec<(i32, i32)> {
     let mut tiles = Vec::new();
     let inside = |tx: i32, ty: i32| (x..x + size_x).contains(&tx) && (y..y + size_y).contains(&ty);
@@ -214,9 +209,7 @@ fn footprint_distance(a: &Target, b: &Target) -> i32 {
     gap(a.x, a.size_x, b.x, b.size_x).max(gap(a.y, a.size_y, b.y, b.size_y))
 }
 
-/// The climbs of `locs`, each paired with the nearest loc on the plane it leads to that climbs back: the player lands
-/// next to that one (or, with none, next to where the first one stands, a plane up or down). Where exactly is a guess
-/// the walk doesn't need, as it plans again from where it lands.
+/// The climbs of `locs`, each paired with the nearest loc on the target plane that climbs back.
 pub fn climbs(flags: Flags, locs: &[Climbable]) -> Vec<Climb> {
     let mut out = Vec::new();
     for c in locs {
@@ -247,8 +240,7 @@ pub fn climbs(flags: Flags, locs: &[Climbable]) -> Vec<Climb> {
     out
 }
 
-/// What a closed door puts on the collision, from its shape and rotation: the bits of `flags` its walls (shapes 0 and 2)
-/// or its footprint (shape 9) stand for. Empty when none are there: it is open.
+/// The collision bits a closed door's walls or footprint set, from its shape and rotation (empty when open).
 pub fn door_blocks(flags: &dyn Fn(i32, i32) -> Option<u32>, loc: &Target, shape: u8, rotation: u8) -> Vec<(i32, i32, u32)> {
     let mut blocks = Vec::new();
     match shape {
@@ -276,8 +268,7 @@ pub fn door_blocks(flags: &dyn Fn(i32, i32) -> Option<u32>, loc: &Target, shape:
     blocks
 }
 
-/// The shape and rotation of a straight closed door that isn't known, from its tile's walls: the one straight wall of
-/// it that the tile across has too. `None` when there isn't exactly one.
+/// The shape and rotation of a straight closed door from its tile's walls; `None` unless exactly one wall matches.
 pub fn guess_wall(flags: &dyn Fn(i32, i32) -> Option<u32>, x: i32, y: i32) -> Option<(u8, u8)> {
     let mut found = None;
     for rotation in 0..4u8 {
@@ -438,8 +429,7 @@ pub fn plan(flags: Flags, bounds: (i32, i32, i32, i32), doors: &[Door], climbs: 
     Some(Plan { tiles: nodes.into_iter().map(point).collect(), actions, reached })
 }
 
-/// A walking plan over every plane, from the scene's live collision (beyond it the cache's, through closed doors):
-/// what the walk walks, and the doors and climbs it uses on the way.
+/// A walking plan over every plane: what to walk, and the doors and climbs used on the way.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NavPlan {
     pub tiles: Vec<NavTile>,
@@ -470,8 +460,7 @@ pub struct NavAction {
 mod tests {
     use super::*;
 
-    // `planes[p]` rows top (north) first: '#' blocked, '|' a wall on the tile's east edge, '_' on its south edge,
-    // 'D' a closed door on its east edge, 'd' one on its south edge, 'L' a solid ladder
+    // `planes[p]` rows north first: '#' blocked, '|' east wall, '_' south wall, 'D'/'d' closed door east/south, 'L' ladder
     fn world(planes: &[&[&str]]) -> (Vec<Vec<u32>>, i32, i32) {
         let (w, h) = (planes[0][0].len() as i32, planes[0].len() as i32);
         let mut out = vec![vec![0u32; (w * h) as usize]; PLANES as usize];

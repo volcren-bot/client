@@ -76,6 +76,21 @@ enum Event {
         pid: u32,
         result: Result<crate::vars::Poll, String>,
     },
+    /// A read of the item containers for the inventory inspector.
+    Inventory {
+        pid: u32,
+        result: Result<crate::inventory::Poll, String>,
+    },
+    /// A read of the open interfaces for the widget inspector.
+    Widgets {
+        pid: u32,
+        result: Result<crate::widgets::Poll, String>,
+    },
+    /// Where the client's mouse is, for the widget inspector's "Follow mouse".
+    WidgetMouse {
+        pid: u32,
+        result: Result<Option<(i32, i32)>, String>,
+    },
     Restored(Result<Option<Me>, ApiError>),
     SignedIn(Result<Me, String>),
     Me(Result<Me, ApiError>),
@@ -239,16 +254,15 @@ const TILES_GIVE_UP: Duration = Duration::from_secs(10);
 // The pause after a failed paint: the frame it waited for is spent, so the next try wouldn't wait for one.
 const TILES_RETRY: Duration = Duration::from_millis(50);
 
-// Paints scene tiles on its own thread once per frame the client presents, so the overlay trails the game by a steady
-// frame and nothing is read in between; dropping it stops and clears.
+// Paints scene tiles on its own thread once per presented frame; dropping it stops and clears.
 struct TilesWorker {
     pid: u32,
-    layers: Arc<Mutex<Vec<&'static str>>>,
+    layers: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
 }
 
 impl TilesWorker {
-    fn start(ctx: &egui::Context, tx: Sender<Event>, target: Target, settings: Settings, layers: Vec<&'static str>) -> Self {
+    fn start(ctx: &egui::Context, tx: Sender<Event>, target: Target, settings: Settings, layers: Vec<String>) -> Self {
         let pid = target.client.pid;
         let worker = Self { pid, layers: Arc::new(Mutex::new(layers)), stop: Arc::new(AtomicBool::new(false)) };
         let (layers, stop, ctx) = (worker.layers.clone(), worker.stop.clone(), ctx.clone());
@@ -259,15 +273,14 @@ impl TilesWorker {
             let mut failing: Option<Instant> = None;
             while !stop.load(Ordering::Relaxed) {
                 let current = layers.lock().map(|l| l.clone()).unwrap_or_default();
-                match backend::scene_tiles_next_frame(&target, &settings, &current, frame) {
+                match backend::scene_tiles_next_frame(&target, &settings, &current.iter().map(String::as_str).collect::<Vec<_>>(), frame) {
                     Ok(Some(painted)) => {
                         frame = painted;
                         failing = None;
                     }
                     // no frame came (minimized, loading): look again once it's clear the worker isn't stopping
                     Ok(None) => {}
-                    // A scene change, world hop or logout fails the paints for a moment: the boxes come off at once,
-                    // since they'd stay where the old scene had them, and painting picks up again when it can.
+                    // A scene change, hop or logout fails the paints: clear the boxes at once and resume when possible.
                     Err(error) => {
                         let since = *failing.get_or_insert_with(|| {
                             let _ = backend::draw(&target, &settings, &Overlay::Clear);
@@ -624,6 +637,8 @@ pub struct LoaderApp {
     packets: crate::packets::Monitor,
     vars: crate::vars::Inspector,
     script_inspector: crate::script_log::Inspector,
+    inventory: crate::inventory::Inspector,
+    widgets: crate::widgets::Inspector,
     api: Api,
     auth: Auth,
     store: Store,
@@ -706,6 +721,8 @@ impl LoaderApp {
             packets: crate::packets::Monitor::default(),
             vars: crate::vars::Inspector::default(),
             script_inspector: crate::script_log::Inspector::default(),
+            inventory: crate::inventory::Inspector::default(),
+            widgets: crate::widgets::Inspector::new(),
             api: Api::new(Config::from_env()),
             auth: Auth::Restoring,
             store: Store::default(),
@@ -1121,12 +1138,16 @@ impl LoaderApp {
 
     // Keeps the scene tiles on while a layer checkbox is checked, refreshing as actors move; layers share one overlay.
     fn tiles_ui(&mut self, ctx: &egui::Context) {
-        let layers: Vec<&'static str> = DEV_LAYERS
+        let mut layers: Vec<String> = DEV_LAYERS
             .iter()
             .zip(&self.dev_toggles)
             .filter(|(_, on)| **on)
-            .filter_map(|(layer, _)| *layer)
+            .filter_map(|(layer, _)| layer.map(str::to_owned))
             .collect();
+        // the widget inspector's selection is boxed on the client while its tab is showing
+        if self.tab == Tab::Development && self.dev_tab == DevTab::WidgetInspector {
+            layers.extend(self.widgets.highlight_layers());
+        }
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
         let target = if layers.is_empty() { None } else { target };
 
@@ -1164,7 +1185,7 @@ impl LoaderApp {
         self.background(ctx, move |settings| Event::Packets { pid, result: backend::packets(&target, &settings, since) });
     }
 
-    // The Packet Inspector tab of the Development page: reads the selected client's packets while Enable is on.
+    // The Packet Inspector tab: reads the selected client's packets while Enable is on.
     // Reads the selected client's varps while the var inspector is enabled; the job also looks up the varbits of varps that changed.
     fn poll_vars(&mut self, ctx: &egui::Context) {
         if !self.vars.enabled {
@@ -1205,7 +1226,104 @@ impl LoaderApp {
         });
     }
 
-    // Reads the selected client's script log while the script inspector is enabled, with the game tick for the new runs.
+    // The widget inspector's "Follow mouse": looks at where the client's mouse is every so often and selects the widget there.
+    fn poll_widget_mouse(&mut self, ctx: &egui::Context) {
+        if !self.widgets.follow_mouse || self.tab != Tab::Development || self.dev_tab != DevTab::WidgetInspector {
+            return;
+        }
+        let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else { return };
+        ctx.request_repaint_after(crate::widgets::FOLLOW_EVERY);
+        if !self.widgets.follow_due(Instant::now()) {
+            return;
+        }
+        let pid = target.client.pid;
+        self.background(ctx, move |settings| {
+            let result = backend::connection(&target, &settings).map(|connection| connection.filter(|c| c.mouse_x >= 0 && c.mouse_y >= 0).map(|c| (c.mouse_x, c.mouse_y)));
+            Event::WidgetMouse { pid, result }
+        });
+    }
+
+    // Reads every open interface of the selected client for the widget inspector, and the names of the groups it has not named yet.
+    fn refresh_widgets(&mut self, ctx: &egui::Context, target: Target) {
+        let pid = target.client.pid;
+        self.widgets.start(pid);
+        let known = self.widgets.known_groups();
+        self.background(ctx, move |settings| {
+            let read = || -> Result<crate::widgets::Poll, String> {
+                let tree = backend::widget_tree(&target, &settings)?;
+                let mut groups: Vec<i32> = tree.widgets.iter().map(|w| w.widget.group).filter(|group| !known.contains(group)).collect();
+                groups.sort_unstable();
+                groups.dedup();
+                let names = if groups.is_empty() {
+                    Vec::new()
+                } else {
+                    let names = backend::game_val_names(&target, &settings, crate::widgets::INTERFACE_GAME_VAL, &groups)?;
+                    groups.into_iter().zip(names).filter_map(|(group, name)| Some((group, name?))).collect()
+                };
+                Ok(crate::widgets::Poll { tree, names })
+            };
+            Event::Widgets { pid, result: read() }
+        });
+    }
+
+    // The Widget Inspector tab of the Development page: the open interfaces as a tree and the fields of the selected widget.
+    fn widgets_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let target = self.selected_target().filter(|t| t.client.loaded.is_some());
+        ui.horizontal_wrapped(|ui| {
+            let busy = self.widgets.reading();
+            if ui.add_enabled(target.is_some() && !busy, egui::Button::new("Refresh")).clicked()
+                && let Some(target) = target.clone()
+            {
+                self.refresh_widgets(&ctx, target);
+            }
+            ui.checkbox(&mut self.widgets.hide_hidden, "Hide hidden");
+            ui.checkbox(&mut self.widgets.follow_mouse, "Follow mouse")
+                .on_hover_text("Selects the widget under the client's mouse, looking about ten times a second. Move the mouse over the client and the tree follows; untick it to keep the selection.");
+        });
+        match &target {
+            Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
+            None => ui.label("Select a client with agent loaded in the Clients tab."),
+        };
+        // the first look at the tab reads the interfaces without being asked
+        if let Some(target) = target {
+            if !self.widgets.has_read() && !self.widgets.reading() && self.widgets.error.is_none() {
+                self.refresh_widgets(&ctx, target);
+            }
+        }
+        if let Some(error) = &self.widgets.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        ui.separator();
+        let inspector = &mut self.widgets;
+        let mut picked = inspector.selected;
+        let open = inspector.open_path();
+        let reveal = std::mem::take(&mut inspector.reveal);
+        ui.columns(2, |columns| {
+            egui::ScrollArea::both().id_salt("widget_tree").auto_shrink([false, false]).show(&mut columns[0], |ui| {
+                for &root in &inspector.built().roots {
+                    widget_node_ui(ui, inspector, root, &open, reveal, &mut picked);
+                }
+            });
+            egui::ScrollArea::vertical().id_salt("widget_fields").auto_shrink([false, false]).show(&mut columns[1], |ui| match inspector.selected_node() {
+                Some(node) => {
+                    egui::Grid::new("widget_field_grid").num_columns(2).striped(true).show(ui, |ui| {
+                        for (name, value) in inspector.fields(node) {
+                            ui.label(name);
+                            ui.add(egui::Label::new(value).selectable(true));
+                            ui.end_row();
+                        }
+                    });
+                }
+                None => {
+                    ui.weak("Pick a widget in the tree, or tick Follow mouse and point at one in the client.");
+                }
+            });
+        });
+        inspector.selected = picked;
+    }
+
+    // Reads the selected client's script log while the script inspector is enabled.
     fn poll_script_log(&mut self, ctx: &egui::Context) {
         if !self.script_inspector.enabled {
             return;
@@ -1220,11 +1338,114 @@ impl LoaderApp {
         self.background(ctx, move |settings| {
             let read = || -> Result<crate::script_log::Poll, String> {
                 let page = backend::script_runs(&target, &settings, since)?;
-                let tick = if page.runs.is_empty() { None } else { backend::state(&target, &settings).ok().and_then(|state| state.tick_count) };
-                Ok(crate::script_log::Poll { page, tick })
+                Ok(crate::script_log::Poll { page })
             };
             Event::ScriptRuns { pid, result: read() }
         });
+    }
+
+    // Reads the selected client's item containers while the inventory inspector is enabled; the job also looks up the names it hasn't got.
+    fn poll_inventory(&mut self, ctx: &egui::Context) {
+        if !self.inventory.enabled {
+            return;
+        }
+        let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else { return };
+        let now = Instant::now();
+        if let Some(wait) = self.inventory.retry_in(now) {
+            ctx.request_repaint_after(wait);
+        }
+        if !self.inventory.due(target.client.pid, now) {
+            return;
+        }
+        let pid = target.client.pid;
+        let crate::inventory::Request { since, known_containers, known_items } = self.inventory.start(pid);
+        self.background(ctx, move |settings| {
+            let read = || -> Result<crate::inventory::Poll, String> {
+                // the first read marks the place in the log, then reads the containers: a change in between is applied twice, harmlessly
+                let (page, baseline) = match since {
+                    Some(since) => (backend::item_changes(&target, &settings, since, crate::inventory::WAIT_FOR_CHANGE)?, None),
+                    None => {
+                        let page = backend::item_changes(&target, &settings, injector::ITEM_CHANGES_NOW, std::time::Duration::ZERO)?;
+                        (page, Some(backend::item_containers(&target, &settings)?))
+                    }
+                };
+                let missing = |known: &[i32], mut ids: Vec<i32>| {
+                    ids.retain(|id| *id >= 0 && !known.contains(id));
+                    ids.sort_unstable();
+                    ids.dedup();
+                    ids
+                };
+                let named = |ids: &[i32], names: Vec<Option<String>>| -> Vec<(i32, String)> {
+                    ids.iter().zip(names).filter_map(|(id, name)| Some((*id, name?))).collect()
+                };
+                let mut containers: Vec<i32> = page.changes.iter().map(|change| change.container).collect();
+                let mut items: Vec<i32> = page.changes.iter().flat_map(|change| [change.old_item, change.new_item]).collect();
+                for (id, held) in baseline.iter().flatten() {
+                    containers.push(*id);
+                    items.extend(held.iter().map(|item| item.id));
+                }
+                let new_containers = missing(&known_containers, containers);
+                let new_items = missing(&known_items, items);
+                let container_names = if new_containers.is_empty() {
+                    Vec::new()
+                } else {
+                    named(&new_containers, backend::game_val_names(&target, &settings, crate::inventory::INV_GAME_VAL, &new_containers)?)
+                };
+                let (item_names, stackable) = if new_items.is_empty() {
+                    (Vec::new(), Vec::new())
+                } else {
+                    let stacks = backend::item_stackable(&target, &settings, &new_items)?;
+                    (named(&new_items, backend::item_names(&target, &settings, &new_items)?), new_items.iter().zip(stacks).filter_map(|(id, stacks)| Some((*id, stacks?))).collect())
+                };
+                Ok(crate::inventory::Poll { page, baseline, container_names, item_names, stackable })
+            };
+            Event::Inventory { pid, result: read() }
+        });
+    }
+
+    // The Inventory Inspector tab of the Development page: snapshots of the client's item containers while Enable is on.
+    fn inventory_ui(&mut self, ui: &mut egui::Ui) {
+        let target = self.selected_target().filter(|t| t.client.loaded.is_some());
+        let inspector = &mut self.inventory;
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut inspector.enabled, "Enable");
+            if ui.button(format!("Refresh ({})", inspector.pending())).on_hover_text("Adds the changes read since the last refresh to the list.").clicked() {
+                inspector.refresh();
+            }
+            if ui.button("Clear").clicked() {
+                inspector.clear();
+            }
+        });
+        match &target {
+            Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
+            None => ui.label("Select a client with agent loaded in the Clients tab."),
+        };
+        if let Some(error) = &inspector.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        ui.separator();
+        let mut picked = inspector.selected;
+        ui.columns(2, |columns| {
+            egui::ScrollArea::vertical().id_salt("inventory_tree").auto_shrink([false, false]).show(&mut columns[0], |ui| {
+                for (id, log) in inspector.logs() {
+                    egui::CollapsingHeader::new(inspector.container_label(*id)).id_salt(("inventory_container", *id)).show(ui, |ui| {
+                        for (index, snapshot) in log.iter().enumerate() {
+                            let label = snapshot.tick.map_or("Tick: ?".to_owned(), |tick| format!("Tick: {tick}"));
+                            if ui.selectable_label(picked == Some((*id, index)), label).clicked() {
+                                picked = Some((*id, index));
+                            }
+                        }
+                    });
+                }
+            });
+            egui::ScrollArea::vertical().id_salt("inventory_items").auto_shrink([false, false]).show(&mut columns[1], |ui| match inspector.picked() {
+                Some((snapshot, before)) => inventory_items_ui(ui, inspector, snapshot, before),
+                None => {
+                    ui.weak("Pick a tick to see the items.");
+                }
+            });
+        });
+        inspector.selected = picked;
     }
 
     // The Script Inspector tab of the Development page: a log of the scripts the client runs for events while Enable is on.
@@ -1248,7 +1469,7 @@ impl LoaderApp {
         };
         let visible = inspector.visible();
         ui.weak(format!(
-            "{} shown of {} kept{}. Scripts a script calls aren't listed, and the tick is the one at the read.",
+            "{} shown of {} kept{}. Scripts started by trigger lookup aren't listed.",
             visible.len(),
             inspector.kept(),
             if inspector.dropped > 0 { format!(", {} missed", inspector.dropped) } else { String::new() }
@@ -1262,8 +1483,8 @@ impl LoaderApp {
         egui::ScrollArea::both().id_salt("script_log").auto_shrink([false, false]).stick_to_bottom(inspector.follow).show_rows(ui, row_height, visible.len(), |ui, rows| {
             for index in rows {
                 let row = visible[index];
-                let first = index == 0 || visible[index - 1].tick != row.tick;
-                ui.label(egui::RichText::new(format!("{}{}", tick_column(first, row.tick), row.text())).font(font.clone()));
+                let first = index == 0 || visible[index - 1].run.tick != row.run.tick;
+                ui.label(egui::RichText::new(format!("{}{}", tick_column(first, row.run.tick), row.text())).font(font.clone()));
             }
         });
     }
@@ -1489,7 +1710,7 @@ impl LoaderApp {
     fn handle_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
             // Tiles and the XP tracker's reads run in the background, so they must not clear another job's busy label.
-            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::Packets { .. } | Event::Vars { .. } | Event::ScriptRuns { .. }) {
+            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::Packets { .. } | Event::Vars { .. } | Event::ScriptRuns { .. } | Event::Inventory { .. } | Event::Widgets { .. } | Event::WidgetMouse { .. }) {
                 self.busy = None;
             }
             match event {
@@ -1672,6 +1893,16 @@ impl LoaderApp {
                 }
                 Event::Packets { pid, result } => self.packets.finish(pid, Instant::now(), result),
                 Event::ScriptRuns { pid, result } => self.script_inspector.finish(pid, Instant::now(), result),
+                Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
+                Event::Widgets { pid, result } => self.widgets.finish(pid, result),
+                Event::WidgetMouse { pid, result } => {
+                    self.widgets.mouse_done();
+                    match result {
+                        Ok(Some((x, y))) if self.widgets.follow_mouse && self.widgets.has_pid(pid) => self.widgets.pick_at(x, y),
+                        Ok(_) => {}
+                        Err(error) => self.widgets.error = Some(error),
+                    }
+                }
                 Event::Vars { pid, result } => self.vars.finish(pid, Instant::now(), result, known_varp_name),
                 Event::State { pid, read, result } => match result {
                     Ok(state) => self.report_state(pid, read, &state),
@@ -2563,8 +2794,7 @@ impl LoaderApp {
             self.fold.reveal(self.script_file.text[..at].matches('\n').count());
         }
         let view = self.fold.view(&self.script_file.text);
-        // wide enough for the longest line (a tab counted as four columns), so the area scrolls sideways
-        // (the gutter and the text sit side by side, an item spacing apart); the text fills what the window leaves
+        // wide enough for the longest line (a tab counts as four columns) so the area scrolls sideways; the text fills what's left
         let text_width = (self.fold.longest_line() as f32 * digit_width + margin.sum().x + 8.0)
             .max(size.x - gutter_width - ui.spacing().item_spacing.x);
         let gutter_height = size.y.max(view.visible.len() as f32 * row_height + margin.sum().y);
@@ -2802,9 +3032,8 @@ impl LoaderApp {
             DevTab::PacketInspector => self.packets_ui(ui),
             DevTab::VarInspector => self.vars_ui(ui),
             DevTab::ScriptInspector => self.script_log_ui(ui),
-            DevTab::WidgetInspector | DevTab::InventoryInspector => {
-                ui.weak("Not ported yet.");
-            }
+            DevTab::InventoryInspector => self.inventory_ui(ui),
+            DevTab::WidgetInspector => self.widgets_ui(ui),
         }
     }
 
@@ -2961,8 +3190,7 @@ impl LoaderApp {
                 });
             log.set_filter(filter);
         }
-        // the buttons sit at the right edge, Copy all first; when the row is too narrow for the filter and both buttons
-        // they follow the filter instead, wrapping onto the next line, so nothing is drawn over anything else
+        // the buttons sit at the right edge; when the row is too narrow they wrap onto the next line after the filter
         let narrow = ui.available_width() < 150.0;
         let layout = if narrow { egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true) } else { egui::Layout::right_to_left(egui::Align::Center) };
         ui.with_layout(layout, |ui| {
@@ -2999,8 +3227,7 @@ impl LoaderApp {
         ui.painter().rect_filled(line, 0.0, ui.visuals().widgets.noninteractive.bg_stroke.color);
         ui.spacing_mut().item_spacing.y = 4.0;
         if self.log_tab == LogTab::Script {
-            // the output keeps the left half; the XP tracker takes the right. When the width can't fit both side by side
-            // the tracker goes under the output instead, so the two never draw over each other.
+            // the output keeps the left half and the XP tracker the right; when too narrow the tracker goes under the output
             let stacked = ui.available_width() < SIDE_BY_SIDE_MIN_WIDTH;
             let panel = if stacked {
                 egui::Panel::bottom("script_side").resizable(false).exact_size(ui.available_height() * 0.4)
@@ -3152,8 +3379,7 @@ fn line_char_range(text: &str, line: usize) -> (usize, usize) {
     (start, start)
 }
 
-/// Walks forward through a text, turning byte offsets asked for in increasing order into char indices and line numbers,
-/// so many offsets cost one pass over the text rather than one each.
+/// Walks forward through a text, turning increasing byte offsets into char indices and line numbers in one pass.
 struct TextWalk<'a> {
     text: &'a str,
     byte: usize,
@@ -3271,6 +3497,8 @@ impl eframe::App for LoaderApp {
         self.poll_packets(&ctx);
         self.poll_vars(&ctx);
         self.poll_script_log(&ctx);
+        self.poll_inventory(&ctx);
+        self.poll_widget_mouse(&ctx);
 
         let narrow = ctx.content_rect().width() < SIDEBAR_MIN_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
@@ -3308,8 +3536,7 @@ impl eframe::App for LoaderApp {
                 .frame(crate::theme::sidebar_frame())
                 .show(ui, |ui| self.sidebar_ui(ui));
         } else {
-            // Below the breakpoint the sidebar is a drawer over the page that slides in from the left. Its right edge is
-            // a skinny handle that stays visible when it is closed; an empty panel keeps the page clear of it.
+            // Below the breakpoint the sidebar is a sliding drawer with a skinny handle that stays visible when closed.
             let area = ui.available_rect_before_wrap();
             egui::Panel::left("sidebar_handle_space")
                 .resizable(false)
@@ -3323,8 +3550,7 @@ impl eframe::App for LoaderApp {
                 egui::emath::easing::cubic_out,
             );
             let width = SIDEBAR_WIDTH.min(area.width() * 0.85);
-            // Closed by a click outside it, Esc or the handle. The drawer sits on a higher layer than the backdrop,
-            // as clicking the backdrop would otherwise raise it over the drawer.
+            // Closed by a click outside, Esc or the handle; the drawer sits above the backdrop so clicks on it aren't taken.
             if slide > 0.0 {
                 let backdrop = egui::Area::new("sidebar_backdrop".into())
                     .order(egui::Order::Foreground)
@@ -3419,6 +3645,73 @@ impl eframe::App for LoaderApp {
             let _ = wait.recv_timeout(Duration::from_secs(3));
         }
         backend::shutdown();
+    }
+}
+
+// What changed in a container since the snapshot before it, then every slot, as RuneLite's inventory delta panel shows them.
+fn inventory_items_ui(ui: &mut egui::Ui, inspector: &crate::inventory::Inspector, snapshot: &crate::inventory::Snapshot, before: Option<&crate::inventory::Snapshot>) {
+    let line = |ui: &mut egui::Ui, id: i32, quantity: i32, color: egui::Color32| {
+        ui.colored_label(color, format!("{} x{quantity}  (id {id})", inspector.item_name(id)));
+    };
+    if let Some(before) = before {
+        let (added, removed) = crate::inventory::compare(&before.items, &snapshot.items, |id| inspector.is_stackable(id));
+        if !added.is_empty() {
+            ui.strong("Items Added:");
+            for (id, quantity) in added {
+                line(ui, id, quantity, egui::Color32::from_rgb(90, 200, 90));
+            }
+        }
+        if !removed.is_empty() {
+            ui.strong("Items Removed:");
+            for (id, quantity) in removed {
+                line(ui, id, quantity, egui::Color32::from_rgb(230, 100, 100));
+            }
+        }
+    }
+    ui.strong("Items in Container:");
+    for item in &snapshot.items {
+        if item.id < 0 {
+            ui.weak(format!("{:>3}  EMPTY", item.slot));
+        } else {
+            ui.label(format!("{:>3}  {} x{}  (id {})", item.slot, inspector.item_name(item.id), item.quantity, item.id));
+        }
+    }
+}
+
+// One node of the widget tree and, when it is open, its children. Hidden widgets are left out when the inspector hides them.
+fn widget_node_ui(ui: &mut egui::Ui, inspector: &crate::widgets::Inspector, index: usize, open: &std::collections::HashSet<usize>, reveal: bool, picked: &mut Option<(i32, i32)>) {
+    let node = &inspector.built().nodes[index];
+    if inspector.hide_hidden && node.widget.hidden {
+        return;
+    }
+    let key = (node.widget.id, node.widget.index);
+    let label = format!("{} {}", node.kind.letter(), inspector.identifier(&node.widget));
+    let selected = *picked == Some(key);
+    if node.children.is_empty() {
+        let response = ui.selectable_label(selected, label);
+        if response.clicked() {
+            *picked = Some(key);
+        }
+        if selected && reveal {
+            response.scroll_to_me(Some(egui::Align::Center));
+        }
+        return;
+    }
+    let mut header = egui::CollapsingHeader::new(egui::RichText::new(label).color(if selected { ui.visuals().selection.stroke.color } else { ui.visuals().text_color() }))
+        .id_salt(("widget", node.widget.id, node.widget.index, index));
+    if reveal && open.contains(&index) {
+        header = header.open(Some(true));
+    }
+    let shown = header.show(ui, |ui| {
+        for &child in &node.children {
+            widget_node_ui(ui, inspector, child, open, reveal, picked);
+        }
+    });
+    if shown.header_response.clicked() {
+        *picked = Some(key);
+    }
+    if selected && reveal {
+        shown.header_response.scroll_to_me(Some(egui::Align::Center));
     }
 }
 

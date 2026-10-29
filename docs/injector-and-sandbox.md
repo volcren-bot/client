@@ -21,7 +21,7 @@ Real code only on Windows. On other targets the same API compiles to stubs retur
 | `async_input.rs` | `Worker<J>`: one thread per pid running queued jobs, `cancel` (drop the queue, stop the running job, return once idle), `Pace` (the sleep/cancelled hook input code goes through). Platform independent, so it is tested natively. |
 | `input_jobs.rs` | The jobs the sandbox's worker runs (`Job`: an input or a wait) and the held-button/key tracking released on cancel. |
 | `font.rs` | The game's bitmap fonts, decoded from the cache, for overlay text. |
-| `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). The overlays themselves are `win::scene_tiles` layers; `spot-anims` outlines each spot animation's tile in magenta with its id, and `projectiles` labels each projectile with its id and cycles left at its 3D position (height from the terrain's heightmap) and draws a line to where it lands (the target actor's tile when it has one). |
+| `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). The overlays themselves are `win::scene_tiles` layers; a `widget:x,y,width,height,rrggbb` layer boxes a canvas area (the widget inspector's selection), `spot-anims` outlines each spot animation's tile in magenta with its id, and `projectiles` labels each projectile with its id and cycles left at its 3D position (height from the terrain's heightmap) and draws a line to where it lands (the target actor's tile when it has one). |
 | `form.rs` | Script settings form spec and the `STATS_PREFIX` line format, shared with the loader. |
 | `sandbox.rs` | The Luau runtime (`mlua` with `luau-jit`) and every script global. |
 | `main.rs` | CLI. |
@@ -42,8 +42,14 @@ injector load <pid> <dll> | unload <pid>           inject / reload / unload the 
 injector status <pid>                              connection, version, protocol, offsets state
 injector state <pid>                               full game state
 injector packets <pid> <since>                     packet log from sequence number <since> (0: oldest kept): `{packets, next, dropped}`
-injector scripts <pid> <since>                     script log from sequence number <since> (0: oldest kept): `{runs, next, dropped}`; each run has the event type, argument count, nesting depth and the first arguments as text
+injector scripts <pid> <since>                     script log from sequence number <since> (0: oldest kept): `{runs, next, dropped}`; each entry is a script's start or end (`end`) with its microsecond time, game tick, event type, argument count, nesting depth and the first arguments as text
 injector varc-changes <pid> <since>                varc log from sequence number <since> (0: oldest kept): `{changes, next, dropped}`; each change has the varc index, whether it is a string, the old value (none when unknown) and the new one
+injector item-changes <pid> <since> [wait ms]      item log from sequence number <since> (0: oldest kept; 18446744073709551615 reads nothing and returns the current `next`); with nothing new it blocks up to [wait ms] (at most 5000) for the agent to log a change: `{changes, next, dropped}`; each change is one container slot write that changed it: tick, container, slot, old and new item and quantity, and whether the container existed before
+injector containers <pid>                          every item container the client holds, by id: `[[id, [{slot, id, quantity}]]]`
+injector item-stackable <pid> <id>...              whether each item stacks, from its definition
+injector widget-tree <pid>                        every open interface for the widget inspector: `{root, sub_interfaces, widgets}`, each widget a component of an open group or a dynamic child (with the component it hangs off); read straight from memory (about two seconds under Wine for 7000 widgets)
+injector widget-words <pid> <group> <child> <index|-1> <count>   debug: the first <count> 4-byte words of a component (or of its dynamic child <index>) with its address
+injector widget-dump <pid> <count>                 debug: the first <count> words of every component of the open interfaces and of their dynamic children: `[[id, index, [words]]]`
 injector run [--script <path>] <pid> < x.luau      run a script; --script enables disk `require`
 injector serve                                     JSON-lines server (the loader's Wine backend)
 ```
@@ -71,6 +77,10 @@ Cancelling drops the queue, interrupts the running job's sleeps and returns once
 
 - **With `--script <path>`** (the loader always passes it; a Windows path under Wine): `require("./x")` / `require("../x")` reads `x.luau`, `x.lua` or `x/init.luau` from disk, relative to the requiring file. Paths must start with `./` or `../`; modules are cached by normalized path. New lib files need no rebuild.
 - **Otherwise** (piped script, or a bare name like `require("game_state")`): the lib compiled into the injector (`LIB_MODULES`, `include_str!` from the sibling `lib/` project, default `embedded-lib` feature). It is stale until a rebuild, new lib files must be added to `LIB_MODULES`, and `VOLCREN_LIB_DIR` (a `lib/` directory; under Wine a Windows path like `Z:\home\me\VOLCREN\lib`) reads those modules from disk instead. `--no-default-features` drops the embedded copy, so the build no longer reads `lib/`; the release workflow builds that way, since the loader always passes `--script`.
+
+### Item change callbacks
+
+`on_item_change(fn) -> id`, `off_item_change(id)` and `wait_item_change(ms)` (typed in the lib's `host.luau`) register Luau callbacks for the item log. The first callback makes an `ItemWatcher` (a subscriber of the log, see [ipc-protocol.md](ipc-protocol.md)). The script is one thread running Luau, so a callback can't interrupt it: `sleep` (replaced while a callback is registered) and `wait_item_change` block on the watcher's event instead of a timer, so they wake when the agent logs a change, run the callbacks for what was logged and go on sleeping for the rest of the time. A script that never sleeps never runs its callbacks. An error in a callback is an error in `sleep`.
 
 ### Adding a global
 

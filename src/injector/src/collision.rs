@@ -19,8 +19,7 @@ pub mod flag {
     pub const FLOOR_DECORATION: u32 = 0x40000;
     pub const FLOOR: u32 = 0x200000;
     pub const BLOCKED: u32 = OBJECT | FLOOR_DECORATION | FLOOR;
-    // Not the client's: which of a tile's walls belong to a closed door (the cache has every door closed), and a door
-    // that fills the tile (a diagonal one). The game's route masks leave these bits alone.
+    // Not the client's: the wall bits of closed doors and of doors that fill the tile (diagonal).
     pub const DOOR_NORTH: u32 = 1 << 24;
     pub const DOOR_EAST: u32 = 1 << 25;
     pub const DOOR_SOUTH: u32 = 1 << 26;

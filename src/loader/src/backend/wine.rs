@@ -17,12 +17,13 @@ use super::{Scan, Settings, Target};
 const CLIENT_EXES: &[&str] = &["osclient.exe", "osrswindows.exe"];
 const HELPER_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Which of a prefix's helpers a request goes to. Requests that wait for the client's next frame get their own, since a
-/// helper answers one request at a time and the rest would queue behind every wait.
+/// Which of a prefix's helpers a request goes to; each kind of wait gets its own lane so others don't queue behind it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Lane {
     Main,
     Frames,
+    /// Requests that wait for the client to log something (item changes).
+    Events,
 }
 
 static SERVERS: OnceLock<Mutex<HashMap<(PathBuf, Lane), Arc<Mutex<Server>>>>> = OnceLock::new();
@@ -252,6 +253,50 @@ pub fn widget(target: &Target, settings: &Settings, group: u16, child: u16) -> R
 pub fn item_container(target: &Target, settings: &Settings, id: i32) -> Result<Option<Vec<Item>>, String> {
     let helper = helper(settings)?;
     run(&target.location, &helper, &["container", &target.client.pid.to_string(), &id.to_string()])
+}
+
+pub fn item_containers(target: &Target, settings: &Settings) -> Result<Vec<(i32, Vec<Item>)>, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["containers", &target.client.pid.to_string()])
+}
+
+pub fn widget_tree(target: &Target, settings: &Settings) -> Result<injector::WidgetTree, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["widget-tree", &target.client.pid.to_string()])
+}
+
+pub fn game_val_names(target: &Target, settings: &Settings, kind: u32, ids: &[i32]) -> Result<Vec<Option<String>>, String> {
+    let helper = helper(settings)?;
+    let (pid, kind) = (target.client.pid.to_string(), kind.to_string());
+    let mut args = vec!["game-vals", pid.as_str(), kind.as_str()];
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    args.extend(ids.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
+}
+
+pub fn item_stackable(target: &Target, settings: &Settings, ids: &[i32]) -> Result<Vec<Option<bool>>, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec!["item-stackable", pid.as_str()];
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    args.extend(ids.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
+}
+
+/// With nothing new it blocks up to `wait`, so it goes to its own helper.
+pub fn item_changes(target: &Target, settings: &Settings, since: u64, wait: std::time::Duration) -> Result<injector::ItemPage, String> {
+    let helper = helper(settings)?;
+    let (pid, since, wait) = (target.client.pid.to_string(), since.to_string(), wait.as_millis().to_string());
+    run_on(Lane::Events, &target.location, &helper, &["item-changes", &pid, &since, &wait])
+}
+
+pub fn item_names(target: &Target, settings: &Settings, ids: &[i32]) -> Result<Vec<Option<String>>, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec!["item-names", pid.as_str()];
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    args.extend(ids.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
 }
 
 pub fn varc(target: &Target, settings: &Settings, id: i32) -> Result<Option<i32>, String> {

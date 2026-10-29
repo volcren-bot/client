@@ -44,7 +44,7 @@ use super::graphics::{
 };
 use super::offsets::{
     find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
-    find_varps, find_interfaces, find_item_containers, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
+    find_varps, find_interfaces, find_item_containers, find_item_setter, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
     find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_packets, find_script_runs, find_varc_setters, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
     find_world_select, ScanError, World,
 };
@@ -268,6 +268,7 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
             super::packets::unhook();
             super::script_runs::unhook();
             super::varc_log::unhook();
+            super::item_log::unhook();
             unhook_wndproc();
 
             return LRESULT(0);
@@ -551,6 +552,8 @@ unsafe fn find_offsets() {
     let packets = found("Packets", find_packets(image));
     let script_runs = found("Script runs", find_script_runs(image));
     let varc_setters = found("Varc setters", find_varc_setters(image));
+    let containers = find_item_containers(image).ok();
+    let item_setter = containers.and_then(|c| found("Item setter", find_item_setter(image, &c)).map(|rule| (rule, c)));
     let camera = player.and_then(|p| found("Camera", find_camera(image, p.client)));
     let projection = player.and_then(|p| found("Projection", find_projection(image, p.client)));
     let scene = projection.and_then(|_| found("Scene", find_scene(image)));
@@ -829,10 +832,13 @@ unsafe fn find_offsets() {
         super::packets::hook(module_base, rule);
     }
     if let Some(rule) = script_runs {
-        super::script_runs::hook(module_base, rule);
+        super::script_runs::hook(module_base, rule, player.zip(tick_count).map(|(p, offset)| (p.client, offset)));
     }
     if let Some(rule) = varc_setters {
         super::varc_log::hook(module_base, rule);
+    }
+    if let Some((rule, containers)) = item_setter {
+        super::item_log::hook(module_base, rule, containers, player.zip(tick_count).map(|(p, offset)| (p.client, offset)));
     }
     if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(image)) {
         super::items::set_lookup(module_base, rule);
@@ -905,6 +911,7 @@ pub unsafe fn reenable_hooks() {
     super::packets::rehook();
     super::script_runs::rehook();
     super::varc_log::rehook();
+    super::item_log::rehook();
     hook_wndproc(HOOKED_HWND.load(Ordering::SeqCst) as u64);
 }
 pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {

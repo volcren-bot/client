@@ -9,6 +9,9 @@ fn main() -> std::process::ExitCode {
     const PACKETS_PER_READ: usize = 1000;
     const SCRIPT_RUNS_PER_READ: usize = 2000;
     const VARC_CHANGES_PER_READ: usize = 1000;
+    const ITEM_CHANGES_PER_READ: usize = 2000;
+    // The longest an `item-changes` call blocks for a change: the caller asks again, which also lets it notice it should stop.
+    const ITEM_CHANGES_MAX_WAIT_MS: u64 = 5000;
 
     fn json<T: serde::Serialize>(result: Result<T, String>) -> String {
         serde_json::to_string(&result).unwrap()
@@ -100,6 +103,14 @@ fn main() -> std::process::ExitCode {
                 (Ok(pid), Ok(ids)) => json(injector::item_params(pid, &ids)),
                 _ => json::<()>(Err(format!("Invalid item-params command: {args:?}"))),
             },
+            ["containers", pid] => match pid.parse() {
+                Ok(pid) => json(injector::item_containers(pid)),
+                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
+            },
+            ["widget-tree", pid] => match pid.parse() {
+                Ok(pid) => json(injector::widget_tree(pid)),
+                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
+            },
             ["container", pid, id] => match (pid.parse(), id.parse()) {
                 (Ok(pid), Ok(id)) => json(injector::item_container(pid, id)),
                 _ => json::<()>(Err(format!("Invalid container command: {args:?}"))),
@@ -118,6 +129,14 @@ fn main() -> std::process::ExitCode {
             ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => match (pid.parse(), index.parse(), count.parse()) {
                 (Ok(pid), Ok(index), Ok(count)) => json(injector::npc_words(pid, index, count, rest == ["def"])),
                 _ => json::<()>(Err(format!("Invalid npc-words command (pid index count [def]): {args:?}"))),
+            },
+            ["widget-words", pid, group, child, index, count] => match (pid.parse(), group.parse(), child.parse(), index.parse(), count.parse()) {
+                (Ok(pid), Ok(group), Ok(child), Ok(index), Ok(count)) => json(injector::widget_words(pid, group, child, index, count)),
+                _ => json::<()>(Err(format!("Invalid widget-words command (pid group child index|-1 count): {args:?}"))),
+            },
+            ["widget-dump", pid, count] => match (pid.parse(), count.parse()) {
+                (Ok(pid), Ok(count)) => json(injector::widget_dump(pid, count)),
+                _ => json::<()>(Err(format!("Invalid widget-dump command (pid count): {args:?}"))),
             },
             ["watch", pid, seconds, bytes] => match (pid.parse(), seconds.parse(), bytes.parse()) {
                 (Ok(pid), Ok(seconds), Ok(bytes)) => json(injector::watch_client(pid, seconds, bytes)),
@@ -208,6 +227,10 @@ fn main() -> std::process::ExitCode {
                 (Ok(pid), Ok(ids)) => json(injector::item_names(pid, &ids)),
                 _ => json::<()>(Err(format!("Invalid item-names command: {args:?}"))),
             },
+            ["item-stackable", pid, ids @ ..] => match (pid.parse(), ids.iter().map(|id| id.parse()).collect::<Result<Vec<i32>, _>>()) {
+                (Ok(pid), Ok(ids)) => json(injector::item_stackable(pid, &ids)),
+                _ => json::<()>(Err(format!("Invalid item-stackable command: {args:?}"))),
+            },
             ["varc", pid, id] => match (pid.parse(), id.parse()) {
                 (Ok(pid), Ok(id)) => json(injector::varc(pid, id)),
                 _ => json::<()>(Err(format!("Invalid varc command: {args:?}"))),
@@ -243,6 +266,12 @@ fn main() -> std::process::ExitCode {
             ["varc-changes", pid, since] => match (pid.parse(), since.parse()) {
                 (Ok(pid), Ok(since)) => json(injector::varc_changes(pid, since, VARC_CHANGES_PER_READ)),
                 _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
+            },
+            ["item-changes", pid, since, rest @ ..] => match (pid.parse(), since.parse(), rest.first().map_or(Ok(0u64), |wait| wait.parse())) {
+                (Ok(pid), Ok(since), Ok(wait)) => {
+                    json(injector::item_changes_wait(pid, since, ITEM_CHANGES_PER_READ, std::time::Duration::from_millis(wait.min(ITEM_CHANGES_MAX_WAIT_MS))))
+                }
+                _ => json::<()>(Err(format!("Invalid pid, sequence number or wait: {args:?}"))),
             },
             ["chat", pid] => match pid.parse() {
                 Ok(pid) => json(injector::chat_messages(pid)),
@@ -314,7 +343,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("Usage: injector list | load <pid> <dll> [<style> <r> <g> <b> <size>] | unload <pid> | status <pid> | state <pid> | console <pid>");
         eprintln!("       injector widget <pid> <group> <child> | children <pid> <group> <child> | interfaces <pid> | screenshot <pid> <file.bmp>");
         eprintln!("       injector varp <pid> <id> | varps <pid> | varbit <pid> <id> | enum <pid> <id> | item-params <pid> <ids...> | name <pid> <display name>");
-        eprintln!("       injector container <pid> <id> | item-names <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | scripts <pid> <since> | varc-changes <pid> <since> | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
+        eprintln!("       injector container <pid> <id> | containers <pid> | widget-tree <pid> | widget-words <pid> <group> <child> <index|-1> <count> | widget-dump <pid> <count> | item-names <pid> <id>... | item-stackable <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | scripts <pid> <since> | varc-changes <pid> <since> | item-changes <pid> <since> [wait ms] (u64 max: only the position) | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
         eprintln!("       injector move <pid> <x> <y> | click <pid> left|right|middle <x> <y> | type <pid> <text> [hold ms]");
         eprintln!("       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up");
         eprintln!("       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms>");

@@ -1,5 +1,4 @@
-//! Embeds `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and the optional `SITE_URL` from `client/.env` (or the build environment) into the binary,
-//! so a release build needs no config file next to it. At run time the same variable names in the environment still override them.
+//! Embeds `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SITE_URL` from `client/.env` at build time; the same variables override them at run time.
 use std::{fs, path::Path, process::Command};
 
 const KEYS: [&str; 4] = ["API_URL", "SUPABASE_URL", "SUPABASE_ANON_KEY", "SITE_URL"];

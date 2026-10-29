@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
-use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_hitsplats, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, projectiles, send_input, send_input_with, spot_anims, varc, varp_value, varps, widget, widget_children, world_select};
+use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_hitsplats, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, projectiles, send_input, send_input_with, spot_anims, varc, varp_value, varps, widget, widget_children, world_select, ItemWatcher};
 #[cfg(not(windows))]
 use offline::*;
 
@@ -15,6 +15,20 @@ mod offline {
     use crate::{ChatMessage, Connection, EntityModel, GameState, GroundItem, Input, Item, Loc, MenuClick, MenuEntry, MenuLayout, Npc, Overlay, Player, Projectile, SpotAnim, SubInterface, Widget, WorldSelect};
 
     const NO_WIN32: &str = "clients can only be reached from Windows or Wine";
+
+    pub struct ItemWatcher;
+
+    impl ItemWatcher {
+        pub fn new(_: u32) -> Result<Self, String> {
+            Err(NO_WIN32.into())
+        }
+        pub fn wait(&self, _: std::time::Duration) -> bool {
+            false
+        }
+        pub fn read(&mut self, _: usize) -> crate::ItemPage {
+            crate::ItemPage::default()
+        }
+    }
 
     pub fn connection(_: u32) -> Option<Connection> {
         None
@@ -219,6 +233,55 @@ struct Collision {
 }
 
 // `scene` cut to `area` (x1, y1, x2, y2, corners included), or whole without one.
+/// The registered item change callbacks and the watcher that wakes the script for them.
+#[derive(Default)]
+struct ItemCallbacks {
+    watcher: Option<ItemWatcher>,
+    callbacks: Vec<(u64, mlua::Function)>,
+    last_id: u64,
+}
+
+/// Waits up to `time` for item changes, calling every callback per change; with `until_change` it returns after the first.
+fn pump_item_changes(lua: &Lua, items: &Rc<RefCell<ItemCallbacks>>, time: std::time::Duration, until_change: bool) -> mlua::Result<bool> {
+    let deadline = std::time::Instant::now() + time;
+    let mut any = false;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        // the borrow ends before any callback runs, so a callback may register or remove callbacks
+        let page = {
+            let mut items = items.borrow_mut();
+            let Some(watcher) = items.watcher.as_mut() else {
+                std::thread::sleep(left);
+                return Ok(any);
+            };
+            if !watcher.wait(left) {
+                return Ok(any);
+            }
+            watcher.read(ITEM_CHANGES_PER_WAKE)
+        };
+        if page.changes.is_empty() {
+            if left.is_zero() {
+                return Ok(any);
+            }
+            continue;
+        }
+        any = true;
+        let callbacks: Vec<mlua::Function> = items.borrow().callbacks.iter().map(|(_, callback)| callback.clone()).collect();
+        for change in &page.changes {
+            let value = to_lua(lua, change)?;
+            for callback in &callbacks {
+                callback.call::<()>(value.clone())?;
+            }
+        }
+        if until_change {
+            return Ok(true);
+        }
+    }
+}
+
+/// Changes a callback pass handles at most per read: a bank opening logs a few hundred in one tick.
+const ITEM_CHANGES_PER_WAKE: usize = 2000;
+
 fn collision_cut(scene: (i32, i32, i32, Vec<Vec<u32>>), area: Option<[i32; 4]>) -> Result<Collision, String> {
     let (x0, y0, plane, columns) = scene;
     let height = columns.first().map_or(0, |c| c.len() as i32);
@@ -454,8 +517,7 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-// The file `require("../lib/host")` names from `dir`: `host.luau`, `host.lua` or `host/init.luau`.
-// `memory` holds files that exist only in memory (a premium script's own files), keyed by their normalized path.
+// The file `require("../lib/host")` names from `dir`; `memory` holds in-memory-only files by normalized path.
 fn find_module(dir: &Path, path: &str, memory: &HashMap<PathBuf, String>) -> Result<PathBuf, Vec<PathBuf>> {
     let base = normalize(&dir.join(path));
     let with = |suffix: &str| {
@@ -482,8 +544,7 @@ fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
     Ok((file, source))
 }
 
-// `require("@lib/main/walker")` is `require("../lib/main/walker")`, so a script can name the lib without counting folders.
-// It matches the `lib` alias in a script's `.luaurc`, which is what `luau-analyze` reads.
+// `require("@lib/...")` is `require("../lib/...")`, matching the `lib` alias in `.luaurc`.
 fn alias_lib(path: String) -> String {
     match path.strip_prefix("@lib/") {
         Some(rest) => format!("../lib/{rest}"),
@@ -502,8 +563,7 @@ fn lib_relative(path: &str) -> Option<&str> {
     rest.strip_prefix("lib/").filter(|r| stepped && !r.is_empty())
 }
 
-// `script_path` is the file the script was read from; without it only modules embedded in the injector can be required.
-// `lib_dir` is the developer's own lib folder: the script's `require("../lib/...")` reads from it instead of from beside the script.
+// `script_path` is the script's file; `lib_dir` is the developer's lib folder, used instead of the one beside the script.
 pub fn run_with_form(
     name: &str,
     source: &str,
@@ -516,8 +576,7 @@ pub fn run_with_form(
     run_with_modules(name, source, pid, print, form, script_path, lib_dir, HashMap::new())
 }
 
-// `modules` are the script's other files by name, kept in memory instead of on disk: `require("./name")` finds them
-// beside `script_path` as if they were there, so a script's source never has to be written out.
+// `modules` are the script's other files kept in memory, found by `require("./name")` as if beside `script_path`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_modules(
     name: &str,
@@ -652,10 +711,51 @@ pub fn run_with_modules(
     globals.set("time", lua.create_function(move |_, (): ()| Ok(started.elapsed().as_secs_f64() * 1000.0))?)?;
     globals.set("clock", lua.create_function(|_, (): ()| Ok(local_time_of_day()))?)?;
 
+    // Item change callbacks; they run inside `sleep` and `wait_item_change`, not interrupting the script.
+    let items = Rc::new(RefCell::new(ItemCallbacks::default()));
+    let registry = items.clone();
+    globals.set(
+        "on_item_change",
+        lua.create_function(move |_, callback: mlua::Function| {
+            let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
+            let mut items = registry.borrow_mut();
+            if items.watcher.is_none() {
+                items.watcher = Some(ItemWatcher::new(pid).map_err(mlua::Error::RuntimeError)?);
+            }
+            items.last_id += 1;
+            let id = items.last_id;
+            items.callbacks.push((id, callback));
+            Ok(id)
+        })?,
+    )?;
+    let registry = items.clone();
+    globals.set(
+        "off_item_change",
+        lua.create_function(move |_, id: u64| {
+            let mut items = registry.borrow_mut();
+            let before = items.callbacks.len();
+            items.callbacks.retain(|(known, _)| *known != id);
+            if items.callbacks.is_empty() {
+                items.watcher = None;
+            }
+            Ok(items.callbacks.len() != before)
+        })?,
+    )?;
+    let pump = items.clone();
+    globals.set(
+        "wait_item_change",
+        lua.create_function(move |lua, ms: u64| pump_item_changes(lua, &pump, std::time::Duration::from_millis(ms), true))?,
+    )?;
+    let pump = items;
     globals.set(
         "sleep",
-        lua.create_function(|_, ms: u64| {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
+        lua.create_function(move |lua, ms: u64| {
+            let time = std::time::Duration::from_millis(ms);
+            if pump.borrow().watcher.is_some() {
+                pump_item_changes(lua, &pump, time, false)?;
+            } else {
+                std::thread::sleep(time);
+            }
             Ok(())
         })?,
     )?;

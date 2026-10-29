@@ -3,12 +3,10 @@ use super::{
     *,
 };
 
-// Java's `Projectile.update` turns the slope into a vertical speed with `tan(slope * 0.02454369)`: the constant is
-// in the native client too, used by that one function.
+// Java's `Projectile.update` uses `tan(slope * 0.02454369)`; the constant appears once in the native client.
 const SLOPE_FACTOR: f64 = 0.02454369;
 
-/// The client's projectile list and the projectile fields, from the update function (Java's `Projectile.am`),
-/// the loop that calls it for every projectile (Java's `Client.pp`) and the constructor.
+/// The projectile list and fields, from the update function, its caller loop and the constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Projectiles {
     /// the list in the client object: a circular list whose head is the sentinel node (next, previous, size)
@@ -201,9 +199,7 @@ fn list_thunk(instrs: &[Instruction], loop_rva: u32) -> Option<u32> {
         .then(|| add.immediate(1) as u32)
 }
 
-// The constructor copies its parameter block over the fields from the source level on (`movups [this+source_level],
-// xmm0`), clears the moving flag, and ends the copy with the id, which it then reads back to look up the spot
-// animation: `mov [this+id], eax; mov edx, [this+id]`.
+// The constructor copies its parameter block over the fields, then reads the id back to look up the spot animation.
 fn constructor_id(instrs: &[Instruction], fields: &Projectiles) -> Option<u32> {
     let stores = |mnemonic: Mnemonic, at: u32| instrs.iter().any(|i| i.mnemonic() == mnemonic && i.op0_kind() == OpKind::Memory && field(i) == Some(at));
     if !(stores(Mnemonic::Movups, fields.source_level) && stores(Mnemonic::Mov, fields.moving)) {

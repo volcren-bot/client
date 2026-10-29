@@ -218,9 +218,7 @@ pub fn find_game_object_layout(image: &[u8], scene: &Scene) -> Result<GameObject
     one(found)
 }
 
-// Where walls and decorations keep their config byte (shape in the low 6 bits, rotation in the next 2), from Java's
-// `Scene.getConfig(plane, x, y, tag)`: each slot's object is checked against the tag, then its config is the
-// `movzx` that follows. The game object branch reads the config `find_game_object_layout` found, which makes the match.
+// Where walls and decorations keep their config byte (shape in the low 6 bits, rotation in the next 2), from `Scene.getConfig`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocConfigs {
     pub wall: u32,

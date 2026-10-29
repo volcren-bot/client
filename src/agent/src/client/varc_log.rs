@@ -41,8 +41,7 @@ type SetObject = unsafe extern "system" fn(*mut c_void, i32, *const u8);
 static SET_INT: OnceLock<(GenericDetour<SetInt>, GetInt)> = OnceLock::new();
 static SET_OBJECT: OnceLock<GenericDetour<SetObject>> = OnceLock::new();
 
-// What the hook last saw each string varc set to (the first bytes and the whole length), as the value before the next change: the
-// client has no cheap getter that leaves the varcs alone.
+// What each string varc was last seen set to, as the value before the next change.
 type Strings = Option<HashMap<i32, (Vec<u8>, u32)>>;
 static STRINGS: Mutex<Strings> = Mutex::new(None);
 
@@ -95,8 +94,7 @@ fn log(change: &Change) {
     unsafe { ipc::varc_log::push(log, time_ms, change) };
 }
 
-// A variant holding a string: the kind byte says so, and the text is inline (the byte at 0x17 is the room left) or, with that
-// byte's top bit set, behind a pointer at 0 with the length at 8.
+// A string variant: the kind byte says so; the text is inline or behind a pointer at 0 with the length at 8.
 fn read_text(variant: u64) -> Option<(Vec<u8>, u32)> {
     let memory = OwnMemory;
     let mut tag = [0u8; 1];

@@ -98,8 +98,3 @@ pub extern "system" fn DllMain(
         None => simba_main(hinst_dll, fdw_reason),
     }
 }
-
-/* pub fn unload_dll() {
-    let _ = unsafe { FreeLibrary(MODULE) };
-}
- */

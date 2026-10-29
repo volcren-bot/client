@@ -8,6 +8,7 @@ pub mod name;
 pub mod offsets;
 pub mod own;
 pub mod packets;
+pub mod item_log;
 pub mod script_runs;
 pub mod varc_log;
 pub mod projection;

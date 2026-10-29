@@ -18,8 +18,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
 const COMPLETE: &str = ".complete";
 
-/// The cache folder. Each revision is a folder `<script id>_<revision>` directly in it, and the shared lib is `lib` beside them,
-/// so a script's `require("../lib/...")` finds it.
+/// The cache folder: each revision is `<script id>_<revision>` in it, with the shared `lib` beside them.
 pub fn cache_root() -> Option<PathBuf> {
     directories::ProjectDirs::from("com", "volcren", "Volcren").map(|dirs| dirs.cache_dir().to_path_buf())
 }
@@ -56,8 +55,7 @@ pub fn prune_old(root: &Path, script_id: &str, keep: i64) {
     }
 }
 
-/// Opens a file the webapp encrypted: `nonce (12 bytes) || ciphertext || tag (16 bytes)` under AES-256-GCM, authenticated with
-/// the file's place (`volcren:<script id>/<9-digit revision>/<name>`), so a file moved to another name or revision doesn't open.
+/// Opens a file the webapp encrypted (`nonce || ciphertext || tag`, AES-256-GCM) authenticated with its place, `volcren:<script id>/<revision>/<name>`.
 pub fn decrypt_file(key_hex: &str, script_id: &str, revision: i64, name: &str, sealed: &[u8]) -> Result<Vec<u8>, String> {
     use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
     let failed = || format!("Couldn't decrypt {name}.");
@@ -95,11 +93,7 @@ pub struct Prepared {
     pub warning: Option<String>,
 }
 
-/// Starts a session and makes sure its files are on disk. If anything after the start fails, the session is ended so the user isn't billed.
-///
-/// `warned` is the revision of a community script the user was warned about and agreed to run (see `store::Confirmed`).
-/// A community script only runs if the revision the server started is that one, so a revision published since the
-/// warning was shown is never run unseen.
+/// Starts a session and makes its files available, ending the session if that fails; a community script runs only if its revision is `warned`.
 pub fn prepare(api: &Api, script: &StoreScript, warned: Option<i64>) -> Result<Prepared, String> {
     let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
     prepare_warned(api, script, &root, warned)
@@ -161,8 +155,7 @@ fn fetch(api: &Api, id: &str, session: &StartedSession, url: &str, name: &str, s
     }
 }
 
-/// A premium script's files, kept in memory: nothing of it is written to the cache, and an earlier cached copy is removed.
-/// The returned entry path points into an empty folder, which is only where the script's `require("../lib/...")` starts from.
+/// A premium script's files, kept in memory (an earlier cached copy is removed); the entry path points into an empty folder.
 fn download_to_memory(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<(PathBuf, String, Vec<(String, String)>), String> {
     let names = session
         .files

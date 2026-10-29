@@ -13,8 +13,7 @@ use crate::api::{
 /// How many community scripts the loader remembers warning about. Old entries are only a missed "don't ask again".
 const MAX_CONFIRMED: usize = 500;
 
-/// The community scripts the user was warned about and chose to run, and the revision they confirmed. A new revision
-/// of the same script, or a different script, warns again. Kept in the loader's local storage, per machine.
+/// The community scripts the user chose to run and the revision confirmed; a new revision warns again. Stored per machine.
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Confirmed(BTreeMap<String, i64>);
 

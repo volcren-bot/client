@@ -14,17 +14,21 @@ pub const POLL_EVERY: Duration = Duration::from_millis(250);
 /// Scripts an idle logged in client runs every frame (seen on build a2636a01); logging them would fill the list in seconds.
 pub const DEFAULT_BLACKLIST: &str = "6697, 4730";
 
-/// One read of the client: the runs since the last one, and the game tick at the time.
+/// One read of the client: the log entries since the last one.
 pub struct Poll {
     pub page: ScriptPage,
-    pub tick: Option<i32>,
 }
 
-/// A logged run with the game tick of the read that found it, so up to a poll (a fraction of a tick) late.
+/// A script that ran: its start entry (with the game tick it started in) and how long it took, once its end has been read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub tick: Option<i32>,
     pub run: ScriptRun,
+    pub duration_us: Option<u64>,
+}
+
+/// `850 µs` or `1.25 ms`.
+pub fn duration_text(micros: u64) -> String {
+    if micros < 1000 { format!("{micros} µs") } else { format!("{:.2} ms", micros as f64 / 1000.0) }
 }
 
 /// Event types whose script is found by trigger (components, menus): argument 0 is not the script id.
@@ -53,7 +57,8 @@ impl Row {
         if more > 0 {
             args.push_str(&format!("{}… +{more}", if args.is_empty() { "" } else { ", " }));
         }
-        if args.is_empty() { format!("{indent}{name}") } else { format!("{indent}{name} ({args})") }
+        let took = self.duration_us.map_or(String::new(), |micros| format!("  {}", duration_text(micros)));
+        if args.is_empty() { format!("{indent}{name}{took}") } else { format!("{indent}{name} ({args}){took}") }
     }
 }
 
@@ -138,7 +143,7 @@ impl Inspector {
             return;
         }
         match result {
-            Ok(Poll { page, tick }) => {
+            Ok(Poll { page }) => {
                 self.error = None;
                 self.next = page.next;
                 self.dropped += page.dropped;
@@ -150,12 +155,36 @@ impl Inspector {
                 }
                 // the blacklist applies as runs arrive, so the scripts it names never push the others out of the list
                 let blacklist = Blacklist::parse(&self.blacklist);
-                self.rows.extend(page.runs.into_iter().map(|run| Row { tick, run }).filter(|row| !blacklist.hides(row)));
+                for run in page.runs {
+                    if run.end {
+                        self.finish_run(&run);
+                    } else {
+                        let row = Row { run, duration_us: None };
+                        if !blacklist.hides(&row) {
+                            self.rows.push_back(row);
+                        }
+                    }
+                }
                 while self.rows.len() > KEEP {
                     self.rows.pop_front();
                 }
             }
             Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// An end entry belongs to the latest unended row of its depth, unless a lower-depth row follows: then its start was left out.
+    fn finish_run(&mut self, end: &ScriptRun) {
+        for row in self.rows.iter_mut().rev() {
+            if row.run.depth < end.depth {
+                return;
+            }
+            if row.run.depth == end.depth {
+                if row.duration_us.is_none() && row.run.event_type == end.event_type && row.run.args == end.args {
+                    row.duration_us = Some(end.time_us.saturating_sub(row.run.time_us));
+                }
+                return;
+            }
         }
     }
 
@@ -170,19 +199,19 @@ mod tests {
     use super::*;
 
     fn run(sequence: u64, event_type: i32, depth: u8, args: &[&str], arg_count: u16) -> ScriptRun {
-        ScriptRun { sequence, time_ms: sequence * 10, event_type, arg_count, depth, args: args.iter().map(|a| a.to_string()).collect() }
+        ScriptRun { sequence, time_us: sequence * 10, tick: Some(7), end: false, event_type, arg_count, depth, args: args.iter().map(|a| a.to_string()).collect() }
     }
 
     fn script(sequence: u64, id: i32) -> ScriptRun {
         run(sequence, 76, 0, &[&id.to_string()], 1)
     }
 
-    fn poll(runs: Vec<ScriptRun>, dropped: u64, tick: Option<i32>) -> Result<Poll, String> {
-        Ok(Poll { page: ScriptPage { next: runs.last().map_or(0, |r| r.sequence + 1), runs, dropped }, tick })
+    fn poll(runs: Vec<ScriptRun>, dropped: u64, _tick: Option<i32>) -> Result<Poll, String> {
+        Ok(Poll { page: ScriptPage { next: runs.last().map_or(0, |r| r.sequence + 1), runs, dropped } })
     }
 
     fn row(run: ScriptRun) -> Row {
-        Row { tick: None, run }
+        Row { run, duration_us: None }
     }
 
     #[test]
@@ -227,7 +256,7 @@ mod tests {
         assert!(inspector.due(32, now + POLL_EVERY));
         assert_eq!(inspector.start(32), 2);
         assert_eq!(inspector.kept(), 2);
-        assert_eq!(inspector.visible()[0].tick, Some(7));
+        assert_eq!(inspector.visible()[0].run.tick, Some(7));
     }
 
     #[test]
@@ -299,5 +328,66 @@ mod tests {
         inspector.start(32);
         inspector.finish(32, now, poll(vec![], 0, None));
         assert_eq!(inspector.error, None);
+    }
+
+    fn ended(mut run: ScriptRun, sequence: u64, time_us: u64) -> ScriptRun {
+        run.sequence = sequence;
+        run.time_us = time_us;
+        run.end = true;
+        run
+    }
+
+    #[test]
+    fn an_end_entry_gives_its_start_a_duration() {
+        let now = Instant::now();
+        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        inspector.start(32);
+        let start = run(0, 76, 0, &["12"], 1);
+        inspector.finish(32, now, poll(vec![start.clone()], 0, None));
+        assert_eq!(inspector.visible()[0].duration_us, None);
+        assert_eq!(inspector.visible()[0].text(), "Script 12");
+        // the end can arrive in a later read
+        inspector.start(32);
+        inspector.finish(32, now, poll(vec![ended(start, 1, 1250)], 0, None));
+        assert_eq!(inspector.visible()[0].duration_us, Some(1250));
+        assert_eq!(inspector.visible()[0].text(), "Script 12  1.25 ms");
+        assert_eq!(duration_text(850), "850 µs");
+    }
+
+    #[test]
+    fn nested_ends_find_their_own_starts() {
+        let now = Instant::now();
+        let mut inspector = Inspector { enabled: true, blacklist: String::new(), ..Inspector::default() };
+        inspector.start(32);
+        let (parent, child_a, child_b) = (run(0, 76, 0, &["1"], 1), run(1, 76, 1, &["2"], 1), run(3, 76, 1, &["2"], 1));
+        inspector.finish(
+            32,
+            now,
+            poll(vec![parent.clone(), child_a.clone(), ended(child_a, 2, 100), child_b.clone(), ended(child_b, 4, 400), ended(parent, 5, 900)], 0, None),
+        );
+        // times are in microseconds since the start of the log: starts at 0, 10 and 30
+        assert_eq!(inspector.visible().iter().map(|r| r.duration_us).collect::<Vec<_>>(), [Some(900), Some(90), Some(370)]);
+    }
+
+    #[test]
+    fn a_blacklisted_scripts_end_is_not_given_to_another_row() {
+        let now = Instant::now();
+        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        inspector.start(32);
+        let kept = run(0, 76, 0, &["12"], 1);
+        let hidden = run(1, 76, 1, &["6697"], 1);
+        // the hidden child ends inside the kept parent; the parent's own end still lands on the parent
+        inspector.finish(32, now, poll(vec![kept.clone(), hidden.clone(), ended(hidden, 2, 50), ended(kept, 3, 70)], 0, None));
+        assert_eq!(inspector.visible().len(), 1);
+        assert_eq!(inspector.visible()[0].duration_us, Some(70));
+    }
+
+    #[test]
+    fn an_end_with_no_start_kept_is_ignored() {
+        let now = Instant::now();
+        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        inspector.start(32);
+        inspector.finish(32, now, poll(vec![ended(run(0, 76, 0, &["12"], 1), 1, 50)], 0, None));
+        assert_eq!(inspector.kept(), 0);
     }
 }

@@ -1,5 +1,4 @@
-//! A tiny HTTP server for tests: answers with whatever the test's handler returns and records every request,
-//! so the whole start flow can run against it without a network.
+//! A tiny HTTP server for tests: answers with the test's handler and records every request.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},

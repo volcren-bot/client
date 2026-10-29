@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use ipc::{Header, Incompatible};
 pub use ipc::PROTOCOL_VERSION;
 
-/// What the sandbox offers the Luau lib: bumped whenever a global is added or changed in a way a newer lib depends on.
-/// A published lib states the `HOST_API` it needs, and a loader only installs libs it satisfies.
-pub const HOST_API: u32 = 4;
+/// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
+pub const HOST_API: u32 = 6;
 pub use ipc::state::varp;
 
 pub mod async_input;
@@ -191,12 +190,16 @@ pub struct PacketPage {
     pub dropped: u64,
 }
 
-/// One script the client ran for an event (`ipc::script_runs`).
+/// One entry of the script log (`ipc::script_runs`): a script the client ran for an event is logged when it starts and again when it ends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptRun {
     pub sequence: u64,
-    /// milliseconds since the agent started logging: only good for ordering and spacing runs
-    pub time_ms: u64,
+    /// microseconds since the agent started logging: only good for ordering entries and timing scripts
+    pub time_us: u64,
+    /// the game tick the entry was logged in
+    pub tick: Option<i32>,
+    /// true for the entry made when the script ended (it repeats the start's event type, depth and arguments)
+    pub end: bool,
     /// the event's type: 76 for an ordinary script event; the component and menu events find their script by trigger instead
     pub event_type: i32,
     /// how many arguments the event had (`args` has the first few)
@@ -239,6 +242,37 @@ pub struct VarcPage {
     pub dropped: u64,
 }
 
+/// One change of an item container slot (`ipc::item_log`): the client wrote a different item or quantity into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemChange {
+    pub sequence: u64,
+    /// milliseconds since the agent started logging: only good for ordering and spacing changes
+    pub time_ms: u64,
+    /// the game tick the client made the change in
+    pub tick: Option<i32>,
+    pub container: i32,
+    pub slot: i32,
+    /// false when the container didn't exist before this write (an empty slot is item -1, quantity 0)
+    pub old_known: bool,
+    pub old_item: i32,
+    pub old_quantity: i32,
+    pub new_item: i32,
+    pub new_quantity: i32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemPage {
+    pub changes: Vec<ItemChange>,
+    /// pass this as `since` to read what comes after
+    pub next: u64,
+    /// changes that were overwritten before they were read
+    pub dropped: u64,
+}
+
+/// Pass this as `since` to `item_changes` to get no changes, only `next`: the point to read from for what happens from now on.
+pub const ITEM_CHANGES_NOW: u64 = u64::MAX;
+
+pub use decode::widgets::{TreeWidget, WidgetDetail, WidgetTree};
 pub use decode::chat::ChatMessage;
 pub use decode::world::{GroundItem, Hitsplat, Item, Npc, Player, Projectile, SpotAnim};
 pub use decode::world_select::{World, WorldSelect};
@@ -251,8 +285,8 @@ mod win;
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
 pub use win::{
-    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims, packets, script_runs, varc_changes,
-    unload, varc, varp_value, varps, widget, widget_children, world_select,
+    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, item_stackable, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_containers, item_changes, item_changes_wait, ItemWatcher, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims, packets, script_runs, varc_changes,
+    unload, varc, varp_value, varps, widget, widget_children, widget_dump, widget_tree, widget_words, world_select,
 };
 
 pub const MODULE_PREFIX: &str = "agent";

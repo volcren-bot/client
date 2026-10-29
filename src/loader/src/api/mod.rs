@@ -1,5 +1,4 @@
-//! The launcher's connection to Volcren: sign-in (PKCE over a loopback redirect), token refresh, and the `/api/launcher/*` calls.
-//! Everything here blocks, so callers run it on a background thread and report back through the app's `Event` channel.
+//! The launcher's blocking connection to Volcren: sign-in (PKCE), token refresh and `/api/launcher/*`; run it on a background thread.
 
 pub mod auth;
 pub mod client;

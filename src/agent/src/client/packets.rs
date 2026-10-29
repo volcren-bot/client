@@ -112,8 +112,7 @@ fn record_received(out: u64, rule: &Packets) -> Option<()> {
     Some(())
 }
 
-// `packet` is about to be written to the socket. Its buffer starts with the opcode byte, which the cipher has masked: the plain
-// id is the packet's own `type`.
+// `packet` is about to be written to the socket; its opcode byte is cipher masked, the plain id is its `type`.
 fn record_sent(packet: u64, rule: &Packets) -> Option<()> {
     let memory = OwnMemory;
     let kind = memory.i32(packet + rule.send_type as u64)? as u32;

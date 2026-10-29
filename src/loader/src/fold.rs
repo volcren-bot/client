@@ -6,8 +6,7 @@ use std::{
 
 use crate::highlight::{Kind, tokenize};
 
-/// Every region that can be folded, as `(first line, last line)` with 0-based lines: `function`, `if`, `for`, `while`, `do`,
-/// `repeat` blocks up to their `end`/`until`, and tables up to their `}`. Sorted by first line, one region per line (the longest).
+/// Every foldable region as `(first line, last line)`, 0-based: blocks up to their `end`/`until` and tables up to `}`; one per line (the longest).
 pub fn ranges(source: &str) -> Vec<(usize, usize)> {
     #[derive(PartialEq)]
     enum Open {

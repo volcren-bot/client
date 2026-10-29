@@ -1,5 +1,4 @@
-/// Where the loader talks to. `API_URL`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` are embedded at build time from `client/.env`
-/// (see `build.rs`) and can be overridden at run time with the same variable names, for example to point a release build at `supabase start` + `bun dev`.
+/// Where the loader talks to: embedded at build time from `client/.env` (see `build.rs`), overridable at run time by the same variables.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// The webapp, which serves `/api/launcher/*`.

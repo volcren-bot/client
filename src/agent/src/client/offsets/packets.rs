@@ -1,14 +1,6 @@
 use super::{model::whole_function, *};
 
-/// The two functions that see every packet, and where a packet keeps what the packet log records.
-///
-/// Java's `Client.iy` reads packets and `co.az` sends them; the native client does the same on a network thread, and the game
-/// thread takes received packets off a queue. Both ends are small functions with plain arguments, so they can be detoured:
-///
-/// - `receive(connection, out) -> bool` moves the next packet into `out`: its id at `+receive_opcode`, and a buffer object at
-///   `+receive_buffer` (size, data pointer, cursor).
-/// - `send(connection, result, packet)` writes a queued packet to the socket. The packet is what `PacketBufferNode.create` (Java's
-///   `js.ac`) built: the client packet id, then the buffer, which holds the (cipher masked) opcode byte and the payload.
+/// The receive and send functions that see every packet, and where a packet keeps what the packet log records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Packets {
     /// RVA of the function that pops the next received packet (the game thread calls it from the packet dispatcher)
@@ -28,9 +20,7 @@ pub struct Packets {
     pub buffer_cursor: u32,
 }
 
-// Where a buffer object keeps the length a received payload was allocated with. The allocator and the move that hands a payload
-// from the network thread to the game thread both treat the first three fields as a unit (size, data, cursor), so there is no
-// code shape that names it; it was checked against the size table of the packet reader on the build the rule was written for.
+// Where a buffer object keeps the length a payload was allocated with; no code shape names it, checked against the packet reader's size table.
 pub const BUFFER_SIZE: u32 = 8;
 
 fn imm1(i: &Instruction) -> Option<u64> {
@@ -41,9 +31,7 @@ fn imm1(i: &Instruction) -> Option<u64> {
     .then(|| i.immediate(1))
 }
 
-// The packet the opcode writer is given: `(buffer, opcode in dl, cipher)`. It adds the next cipher byte to the opcode and appends
-// the byte to the buffer (Java's `PacketBuffer.writeByteIsaac`): a few instructions with a byte `add`, a byte store through
-// `[data + cursor]`, and the cipher pool's refill test (`mov eax, 0x100` after a `call`).
+// The opcode writer `(buffer, opcode in dl, cipher)`: adds the cipher byte to the opcode and appends it to the buffer.
 struct Writer {
     function: u32,
     data: u32,
@@ -70,8 +58,7 @@ fn opcode_writer(function: u32, instrs: &[Instruction]) -> Option<Writer> {
     Some(Writer { function, data, cursor })
 }
 
-// The packet constructor calls the writer with `lea rcx, [packet + buffer]` and stores the client packet id (`movsxd rsi, edx`,
-// then `mov [packet], esi`) in the packet.
+// The packet constructor calls the writer with `lea rcx, [packet + buffer]` and stores the packet id.
 fn constructor_fields(instrs: &[Instruction], call: usize) -> Option<(u32, u32)> {
     let buffer = instrs[call.saturating_sub(6)..call]
         .iter()
@@ -101,8 +88,7 @@ fn constructor_fields(instrs: &[Instruction], call: usize) -> Option<(u32, u32)>
     Some((kind, buffer))
 }
 
-// The send function takes the packet in `r8` and passes the buffer's data pointer and written length on to the socket write: two
-// loads from the packet at the displacements the writer implies, and one call.
+// The send function passes the packet's buffer data pointer and length to the socket write.
 fn is_sender(instrs: &[Instruction], data: u32, cursor: u32) -> bool {
     if instrs.iter().filter(|i| i.mnemonic() == Mnemonic::Call).count() != 1 {
         return false;
@@ -114,9 +100,7 @@ fn is_sender(instrs: &[Instruction], data: u32, cursor: u32) -> bool {
     loads(data, Register::RDX) && loads(cursor, Register::R8)
 }
 
-// The receive function: `cmp dword [connection + state], 3` first, then the queue node's kind is compared with 3 and 4, and the
-// packet id is stored at the start of `out` (`mov [out], eax`, `out` being a copy of `rdx`) with the payload moved into `out + n`
-// (`lea rcx, [out + n]` before a call).
+// The receive function: checks the connection state, compares the queue node's kind with 3 and 4, stores the packet id at the start of `out`.
 fn receive_fields(instrs: &[Instruction]) -> Option<(u32, u32)> {
     let state_is_3 = instrs.iter().take(6).any(|i| {
         i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Memory && i.memory_base() == Register::RCX && i.memory_size() == iced_x86::MemorySize::UInt32 && imm1(i) == Some(3)

@@ -131,18 +131,33 @@ pub fn decode_enum(data: &[u8]) -> Option<EnumDef> {
     }
 }
 
+/// What an item definition says that the loader and scripts use: its params (opcode 249) and whether it stacks.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ObjDef {
+    pub params: BTreeMap<u32, Value>,
+    /// Opcode 11, or a noted item (opcode 98 names its note template), which stacks whatever the plain item does.
+    pub stackable: bool,
+}
+
 /// The params (opcode 249) of an item definition; an unknown opcode fails the decode instead of misreading the rest.
 pub fn decode_obj_params(data: &[u8]) -> Option<BTreeMap<u32, Value>> {
+    decode_obj(data).map(|def| def.params)
+}
+
+pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
     let mut r = Reader::new(data);
     let mut params = BTreeMap::new();
+    let mut stackable = false;
     loop {
         match r.u8()? {
-            0 => return Some(params),
-            1 | 4..=8 | 24 | 26 | 75 | 78 | 79 | 90..=95 | 97..=99 | 110..=112 | 139 | 140 | 148 | 149 => r.skip(2)?,
+            0 => return Some(ObjDef { params, stackable }),
+            11 => stackable = true,
+            98 => stackable |= r.u16()? != 0,
+            1 | 4..=8 | 24 | 26 | 75 | 78 | 79 | 90..=95 | 97 | 99 | 110..=112 | 139 | 140 | 148 | 149 => r.skip(2)?,
             2 | 3 | 9 | 30..=39 => {
                 r.string()?;
             }
-            11 | 15 | 16 | 65 | 160 | 251 => {}
+            15 | 16 | 65 | 160 | 251 => {}
             12 | 44 | 46 | 47 | 49..=54 => r.skip(4)?,
             13 | 14 | 27 | 42 | 113..=115 => r.skip(1)?,
             23 | 25 => r.skip(3)?,
@@ -248,6 +263,15 @@ mod tests {
         let params = decode_obj_params(&data).unwrap();
         assert_eq!(params.get(&601), Some(&Value::Str("Wind Bolt".into())));
         assert_eq!(params.get(&596), Some(&Value::Int(14286869)));
+    }
+
+    #[test]
+    fn reads_whether_an_item_stacks() {
+        assert!(decode_obj(&hex("0b00")).unwrap().stackable);
+        assert!(!decode_obj(&hex("02580000")).unwrap().stackable);
+        // a note: its template is item 799
+        assert!(decode_obj(&hex("62031f00")).unwrap().stackable);
+        assert!(!decode_obj(&hex("62000000")).unwrap().stackable);
     }
 
     #[test]

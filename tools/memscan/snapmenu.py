@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Snapshot menu-related fields: prints a labeled block of i32 fields.
-
-Usage: snapmenu.py <pid> <label>
-"""
+"""Print a labeled block of the menu-related i32 fields: snapmenu.py <pid> <label>"""
 import struct
 import sys
 

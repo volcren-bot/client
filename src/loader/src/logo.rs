@@ -1,5 +1,4 @@
-//! The webapp landing page's ASCII art (a flame over the VOLCREN lettering), painted faintly behind a page.
-//! The colors follow `webapp/src/routes/+page.svelte`, without its shimmer.
+//! The webapp landing page's ASCII art, painted faintly behind a page, with colors from `webapp/src/routes/+page.svelte`.
 
 use eframe::egui::{self, Color32, Rect, text::{LayoutJob, TextFormat}};
 

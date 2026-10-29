@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Watch i32 fields in regions of a process memory and report changes with timestamps.
-
-Usage: watch.py <pid> <region_spec>...
-region_spec: start,len[,label]   (hex values, e.g. 342bd40,800,minimenu)
-"""
+"""Report timestamped i32 changes in memory regions: watch.py <pid> <start,len[,label]>... (hex)"""
 import struct
 import sys
 import time

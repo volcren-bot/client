@@ -1,15 +1,6 @@
 use super::{model::whole_function, *};
 
-/// The functions that write a client variable (varc), which the interpreter's `put_varc` opcodes call and nothing else does.
-///
-/// The client keeps its varcs in a map inside one object (`Varcs`). The Lua getter `getIntegerVarc` jumps to its int lookup, which
-/// finds the entry with a shared map search; the setters are the other functions that use the same search and the same map
-/// fields, and end by marking the varcs as changed (a byte store of 1). They differ in what they store:
-///
-/// - `set_int(varcs, index, value)` sets the entry's kind to 1 (`mov r11b, 1`);
-/// - `set_long` does the same with kind 5 (not logged);
-/// - `set_object(varcs, index, variant)` takes a pointer to a variant (what the interpreter's object stack holds): the kind is
-///   whatever the variant says. The varc string opcodes use it.
+/// The functions that write a varc (`set_int`, `set_long`, `set_object`), found by the shared map search and the changed-flag store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VarcSetters {
     /// RVA of the int lookup the Lua getter jumps to: `get_int(varcs, index)`, -1 when the varc has no int
@@ -18,9 +9,7 @@ pub struct VarcSetters {
     pub set_object: u32,
 }
 
-/// A variant is `VARIANT_SIZE` bytes with its kind at `VARIANT_KIND` (2 for a string); a string is inline in the first 0x17 bytes
-/// (the byte at 0x17 is the room left) or, when that byte's top bit is set, a pointer at 0 and a length at 8. No code shape names
-/// them (the interpreter indexes the object stack with them); they were checked on the builds the rule was written for.
+/// A variant's size, kind offset (2 for a string) and inline or pointer string layout; no code shape names them, checked on known builds.
 pub const VARIANT_KIND: u32 = 0x20;
 pub const VARIANT_STRING: u8 = 2;
 

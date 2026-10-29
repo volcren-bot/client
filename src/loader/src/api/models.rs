@@ -73,8 +73,7 @@ pub struct Removed {
     pub removed: bool,
 }
 
-/// A share code is 64 hex digits. Whitespace and case are forgiven, because codes are copied and pasted;
-/// anything else is refused before the server is asked.
+/// A share code is 64 hex digits; whitespace and case are forgiven, anything else is refused before asking the server.
 pub fn normalize_share_code(input: &str) -> Option<String> {
     let code = input.trim().to_ascii_lowercase();
     (code.len() == 64 && code.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).then_some(code)

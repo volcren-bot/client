@@ -1,6 +1,4 @@
-//! An embedded terminal: a shell on a pseudo-terminal, emulated by `alacritty_terminal` and drawn with egui.
-//!
-//! The shell lives as long as the app, not the page, so switching tabs doesn't kill what runs in it.
+//! An embedded terminal: a shell on a pseudo-terminal emulated by `alacritty_terminal`, living as long as the app.
 
 use std::{
     io::{Read, Write},

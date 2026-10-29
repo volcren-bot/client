@@ -10,7 +10,7 @@ use crate::{
     chat::{self, ChatMessage},
     memory::Memory,
     state,
-    widgets::{self, SubInterface, Widget, find_children, find_widget},
+    widgets::{self, SubInterface, Widget, WidgetTree, find_children, find_tree, find_widget},
     world::{self, SpotAnim, GroundItem, Item, Npc, Player, Projectile},
     world_select::{self, WorldSelect},
 };
@@ -77,6 +77,12 @@ pub fn widget_children(memory: &impl Memory, layout: &Layout, group: u16, child:
     find_children(memory, &layout.interfaces, root, group, child).map(|children| children.into_iter().map(|w| w.scaled(scale)).collect())
 }
 
+/// Every open interface with its components, read by the injector since the worker's reply buffer is small.
+pub fn widget_tree(memory: &impl Memory, layout: &Layout) -> Option<WidgetTree> {
+    let (root, scale) = interface_root(memory, layout)?;
+    find_tree(memory, &layout.interfaces, root, scale)
+}
+
 pub fn sub_interfaces(memory: &impl Memory, layout: &Layout) -> Option<Vec<SubInterface>> {
     state::root_interface(memory, layout, state::current(memory, layout))?;
     widgets::sub_interfaces(memory, &layout.interfaces)
@@ -88,6 +94,10 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
 
 pub fn item_container(memory: &impl Memory, layout: &Layout, id: i32) -> Option<Vec<Item>> {
     world::item_container(memory, &layout.world, id)
+}
+
+pub fn item_containers(memory: &impl Memory, layout: &Layout) -> Option<Vec<(i32, Vec<Item>)>> {
+    world::item_containers(memory, &layout.world)
 }
 
 pub fn varc(memory: &impl Memory, layout: &Layout, id: i32) -> Option<i32> {

@@ -311,10 +311,7 @@ pub struct SceneLoaderLayout {
     pub instance_flag: u32,
 }
 
-// The projectiles in flight: a circular list at `client + list` whose head is its sentinel node (next, previous, size),
-// each node holding a projectile pointer at `node`; `cycle` is the module RVA of the client cycle the start and end
-// cycles count in. The rest are projectile fields: tiles and planes (world coordinates), actors (NPC index + 1, or
-// -(player index + 1), 0 for none), heights, cycles, the local fine position as doubles, and the `moving` byte.
+// The projectiles in flight: a circular list at `client + list` of nodes holding projectile pointers, plus the projectile field offsets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectileLayout {
@@ -344,10 +341,7 @@ pub struct ProjectileLayout {
     pub reserved: u32,
 }
 
-// The spot animations on tiles (Java's spot animations): a circular list at `world view + list` whose head is its
-// sentinel node (next, previous, size), each node holding the object pointer at the shared pointer's slot. `cycle` is the
-// module RVA of the client cycle `start_cycle` counts in. The rest are object fields: plane, the local fine position and
-// height, and the spot animation id.
+// The spot animations on tiles: a circular list at `world view + list` of nodes holding object pointers, plus the object field offsets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpotAnimLayout {
@@ -1075,11 +1069,7 @@ pub struct Shared<'a> {
 }
 
 impl<'a> Shared<'a> {
-    /// Zeroes the block and stamps the protocol version.
-    ///
-    /// # Safety
-    /// `ptr` must point at a writable mapping of at least `LAYOUT_SIZE` bytes, aligned for
-    /// `LayoutMemory`, that stays mapped for `'a`. Nobody else may be using the block yet.
+    /// Zeroes the block and stamps the protocol version; `ptr` must be a writable, aligned mapping of `LAYOUT_SIZE` bytes nobody else uses yet.
     pub unsafe fn create(ptr: NonNull<LayoutMemory>) -> Self {
         let this = ptr.as_ptr();
         unsafe {
@@ -1092,9 +1082,7 @@ impl<'a> Shared<'a> {
         }
     }
 
-    /// # Safety
-    /// `ptr` must point at a writable mapping of at least `LAYOUT_SIZE` bytes, aligned for
-    /// `LayoutMemory`, that was set up by `create` and stays mapped for `'a`.
+    /// `ptr` must be a writable, aligned mapping of `LAYOUT_SIZE` bytes set up by `create`.
     pub unsafe fn attach(ptr: NonNull<LayoutMemory>) -> Self {
         Self {
             ptr,
@@ -1685,9 +1673,7 @@ pub struct LayoutView<'a> {
 }
 
 impl<'a> LayoutView<'a> {
-    /// # Safety
-    /// `ptr` must point at a readable mapping of at least `LAYOUT_SIZE` bytes, aligned for
-    /// `LayoutMemory`, that stays mapped for `'a`.
+    /// `ptr` must be a readable, aligned mapping of `LAYOUT_SIZE` bytes.
     pub unsafe fn attach(ptr: NonNull<LayoutMemory>) -> Self {
         Self {
             ptr,

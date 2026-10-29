@@ -179,8 +179,7 @@ pub fn sidebar_frame() -> egui::Frame {
         .inner_margin(egui::Margin { left: SIDEBAR_INSET, right: 0, top: 6, bottom: 6 })
 }
 
-/// The narrow-window sidebar toggle, the drawer's right edge: a tall, skinny strip with a chevron that turns from
-/// pointing right (closed, `open` 0) to left (open, `open` 1).
+/// The narrow-window sidebar toggle: a skinny strip with a chevron pointing right (closed, `open` 0) to left (open, `open` 1).
 pub fn sidebar_handle(ui: &mut egui::Ui, open: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Toggle the sidebar");

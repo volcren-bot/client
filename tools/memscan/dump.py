@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Dump i32 fields of memory regions to a file for diffing.
-
-Usage: dump.py <pid> <out.npz-less text> <start:hex> <len:hex> [<start> <len> ...]
-Writes lines "addr_offset_from_first_start value" — actually writes one file per
-region with lines "offsethex value" plus a header with the region start.
-"""
+"""Dump i32 fields of memory regions to a file for diffing: dump.py <pid> <out> <start:hex> <len:hex> [...]"""
 import struct
 import sys
 

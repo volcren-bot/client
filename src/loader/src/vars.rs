@@ -15,8 +15,7 @@ pub const POLL_EVERY: Duration = Duration::from_millis(200);
 /// The varbits stored in one varp: (id, definition, gameval name).
 pub type Varbits = Vec<(i32, VarbitDef, Option<String>)>;
 
-/// One read of the client: the varps, the game tick they were read at, the varbits of the varps that changed, and the client
-/// variable changes the scripts made since the last read.
+/// One read of the client: varps, game tick, varbits of changed varps and the varc changes since the last read.
 pub struct Poll {
     pub varps: Option<Vec<i32>>,
     pub tick: Option<i32>,
@@ -26,8 +25,7 @@ pub struct Poll {
     pub varc_error: Option<String>,
 }
 
-/// What a read of the client needs to know: the varps to compare with, the varps whose varbits are known and where to read the
-/// varc log from.
+/// What a read needs: the varps to compare with, the varps whose varbits are known and where to read the varc log from.
 pub struct Request {
     pub previous: Option<Vec<i32>>,
     pub known: Vec<u16>,
@@ -85,8 +83,7 @@ fn with_varbit(varp: i32, def: &VarbitDef, value: i32) -> i32 {
     ((varp as u32 & !(mask << def.lsb)) | ((value as u32 & mask) << def.lsb)) as i32
 }
 
-/// What changed from `old` to `new`. A changed varp logs its varbits that changed, then itself if bits are left that no
-/// varbit explained, like RuneLite's inspector.
+/// What changed from `old` to `new`: changed varps log their changed varbits, then themselves if bits remain unexplained.
 pub fn diff(old: &[i32], new: &[i32], tick: Option<i32>, varbits: impl Fn(u16) -> Varbits, varp_name: impl Fn(usize) -> Option<String>) -> Vec<Entry> {
     let mut entries = Vec::new();
     for (index, (&before, &after)) in old.iter().zip(new).enumerate() {

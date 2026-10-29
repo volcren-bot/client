@@ -1,16 +1,18 @@
 #![no_std]
+#![allow(clippy::missing_safety_doc)]
 
 extern crate alloc;
 
 use alloc::{format, string::String};
 
+pub mod item_log;
 pub mod packets;
 pub mod script_runs;
 pub mod varc_log;
 pub mod read;
 pub mod state;
 
-pub const PROTOCOL_VERSION: u8 = 50;
+pub const PROTOCOL_VERSION: u8 = 53;
 
 pub const SHARED_MEMORY_PREFIX: &str = "AGENT_DATA_";
 
@@ -59,8 +61,7 @@ pub fn work_event_name(pid: u32) -> String {
     format!("AGENT_WORK_{pid}")
 }
 
-/// An auto-reset event the agent sets each time the client presents a frame, after bumping `Header::frame_serial`,
-/// so a reader can do its work once per frame without polling.
+/// An auto-reset event the agent sets each presented frame, after bumping `Header::frame_serial`.
 pub fn frame_event_name(pid: u32) -> String {
     format!("AGENT_FRAME_{pid}")
 }

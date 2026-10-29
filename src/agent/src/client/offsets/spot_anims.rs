@@ -1,7 +1,6 @@
 use super::{model::whole_function, *};
 
-/// The spot animations placed on tiles (Java's `GraphicsObject`s, RuneLite's graphics objects): a list in the world view and the object fields, from the
-/// object's constructor and the code that creates one and appends it to the list.
+/// The spot animations placed on tiles: a list in the world view and the object fields, from the constructor and the code that appends one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpotAnims {
     /// the list in the world view: a circular list whose head is the sentinel node (next, previous, size)
@@ -49,9 +48,7 @@ fn stack_load(i: &Instruction) -> Option<u32> {
         .then(|| i.memory_displacement64() as u32)
 }
 
-// The spot animation constructor: `(this, world view, spot animation id in r8d, level in r9d, then on the stack x, y, z,
-// delay, cycle)`. It looks the id up for the animation (`mov edx, id; ...; call lookup; mov rdx, [rax+8]; mov edx,
-// [rdx+8]; call init`, as the projectile constructor does) and stores the parameters in the object.
+// The constructor `(this, world view, id in r8d, level in r9d, then x, y, z, delay, cycle on the stack)` looks up the id and stores the parameters.
 fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
     let this = instrs.iter().take(8).find(|i| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Register && i.op1_register() == Register::RCX && i.op0_register().size() == 8)?.op0_register();
     let init = instrs.windows(5).position(|w| {
@@ -105,9 +102,7 @@ fn jumps_to(pe: &Pe, target: u32) -> Vec<u32> {
     found
 }
 
-// From a call that builds the object: the world view offset of the list it is appended to (`lea rcx, [view + list]` or
-// `add rcx, list` and then a call) and the client cycle, the last stack argument (`lea reg, [rip + cycle]; mov [rsp +
-// n], reg`).
+// From a call that builds the object: the list offset in the world view and the client cycle, the last stack argument.
 fn creation_site(instrs: &[Instruction], call: usize) -> Option<(u32, u32)> {
     let before = &instrs[call.saturating_sub(40)..call];
     let last = before
@@ -141,8 +136,7 @@ pub fn find_spot_anims(image: &[u8]) -> Result<SpotAnims, ScanError> {
     }
     let (constructor, fields) = one(constructors)?;
 
-    // `std::make_shared` builds the object through a thunk that jumps to the constructor; the packet handler calls it
-    // directly (one site) or through a small wrapper that allocates the block (the other)
+// `std::make_shared` reaches the constructor through a thunk; the packet handler calls it directly or through a wrapper.
     let thunks = jumps_to(&pe, constructor);
     let calls = direct_calls(&pe);
     let mut sites = Vec::new();

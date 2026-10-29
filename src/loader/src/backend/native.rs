@@ -73,6 +73,31 @@ pub fn item_container(target: &Target, _settings: &Settings, id: i32) -> Result<
     injector::item_container(target.client.pid, id)
 }
 
+pub fn item_containers(target: &Target, _settings: &Settings) -> Result<Vec<(i32, Vec<Item>)>, String> {
+    injector::item_containers(target.client.pid)
+}
+
+pub fn widget_tree(target: &Target, _settings: &Settings) -> Result<injector::WidgetTree, String> {
+    injector::widget_tree(target.client.pid)
+}
+
+pub fn game_val_names(target: &Target, _settings: &Settings, kind: u32, ids: &[i32]) -> Result<Vec<Option<String>>, String> {
+    injector::game_val_names(target.client.pid, kind, ids)
+}
+
+pub fn item_stackable(target: &Target, _settings: &Settings, ids: &[i32]) -> Result<Vec<Option<bool>>, String> {
+    injector::item_stackable(target.client.pid, ids)
+}
+
+/// One read of the item log is at most `ITEM_CHANGES_PER_READ` changes; with nothing new it blocks up to `wait`.
+pub fn item_changes(target: &Target, _settings: &Settings, since: u64, wait: std::time::Duration) -> Result<injector::ItemPage, String> {
+    injector::item_changes_wait(target.client.pid, since, 2000, wait)
+}
+
+pub fn item_names(target: &Target, _settings: &Settings, ids: &[i32]) -> Result<Vec<Option<String>>, String> {
+    injector::item_names(target.client.pid, ids)
+}
+
 pub fn varbits_of(target: &Target, _settings: &Settings, varp: u16) -> Result<Vec<(i32, injector::config::VarbitDef, Option<String>)>, String> {
     injector::varbits_of(target.client.pid, varp)
 }

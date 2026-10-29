@@ -49,6 +49,7 @@ pub unsafe fn unload(events: &[HANDLE]) {
     super::packets::unhook();
     super::script_runs::unhook();
     super::varc_log::unhook();
+    super::item_log::unhook();
 
     if !wait_for_hook_calls() {
         println!("[Agent]: Cannot unload: a hook call is still running. agent stays loaded with its hooks off.\r\n");
@@ -58,6 +59,7 @@ pub unsafe fn unload(events: &[HANDLE]) {
     super::packets::close();
     super::script_runs::close();
     super::varc_log::close();
+    super::item_log::close();
     if let Some(layout) = LAYOUT_MAP.get() {
         layout.close();
     }
