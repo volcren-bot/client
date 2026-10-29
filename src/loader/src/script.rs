@@ -22,6 +22,8 @@ pub enum ScriptEvent {
     Breaks(injector::form::BreakPlan),
     /// What the script counts, from `report_counters`.
     Counters(Vec<injector::form::Counter>),
+    /// `bank_pin_enter()` asks for the PIN saved for the account with this name hash; answer with `answer_pin`.
+    PinRequest(String),
     Finished { result: Result<(), String>, stopped: bool },
 }
 
@@ -56,6 +58,7 @@ impl Script {
         let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
+        let pins = format!("{}\n", injector::form::PINS_PREFIX);
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
         let files = if modules.is_empty() {
             String::new()
@@ -64,7 +67,8 @@ impl Script {
             format!("{}{}\n{json}", injector::form::MODULES_PREFIX, json.len())
         };
         if let Err(error) = stdin
-            .write_all(files.as_bytes())
+            .write_all(pins.as_bytes())
+            .and_then(|()| stdin.write_all(files.as_bytes()))
             .and_then(|()| stdin.write_all(header.as_bytes()))
             .and_then(|()| stdin.write_all(source.as_bytes()))
             .and_then(|()| stdin.flush())
@@ -133,6 +137,12 @@ impl Script {
         writeln!(stdin, "{reply}").and_then(|()| stdin.flush()).map_err(|e| format!("Couldn't answer the script's form: {e}"))
     }
 
+    /// Tells the script's injector the PIN for the hash it asked about, `None` if no saved account has it, or why we can't say.
+    pub fn answer_pin(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
+        let stdin = self.stdin.as_mut().ok_or("the script's input is closed")?;
+        writeln!(stdin, "{}", injector::form::pin_reply_line(&answer)).and_then(|()| stdin.flush()).map_err(|e| format!("Couldn't answer the script's PIN request: {e}"))
+    }
+
     pub fn is_running(&self) -> bool {
         !self.finished
     }
@@ -183,6 +193,9 @@ impl Script {
                         Some((experience, gold, custom)) => ScriptEvent::Stats(experience, gold, custom),
                         None => ScriptEvent::Output(format!("Bad stats from the script: {payload}")),
                     };
+                }
+                if let Some(hash) = line.strip_prefix(injector::form::PIN_REQUEST_PREFIX) {
+                    return ScriptEvent::PinRequest(hash.trim().to_owned());
                 }
                 if let Some(payload) = line.strip_prefix(injector::form::BREAKS_PREFIX) {
                     return match injector::form::parse_breaks(payload) {
@@ -255,6 +268,7 @@ mod tests {
                     ScriptEvent::Form(spec) => lines.push(format!("form {spec}")),
                     ScriptEvent::Breaks(plan) => lines.push(format!("breaks {}", plan.breaks.len())),
                     ScriptEvent::Counters(counters) => lines.push(format!("counters {}", counters.len())),
+                    ScriptEvent::PinRequest(hash) => lines.push(format!("pin {hash}")),
                     ScriptEvent::Stats(experience, gold, _) => lines.push(format!("stats {experience} {gold}")),
                     ScriptEvent::Finished { result, stopped } => return (lines, Some((result, stopped))),
                 }
@@ -292,7 +306,7 @@ mod tests {
                 match event {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Stats(..) | ScriptEvent::Breaks(..) | ScriptEvent::Counters(..) => {}
+                    ScriptEvent::Stats(..) | ScriptEvent::Breaks(..) | ScriptEvent::Counters(..) | ScriptEvent::PinRequest(..) => {}
                     ScriptEvent::Finished { .. } => panic!("the script ended before asking for a form"),
                 }
             }

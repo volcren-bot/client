@@ -412,11 +412,20 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
     use std::io::BufRead;
     use injector::form::{self, SCRIPT_PREFIX};
 
-    let mut input = std::io::BufReader::new(std::io::stdin().lock());
+    let mut input = std::io::BufReader::new(std::io::stdin());
     let mut first = String::new();
     if input.read_line(&mut first).is_err() {
         eprintln!("Couldn't read the script from stdin.");
         return std::process::ExitCode::from(2);
+    }
+    // The loader says first that it answers PIN requests (`bank_pin_enter()` asks it for the logged in account's PIN).
+    let loader_has_pins = first.trim_end() == form::PINS_PREFIX;
+    if loader_has_pins {
+        first.clear();
+        if input.read_line(&mut first).is_err() {
+            eprintln!("Couldn't read the script from stdin.");
+            return std::process::ExitCode::from(2);
+        }
     }
     // The script's other files can come first, so they never touch the disk.
     let mut modules = std::collections::HashMap::new();
@@ -442,17 +451,24 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                 eprintln!("Couldn't read the script from stdin.");
                 return std::process::ExitCode::from(2);
             }
-            let handler: form::FormHandler = Box::new(move |spec| {
+            // The form and PIN requests share stdin: the script waits on each reply, so they never interleave.
+            let input = std::sync::Arc::new(std::sync::Mutex::new(input));
+            let ask = move |input: &std::sync::Mutex<std::io::BufReader<std::io::Stdin>>, request: String| -> Result<String, String> {
                 {
                     let mut out = std::io::stdout().lock();
-                    write!(out, "{}{}", form::request_line(spec), form::ENTRY_END).and_then(|()| out.flush()).map_err(|e| e.to_string())?;
+                    write!(out, "{request}{}", form::ENTRY_END).and_then(|()| out.flush()).map_err(|e| e.to_string())?;
                 }
                 let mut reply = String::new();
-                match input.read_line(&mut reply) {
+                match input.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read_line(&mut reply) {
                     Ok(0) | Err(_) => Err("the loader closed the script's input".into()),
-                    Ok(_) => form::parse_reply(&reply),
+                    Ok(_) => Ok(reply),
                 }
-            });
+            };
+            if loader_has_pins {
+                let input = input.clone();
+                injector::bank_pin::set_lookup(Box::new(move |hash| form::parse_pin_reply(&ask(&input, form::pin_request_line(hash))?)));
+            }
+            let handler: form::FormHandler = Box::new(move |spec| form::parse_reply(&ask(&input, form::request_line(spec))?));
             (String::from_utf8_lossy(&bytes).into_owned(), Some(handler))
         }
         _ => {

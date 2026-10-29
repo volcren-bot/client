@@ -1868,8 +1868,9 @@ mod tests {
 
     #[test]
     fn write_then_read() {
-        let mut memory = core::mem::MaybeUninit::<LayoutMemory>::uninit();
-        let shared = memory.as_mut_ptr();
+        // On the heap: the layout is megabytes, more than a test thread's stack.
+        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
+        let shared = (*memory).as_mut_ptr();
         unsafe {
             let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
@@ -1900,8 +1901,9 @@ mod tests {
 
     #[test]
     fn total_xp_requests_and_status_round_trip() {
-        let mut memory = core::mem::MaybeUninit::<LayoutMemory>::uninit();
-        let shared = memory.as_mut_ptr();
+        // On the heap: the layout is megabytes, more than a test thread's stack.
+        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
+        let shared = (*memory).as_mut_ptr();
         unsafe {
             let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
@@ -1931,8 +1933,9 @@ mod tests {
 
     #[test]
     fn item_name_requests_and_status_round_trip() {
-        let mut memory = core::mem::MaybeUninit::<LayoutMemory>::uninit();
-        let shared = memory.as_mut_ptr();
+        // On the heap: the layout is megabytes, more than a test thread's stack.
+        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
+        let shared = (*memory).as_mut_ptr();
         unsafe {
             let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
@@ -1962,8 +1965,9 @@ mod tests {
 
     #[test]
     fn name_requests_and_status_round_trip() {
-        let mut memory = core::mem::MaybeUninit::<LayoutMemory>::uninit();
-        let shared = memory.as_mut_ptr();
+        // On the heap: the layout is megabytes, more than a test thread's stack.
+        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
+        let shared = (*memory).as_mut_ptr();
         unsafe {
             let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
@@ -1996,8 +2000,9 @@ mod tests {
 
     #[test]
     fn rejects_busy_and_incompatible() {
-        let mut memory = core::mem::MaybeUninit::<LayoutMemory>::uninit();
-        let shared = memory.as_mut_ptr();
+        // On the heap: the layout is megabytes, more than a test thread's stack.
+        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
+        let shared = (*memory).as_mut_ptr();
         unsafe {
             let ptr = shared;
             Shared::create(NonNull::new(ptr).unwrap());

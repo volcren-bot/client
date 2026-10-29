@@ -6,6 +6,8 @@ use serde::Serialize;
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
+use crate::bank_pin::enter as bank_pin_enter;
+#[cfg(windows)]
 use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_hitsplats, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, projectiles, send_input, send_input_with, spot_anims, varc, varp_value, varps, widget, widget_children, world_select, ItemWatcher};
 #[cfg(not(windows))]
 use offline::*;
@@ -160,6 +162,9 @@ mod offline {
         Err(NO_WIN32.into())
     }
     pub fn send_input_with(_: u32, _: &Input, _: &dyn super::Pace) -> Result<(), String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn bank_pin_enter(_: u32, _: &(dyn super::Pace + Sync)) -> Result<crate::bank_pin::Outcome, String> {
         Err(NO_WIN32.into())
     }
     pub fn draw(_: u32, _: &Overlay) -> Result<(), String> {
@@ -666,7 +671,8 @@ pub fn run_with_modules(
         "print",
         lua.create_function_mut(move |_, args: MultiValue| {
             let line: Vec<String> = args.iter().map(|v| v.to_string().unwrap_or_else(|_| "?".into())).collect();
-            (printer.borrow_mut())(line.join("\t"));
+            // U+001E starts the loader's own lines (`FORM`, `STATS`, `PINREQ`, ...); a script must not be able to write one.
+            (printer.borrow_mut())(line.join("\t").replace('\u{1e}', ""));
             Ok(())
         })?,
     )?;
@@ -976,6 +982,18 @@ pub fn run_with_modules(
     fn type_input((text, hold_ms): (String, Option<u32>)) -> mlua::Result<Input> {
         Ok(Input::Type { text, hold_ms: hold_ms.unwrap_or(crate::KEY_HOLD_MS) })
     }
+    // Enters the PIN the loader gave this run on the open bank PIN keypad; it takes no PIN and returns only how it went.
+    globals.set(
+        "bank_pin_enter",
+        lua.create_function({
+            let worker = worker.clone();
+            move |_, (): ()| -> mlua::Result<&'static str> {
+                let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
+                cancel_input(&worker);
+                bank_pin_enter(pid, &crate::async_input::Blocking).map(crate::bank_pin::Outcome::name).map_err(mlua::Error::RuntimeError)
+            }
+        })?,
+    )?;
     globals.set("click", input(&lua, pid, &worker, click_input)?)?;
     globals.set("move", input(&lua, pid, &worker, move_input)?)?;
     globals.set("wind_mouse", input(&lua, pid, &worker, wind_mouse_input)?)?;
@@ -1297,6 +1315,13 @@ mod tests {
         let (lines, result) = run_lines("print('a', 1, nil, true) print(2 + 3)");
         assert_eq!(lines, ["a\t1\tnil\ttrue", "5"]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn a_script_cannot_write_the_loaders_lines() {
+        let (lines, result) = run_lines("print('\\x1ePINREQ abc', 'x\\x1eFORM {}')");
+        result.unwrap();
+        assert_eq!(lines, ["PINREQ abc\txFORM {}"]);
     }
 
     #[test]

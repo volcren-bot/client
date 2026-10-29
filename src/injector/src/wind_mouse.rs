@@ -63,10 +63,10 @@ pub fn run_with(
     WindMouse::new(start, dest, options, post, sleep).run()
 }
 
-struct Rng(u64);
+pub(crate) struct Rng(u64);
 
 impl Rng {
-    fn seeded() -> Self {
+    pub(crate) fn seeded() -> Self {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         let mut z = nanos ^ (std::process::id() as u64) << 32;
         z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -75,7 +75,7 @@ impl Rng {
         Self((z ^ (z >> 31)) | 1)
     }
 
-    fn random(&mut self) -> f64 {
+    pub(crate) fn random(&mut self) -> f64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;

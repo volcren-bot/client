@@ -2090,6 +2090,13 @@ pub fn draw_batch(pid: u32, overlays: &[Overlay]) -> Result<(), String> {
     })
 }
 
+/// Paints through `put(x, y, color)` onto the overlay, over what is drawn on it already, as one update.
+pub(crate) fn paint_overlay(pid: u32, paint: impl FnOnce(&mut dyn FnMut(i32, i32, Rgba))) -> Result<(), String> {
+    with_overlay(pid, overlay_mode::ON_SERIAL, true, None, |buf, width, height| {
+        paint(&mut |x, y, color| unsafe { put_pixel(buf, width, height, x, y, color) })
+    })
+}
+
 pub fn draw_lines(pid: u32, lines: &[[i32; 4]], color: Rgba) -> Result<(), String> {
     with_overlay(pid, overlay_mode::ON_SERIAL, true, None, |overlay_ptr, width, height| {
         for &[x1, y1, x2, y2] in lines {

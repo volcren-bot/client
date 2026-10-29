@@ -23,6 +23,7 @@ Real code only on Windows. On other targets the same API compiles to stubs retur
 | `font.rs` | The game's bitmap fonts, decoded from the cache, for overlay text. |
 | `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). The overlays themselves are `win::scene_tiles` layers; a `widget:x,y,width,height,rrggbb` layer boxes a canvas area (the widget inspector's selection), `spot-anims` outlines each spot animation's tile in magenta with its id, and `projectiles` labels each projectile with its id and cycles left at its 3D position (height from the terrain's heightmap) and draws a line to where it lands (the target actor's tile when it has one). |
 | `form.rs` | Script settings form spec and the `STATS_PREFIX` line format, shared with the loader. |
+| `bank_pin.rs` | Enters the bank PIN on the keypad (interface 213) for `bank_pin_enter()`. It hashes the logged in player's name (`hash_name`, the same hash the loader's Accounts page saves) and asks the loader for that account's PIN: a `PINREQ <hash>` line on stdout, answered on stdin by `form::pin_reply_line` (only when the loader's first line was `PINS`; otherwise every call is `no_pin`). Then it finds each button, moves the mouse and clicks, so no script ever sees the PIN or a digit. Reads the client through a small `Client` trait, so the tests run against a fake keypad. |
 | `sandbox.rs` | The Luau runtime (`mlua` with `luau-jit`) and every script global. |
 | `main.rs` | CLI. |
 

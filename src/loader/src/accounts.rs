@@ -11,7 +11,6 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const KEYRING_SERVICE: &str = "volcren-loader";
 const KEYRING_USER: &str = "accounts-key";
@@ -38,22 +37,10 @@ pub struct Entry {
     pub pin: String,
 }
 
-/// SHA-256 of the account name as the client normalizes it (trimmed, lowercase, spaces and hyphens as `_`), as lowercase hex.
+/// SHA-256 of the account name as the client normalizes it (trimmed, lowercase, underscores and hyphens as spaces), as lowercase hex.
 /// So a name typed as "My Name" and the client's own `my_name` hash the same.
 pub fn hash_name(account: &str) -> String {
-    let clean: String = account
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| {
-            if matches!(c, ' ' | '-' | '\u{a0}') {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect();
-    hex(&Sha256::digest(clean.as_bytes()))
+    injector::bank_pin::hash_name(account)
 }
 
 pub fn valid_pin(pin: &str) -> bool {
@@ -246,6 +233,15 @@ impl Accounts {
                 ..Self::default()
             },
         }
+    }
+
+    /// The saved PIN of the account with this name hash, for a script's `bank_pin_enter()`; `Err` while the file can't be read.
+    /// Edits that aren't saved yet don't count.
+    pub fn pin_for(&self, hash: &str) -> Result<Option<String>, String> {
+        if let Some(why) = &self.locked {
+            return Err(format!("the saved accounts can't be read: {why}"));
+        }
+        Ok(self.entries.iter().find(|entry| entry.hash == hash).map(|entry| entry.pin.clone()))
     }
 
     fn persist(&mut self) {

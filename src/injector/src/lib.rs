@@ -9,6 +9,8 @@ pub const HOST_API: u32 = 6;
 pub use ipc::state::varp;
 
 pub mod async_input;
+pub mod bank_pin;
+mod bank_pin_overlay;
 pub mod input_jobs;
 pub mod cache;
 pub mod collision;
@@ -281,6 +283,8 @@ pub use decode::world_select::{World, WorldSelect};
 mod input;
 #[cfg(windows)]
 mod win;
+#[cfg(windows)]
+pub(crate) use win::paint_overlay;
 #[cfg(windows)]
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]

@@ -2447,6 +2447,14 @@ impl LoaderApp {
                     }
                 }
                 ScriptEvent::Counters(counters) => self.counters.update(counters, self.run_time()),
+                ScriptEvent::PinRequest(hash) => {
+                    let answer = self.accounts.pin_for(&hash);
+                    if let Some(script) = &mut self.script
+                        && let Err(error) = script.answer_pin(answer)
+                    {
+                        self.script_error(error);
+                    }
+                }
                 ScriptEvent::Breaks(plan) => self.breaks.update(plan, std::time::Instant::now()),
                 ScriptEvent::Finished { stopped: true, .. } => self.script_info("Script stopped."),
                 ScriptEvent::Finished { result: Ok(()), .. } => self.script_info("Script finished."),

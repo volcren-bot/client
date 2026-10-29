@@ -4,6 +4,11 @@ use serde_json::{Map, Value, json};
 pub const SCRIPT_PREFIX: &str = "\u{1e}SCRIPT ";
 /// Optional, before the script: a JSON object of the script's other files by name, which the injector keeps in memory.
 pub const MODULES_PREFIX: &str = "\u{1e}MODULES ";
+/// Optional, the first line: the loader answers `PIN_REQUEST_PREFIX` requests, so `bank_pin_enter()` may ask it.
+pub const PINS_PREFIX: &str = "\u{1e}PINS";
+/// A line the injector writes for `bank_pin_enter()`: the hash of the logged in account's name. The loader answers on
+/// the script's stdin with `pin_reply_line`. The PIN goes no further than the injector's own code.
+pub const PIN_REQUEST_PREFIX: &str = "\u{1e}PINREQ ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
 /// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";
@@ -179,6 +184,28 @@ pub fn request_line(spec: &Value) -> String {
     format!("{FORM_PREFIX}{spec}")
 }
 
+pub fn pin_request_line(hash: &str) -> String {
+    format!("{PIN_REQUEST_PREFIX}{hash}")
+}
+
+/// The loader's answer to a PIN request: the PIN, `None` when no saved account has that hash, or why it can't tell.
+pub fn pin_reply_line(answer: &Result<Option<String>, String>) -> String {
+    match answer {
+        Ok(Some(pin)) => json!({ "pin": pin }),
+        Ok(None) => json!({ "none": true }),
+        Err(error) => json!({ "error": error }),
+    }
+    .to_string()
+}
+
+pub fn parse_pin_reply(line: &str) -> Result<Option<String>, String> {
+    let reply: Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad PIN reply from the loader: {e}"))?;
+    if let Some(error) = reply.get("error").and_then(Value::as_str) {
+        return Err(error.to_owned());
+    }
+    Ok(reply.get("pin").and_then(Value::as_str).map(str::to_owned))
+}
+
 pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {
     let reply: Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad form reply from the loader: {e}"))?;
     if reply.get("cancelled").and_then(Value::as_bool) == Some(true) {
@@ -190,6 +217,14 @@ pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pin_replies_round_trip() {
+        for answer in [Ok(Some("0123".to_owned())), Ok(None), Err("locked".to_owned())] {
+            assert_eq!(parse_pin_reply(&pin_reply_line(&answer)), answer);
+        }
+        assert!(parse_pin_reply("nonsense").is_err());
+    }
 
     #[test]
     fn checks_specs_and_fills_defaults() {
