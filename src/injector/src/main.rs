@@ -106,9 +106,29 @@ fn main() -> std::process::ExitCode {
                 }
                 _ => json::<()>(Err(format!("Invalid project command (x y height ...): {args:?}"))),
             },
+            ["mem", pid, address, count] => match (pid.parse(), u64::from_str_radix(address.trim_start_matches("0x"), 16), count.parse()) {
+                (Ok(pid), Ok(address), Ok(count)) => json(injector::memory_words(pid, address, count)),
+                _ => json::<()>(Err(format!("Invalid mem command (pid hex-address count): {args:?}"))),
+            },
             ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => match (pid.parse(), index.parse(), count.parse()) {
                 (Ok(pid), Ok(index), Ok(count)) => json(injector::npc_words(pid, index, count, rest == ["def"])),
                 _ => json::<()>(Err(format!("Invalid npc-words command (pid index count [def]): {args:?}"))),
+            },
+            ["watch", pid, seconds, bytes] => match (pid.parse(), seconds.parse(), bytes.parse()) {
+                (Ok(pid), Ok(seconds), Ok(bytes)) => json(injector::watch_client(pid, seconds, bytes)),
+                _ => json::<()>(Err(format!("Invalid watch command (pid seconds bytes): {args:?}"))),
+            },
+            ["world-entities", pid] => match pid.parse() {
+                Ok(pid) => json(injector::world_entities(pid)),
+                _ => json::<()>(Err(format!("Invalid world-entities command: {args:?}"))),
+            },
+            ["world-debug", pid] => match pid.parse() {
+                Ok(pid) => json(injector::world_debug(pid)),
+                _ => json::<()>(Err(format!("Invalid world-debug command: {args:?}"))),
+            },
+            ["player-words", pid, index, count] => match (pid.parse(), index.parse(), count.parse()) {
+                (Ok(pid), Ok(index), Ok(count)) => json(injector::player_words(pid, index, count)),
+                _ => json::<()>(Err(format!("Invalid player-words command (pid index count): {args:?}"))),
             },
             ["npc-model", pid, index] => match (pid.parse(), index.parse()) {
                 (Ok(pid), Ok(index)) => json(injector::npc_model(pid, index)),
@@ -199,6 +219,14 @@ fn main() -> std::process::ExitCode {
                 Ok(pid) => json(injector::npcs(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
+            ["projectiles", pid] => match pid.parse() {
+                Ok(pid) => json(injector::projectiles(pid)),
+                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
+            },
+            ["spot-anims", pid] => match pid.parse() {
+                Ok(pid) => json(injector::spot_anims(pid)),
+                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
+            },
             ["chat", pid] => match pid.parse() {
                 Ok(pid) => json(injector::chat_messages(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
@@ -269,7 +297,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("Usage: injector list | load <pid> <dll> [<style> <r> <g> <b> <size>] | unload <pid> | status <pid> | state <pid> | console <pid>");
         eprintln!("       injector widget <pid> <group> <child> | children <pid> <group> <child> | interfaces <pid> | screenshot <pid> <file.bmp>");
         eprintln!("       injector varp <pid> <id> | varps <pid> | varbit <pid> <id> | enum <pid> <id> | item-params <pid> <ids...> | name <pid> <display name>");
-        eprintln!("       injector container <pid> <id> | item-names <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
+        eprintln!("       injector container <pid> <id> | item-names <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
         eprintln!("       injector move <pid> <x> <y> | click <pid> left|right|middle <x> <y> | type <pid> <text> [hold ms]");
         eprintln!("       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up");
         eprintln!("       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms>");

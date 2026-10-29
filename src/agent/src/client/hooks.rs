@@ -45,13 +45,13 @@ use super::graphics::{
 use super::offsets::{
     find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
     find_varps, find_interfaces, find_item_containers, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
-    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_ground_items, find_item_pile, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
+    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
     find_world_select, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
 use ipc::{cursor_style, overlay_mode};
 use ipc::state::{
-    part, CameraLayout, ChatLayout, CollisionLayout, GroundItemsLayout, InterfaceLayout, Layout, LoginLayout, MinimapLayout, PlayerLayout, ProjectionLayout, SceneLoaderLayout, SkillsLayout, WorldLayout, WorldSelectLayout,
+    part, CameraLayout, ChatLayout, CollisionLayout, SpotAnimLayout, GroundItemsLayout, InterfaceLayout, Layout, LoginLayout, MinimapLayout, PlayerLayout, ProjectileLayout, ProjectionLayout, SceneLoaderLayout, SkillsLayout, WorldLayout, WorldSelectLayout,
 };
 use super::unload::HookCall;
 use crate::shared::{
@@ -543,6 +543,8 @@ unsafe fn find_offsets() {
     let destination = minimap.and_then(|m| found("Destination", find_destination(image, m.object)));
     let ground_items = found("Ground items", find_ground_items(image));
     let chat = found("Chat", find_chat(image));
+    let projectiles = found("Projectiles", find_projectiles(image));
+    let spot_anims = found("Spot animations", find_spot_anims(image));
     let camera = player.and_then(|p| found("Camera", find_camera(image, p.client)));
     let projection = player.and_then(|p| found("Projection", find_projection(image, p.client)));
     let scene = projection.and_then(|_| found("Scene", find_scene(image)));
@@ -720,6 +722,50 @@ unsafe fn find_offsets() {
             layout.found |= part::COLLISION;
             layout.collision = CollisionLayout { maps: c.maps, stride: c.stride };
         }
+    }
+    // read through the world view, so it needs the world's client and actor layout
+    if let Some(p) = projectiles.filter(|_| world.is_some()) {
+        layout.found |= part::PROJECTILES;
+        layout.projectiles = ProjectileLayout {
+            list: p.list,
+            node: p.node,
+            cycle: p.cycle,
+            source_level: p.source_level,
+            source_x: p.source_x,
+            source_y: p.source_y,
+            source_actor: p.source_actor,
+            start_height: p.start_height,
+            target_level: p.target_level,
+            target_x: p.target_x,
+            target_y: p.target_y,
+            target_actor: p.target_actor,
+            end_height: p.end_height,
+            start_cycle: p.start_cycle,
+            end_cycle: p.end_cycle,
+            slope: p.slope,
+            start_pos: p.start_pos,
+            id: p.id,
+            x: p.x,
+            z: p.z,
+            y: p.y,
+            orientation: p.orientation,
+            moving: p.moving,
+            reserved: 0,
+        };
+    }
+    // read through the local player's world view
+    if let Some(g) = spot_anims.filter(|_| player.is_some()) {
+        layout.found |= part::SPOT_ANIMS;
+        layout.spot_anims = SpotAnimLayout {
+            list: g.list,
+            cycle: g.cycle,
+            start_cycle: g.start_cycle,
+            level: g.level,
+            x: g.x,
+            y: g.y,
+            z: g.z,
+            id: g.id,
+        };
     }
     if let Some(flag) = instance_flag {
         layout.found |= part::SCENE_LOADER;

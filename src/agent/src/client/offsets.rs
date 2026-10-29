@@ -9,9 +9,11 @@ mod menu;
 mod minimap;
 mod model;
 mod projection;
+mod projectiles;
 mod scene;
 mod scene_loader;
 mod scripts;
+mod spot_anims;
 mod values;
 mod world_select;
 pub use values::{
@@ -20,6 +22,7 @@ pub use values::{
 pub use items::{find_game_vals, find_obj_type_lookup, CacheTable, GameVals, ObjTypeLookup};
 pub use local_projection::find_local_projection;
 pub use projection::{find_projection, Projection};
+pub use projectiles::find_projectiles;
 pub use scene_loader::find_instance_flag;
 pub use scene::{
     find_collision_maps, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, loc_kind, DecorationLayout, GameObjectLayout,
@@ -28,6 +31,7 @@ pub use scene::{
 pub use menu::{find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, Menu, MenuClick, MenuLayout, Selection};
 pub use camera::find_camera;
 pub use chat::find_chat;
+pub use spot_anims::find_spot_anims;
 pub use ground_items::{find_ground_items, find_item_pile};
 pub use minimap::{find_destination, find_minimap};
 pub use model::{render_slots, find_actor_orientation, find_animation_height, find_model_faces, find_model_vertices, find_npc_model, ActorOrientation, ModelFaces, ModelVertices, NpcModel};
@@ -1215,10 +1219,11 @@ pub fn find_interfaces(image: &[u8]) -> Result<Interfaces, ScanError> {
 
 #[cfg(test)]
 mod tests {
+    use super::spot_anims::SpotAnims;
     use super::values::{ActorLists, ActorNames, AppearanceDecoder, ItemContainers, RunEnergy, Varcs};
     use super::*;
 
-    fn map_image(file: &[u8]) -> Vec<u8> {
+    pub(super) fn map_image(file: &[u8]) -> Vec<u8> {
         let nt = u32_at(file, 0x3c).unwrap() as usize;
         let optional = nt + 24;
         let size_of_image = u32_at(file, optional + 56).unwrap() as usize;
@@ -1447,6 +1452,17 @@ mod tests {
             chat,
             Ok(chat::Chat { messages: 0x154fa48, cycle: 0xe98c14, message_cycle: 0x8, kind: 0x40, name: 0x48, sender: 0x70, text: 0xa0, time_utc: 0x28, time_local: 0x10 })
         );
+        let projectiles = find_projectiles(&image).expect("projectiles not found");
+        println!("{projectiles:x?}");
+        assert_eq!((projectiles.list, projectiles.node, projectiles.cycle), (0xcc70, 0x18, 0xe98c14));
+        assert_eq!((projectiles.source_level, projectiles.target_actor, projectiles.start_cycle, projectiles.end_cycle, projectiles.id), (0x260, 0x284, 0x288, 0x28c, 0x298));
+        assert_eq!((projectiles.x, projectiles.z, projectiles.y, projectiles.orientation, projectiles.moving), (0x2a0, 0x2a8, 0x2b0, 0x2b8, 0x2c0));
+        let spot_anims = find_spot_anims(&image).expect("spot animations not found");
+        println!("{spot_anims:x?}");
+        assert_eq!(
+            spot_anims,
+            SpotAnims { list: 0x160, cycle: 0xe98c14, start_cycle: 0x260, level: 0x264, x: 0x268, y: 0x26c, z: 0x270, id: 0x274 }
+        );
         let ground_items = find_ground_items(&image);
         println!("{ground_items:x?}");
         assert_eq!(ground_items, Ok(ground_items::GroundItems { items: 0x140, level: 0x10, node_item: 0x18, id: 0x20 }));
@@ -1593,6 +1609,8 @@ mod tests {
             println!("{}: {minimap:x?}", build.display());
             println!("{}: destination {:x?}", build.display(), find_destination(&image, minimap.object));
             println!("{}: {:x?}", build.display(), find_ground_items(&image));
+            println!("{}: {:x?}", build.display(), find_projectiles(&image).unwrap_or_else(|error| panic!("projectiles not found in {}: {error:?}", build.display())));
+            println!("{}: {:x?}", build.display(), find_spot_anims(&image).unwrap_or_else(|error| panic!("spot animations not found in {}: {error:?}", build.display())));
             println!("{}: {:x?}", build.display(), find_chat(&image).unwrap_or_else(|error| panic!("chat not found in {}: {error:?}", build.display())));
             let camera = find_camera(&image, player.client)
                 .unwrap_or_else(|error| panic!("camera not found in {}: {error:?}", build.display()));

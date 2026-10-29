@@ -665,18 +665,18 @@ fn names(
 
 static TERRAIN: Mutex<Option<(u32, Terrain)>> = Mutex::new(None);
 
-fn project_locally(pid: u32, points: &[projection::Point], shift: Option<[i32; 2]>) -> Result<Vec<[f32; 2]>, Failure> {
+fn project_locally(pid: u32, points: &[projection::Point], shift: Option<[i32; 2]>, clip: bool) -> Result<Vec<[f32; 2]>, Failure> {
     let (layout, memory) = reader(pid, 0, "").map_err(Failure::Unavailable)?;
     let mut cache = TERRAIN.lock().unwrap_or_else(|e| e.into_inner());
     let mut terrain = cache.take().filter(|(p, _)| *p == pid).map(|(_, terrain)| terrain);
-    let result = projection::project(&memory, &layout, &mut terrain, points, shift, || decorations(pid));
+    let result = projection::project(&memory, &layout, &mut terrain, points, shift, clip, || decorations(pid));
     *cache = terrain.map(|terrain| (pid, terrain));
     result
 }
 
 pub fn project(pid: u32, points: &[projection::Point], via: Via) -> Result<Vec<[f32; 2]>, String> {
     if via != Via::Client {
-        match project_locally(pid, points, None) {
+        match project_locally(pid, points, None, false) {
             Ok(screen) => return Ok(screen),
             Err(Failure::Unavailable(why)) if via == Via::Local => return Err(format!("local projection: {why}")),
             Err(Failure::Unavailable(_)) => {}
@@ -686,9 +686,17 @@ pub fn project(pid: u32, points: &[projection::Point], via: Via) -> Result<Vec<[
     project_in_client(pid, &plain)
 }
 
+// `project` for drawing: a point nearer than the camera's near plane or behind it comes back as NaN, which is never on screen. Only the local projection clips; the client's own leaves such points where it puts them.
+pub fn project_clipped(pid: u32, points: &[projection::Point]) -> Result<Vec<[f32; 2]>, String> {
+    match project_locally(pid, points, None, true) {
+        Ok(screen) => Ok(screen),
+        Err(Failure::Unavailable(_)) => project(pid, points, Via::Client),
+    }
+}
+
 // `project` with the camera moved by `shift` first; only the local projection can move the camera.
 pub fn project_moved(pid: u32, points: &[projection::Point], shift: [i32; 2]) -> Result<Vec<[f32; 2]>, String> {
-    match project_locally(pid, points, Some(shift)) {
+    match project_locally(pid, points, Some(shift), false) {
         Ok(screen) => Ok(screen),
         Err(Failure::Unavailable(why)) => Err(format!("local projection: {why}")),
     }
@@ -1761,9 +1769,72 @@ pub fn npc_sizes(pid: u32, indices: &[i32]) -> Result<std::collections::BTreeMap
     Ok(indices.iter().filter_map(|&i| Some((i, world::npc_size(&memory, &layout.world, i)?))).collect())
 }
 
+// The hitsplats in use on the NPCs with `indices`, by index; the ones gone or unreadable are left out. Read straight
+// from the client's memory, not through the agent.
+pub fn npc_hitsplats(pid: u32, indices: &[i32]) -> Result<std::collections::BTreeMap<i32, Vec<world::Hitsplat>>, String> {
+    let (layout, memory) = world_reader(pid)?;
+    Ok(indices.iter().filter_map(|&i| Some((i, world::npc_hitsplats(&memory, &layout.world, i)?))).collect())
+}
+
+// Debug: `count` 4-byte words of the client's memory at `address`, to follow pointers found with `npc_words`.
+pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, String> {
+    let (_, memory) = world_reader(pid)?;
+    let mut bytes = vec![0u8; count * 4];
+    if !memory.read(address, &mut bytes) {
+        return Err(format!("can't read {count} words at {address:#x}"));
+    }
+    Ok(bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect())
+}
+
 pub fn npc_words(pid: u32, index: i32, count: usize, definition: bool) -> Result<(u64, Vec<i32>), String> {
     let (layout, memory) = world_reader(pid)?;
     world::npc_words(&memory, &layout.world, index, count, definition).ok_or_else(|| format!("no NPC {index} in the scene"))
+}
+
+// Debug: watches `bytes` of the client object for `seconds` and reports each 4-byte word that changed, with its first
+// and last values and how many times it changed, to find fields that only flicker (a queue that is emptied at once).
+pub fn watch_client(pid: u32, seconds: u64, bytes: usize) -> Result<Vec<String>, String> {
+    let (layout, memory) = world_reader(pid)?;
+    let client = ipc::read::client(&memory, &layout).ok_or("no client")?;
+    let read = |buffer: &mut Vec<u8>| memory.read(client, buffer);
+    let mut last = vec![0u8; bytes];
+    if !read(&mut last) {
+        return Err("can't read the client object".into());
+    }
+    let mut now = last.clone();
+    let mut changes: std::collections::BTreeMap<usize, (i32, i32, u32)> = Default::default();
+    let word = |b: &[u8], i: usize| i32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    let end = std::time::Instant::now() + Duration::from_secs(seconds);
+    while std::time::Instant::now() < end {
+        if !read(&mut now) {
+            continue;
+        }
+        for i in (0..bytes).step_by(4) {
+            let (old, new) = (word(&last, i), word(&now, i));
+            if old != new {
+                let entry = changes.entry(i).or_insert((old, new, 0));
+                entry.1 = new;
+                entry.2 += 1;
+            }
+        }
+        std::mem::swap(&mut last, &mut now);
+    }
+    Ok(changes.into_iter().map(|(i, (first, last, n))| format!("+{i:#x} first {first} last {last} changes {n}")).collect())
+}
+
+pub fn world_entities(pid: u32) -> Result<Vec<world::WorldEntity>, String> {
+    let (layout, memory) = world_reader(pid)?;
+    world::world_entities(&memory, &layout.world).ok_or_else(|| "no world views".to_string())
+}
+
+pub fn world_debug(pid: u32) -> Result<Vec<String>, String> {
+    let (layout, memory) = world_reader(pid)?;
+    world::world_debug(&memory, &layout.world).ok_or_else(|| "no world view".to_string())
+}
+
+pub fn player_words(pid: u32, index: i32, count: usize) -> Result<(u64, Vec<i32>), String> {
+    let (layout, memory) = world_reader(pid)?;
+    world::player_words(&memory, &layout.world, index, count).ok_or_else(|| format!("no player {index} in the scene"))
 }
 
 pub fn players(pid: u32) -> Result<Vec<Player>, String> {
@@ -1772,6 +1843,33 @@ pub fn players(pid: u32) -> Result<Vec<Player>, String> {
     }
     let (layout, memory) = world_reader(pid)?;
     Ok(worker::players(&memory, &layout))
+}
+
+pub fn projectiles(pid: u32) -> Result<Vec<crate::Projectile>, String> {
+    let mut projectiles = match ask_worker(pid, worker_kind::PROJECTILES, [0; 4]) {
+        Some(projectiles) => projectiles,
+        None => {
+            let (layout, memory) = reader(pid, worker::PROJECTILE_PARTS, "where projectiles are")?;
+            worker::projectiles(&memory, &layout)
+        }
+    };
+    // The client's z counts from the heightmap's zero, so the height above the ground is the heightmap's height minus it.
+    if projectiles.iter().any(|p| p.moving) {
+        with_terrain(pid, |terrain| {
+            for p in projectiles.iter_mut().filter(|p| p.moving) {
+                p.height = terrain.heightmap(p.local_x, p.local_y, p.source_plane) - p.z;
+            }
+        })?;
+    }
+    Ok(projectiles)
+}
+
+pub fn spot_anims(pid: u32) -> Result<Vec<crate::SpotAnim>, String> {
+    if let Some(objects) = ask_worker(pid, worker_kind::SPOT_ANIMS, [0; 4]) {
+        return Ok(objects);
+    }
+    let (layout, memory) = reader(pid, worker::SPOT_ANIM_PARTS, "where spot animations are")?;
+    Ok(worker::spot_anims(&memory, &layout))
 }
 
 pub fn world_select(pid: u32) -> Result<Option<WorldSelect>, String> {
@@ -1922,6 +2020,8 @@ const LOADING_INSET: i32 = 16;
 const GRID_RADIUS: i32 = 32;
 
 // Corners further out than this are behind the camera or otherwise meaningless, so they're not drawn.
+// How thick the outlines and lines of the scene layers are, in pixels.
+const STROKE_WIDTH: i32 = 2;
 const SCREEN_LIMIT: f32 = 100_000.0;
 const LABEL_SHADOW: Rgba = Rgba { r: 0, g: 0, b: 0, a: 255 };
 const TEXT_COLOR: Rgba = Rgba { r: 255, g: 255, b: 255, a: 255 };
@@ -1933,9 +2033,13 @@ const NPC_LABEL_OFFSET: i32 = 40;
 // Text panels start this far in from the canvas's top left.
 const TEXT_LEFT: i32 = 8;
 const TEXT_TOP: i32 = 8;
-const LAYERS: [&str; 18] = [
+const LAYERS: [&str; 22] = [
     "players",
+    "world-entities",
+    "interacting",
     "npcs",
+    "projectiles",
+    "spot-anims",
     "objects",
     "grid",
     "ground-items",
@@ -1958,6 +2062,12 @@ const LAYERS: [&str; 18] = [
 const PLAYER_TILE_COLOR: Rgba = Rgba { r: 41, g: 98, b: 255, a: 255 };
 const LOCAL_PLAYER_TILE_COLOR: Rgba = Rgba { r: 0, g: 184, b: 212, a: 255 };
 const NPC_TILE_COLOR: Rgba = Rgba { r: 255, g: 255, b: 0, a: 255 };
+// RuneLite draws world entities in blue.
+const WORLD_ENTITY_COLOR: Rgba = Rgba { r: 0, g: 0, b: 255, a: 255 };
+const INTERACTING_COLOR: Rgba = Rgba { r: 0, g: 255, b: 255, a: 255 };
+// The interacting arrows are drawn this many pixels below the actors' middles, and their heads at twice RuneLite's size.
+const INTERACTING_SHIFT: f32 = 16.0;
+const ARROW_SCALE: f32 = 2.0;
 const OBJECT_TILE_COLOR: Rgba = Rgba { r: 0, g: 255, b: 0, a: 255 };
 const GROUND_ITEM_COLOR: Rgba = Rgba { r: 221, g: 44, b: 0, a: 255 };
 const GROUND_OBJECT_COLOR: Rgba = Rgba { r: 170, g: 0, b: 255, a: 255 };
@@ -1965,6 +2075,11 @@ const WALL_COLOR: Rgba = Rgba { r: 158, g: 158, b: 158, a: 255 };
 const DECORATION_COLOR: Rgba = Rgba { r: 98, g: 0, b: 234, a: 255 };
 const TILE_FLAG_COLOR: Rgba = Rgba { r: 221, g: 44, b: 0, a: 255 };
 const CHUNK_COLOR: Rgba = Rgba { r: 0, g: 0, b: 255, a: 255 };
+// RuneLite labels projectiles in red; the line to where each one lands is a dimmer red.
+const PROJECTILE_COLOR: Rgba = Rgba { r: 255, g: 0, b: 0, a: 255 };
+const PROJECTILE_PATH_COLOR: Rgba = Rgba { r: 255, g: 0, b: 0, a: 140 };
+// RuneLite outlines spot animations' tiles in magenta and labels them in white.
+const SPOT_ANIM_COLOR: Rgba = Rgba { r: 255, g: 0, b: 255, a: 255 };
 const MAP_SQUARE_COLOR: Rgba = Rgba { r: 0, g: 255, b: 0, a: 255 };
 const LOCAL_VALID_MOVEMENT_COLOR: Rgba = Rgba { r: 141, g: 220, b: 26, a: 255 };
 const LINE_OF_SIGHT_COLOR: Rgba = Rgba { r: 204, g: 42, b: 219, a: 255 };
@@ -1997,6 +2112,7 @@ struct Plan {
     paths: Vec<Stroke>,
     labels: Vec<Label>,
     texts: Vec<Text>,
+    arrows: Vec<Arrow>,
 }
 
 // A line through the points, or around them when `closed`; a `marker` outline counts towards the `scene_tiles` result.
@@ -2005,6 +2121,13 @@ struct Stroke {
     color: Rgba,
     closed: bool,
     marker: bool,
+}
+
+// A line from one point to another with a head at the second.
+struct Arrow {
+    from: usize,
+    to: usize,
+    color: Rgba,
 }
 
 // A label drawn centred above its anchor point.
@@ -2033,6 +2156,11 @@ impl Plan {
         self.paths.push(Stroke { points, color, closed, marker });
     }
 
+    fn arrow(&mut self, from: projection::Point, to: projection::Point, color: Rgba) {
+        let (from, to) = (self.point(from), self.point(to));
+        self.arrows.push(Arrow { from, to, color });
+    }
+
     fn label(&mut self, anchor: projection::Point, text: String, color: Rgba) {
         let anchor = self.point(anchor);
         self.labels.push(Label { anchor, text, color });
@@ -2052,7 +2180,7 @@ impl Plan {
 // The corners of a `size_x` by `size_y` footprint from tile `(tx, ty)` in scene coordinates; far corners lie on the tiles beyond, so they name it.
 fn footprint(tx: i32, ty: i32, size_x: i32, size_y: i32) -> [projection::Point; 4] {
     let (x, y, w, h) = (tx * TILE_SIZE, ty * TILE_SIZE, size_x * TILE_SIZE, size_y * TILE_SIZE);
-    let corner = |x, y, tile| projection::Point { x, y, z: 0, tile: Some(tile) };
+    let corner = |x, y, tile| projection::Point { tile: Some(tile), ..projection::Point::new(x, y, 0) };
     [
         corner(x, y, [tx, ty]),
         corner(x + w, y, [tx + size_x - 1, ty]),
@@ -2072,7 +2200,7 @@ fn tile_centre([tx, ty]: [i32; 2]) -> projection::Point {
 
 // A point on the scene's grid lines, which names no tile: the ground is the tile beyond it, as the client draws it.
 fn boundary(tx: i32, ty: i32) -> projection::Point {
-    projection::Point::new(tx * TILE_SIZE, ty * TILE_SIZE, 0)
+    projection::Point { heightmap: true, ..projection::Point::new(tx * TILE_SIZE, ty * TILE_SIZE, 0) }
 }
 
 fn in_scene([tx, ty]: [i32; 2]) -> bool {
@@ -2091,13 +2219,22 @@ fn actor_marker(plan: &mut Plan, local: (i32, i32), height: i32, label: String, 
     let tile = Some([local_x >> 7, local_y >> 7]);
     // Heights point down in projection coordinates, so lifting a point is a negative offset.
     let lift = height + NPC_LABEL_OFFSET;
-    let corners = TILE_CORNERS.map(|[dx, dy]| projection::Point { x: local_x + dx, y: local_y + dy, z: 0, tile });
+    let corners = TILE_CORNERS.map(|[dx, dy]| projection::Point { tile, ..projection::Point::new(local_x + dx, local_y + dy, 0) });
     plan.path(&corners, color, true, true);
     plan.label(projection::Point::new(local_x, local_y, -lift), label, color);
 }
 
 fn npc_label(npc: &Npc) -> String {
     format!("{} (ID:{}) (A: {}) (P: {}) (G: {})", crate::strip_tags(&npc.name), npc.id, npc.animation, npc.pose, npc.graphic)
+}
+
+// Like RuneLite's projectile overlay, plus the cycles left until it lands (or until it leaves, while it waits).
+fn projectile_label(p: &crate::Projectile) -> String {
+    if p.moving {
+        format!("(ID: {}) ({})", p.id, p.end_cycle - p.cycle)
+    } else {
+        format!("(ID: {}) (in {})", p.id, p.start_cycle - p.cycle)
+    }
 }
 
 // Like RuneLite's player overlay: the name, then the animation, pose and graphic.
@@ -2294,6 +2431,62 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         }
     }
 
+    if on("world-entities") {
+        // Each moving sub-scene (a boat), labelled where it is in the top-level scene.
+        for entity in world_entities(pid)? {
+            let label = format!("ID: {} Type: {}", entity.view_id, entity.config_id);
+            plan.label(projection::Point::new(entity.local_x, entity.local_y, 0), label, WORLD_ENTITY_COLOR);
+        }
+    }
+
+    if on("interacting") {
+        // An arrow from each actor to the one it interacts with, from middle to middle.
+        let (npcs, players) = (npcs(pid)?, players(pid)?);
+        let middle = |local_x, local_y, height: i32| projection::Point::new(local_x, local_y, -(if height > 0 { height } else { NPC_LABEL_DEFAULT_HEIGHT }) / 2);
+        let npc_at = |index: i32| npcs.iter().find(|n| n.index == index).map(|n| middle(n.local_x, n.local_y, n.height));
+        let player_at = |index: i32| players.iter().find(|p| p.index == index).map(|p| middle(p.local_x, p.local_y, p.height));
+        let target = |npc: i32, player: i32| npc_at(npc).or_else(|| player_at(player));
+        for npc in &npcs {
+            if let Some(to) = target(npc.interacting_npc, npc.interacting_player) {
+                plan.arrow(middle(npc.local_x, npc.local_y, npc.height), to, INTERACTING_COLOR);
+            }
+        }
+        for player in &players {
+            if let Some(to) = target(player.interacting_npc, player.interacting_player) {
+                plan.arrow(middle(player.local_x, player.local_y, player.height), to, INTERACTING_COLOR);
+            }
+        }
+    }
+
+    if on("projectiles") {
+        let here = here()?;
+        let (origin_x, origin_y) = scene_origin(&here);
+        let projectiles = projectiles(pid)?;
+        // a projectile at an actor follows it, so its line ends where the actor stands now
+        let npcs = if projectiles.iter().any(|p| p.target_npc >= 0) { npcs(pid)? } else { Vec::new() };
+        let players = if projectiles.iter().any(|p| p.target_player >= 0) { players(pid)? } else { Vec::new() };
+        for p in projectiles.iter().filter(|p| Some(p.source_plane) == here.plane) {
+            let at = projection::Point::new(p.local_x, p.local_y, -p.height);
+            let actor = npcs.iter().find(|n| n.index == p.target_npc).map(|n| (n.local_x, n.local_y))
+                .or_else(|| players.iter().find(|pl| pl.index == p.target_player).map(|pl| (pl.local_x, pl.local_y)));
+            let target = match actor {
+                Some((x, y)) => projection::Point::new(x, y, -p.end_height),
+                None => projection::Point { z: -p.end_height, ..tile_centre([p.target_x - origin_x, p.target_y - origin_y]) },
+            };
+            plan.path(&[at, target], PROJECTILE_PATH_COLOR, false, false);
+            plan.label(at, projectile_label(p), PROJECTILE_COLOR);
+        }
+    }
+
+    if on("spot-anims") {
+        let here = here()?;
+        for object in spot_anims(pid)?.iter().filter(|object| Some(object.plane) == here.plane) {
+            let tile = [object.local_x >> 7, object.local_y >> 7];
+            plan.path(&tile_corners(tile), SPOT_ANIM_COLOR, true, true);
+            plan.label(tile_centre(tile), format!("(ID: {})", object.id), TEXT_COLOR);
+        }
+    }
+
     if on("objects") || on("ground-objects") || on("walls") || on("decorations") {
         let reply = cached_locs_reply(pid)?;
         for loc in &reply.locs[..(reply.count as usize).min(reply.locs.len())] {
@@ -2464,7 +2657,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         }
     }
 
-    let screen = if plan.points.is_empty() { Vec::new() } else { project(pid, &plan.points, Via::Auto)? };
+    let screen = if plan.points.is_empty() { Vec::new() } else { project_clipped(pid, &plan.points)? };
     let on_screen = |[x, y]: &[f32; 2]| x.abs() < SCREEN_LIMIT && y.abs() < SCREEN_LIMIT;
     let drawn = plan.paths.iter().filter(|path| path.marker && path.points.iter().all(|&i| on_screen(&screen[i]))).count();
 
@@ -2476,6 +2669,9 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
             let [x, y] = screen[i];
             (on_screen(&[x, y]), x.round() as i32, y.round() as i32).hash(&mut hasher);
         }
+    }
+    for arrow in &plan.arrows {
+        (arrow.color, screen[arrow.from].map(|v| v.round() as i32), screen[arrow.to].map(|v| v.round() as i32)).hash(&mut hasher);
     }
     for label in &plan.labels {
         let [x, y] = screen[label.anchor];
@@ -2492,8 +2688,19 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
             for i in 0..edges {
                 let (a, b) = (points[i], points[(i + 1) % points.len()]);
                 if on_screen(&a) && on_screen(&b) {
-                    draw_line(buf, width, height, [a[0].round() as i32, a[1].round() as i32, b[0].round() as i32, b[1].round() as i32], path.color);
+                    let [x1, y1, x2, y2] = [a[0].round() as i32, a[1].round() as i32, b[0].round() as i32, b[1].round() as i32];
+                    // two pixels thick: the line and its copy one pixel to the right and down
+                    for shift in 0..STROKE_WIDTH {
+                        draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], path.color);
+                        draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], path.color);
+                    }
                 }
+            }
+        }
+        for arrow in &plan.arrows {
+            let [from, to] = [arrow.from, arrow.to].map(|i| screen[i]);
+            if on_screen(&from) && on_screen(&to) {
+                draw_arrow(buf, width, height, [from[0], from[1] + INTERACTING_SHIFT], [to[0], to[1] + INTERACTING_SHIFT], arrow.color);
             }
         }
         for label in &plan.labels {
@@ -2591,6 +2798,42 @@ unsafe fn draw_rect(buf: *mut u8, width: i32, height: i32, [x1, y1, x2, y2]: [i3
         unsafe {
             put_pixel(buf, width, height, left, y, color);
             put_pixel(buf, width, height, right, y, color);
+        }
+    }
+}
+
+// A thick line from `from` to `to` with a filled head at `to`, like RuneLite's interacting arrows.
+unsafe fn draw_arrow(buf: *mut u8, width: i32, height: i32, from: [f32; 2], to: [f32; 2], color: Rgba) {
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let length = dx.hypot(dy);
+    let round = |[x, y]: [f32; 2]| [x.round() as i32, y.round() as i32];
+    let [x1, y1] = round(from);
+    let [x2, y2] = round(to);
+    for shift in 0..STROKE_WIDTH {
+        unsafe {
+            draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], color);
+            draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], color);
+        }
+    }
+    if length < 1.0 {
+        return;
+    }
+    // the head: its tip at `to`, 5 long and 6 wide, pointing along the line
+    let (ux, uy) = (dx / length * ARROW_SCALE, dy / length * ARROW_SCALE);
+    let base = [to[0] - 5.0 * ux, to[1] - 5.0 * uy];
+    let corners = [to, [base[0] - 3.0 * uy, base[1] + 3.0 * ux], [base[0] + 3.0 * uy, base[1] - 3.0 * ux]];
+    let edge = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+    let low = corners.map(|c| c[0].floor() as i32).into_iter().min().unwrap();
+    let high = corners.map(|c| c[0].ceil() as i32).into_iter().max().unwrap();
+    let top = corners.map(|c| c[1].floor() as i32).into_iter().min().unwrap();
+    let bottom = corners.map(|c| c[1].ceil() as i32).into_iter().max().unwrap();
+    for y in top..=bottom {
+        for x in low..=high {
+            let p = [x as f32 + 0.5, y as f32 + 0.5];
+            let sides = [edge(corners[0], corners[1], p), edge(corners[1], corners[2], p), edge(corners[2], corners[0], p)];
+            if sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0) {
+                unsafe { put_pixel(buf, width, height, x, y, color) };
+            }
         }
     }
 }

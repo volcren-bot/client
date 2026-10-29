@@ -9,7 +9,7 @@ pub struct NpcModel {
 
 const UNW_FLAG_CHAININFO: u8 = 4;
 
-fn chunk_root(pe: &Pe, begin: u32) -> Option<u32> {
+pub(super) fn chunk_root(pe: &Pe, begin: u32) -> Option<u32> {
     let mut begin = begin;
     for _ in 0..8 {
         let index = pe.raw_functions.partition_point(|&(b, _, _)| b < begin);

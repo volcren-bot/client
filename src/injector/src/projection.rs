@@ -159,6 +159,17 @@ impl Camera {
     }
 
     pub fn project(&self, x: i32, y: i32, height: i32) -> [f32; 2] {
+        self.project_at(x, y, height).0
+    }
+
+    /// `project`, but `None` for a point closer to the camera than `NEAR_PLANE` or behind it, as RuneLite's `Perspective.localToCanvas`.
+    pub fn project_near(&self, x: i32, y: i32, height: i32) -> Option<[f32; 2]> {
+        let (screen, distance) = self.project_at(x, y, height);
+        (distance >= NEAR_PLANE).then_some(screen)
+    }
+
+    // The screen position and the distance along the view direction.
+    fn project_at(&self, x: i32, y: i32, height: i32) -> ([f32; 2], f32) {
         let [sin_pitch, cos_pitch, sin_yaw, cos_yaw] = self.trig;
         let dx = x.wrapping_sub(self.position[0]) as f32;
         let dz = height.wrapping_sub(self.position[1]) as f32;
@@ -170,7 +181,7 @@ impl Camera {
         let zoom = self.zoom as f32;
         let sx = truncate(zoom * across / distance).wrapping_add(self.offset[0]).wrapping_add(self.center[0]);
         let sy = truncate(zoom * up / distance).wrapping_add(self.offset[1]).wrapping_add(self.center[1]);
-        [self.canvas_units(sx, 0), self.canvas_units(sy, 1)]
+        ([self.canvas_units(sx, 0), self.canvas_units(sy, 1)], distance)
     }
 
     fn canvas_units(&self, value: i32, axis: usize) -> f32 {
@@ -313,6 +324,17 @@ impl Terrain {
         Some(PAINT_TRIANGLES.iter().map(|t| t.map(|i| corners[i])).collect())
     }
 
+    // The heightmap's height under (x, y), without tile models or decorations: what the client flies projectiles over.
+    pub fn heightmap(&self, x: i32, y: i32, plane: i32) -> i32 {
+        self.bilinear(x, y, plane, (x >> TILE_SHIFT, y >> TILE_SHIFT))
+    }
+
+    // The heightmap under (x, y), 0 outside the scene.
+    pub fn flat_ground(&self, x: i32, y: i32, plane: i32) -> i32 {
+        let [size_x, size_y] = self.size;
+        if (0..size_x).contains(&(x >> TILE_SHIFT)) && (0..size_y).contains(&(y >> TILE_SHIFT)) { self.heightmap(x, y, plane) } else { 0 }
+    }
+
     pub fn ground(&mut self, memory: &impl Memory, layout: &Layout, x: i32, y: i32, plane: i32) -> i32 {
         self.ground_on(memory, layout, x, y, plane, None)
     }
@@ -362,6 +384,9 @@ fn barycentric(px: i32, py: i32, [a, b, c]: &Triangle) -> i32 {
     truncate(bh as f32 * wb + ah as f32 * wa + wc * ch as f32)
 }
 
+/// Nearer than this along the view direction a point is not drawn, as in RuneLite.
+pub const NEAR_PLANE: f32 = 50.0;
+
 pub type Decoration = ((i32, i32, i32), i32);
 
 /// A point to project: `x`, `y`, `z` (height above ground, negative up) and the `tile` whose ground it stands on (default: the tile under it).
@@ -371,11 +396,13 @@ pub struct Point {
     pub y: i32,
     pub z: i32,
     pub tile: Option<[i32; 2]>,
+    /// Stand on the bare heightmap rather than the tile's model, as RuneLite's `Perspective.getTileHeight`.
+    pub heightmap: bool,
 }
 
 impl Point {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
-        Self { x, y, z, tile: None }
+        Self { x, y, z, tile: None, heightmap: false }
     }
 }
 
@@ -422,6 +449,7 @@ pub fn project(
     terrain: &mut Option<Terrain>,
     points: &[Point],
     shift: Option<[i32; 2]>,
+    clip: bool,
     decorations: impl FnOnce() -> Vec<Decoration>,
 ) -> Result<Vec<[f32; 2]>, Failure> {
     if !layout.has(NEEDS) {
@@ -440,7 +468,12 @@ pub fn project(
     }
     Ok(points
         .iter()
-        .map(|p| camera.project(p.x, p.y, terrain.ground_on(memory, layout, p.x, p.y, key.plane, p.tile).wrapping_add(p.z)))
+        .map(|p| {
+            let ground = if p.heightmap { terrain.flat_ground(p.x, p.y, key.plane) } else { terrain.ground_on(memory, layout, p.x, p.y, key.plane, p.tile) };
+            let height = ground.wrapping_add(p.z);
+            // a clipped point has no position, which no on-screen test passes
+            if clip { camera.project_near(p.x, p.y, height).unwrap_or([f32::NAN; 2]) } else { camera.project(p.x, p.y, height) }
+        })
         .collect())
 }
 
@@ -658,7 +691,7 @@ mod tests {
         let mut asked = 0;
         // straight down from 1000 above (0, 0): across = dx, up = -depth = -dy, distance = dz
         let points = [[0, 0, 0], [100, 0, 0], [0, 200, 0], [128, 256, -88]].map(|[x, y, z]| Point::new(x, y, z));
-        let screen = project(&m, &layout, &mut terrain, &points, None, || {
+        let screen = project(&m, &layout, &mut terrain, &points, None, false, || {
             asked += 1;
             Vec::new()
         })
@@ -671,7 +704,7 @@ mod tests {
         let x = 500 * 128 / 900 + 404;
         let y = 2 + 300 - 500 * 256 / 900;
         assert_eq!(screen[3], [((x as f32 / 2.0 + 0.5) as i32 * 2) as f32, ((y as f32 / 2.0 + 0.5) as i32 * 2) as f32]);
-        project(&m, &layout, &mut terrain, &points, None, || {
+        project(&m, &layout, &mut terrain, &points, None, false, || {
             asked += 1;
             Vec::new()
         })
@@ -688,7 +721,7 @@ mod tests {
         }
         let mut terrain = None;
         let points = [Point::new(300, 200, -40)];
-        let shifted = project(&m, &layout, &mut terrain, &points, Some([128, 0]), Vec::new).unwrap();
+        let shifted = project(&m, &layout, &mut terrain, &points, Some([128, 0]), false, Vec::new).unwrap();
         let t = terrain.as_mut().unwrap();
         let rise = t.ground_on(&m, &layout, 192, 64, 0, None) - t.ground_on(&m, &layout, 64, 64, 0, None);
         assert_eq!(rise, -10);
@@ -696,7 +729,7 @@ mod tests {
         let mut camera = Camera::read(&m, &layout, CLIENT, SCENE).unwrap();
         camera.position = [camera.position[0] + 128, camera.position[1] + rise, camera.position[2]];
         assert_eq!(shifted[0], camera.project(300, 200, ground - 40));
-        assert_ne!(shifted, project(&m, &layout, &mut terrain, &points, None, Vec::new).unwrap());
+        assert_ne!(shifted, project(&m, &layout, &mut terrain, &points, None, false, Vec::new).unwrap());
     }
 
     #[test]
@@ -716,6 +749,6 @@ mod tests {
     fn needs_the_parts() {
         let (m, mut layout) = world();
         layout.found &= !part::PROJECTION;
-        assert!(matches!(project(&m, &layout, &mut None, &[Point::new(0, 0, 0)], None, Vec::new), Err(Failure::Unavailable(_))));
+        assert!(matches!(project(&m, &layout, &mut None, &[Point::new(0, 0, 0)], None, false, Vec::new), Err(Failure::Unavailable(_))));
     }
 }

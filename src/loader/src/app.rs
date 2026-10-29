@@ -104,6 +104,7 @@ enum Tab {
     Running,
     Scripts,
     Development,
+    Terminal,
     Settings,
 }
 
@@ -123,19 +124,18 @@ const SIDEBAR_WIDTH: f32 = 190.0;
 /// Width of the strip that toggles the sidebar on narrow windows.
 const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
 
-const DEV_TOGGLES: [&str; 33] = [
+const DEV_TOGGLES: [&str; 27] = [
     "Players",
     "NPCs",
     "Ground Items",
     "Ground Objects",
     "Game Objects",
     "Grid",
-    "Graphics Objects",
+    "Spot Animations",
     "Walls",
     "Decorations",
     "Projectiles",
     "Location",
-    "World Map Location",
     "Tile Location",
     "Camera Position",
     "Zone Borders",
@@ -145,17 +145,12 @@ const DEV_TOGGLES: [&str; 33] = [
     "Valid Movement",
     "Movement Flags",
     "Interacting",
-    "Examine",
-    "Detached Camera",
     "Widget Inspector",
     "Var Inspector",
     "Sound Effects",
     "Script Inspector",
     "Inventory Inspector",
     "Tile flags",
-    "Shell",
-    "Menus",
-    "Swing Defaults",
     "World Entities",
 ];
 
@@ -188,12 +183,11 @@ const DEV_LAYERS: [Option<&str>; DEV_TOGGLES.len()] = [
     Some("ground-objects"),
     Some("objects"),
     Some("grid"),
-    None,
+    Some("spot-anims"),
     Some("walls"),
     Some("decorations"),
-    None,
+    Some("projectiles"),
     Some("location"),
-    None,
     Some("tile-location"),
     Some("camera"),
     Some("zone-borders"),
@@ -202,19 +196,14 @@ const DEV_LAYERS: [Option<&str>; DEV_TOGGLES.len()] = [
     Some("line-of-sight"),
     Some("valid-movement"),
     Some("movement-flags"),
-    None,
-    None,
-    None,
+    Some("interacting"),
     None,
     None,
     None,
     None,
     None,
     Some("tile-flags"),
-    None,
-    None,
-    None,
-    None,
+    Some("world-entities"),
 ];
 // How long the scene tiles may keep failing before the worker gives up and reports why.
 const TILES_GIVE_UP: Duration = Duration::from_secs(10);
@@ -569,6 +558,8 @@ pub struct LoaderApp {
     tab: Tab,
     /// The sidebar drawer is open (only used when the window is too narrow to show it permanently).
     sidebar_open: bool,
+    /// The shell of the Terminal page, started the first time it is opened and kept until the app closes.
+    terminal: Option<crate::terminal::Terminal>,
     display_name: String,
     varp: usize,
     varps: Option<Vec<i32>>,
@@ -640,6 +631,7 @@ impl LoaderApp {
             settings,
             tab: Tab::Clients,
             sidebar_open: false,
+            terminal: None,
             display_name: String::new(),
             varp: varp::RUN,
             varps: None,
@@ -930,6 +922,7 @@ impl LoaderApp {
             },
             (Tab::Scripts, "\u{f044}", "editor".to_owned()),
             (Tab::Development, "\u{f188}", "development".to_owned()),
+            (Tab::Terminal, "\u{f120}", "terminal".to_owned()),
             (Tab::Settings, "\u{f013}", "settings".to_owned()),
         ];
         for (i, (tab, icon, name)) in items.iter().enumerate() {
@@ -2474,13 +2467,28 @@ impl LoaderApp {
         }
     }
 
+    fn terminal_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.terminal.get_or_insert_with(|| crate::terminal::Terminal::new(&ctx)).ui(ui);
+    }
+
     fn development_ui(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Game state").default_open(true).show(ui, |ui| self.state_ui(ui));
         egui::CollapsingHeader::new("Varps").default_open(true).show(ui, |ui| self.varps_ui(ui));
         ui.separator();
-        egui::Grid::new("development_toggles")
-            .num_columns(DEV_COLUMNS)
-            .spacing([24.0, 6.0])
+        // Drop columns as the window narrows, down to a single vertical stack.
+        let gap = 24.0;
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let widest = DEV_TOGGLES
+            .iter()
+            .map(|label| ui.painter().layout_no_wrap((*label).to_owned(), font.clone(), egui::Color32::WHITE).size().x)
+            .fold(0.0_f32, f32::max)
+            + ui.spacing().icon_width
+            + ui.spacing().icon_spacing;
+        let columns = (((ui.available_width() + gap) / (widest + gap)).floor() as usize).clamp(1, DEV_COLUMNS);
+        egui::Grid::new(("development_toggles", columns))
+            .num_columns(columns)
+            .spacing([gap, 6.0])
             .show(ui, |ui| {
                 for (index, (label, on)) in DEV_TOGGLES
                     .iter()
@@ -2489,7 +2497,7 @@ impl LoaderApp {
                 {
                     ui.add_enabled(DEV_LAYERS[index].is_some(), egui::Checkbox::new(on, *label))
                         .on_disabled_hover_text("Not ported yet.");
-                    if (index + 1) % DEV_COLUMNS == 0 {
+                    if (index + 1) % columns == 0 {
                         ui.end_row();
                     }
                 }
@@ -2511,7 +2519,7 @@ impl LoaderApp {
         let elapsed = self.run_time();
         ui.label(format!("{} · {} xp", duration(elapsed), thousands(self.xp.total())));
         let rows = self.xp.rows();
-        egui::ScrollArea::both().id_salt("xp_rows").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::both().min_scrolled_height(0.0).id_salt("xp_rows").auto_shrink([false, false]).show(ui, |ui| {
             if rows.is_empty() {
                 ui.weak("No experience gained yet.");
             } else {
@@ -2567,7 +2575,7 @@ impl LoaderApp {
             ui.label(egui::RichText::new(format!("On a {} · {} left", active.kind, duration(active.remaining))).strong());
             ui.add_space(4.0);
         }
-        egui::ScrollArea::both().id_salt("breaks_rows").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::both().min_scrolled_height(0.0).id_salt("breaks_rows").auto_shrink([false, false]).show(ui, |ui| {
             if !view.breaks.is_empty() {
                 ui.label(egui::RichText::new("Breaks").strong());
                 egui::Grid::new("breaks_grid").num_columns(2).spacing([12.0, 2.0]).show(ui, |ui| {
@@ -2680,6 +2688,10 @@ impl LoaderApp {
                 }
             });
         }
+        // what's left once the side panel took its share; the output is cropped to it rather than drawn over the panel
+        ui.shrink_clip_rect(ui.available_rect_before_wrap());
+        // what is left after the tracker: anything that doesn't fit there is cut off rather than drawn over it
+        ui.shrink_clip_rect(ui.available_rect_before_wrap());
         ui.horizontal_wrapped(|ui| self.log_controls_ui(ui));
         self.log_ui(ui);
     }
@@ -2706,6 +2718,7 @@ impl LoaderApp {
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
         egui::ScrollArea::vertical()
+            .min_scrolled_height(0.0)
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
@@ -3036,6 +3049,7 @@ impl eframe::App for LoaderApp {
                 Tab::Running => self.running_ui(ui),
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),
+                Tab::Terminal => self.terminal_ui(ui),
                 Tab::Settings => self.settings_ui(ui),
             }
         });
@@ -3050,6 +3064,9 @@ impl eframe::App for LoaderApp {
     }
 
     fn on_exit(&mut self) {
+        if let Some(terminal) = &mut self.terminal {
+            terminal.close();
+        }
         if let Some(script) = &mut self.script {
             script.stop();
         }

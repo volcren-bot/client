@@ -11,7 +11,7 @@ use crate::{
     memory::Memory,
     state,
     widgets::{self, SubInterface, Widget, find_children, find_widget},
-    world::{self, GroundItem, Item, Npc, Player},
+    world::{self, SpotAnim, GroundItem, Item, Npc, Player, Projectile},
     world_select::{self, WorldSelect},
 };
 
@@ -31,6 +31,24 @@ pub fn players(memory: &impl Memory, layout: &Layout) -> Vec<Player> {
         return Vec::new();
     }
     world::players(memory, &layout.world).unwrap_or_default()
+}
+
+pub const PROJECTILE_PARTS: u64 = part::PROJECTILES | part::WORLD;
+
+pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Vec<Projectile> {
+    if !logged_in(memory, layout) {
+        return Vec::new();
+    }
+    world::projectiles(memory, layout).unwrap_or_default()
+}
+
+pub const SPOT_ANIM_PARTS: u64 = part::SPOT_ANIMS | part::PLAYER;
+
+pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Vec<SpotAnim> {
+    if !logged_in(memory, layout) {
+        return Vec::new();
+    }
+    world::spot_anims(memory, layout).unwrap_or_default()
 }
 
 pub const GROUND_ITEM_PARTS: u64 = part::GROUND_ITEMS | part::PROJECTION | part::PLAYER;
@@ -98,6 +116,8 @@ pub fn parts(kind_id: u32) -> Option<u64> {
         kind::GAME_STATE => 0,
         kind::CHAT => part::CHAT,
         kind::WORLD_SELECT => part::WORLD_SELECT,
+        kind::PROJECTILES => PROJECTILE_PARTS,
+        kind::SPOT_ANIMS => SPOT_ANIM_PARTS,
         _ => return None,
     })
 }
@@ -123,6 +143,8 @@ pub fn serve(memory: &impl Memory, layout: &Layout, kind_id: u32, args: [i32; 4]
         kind::VARC => put(&varc(memory, layout, args[0]), out),
         kind::CHAT => put(&chat(memory, layout, (args[0] as u32 as i64) | ((args[1] as i64) << 32)), out),
         kind::WORLD_SELECT => put(&world_select(memory, layout), out),
+        kind::PROJECTILES => put(&projectiles(memory, layout), out),
+        kind::SPOT_ANIMS => put(&spot_anims(memory, layout), out),
         _ => Err(status::NOT_FOUND),
     }
 }

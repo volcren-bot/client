@@ -15,6 +15,7 @@ mod highlight;
 mod script;
 mod session;
 mod store;
+mod terminal;
 mod theme;
 mod libs;
 mod logo;

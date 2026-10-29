@@ -130,6 +130,35 @@ pub fn table_get(memory: &impl Memory, table: u64, key: i32) -> Option<u64> {
     None
 }
 
+/// Every (key, value) in a table `table_get` reads, in no order.
+pub fn table_entries(memory: &impl Memory, table: u64) -> Vec<(i32, u64)> {
+    let (Some(buckets), Some(count)) = (memory.ptr(table + TABLE_BUCKETS), memory.i32(table + TABLE_COUNT)) else { return Vec::new() };
+    let count = count as u32 as u64;
+    if count == 0 || count > 1 << 16 {
+        return Vec::new();
+    }
+    let Some(end) = memory.u64(buckets + count * 8) else { return Vec::new() };
+    let mut seen = alloc::collections::BTreeSet::new();
+    let mut entries = Vec::new();
+    for bucket in 0..count {
+        let mut node = memory.u64(buckets + bucket * 8).unwrap_or(0);
+        for _ in 0..MAX_CHAIN {
+            if node == 0 || node == end || !seen.insert(node) {
+                break;
+            }
+            let mut fields = [0u8; NODE_SIZE];
+            if !memory.read(node, &mut fields) {
+                break;
+            }
+            let key = i32::from_le_bytes(fields[..4].try_into().unwrap());
+            let value = u64::from_le_bytes(fields[NODE_VALUE as usize..][..8].try_into().unwrap());
+            entries.push((key, value));
+            node = u64::from_le_bytes(fields[NODE_NEXT as usize..].try_into().unwrap());
+        }
+    }
+    entries
+}
+
 pub fn local_player(memory: &impl Memory, layout: &Layout) -> Option<(u64, u64)> {
     if !layout.has(part::PLAYER) {
         return None;

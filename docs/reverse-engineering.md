@@ -69,3 +69,22 @@ The client rebuilds the scene from a map-rebuild packet, in the packet dispatche
 - The world view `local_player` returns has the live `baseX`/`baseY` but none of this; other objects carry stale copies of the base coordinates (they look live but never change), so match by structure, not by value.
 - `map_regions` finds all of this by shape and takes it only when exactly one builder in the client's loader has a vector of that shape; nothing is an address or a fixed offset. If a game update makes it fail, the code anchors are the two builder methods (each stores its vtable into a fresh `0xf8`/`0xb0` byte object and sets the `+0x54dd` flag) and their caller, the packet dispatcher.
 - Instances are placed at x >= 6400, so `Position.in_instance` is a coordinate test; the loader tells which squares an instance copies.
+
+### Projectiles (`offsets/projectiles.rs`)
+
+Java keeps projectiles in `Client.projectiles`; the native client keeps them in a circular list inside the client object (the one the `client` global points to): the list head is its own sentinel node (next, previous, size at `+0x10`), and each node holds a `shared_ptr` whose object pointer (`+0x18`) is the projectile.
+
+- The anchor is the update function (Java's `Projectile.am`): the only code that reads the double `0.02454369` (`tan(slope * 0.02454369)`). Its first `.pdata` entry holding the constant is a chained chunk, so `chunk_root` walks back to the function. It gives every field but the id: the start cycle (first compare), the target and then the source position (two calls to one helper with actor in `edx`, x in `r8d`, y in `r9d`, level on the stack, each followed by `sub` of the end or start height), the `moving` byte (Java's `ay`), slope, start position, end cycle (`- cycle + 1`), the x, z, y doubles (written back to the caller in that order) and the orientation (the first `and 0x7ff` store).
+- Its only caller is the loop (Java's `Client.pp`), which compares the end cycle with the client cycle global (the same one chat uses), and a client method `mov rdx, rcx; add rcx, list; jmp loop` gives the list's offset.
+- The constructor copies a parameter block over the fields from the source level (`movups`), clears `moving`, and ends with the id, which it reads back to look up the spot animation.
+- Tiles are world coordinates; actors are NPC index + 1 or -(player index + 1), 0 for none; the server often sends no source actor (your own bolts have none). `z` counts from the heightmap's zero: the height above the ground is the bilinear heightmap height minus `z`.
+
+### Spot animations on tiles (`offsets/spot_anims.rs`)
+
+Java's `GraphicsObject`s (RuneLite: graphics objects). They are not on actors: an actor's own spot animation is the `graphic` of the NPC or player. The native client keeps the tile ones in a circular list in the world view (not the client object, unlike projectiles): head at `world view + 0x160` (next, previous, size at `+0x10`), each node holding the object pointer at `+0x18`, like the projectile list.
+
+- The anchor is the object's constructor, found by shape: a function of at most 0x200 bytes that looks up the spot animation for the id (`call lookup; mov rdx, [rax+8]; mov edx, [rdx+8]; call init`, as the projectile constructor does) and stores its parameters in fields of `this`. The id is the register it passes to the lookup; the level is the one stored from `r9d`; the three stack parameters are x, y and z in stack order; the start cycle is `add edx, [rsp+n]` (the delay plus the client cycle).
+- The constructor is `std::make_shared`'s: a thunk that tail-jumps to it, called from the packet handler for the spot-animation packet. One site calls it directly and one goes through a small wrapper that allocates the block; both then append the new object to the list (`lea rcx, [view + list]` or `add rcx, list`, then a call), which gives the list offset. The last stack argument of the call is the address of the client cycle.
+- Fields (build of 2026-10-28): start cycle `+0x260`, level `+0x264`, local fine x, y and z `+0x268`, `+0x26c`, `+0x270` (z is the ground height at the tile minus the height the server sent, so negative is up), id `+0x274`, world view `+0x278`, animation state `+0x280`.
+- Camelot Teleport and other spells that flash on the caster set the actor's spot animation, not this list; Telekinetic Grab on a ground item places id 144 on the item's tile, a handy live trigger. Only the local player's world view is read.
+

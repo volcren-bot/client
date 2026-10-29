@@ -31,6 +31,8 @@ pub mod part {
     pub const CHAT: u64 = 1 << 14;
     pub const COLLISION: u64 = 1 << 15;
     pub const SCENE_LOADER: u64 = 1 << 16;
+    pub const PROJECTILES: u64 = 1 << 17;
+    pub const SPOT_ANIMS: u64 = 1 << 18;
 }
 
 pub mod varp {
@@ -309,6 +311,56 @@ pub struct SceneLoaderLayout {
     pub instance_flag: u32,
 }
 
+// The projectiles in flight: a circular list at `client + list` whose head is its sentinel node (next, previous, size),
+// each node holding a projectile pointer at `node`; `cycle` is the module RVA of the client cycle the start and end
+// cycles count in. The rest are projectile fields: tiles and planes (world coordinates), actors (NPC index + 1, or
+// -(player index + 1), 0 for none), heights, cycles, the local fine position as doubles, and the `moving` byte.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProjectileLayout {
+    pub list: u32,
+    pub node: u32,
+    pub cycle: u32,
+    pub source_level: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_actor: u32,
+    pub start_height: u32,
+    pub target_level: u32,
+    pub target_x: u32,
+    pub target_y: u32,
+    pub target_actor: u32,
+    pub end_height: u32,
+    pub start_cycle: u32,
+    pub end_cycle: u32,
+    pub slope: u32,
+    pub start_pos: u32,
+    pub id: u32,
+    pub x: u32,
+    pub z: u32,
+    pub y: u32,
+    pub orientation: u32,
+    pub moving: u32,
+    pub reserved: u32,
+}
+
+// The spot animations on tiles (Java's spot animations): a circular list at `world view + list` whose head is its
+// sentinel node (next, previous, size), each node holding the object pointer at the shared pointer's slot. `cycle` is the
+// module RVA of the client cycle `start_cycle` counts in. The rest are object fields: plane, the local fine position and
+// height, and the spot animation id.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpotAnimLayout {
+    pub list: u32,
+    pub cycle: u32,
+    pub start_cycle: u32,
+    pub level: u32,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub id: u32,
+}
+
 pub mod collision_map {
     pub const WIDTH: usize = 0x8;
     pub const HEIGHT: usize = 0xc;
@@ -352,6 +404,8 @@ pub struct Layout {
     pub chat: ChatLayout,
     pub collision: CollisionLayout,
     pub scene_loader: SceneLoaderLayout,
+    pub projectiles: ProjectileLayout,
+    pub spot_anims: SpotAnimLayout,
 }
 
 impl Layout {
@@ -793,6 +847,8 @@ pub mod worker_kind {
     pub const VARC: u32 = 9;
     pub const CHAT: u32 = 10;
     pub const WORLD_SELECT: u32 = 11;
+    pub const PROJECTILES: u32 = 12;
+    pub const SPOT_ANIMS: u32 = 13;
 }
 
 pub mod worker_status {
@@ -1725,9 +1781,11 @@ mod tests {
         );
         assert_eq!(size_of::<ProjectionLayout>(), 24 * 4);
         assert_eq!(size_of::<ChatLayout>(), 10 * 4);
+        assert_eq!(size_of::<ProjectileLayout>(), 24 * 4);
+        assert_eq!(size_of::<SpotAnimLayout>(), 8 * 4);
         assert_eq!(
             offset_of!(LayoutMemory, request_sequence),
-            8 + 96 + 96 + 120 + 56 + 28 + 96 + 16 + 40 + 8 + 4
+            8 + 96 + 96 + 120 + 56 + 28 + 96 + 16 + 40 + 8 + 4 + 96 + 32
         );
         let entry = MENU_OPTION_SIZE + MENU_TARGET_SIZE + 20;
         assert_eq!(size_of::<MenuEntryInfo>(), entry);
@@ -1753,6 +1811,8 @@ mod tests {
                 + 40
                 + 8
                 + 4
+                + 96
+                + 32
                 + 8
                 + 56
                 + 8

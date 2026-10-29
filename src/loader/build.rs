@@ -21,7 +21,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VOLCREN_VERSION");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rustc-env=VOLCREN_VERSION={}", version());
-    let env_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env");
+    // Read at run time, not with `env!`, so a cached build script doesn't keep looking at the directory the project used to live in.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let env_file = Path::new(&manifest_dir).join("../../.env");
     println!("cargo:rerun-if-changed={}", env_file.display());
     let contents = fs::read_to_string(&env_file).unwrap_or_default();
     for key in KEYS {

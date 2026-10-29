@@ -21,7 +21,7 @@ Real code only on Windows. On other targets the same API compiles to stubs retur
 | `async_input.rs` | `Worker<J>`: one thread per pid running queued jobs, `cancel` (drop the queue, stop the running job, return once idle), `Pace` (the sleep/cancelled hook input code goes through). Platform independent, so it is tested natively. |
 | `input_jobs.rs` | The jobs the sandbox's worker runs (`Job`: an input or a wait) and the held-button/key tracking released on cancel. |
 | `font.rs` | The game's bitmap fonts, decoded from the cache, for overlay text. |
-| `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). |
+| `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). The overlays themselves are `win::scene_tiles` layers; `spot-anims` outlines each spot animation's tile in magenta with its id, and `projectiles` labels each projectile with its id and cycles left at its 3D position (height from the terrain's heightmap) and draws a line to where it lands (the target actor's tile when it has one). |
 | `form.rs` | Script settings form spec and the `STATS_PREFIX` line format, shared with the loader. |
 | `sandbox.rs` | The Luau runtime (`mlua` with `luau-jit`) and every script global. |
 | `main.rs` | CLI. |
@@ -29,7 +29,7 @@ Real code only on Windows. On other targets the same API compiles to stubs retur
 ## Session cache and the agent's worker
 
 - `win.rs` keeps a `Session` per pid for 500 ms (process handle, mapped state block, the agent's work event), so a read doesn't reopen them; `forget(pid)` drops it on agent load/unload, a protocol mismatch or a request timeout. `input.rs` caches the `JagRenderView` window per pid and checks it with `IsWindow`.
-- Every pure memory read (`npcs`, `players`, `ground_items`, `widget`, `widget_children`, `sub_interfaces`, `game_state`, `item_container`, `varc`, `chat_messages`, `world_select`) first asks the agent's worker thread (`ask_worker`, see `work_event_name` in [ipc-protocol.md](ipc-protocol.md)) and decodes its postcard answer; the same `decode::worker` function runs through `ReadProcessMemory` when it can't answer. `npcs` takes about 0.09 ms against 2.4 ms that way. The first call after an agent reload may fall back.
+- Every pure memory read (`npcs`, `players`, `ground_items`, `projectiles`, `spot_anims`, `widget`, `widget_children`, `sub_interfaces`, `game_state`, `item_container`, `varc`, `chat_messages`, `world_select`) first asks the agent's worker thread (`ask_worker`, see `work_event_name` in [ipc-protocol.md](ipc-protocol.md)) and decodes its postcard answer; the same `decode::worker` function runs through `ReadProcessMemory` when it can't answer. `npcs` takes about 0.09 ms against 2.4 ms that way. The first call after an agent reload may fall back.
 - `ground_items` keeps item names in a per-process cache: a name never changes while the client runs, so only unseen ids cost a game-thread request.
 
 ## CLI

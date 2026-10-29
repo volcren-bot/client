@@ -6,13 +6,13 @@ use serde::Serialize;
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
-use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, send_input, send_input_with, varc, varp_value, varps, widget, widget_children, world_select};
+use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_hitsplats, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, projectiles, send_input, send_input_with, spot_anims, varc, varp_value, varps, widget, widget_children, world_select};
 #[cfg(not(windows))]
 use offline::*;
 
 #[cfg(not(windows))]
 mod offline {
-    use crate::{ChatMessage, Connection, EntityModel, GameState, GroundItem, Input, Item, Loc, MenuClick, MenuEntry, MenuLayout, Npc, Overlay, Player, SubInterface, Widget, WorldSelect};
+    use crate::{ChatMessage, Connection, EntityModel, GameState, GroundItem, Input, Item, Loc, MenuClick, MenuEntry, MenuLayout, Npc, Overlay, Player, Projectile, SpotAnim, SubInterface, Widget, WorldSelect};
 
     const NO_WIN32: &str = "clients can only be reached from Windows or Wine";
 
@@ -88,6 +88,12 @@ mod offline {
     pub fn ground_items(_: u32) -> Result<Vec<GroundItem>, String> {
         Err(NO_WIN32.into())
     }
+    pub fn projectiles(_: u32) -> Result<Vec<Projectile>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn spot_anims(_: u32) -> Result<Vec<SpotAnim>, String> {
+        Err(NO_WIN32.into())
+    }
     pub fn chat_messages(_: u32) -> Result<Vec<ChatMessage>, String> {
         Err(NO_WIN32.into())
     }
@@ -110,6 +116,9 @@ mod offline {
         Err(NO_WIN32.into())
     }
     pub fn npc_sizes(_: u32, _: &[i32]) -> Result<std::collections::BTreeMap<i32, i32>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn npc_hitsplats(_: u32, _: &[i32]) -> Result<std::collections::BTreeMap<i32, Vec<decode::world::Hitsplat>>, String> {
         Err(NO_WIN32.into())
     }
     pub fn scene_collision(_: u32) -> Result<(i32, i32, i32, Vec<Vec<u32>>), String> {
@@ -346,6 +355,8 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("npcs", "main/entities/npcs.luau"),
     lib_module!("objects", "main/entities/objects.luau"),
     lib_module!("ground_items", "main/entities/ground_items.luau"),
+    lib_module!("projectiles", "main/entities/projectiles.luau"),
+    lib_module!("spot_anims", "main/entities/spot_anims.luau"),
     lib_module!("clickbox", "main/clickbox.luau"),
     lib_module!("varps", "main/varps.luau"),
     lib_module!("varbits", "main/varbits.luau"),
@@ -396,7 +407,7 @@ fn fine_point(p: &mlua::Table) -> mlua::Result<crate::projection::Point> {
         Some(t) => Some([t.get::<i32>("x")?, t.get::<i32>("y")?]),
         None => None,
     };
-    Ok(crate::projection::Point { x: p.get("x")?, y: p.get("y")?, z: p.get::<Option<i32>>("z")?.unwrap_or(0), tile })
+    Ok(crate::projection::Point { tile, ..crate::projection::Point::new(p.get("x")?, p.get("y")?, p.get::<Option<i32>>("z")?.unwrap_or(0)) })
 }
 
 fn module_name(path: &str) -> &str {
@@ -721,10 +732,13 @@ pub fn run_with_modules(
     globals.set("npcs", query(&lua, pid, |pid, (): ()| npcs(pid))?)?;
     globals.set("npc_model", query(&lua, pid, |pid, index: i32| Ok(npc_model(pid, index)?.map(script_model)))?)?;
     globals.set("npc_sizes", query(&lua, pid, |pid, indices: Vec<i32>| npc_sizes(pid, &indices))?)?;
+    globals.set("npc_hitsplats", query(&lua, pid, |pid, indices: Vec<i32>| npc_hitsplats(pid, &indices))?)?;
     globals.set("locs", query(&lua, pid, |pid, plane: Option<i32>| locs(pid, plane))?)?;
     globals.set("map_regions", query(&lua, pid, |pid, (): ()| map_regions(pid))?)?;
     globals.set("in_instance", query(&lua, pid, |pid, (): ()| in_instance(pid))?)?;
     globals.set("ground_items", query(&lua, pid, |pid, (): ()| ground_items(pid))?)?;
+    globals.set("projectiles", query(&lua, pid, |pid, (): ()| projectiles(pid))?)?;
+    globals.set("spot_anims", query(&lua, pid, |pid, (): ()| spot_anims(pid))?)?;
     globals.set("chat_messages", query(&lua, pid, |pid, (): ()| chat_messages(pid))?)?;
     globals.set(
         "find_path",
