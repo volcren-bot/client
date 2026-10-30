@@ -29,7 +29,7 @@ struct Server {
     entry: &'static str,
     /// 404 for the lib index, as before the first lib release.
     no_lib: bool,
-    /// Credits per minute of the started session; a premium script's files stay in memory.
+    /// Credits per minute of the started session.
     price: i64,
     /// Serve the files encrypted, and the key with the session.
     encrypted: bool,
@@ -183,8 +183,7 @@ fn a_store_script_runs_from_start_to_end() {
     assert_eq!(prepared.session.session_id, "s1");
     let dir = revision_dir(&root, SCRIPT_ID, 4);
     assert_eq!(prepared.entry, dir.join("main.luau"));
-    // A premium script is never written to disk: its other files are handed over in memory.
-    assert!(prepared.premium);
+    // A script is never written to disk: its other files are handed over in memory.
     assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
     assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "the revision folder is empty");
     // The lib sits beside the revision folders, which is where `require("../lib/...")` looks.
@@ -220,59 +219,33 @@ fn a_store_script_runs_from_start_to_end() {
 #[test]
 fn encrypted_files_are_opened_with_the_session_key() {
     let root = cache("encrypted");
-    // premium: decrypted in memory only
     let fake = Server { encrypted: true, ..Server::healthy() }.start();
     let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
     assert_eq!(prepared.source, MAIN);
     assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
     assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 4)).unwrap().count(), 0);
-    // free: cached decrypted, so the next start needs no key to read it
-    let fake = Server { encrypted: true, price: 0, revision: 6, ..Server::healthy() }.start();
-    let prepared = prepare_in(&api(&fake), &free_script(), &root).expect("prepare");
-    assert_eq!(prepared.source, MAIN);
-    assert_eq!(fs::read_to_string(revision_dir(&root, SCRIPT_ID, 6).join("util.luau")).unwrap(), UTIL);
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
-fn a_session_priced_zero_for_a_premium_script_is_still_premium() {
-    // authors and testers run for free, but the script is still premium: nothing of it is written to disk
-    let root = cache("premium-free-session");
-    let fake = Server { price: 0, ..Server::healthy() }.start();
-    let premium_listing: StoreScript = serde_json::from_value(json!({
-        "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 30, "revision": 4, "can_access": true
-    }))
-    .unwrap();
-    let prepared = prepare_in(&api(&fake), &premium_listing, &root).expect("prepare");
-    assert!(prepared.premium);
+fn a_free_script_is_never_written_to_disk_either() {
+    let root = cache("free");
+    let free = Server { price: 0, ..Server::healthy() }.start();
+    let prepared = prepare_in(&api(&free), &free_script(), &root).unwrap();
+    assert_eq!(prepared.source, MAIN);
+    assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
     assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 4)).unwrap().count(), 0);
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
-fn a_free_script_is_cached_and_a_premium_one_is_not() {
-    let root = cache("free");
-    let free = Server { price: 0, ..Server::healthy() }.start();
-    let prepared = prepare_in(&api(&free), &free_script(), &root).unwrap();
-    assert!(!prepared.premium);
-    assert!(prepared.modules.is_empty());
-    let dir = revision_dir(&root, SCRIPT_ID, 4);
-    assert_eq!(fs::read_to_string(dir.join("util.luau")).unwrap(), UTIL);
-    assert_eq!(fs::read_to_string(dir.join("main.luau")).unwrap(), MAIN);
-    // Once it costs credits, the cached copy is removed.
-    prepare_in(&api(&Server::healthy().start()), &script(), &root).unwrap();
-    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
-fn a_second_start_reuses_the_download_and_the_lib() {
+fn every_start_downloads_the_files_again_but_reuses_the_lib() {
     let fake = Server { price: 0, ..Server::healthy() }.start();
     let api = api(&fake);
     let root = cache("reuse");
     prepare_in(&api, &free_script(), &root).unwrap();
     prepare_in(&api, &free_script(), &root).unwrap();
-    assert_eq!(fake.count("GET", "/files/main.luau"), 1);
+    assert_eq!(fake.count("GET", "/files/main.luau"), 2);
     assert_eq!(fake.count("GET", "/storage/v1/object/public/client/lib/index.json"), 2, "the index is checked every time");
     assert_eq!(fake.count("GET", &format!("/storage/v1/object/public/client/lib/{LIB_VERSION}/lib.zip")), 1);
     assert_eq!(fake.count("POST", "/launcher/sessions"), 2);
@@ -280,14 +253,16 @@ fn a_second_start_reuses_the_download_and_the_lib() {
 }
 
 #[test]
-fn a_new_revision_replaces_the_old_one_in_the_cache() {
+fn a_new_revision_removes_the_old_one_from_the_cache() {
     let root = cache("revisions");
-    let old = Server { revision: 4, price: 0, ..Server::healthy() }.start();
-    prepare_in(&api(&old), &free_script(), &root).unwrap();
+    // a copy left on disk by an earlier loader
+    let old = revision_dir(&root, SCRIPT_ID, 4);
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("main.luau"), MAIN).unwrap();
     let new = Server { revision: 5, price: 0, ..Server::healthy() }.start();
     prepare_in(&api(&new), &free_script(), &root).unwrap();
-    assert!(!revision_dir(&root, SCRIPT_ID, 4).exists());
-    assert!(revision_dir(&root, SCRIPT_ID, 5).join("main.luau").is_file());
+    assert!(!old.exists());
+    assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 5)).unwrap().count(), 0);
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -1,8 +1,7 @@
-//! Running a store script: start a session, download the live revision into the cache, and keep the session billed with heartbeats.
+//! Running a store script: start a session, download the live revision into memory, and keep the session billed with heartbeats.
 
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -16,7 +15,6 @@ use crate::api::{Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript, m
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(4 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
-const COMPLETE: &str = ".complete";
 
 /// The cache folder: each revision is `<script id>_<revision>` in it, with the shared `lib` beside them.
 pub fn cache_root() -> Option<PathBuf> {
@@ -85,10 +83,8 @@ pub struct Prepared {
     pub session: StartedSession,
     pub entry: PathBuf,
     pub source: String,
-    /// A premium script's other files by name. They are only ever in memory, and go to the injector over its stdin.
+    /// The script's other files by name. They are only ever in memory, and go to the injector over its stdin.
     pub modules: Vec<(String, String)>,
-    /// The script costs credits: its files are never written to disk, and its source isn't shown.
-    pub premium: bool,
     /// Something the user should know before the script runs, such as an outdated loader.
     pub warning: Option<String>,
 }
@@ -118,13 +114,10 @@ pub fn prepare_warned(api: &Api, script: &StoreScript, root: &Path, warned: Opti
             script.title
         ));
     }
-    // The session's price is 0 for the author and testers, so the listed price counts too.
-    let premium = session.price > 0 || script.price > 0;
-    let downloaded = if premium { download_to_memory(api, root, id, &session) } else { download(api, root, id, &session).map(|(entry, source)| (entry, source, Vec::new())) };
-    match downloaded {
+    match download_to_memory(api, root, id, &session) {
         Ok((entry, source, modules)) => {
             prune_old(root, id, session.revision);
-            Ok(Prepared { session, entry, source, modules, premium, warning: lib.warning })
+            Ok(Prepared { session, entry, source, modules, warning: lib.warning })
         }
         Err(error) => {
             let _ = api.end_session(&session.session_id);
@@ -158,7 +151,7 @@ fn fetch(api: &Api, id: &str, session: &StartedSession, url: &str, name: &str, s
 // The entry path, its source, and the other modules as (name, source).
 type Downloaded = (PathBuf, String, Vec<(String, String)>);
 
-/// A premium script's files, kept in memory (an earlier cached copy is removed); the entry path points into an empty folder.
+/// A script's files, kept in memory (an earlier cached copy is removed); the entry path points into an empty folder.
 fn download_to_memory(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<Downloaded, String> {
     let names = session
         .files
@@ -188,36 +181,6 @@ fn download_to_memory(api: &Api, root: &Path, id: &str, session: &StartedSession
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the cache folder: {e}"))?;
     Ok((dir.join(entry_name), source.ok_or("The entry file wasn't downloaded.")?, modules))
-}
-
-fn download(api: &Api, root: &Path, id: &str, session: &StartedSession) -> Result<(PathBuf, String), String> {
-    let dir = revision_dir(root, id, session.revision);
-    let names = session
-        .files
-        .iter()
-        .map(|file| safe_file_name(&file.name).ok_or_else(|| format!("The server sent a file name that can't be used: {:?}", file.name)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let entry_name = safe_file_name(&session.entry)
-        .filter(|entry| names.contains(entry))
-        .ok_or_else(|| format!("This revision's entry file {:?} isn't one of its files.", session.entry))?;
-
-    // A finished download of this revision is reused. Revisions never change once published.
-    if !(dir.join(COMPLETE).is_file() && names.iter().all(|name| dir.join(name).is_file())) {
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the cache folder: {e}"))?;
-        for (file, name) in session.files.iter().zip(&names) {
-            let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
-            fs::write(dir.join(name), &bytes).map_err(|e| format!("Couldn't save {name}: {e}"))?;
-        }
-        fs::write(dir.join(COMPLETE), b"").map_err(|e| format!("Couldn't finish the download: {e}"))?;
-    }
-
-    let entry = dir.join(entry_name);
-    let mut source = String::new();
-    fs::File::open(&entry)
-        .and_then(|mut file| file.read_to_string(&mut source))
-        .map_err(|e| format!("Couldn't read {entry_name}: {e}"))?;
-    Ok((entry, source))
 }
 
 /// What the app should do after a heartbeat answer.
