@@ -2024,7 +2024,7 @@ impl LoaderApp {
                         self.error(error);
                     }
                     if !self.targets.iter().any(|t| Some(t.key()) == self.selected) {
-                        self.selected = (self.targets.len() == 1).then(|| self.targets[0].key());
+                        self.selected = self.targets.first().map(Target::key);
                     }
                 }
                 Event::Loaded { pid, result } => {
