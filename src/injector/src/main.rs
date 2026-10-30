@@ -259,6 +259,10 @@ fn main() -> std::process::ExitCode {
                 (Ok(pid), Ok(since)) => json(injector::packets(pid, since, PACKETS_PER_READ)),
                 _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
             },
+            ["packet-layouts", pid] => match pid.parse() {
+                Ok(pid) => json(injector::packet_layouts(pid)),
+                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
+            },
             ["scripts", pid, since] => match (pid.parse(), since.parse()) {
                 (Ok(pid), Ok(since)) => json(injector::script_runs(pid, since, SCRIPT_RUNS_PER_READ)),
                 _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
@@ -418,9 +422,15 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         eprintln!("Couldn't read the script from stdin.");
         return std::process::ExitCode::from(2);
     }
-    // The loader says first that it answers PIN requests (`bank_pin_enter()` asks it for the logged in account's PIN).
-    let loader_has_pins = first.trim_end() == form::PINS_PREFIX;
-    if loader_has_pins {
+    // The loader says first what it answers: PIN requests (`bank_pin_enter()` asks it for the logged in account's PIN) and
+    // HTTP requests (`http_request()`).
+    let (mut loader_has_pins, mut loader_has_http) = (false, false);
+    loop {
+        match first.trim_end() {
+            form::PINS_PREFIX => loader_has_pins = true,
+            injector::http::CAPABILITY_PREFIX => loader_has_http = true,
+            _ => break,
+        }
         first.clear();
         if input.read_line(&mut first).is_err() {
             eprintln!("Couldn't read the script from stdin.");
@@ -451,7 +461,7 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                 eprintln!("Couldn't read the script from stdin.");
                 return std::process::ExitCode::from(2);
             }
-            // The form and PIN requests share stdin: the script waits on each reply, so they never interleave.
+            // The form, PIN and HTTP requests share stdin: the script waits on each reply, so they never interleave.
             let input = std::sync::Arc::new(std::sync::Mutex::new(input));
             let ask = move |input: &std::sync::Mutex<std::io::BufReader<std::io::Stdin>>, request: String| -> Result<String, String> {
                 {
@@ -467,6 +477,10 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             if loader_has_pins {
                 let input = input.clone();
                 injector::bank_pin::set_lookup(Box::new(move |hash| form::parse_pin_reply(&ask(&input, form::pin_request_line(hash))?)));
+            }
+            if loader_has_http {
+                let input = input.clone();
+                injector::http::set_handler(Box::new(move |request| injector::http::parse_reply(&ask(&input, injector::http::request_line(request))?)));
             }
             let handler: form::FormHandler = Box::new(move |spec| form::parse_reply(&ask(&input, form::request_line(spec))?));
             (String::from_utf8_lossy(&bytes).into_owned(), Some(handler))

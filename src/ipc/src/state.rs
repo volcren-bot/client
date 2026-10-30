@@ -33,6 +33,7 @@ pub mod part {
     pub const SCENE_LOADER: u64 = 1 << 16;
     pub const PROJECTILES: u64 = 1 << 17;
     pub const SPOT_ANIMS: u64 = 1 << 18;
+    pub const PATH: u64 = 1 << 19;
 }
 
 pub mod varp {
@@ -355,6 +356,16 @@ pub struct SpotAnimLayout {
     pub id: u32,
 }
 
+// An actor's path, scene tiles newest first: entry 0 of `x` and `y` (each `[i32; 10]`) is the tile the server last put it on; `length` the steps it still has to walk.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathLayout {
+    pub x: u32,
+    pub y: u32,
+    pub length: u32,
+    pub reserved: u32,
+}
+
 pub mod collision_map {
     pub const WIDTH: usize = 0x8;
     pub const HEIGHT: usize = 0xc;
@@ -400,6 +411,7 @@ pub struct Layout {
     pub scene_loader: SceneLoaderLayout,
     pub projectiles: ProjectileLayout,
     pub spot_anims: SpotAnimLayout,
+    pub path: PathLayout,
 }
 
 impl Layout {
@@ -1769,9 +1781,10 @@ mod tests {
         assert_eq!(size_of::<ChatLayout>(), 10 * 4);
         assert_eq!(size_of::<ProjectileLayout>(), 24 * 4);
         assert_eq!(size_of::<SpotAnimLayout>(), 8 * 4);
+        assert_eq!(size_of::<PathLayout>(), 4 * 4);
         assert_eq!(
             offset_of!(LayoutMemory, request_sequence),
-            8 + 96 + 96 + 120 + 56 + 28 + 96 + 16 + 40 + 8 + 4 + 96 + 32
+            8 + 96 + 96 + 120 + 56 + 28 + 96 + 16 + 40 + 8 + 4 + 96 + 32 + 16
         );
         let entry = MENU_OPTION_SIZE + MENU_TARGET_SIZE + 20;
         assert_eq!(size_of::<MenuEntryInfo>(), entry);
@@ -1799,6 +1812,7 @@ mod tests {
                 + 4
                 + 96
                 + 32
+                + 16
                 + 8
                 + 56
                 + 8

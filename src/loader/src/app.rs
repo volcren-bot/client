@@ -68,6 +68,11 @@ enum Event {
         pid: u32,
         result: Result<injector::PacketPage, String>,
     },
+    /// What the agent read about the client's packets, for the packet monitor.
+    PacketLayouts {
+        pid: u32,
+        result: Result<Option<Vec<injector::PacketLayout>>, String>,
+    },
     /// A read of the script log for the script inspector.
     ScriptRuns {
         pid: u32,
@@ -145,21 +150,30 @@ enum Tab {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DevTab {
     Tools,
-    WidgetInspector,
-    VarInspector,
-    ScriptInspector,
-    InventoryInspector,
-    PacketInspector,
+    Inspectors,
 }
 
 impl DevTab {
-    const ALL: [(DevTab, &'static str); 6] = [
-        (DevTab::Tools, "Tools"),
-        (DevTab::WidgetInspector, "Widget Inspector"),
-        (DevTab::VarInspector, "Var Inspector"),
-        (DevTab::ScriptInspector, "Script Inspector"),
-        (DevTab::InventoryInspector, "Inventory Inspector"),
-        (DevTab::PacketInspector, "Packet Inspector"),
+    const ALL: [(DevTab, &'static str); 2] = [(DevTab::Tools, "Tools"), (DevTab::Inspectors, "Inspectors")];
+}
+
+/// The tabs inside the Inspectors tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InspectorTab {
+    Widget,
+    Var,
+    Script,
+    Inventory,
+    Packet,
+}
+
+impl InspectorTab {
+    const ALL: [(InspectorTab, &'static str); 5] = [
+        (InspectorTab::Widget, "Widget"),
+        (InspectorTab::Var, "Var"),
+        (InspectorTab::Script, "Script"),
+        (InspectorTab::Inventory, "Inventory"),
+        (InspectorTab::Packet, "Packet"),
     ];
 }
 
@@ -262,14 +276,16 @@ struct TilesWorker {
     pid: u32,
     layers: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl TilesWorker {
     fn start(ctx: &egui::Context, tx: Sender<Event>, target: Target, settings: Settings, layers: Vec<String>) -> Self {
         let pid = target.client.pid;
-        let worker = Self { pid, layers: Arc::new(Mutex::new(layers)), stop: Arc::new(AtomicBool::new(false)) };
+        let worker = Self { pid, layers: Arc::new(Mutex::new(layers)), stop: Arc::new(AtomicBool::new(false)), thread: None };
         let (layers, stop, ctx) = (worker.layers.clone(), worker.stop.clone(), ctx.clone());
-        thread::spawn(move || {
+        let mut worker = worker;
+        worker.thread = Some(thread::spawn(move || {
             // the frame last painted after; the first paint waits for any frame
             let mut frame = 0;
             // since when the paints have been failing
@@ -300,8 +316,16 @@ impl TilesWorker {
             }
             // Take the boxes off the client once nothing can paint them again.
             let _ = backend::draw(&target, &settings, &Overlay::Clear);
-        });
+        }));
         worker
+    }
+
+    /// Stops painting and waits until the boxes are off the client; the loader is about to exit, which would cut the clear short.
+    fn finish(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -315,6 +339,8 @@ const SCRIPT_KEY: &str = "script";
 const FORMS_KEY: &str = "forms";
 const CURSOR_KEY: &str = "cursor";
 const CONFIRMED_KEY: &str = "community_confirmed";
+/// The hosts the user added to the HTTP whitelist (the built-in ones are not stored).
+const HTTP_WHITELIST_KEY: &str = "http_whitelist";
 
 /// How often the XP tracker reads the client while a script runs.
 const XP_READ_EVERY: Duration = Duration::from_secs(5);
@@ -440,13 +466,129 @@ const KNOWN_VARPS: [(&str, usize); 11] = [
     ("Last home teleport", 892),
 ];
 
-/// The tick column of an inspector row: the tick on the first row of that tick, blank under it.
-fn tick_column(first: bool, tick: Option<i32>) -> String {
-    match (first, tick) {
-        (true, Some(tick)) => format!("{tick:>8}  "),
-        (true, None) => format!("{:>8}  ", "?"),
-        (false, _) => " ".repeat(10),
+/// A Development inspector's log as a table: a header that stays put, columns the user can resize, rows drawn only while visible.
+/// `columns` are (title, column); the last one should be `remainder`. `row` fills one row's cells, given the row.
+struct LogTable<'a> {
+    id: &'a str,
+    follow: bool,
+    row_height: f32,
+    max_height: Option<f32>,
+    clickable: bool,
+}
+
+impl LogTable<'_> {
+    fn show(&self, ui: &mut egui::Ui, columns: Vec<(&str, egui_extras::Column)>, rows: usize, row: impl FnMut(egui_extras::TableRow<'_, '_>)) {
+        // text that can be selected takes the clicks a clickable row wants
+        ui.scope(|ui| {
+            ui.style_mut().interaction.selectable_labels = !self.clickable;
+            self.table(ui, columns, rows, row);
+        });
     }
+
+    fn table(&self, ui: &mut egui::Ui, columns: Vec<(&str, egui_extras::Column)>, rows: usize, row: impl FnMut(egui_extras::TableRow<'_, '_>)) {
+        let mut table = egui_extras::TableBuilder::new(ui)
+            .id_salt(self.id)
+            .striped(true)
+            .resizable(true)
+            .stick_to_bottom(self.follow)
+            .auto_shrink([false, false])
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+        if let Some(height) = self.max_height {
+            table = table.max_scroll_height(height);
+        }
+        if self.clickable {
+            table = table.sense(egui::Sense::click());
+        }
+        let titles: Vec<&str> = columns.iter().map(|(title, _)| *title).collect();
+        for (_, column) in columns {
+            table = table.column(column);
+        }
+        table
+            .header(self.row_height, |mut header| {
+                for title in titles {
+                    header.col(|ui| {
+                        ui.strong(title);
+                    });
+                }
+            })
+            .body(|body| body.rows(self.row_height, rows, row));
+    }
+}
+
+fn narrow(width: f32) -> egui_extras::Column {
+    egui_extras::Column::initial(width).at_least(24.0).clip(true)
+}
+
+/// The Names menu of the packet monitor: every packet the table knows by name, searchable, each click cycling it through
+/// show only, hide and off by rewriting the filter text.
+fn packet_names_menu(ui: &mut egui::Ui, monitor: &mut crate::packets::Monitor) {
+    use crate::packets::{name_state, with_name, NameState, UNKNOWN};
+
+    let active = crate::packets::named_words(&monitor.filter, monitor.table()) + usize::from(crate::packets::name_state(&monitor.filter, UNKNOWN) != NameState::Off);
+    let title = if active > 0 { format!("Names ({active}) ⏷") } else { "Names ⏷".to_owned() };
+    let config = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(title).config(config).ui(ui, |ui| {
+        ui.set_width(300.0);
+        ui.add(egui::TextEdit::singleline(&mut monitor.name_search).desired_width(f32::INFINITY).hint_text("🔍 Search names"));
+        ui.add_space(2.0);
+        ui.weak("Click a name: show only → hide → off.");
+        ui.separator();
+
+        let search = monitor.name_search.trim().to_ascii_lowercase();
+        let mut rows: Vec<(bool, u16, String)> = monitor.table().named().map(|(sent, opcode, name)| (sent, opcode, name.to_owned())).filter(|(_, _, name)| name.to_ascii_lowercase().contains(&search)).collect();
+        rows.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)));
+        let mut clicked = None;
+        let mut row = |ui: &mut egui::Ui, name: &str, detail: String| {
+            let state = name_state(&monitor.filter, name);
+            let (glyph, color) = match state {
+                NameState::Off => ("", ui.visuals().weak_text_color()),
+                NameState::Only => ("✔", ui.visuals().hyperlink_color),
+                NameState::Hidden => ("✖", ui.visuals().error_fg_color),
+            };
+            let response = ui
+                .horizontal(|ui| {
+                    ui.add_sized([20.0, 18.0], egui::Label::new(egui::RichText::new(glyph).color(color).strong()));
+                    let text = egui::RichText::new(name).monospace();
+                    let text = if state == NameState::Off { text } else { text.color(color) };
+                    ui.label(text);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.weak(detail));
+                })
+                .response
+                .interact(egui::Sense::click());
+            if response.hovered() {
+                ui.painter().rect_filled(response.rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            }
+            if response.clicked() {
+                clicked = Some((name.to_owned(), state.next()));
+            }
+        };
+        if UNKNOWN.to_ascii_lowercase().contains(&search) {
+            row(ui, UNKNOWN, "no name".to_owned());
+            ui.separator();
+        }
+        egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+            if rows.is_empty() && !UNKNOWN.to_ascii_lowercase().contains(&search) {
+                ui.weak("No name matches.");
+            }
+            for (sent, opcode, name) in &rows {
+                row(ui, name, format!("{} {opcode}", if *sent { "→" } else { "←" }));
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!monitor.filter.is_empty(), egui::Button::new("Clear filter")).clicked() {
+                monitor.filter.clear();
+            }
+            ui.weak(format!("{} named", monitor.table().named().count()));
+        });
+        if let Some((name, state)) = clicked {
+            monitor.filter = with_name(&monitor.filter, &name, state);
+        }
+    });
+}
+
+fn mono(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).monospace()
 }
 
 fn known_varp_name(id: usize) -> Option<String> {
@@ -636,6 +778,7 @@ pub struct LoaderApp {
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
     dev_tab: DevTab,
+    inspector_tab: InspectorTab,
     tiles: Option<TilesWorker>,
     packets: crate::packets::Monitor,
     vars: crate::vars::Inspector,
@@ -646,6 +789,9 @@ pub struct LoaderApp {
     auth: Auth,
     store: Store,
     accounts: crate::accounts::Accounts,
+    /// The hosts scripts may send HTTP requests to.
+    http_whitelist: crate::whitelist::Whitelist,
+    whitelist_page: crate::whitelist::Page,
     /// Community scripts the user agreed to run, by revision (persisted).
     confirmed: Confirmed,
     /// A community script waiting for the user to accept the warning before it starts.
@@ -692,6 +838,7 @@ impl LoaderApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let (tx, rx) = channel();
+        let config = Config::from_env();
         let mut app = Self {
             settings,
             tab: Tab::Clients,
@@ -721,16 +868,22 @@ impl LoaderApp {
                 .and_then(|s| eframe::get_value(s, CURSOR_KEY))
                 .unwrap_or(DEFAULT_CURSOR),
             dev_tab: DevTab::Tools,
+            inspector_tab: InspectorTab::Widget,
             tiles: None,
             packets: crate::packets::Monitor::default(),
             vars: crate::vars::Inspector::default(),
             script_inspector: crate::script_log::Inspector::default(),
             inventory: crate::inventory::Inspector::default(),
             widgets: crate::widgets::Inspector::new(),
-            api: Api::new(Config::from_env()),
+            api: Api::new(config.clone()),
             auth: Auth::Restoring,
             store: Store::default(),
             accounts: crate::accounts::Accounts::load(),
+            http_whitelist: crate::whitelist::Whitelist::new(
+                cc.storage.and_then(|s| eframe::get_value(s, HTTP_WHITELIST_KEY)).unwrap_or_default(),
+                &config,
+            ),
+            whitelist_page: Default::default(),
             confirmed: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, CONFIRMED_KEY))
@@ -1151,7 +1304,7 @@ impl LoaderApp {
             .filter_map(|(layer, _)| layer.map(str::to_owned))
             .collect();
         // the widget inspector's selection is boxed on the client while its tab is showing
-        if self.tab == Tab::Development && self.dev_tab == DevTab::WidgetInspector {
+        if self.widget_inspector_showing() {
             layers.extend(self.widgets.highlight_layers());
         }
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
@@ -1184,6 +1337,11 @@ impl LoaderApp {
         let now = Instant::now();
         // look again when the next read is due, even if nothing else repaints
         ctx.request_repaint_after(crate::packets::POLL_EVERY);
+        if self.packets.wants_layouts(target.client.pid, now) {
+            self.packets.start_layouts(target.client.pid);
+            let (pid, target) = (target.client.pid, target.clone());
+            self.background(ctx, move |settings| Event::PacketLayouts { pid, result: backend::packet_layouts(&target, &settings) });
+        }
         if !self.packets.due(target.client.pid, now) {
             return;
         }
@@ -1234,7 +1392,7 @@ impl LoaderApp {
 
     // The widget inspector's "Follow mouse": looks at where the client's mouse is every so often and selects the widget there.
     fn poll_widget_mouse(&mut self, ctx: &egui::Context) {
-        if !self.widgets.follow_mouse || self.tab != Tab::Development || self.dev_tab != DevTab::WidgetInspector {
+        if !self.widgets.follow_mouse || !self.widget_inspector_showing() {
             return;
         }
         let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else { return };
@@ -1465,8 +1623,8 @@ impl LoaderApp {
             ui.checkbox(&mut inspector.triggers, "Trigger events").on_hover_text("Component and menu events, which find their script by trigger so their script id isn't known.");
             ui.checkbox(&mut inspector.follow, "Follow");
             ui.label("Blacklist");
-            ui.add(egui::TextEdit::singleline(&mut inspector.blacklist).desired_width(140.0).hint_text("6697, 4730"))
-                .on_hover_text("Script ids to leave out. Separate with commas or spaces. A client runs a few scripts every frame; the default names the ones seen on an idle account.");
+            ui.add(egui::TextEdit::singleline(&mut inspector.blacklist).desired_width(140.0).hint_text("6697, npc_name_timer"))
+                .on_hover_text("Scripts to leave out: ids or names. Separate with commas or spaces. A client runs a few scripts every frame; the default names the ones seen on an idle account.");
             if ui.button("Clear").clicked() {
                 inspector.clear();
             }
@@ -1488,12 +1646,26 @@ impl LoaderApp {
         ui.separator();
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
-        egui::ScrollArea::both().id_salt("script_log").auto_shrink([false, false]).stick_to_bottom(inspector.follow).show_rows(ui, row_height, visible.len(), |ui, rows| {
-            for index in rows {
-                let row = &visible[index];
-                let first = index == 0 || visible[index - 1].run.tick != row.run.tick;
-                ui.label(egui::RichText::new(format!("{}{}", tick_column(first, row.run.tick), row.text())).font(font.clone()));
-            }
+        let table = LogTable { id: "script_log", follow: inspector.follow, row_height, max_height: None, clickable: false };
+        table.show(ui, vec![("Tick", narrow(60.0)), ("Script", narrow(240.0)), ("Arguments", narrow(260.0)), ("Time", egui_extras::Column::remainder().at_least(60.0).clip(true))], visible.len(), |mut row| {
+            let index = row.index();
+            let entry = &visible[index];
+            // the tick is shown on the first run of each tick
+            let first = index == 0 || visible[index - 1].run.tick != entry.run.tick;
+            row.col(|ui| {
+                if first {
+                    ui.label(mono(entry.run.tick.map_or("?".to_owned(), |tick| tick.to_string())));
+                }
+            });
+            row.col(|ui| {
+                ui.label(mono(format!("{}{}", "  ".repeat(entry.run.depth as usize), entry.name())));
+            });
+            row.col(|ui| {
+                ui.label(mono(entry.args_text()));
+            });
+            row.col(|ui| {
+                ui.label(mono(entry.took()));
+            });
         });
     }
 
@@ -1529,19 +1701,35 @@ impl LoaderApp {
         ui.separator();
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
-        egui::ScrollArea::both().id_salt("vars").auto_shrink([false, false]).stick_to_bottom(inspector.follow).show_rows(ui, row_height, visible.len(), |ui, rows| {
-            for index in rows {
-                let entry = &visible[index];
-                // the tick is shown on the first entry of each tick (a row of its own would break the fixed row height)
-                let first = index == 0 || visible[index - 1].tick != entry.tick;
-                let kind = match entry.kind {
-                    crate::vars::Kind::Varbit => "Varbit",
-                    crate::vars::Kind::Varp => "VarPlayer",
-                    crate::vars::Kind::VarcInt => "VarClientInt",
-                    crate::vars::Kind::VarcStr => "VarClientStr",
-                };
-                ui.label(egui::RichText::new(format!("{}{kind} {} changed: {} -> {}", tick_column(first, entry.tick), entry.name, entry.old, entry.new)).font(font.clone()));
-            }
+        let table = LogTable { id: "vars", follow: inspector.follow, row_height, max_height: None, clickable: false };
+        table.show(ui, vec![("Tick", narrow(60.0)), ("Kind", narrow(100.0)), ("Name", narrow(220.0)), ("Old", narrow(110.0)), ("New", egui_extras::Column::remainder().at_least(60.0).clip(true))], visible.len(), |mut row| {
+            let index = row.index();
+            let entry = &visible[index];
+            // the tick is shown on the first change of each tick
+            let first = index == 0 || visible[index - 1].tick != entry.tick;
+            let kind = match entry.kind {
+                crate::vars::Kind::Varbit => "Varbit",
+                crate::vars::Kind::Varp => "VarPlayer",
+                crate::vars::Kind::VarcInt => "VarClientInt",
+                crate::vars::Kind::VarcStr => "VarClientStr",
+            };
+            row.col(|ui| {
+                if first {
+                    ui.label(mono(entry.tick.map_or("?".to_owned(), |tick| tick.to_string())));
+                }
+            });
+            row.col(|ui| {
+                ui.label(mono(kind));
+            });
+            row.col(|ui| {
+                ui.label(mono(entry.name.as_str()));
+            });
+            row.col(|ui| {
+                ui.label(mono(entry.old.as_str()));
+            });
+            row.col(|ui| {
+                ui.label(mono(entry.new.as_str()));
+            });
         });
     }
 
@@ -1554,11 +1742,18 @@ impl LoaderApp {
                 ui.checkbox(&mut monitor.received, "Received");
                 ui.checkbox(&mut monitor.sent, "Sent");
                 ui.checkbox(&mut monitor.follow, "Follow");
-                ui.label("Opcodes");
-                ui.add(egui::TextEdit::singleline(&mut monitor.filter).desired_width(120.0).hint_text("40, 2 or !40"))
-                    .on_hover_text("Only these opcodes, or with a ! in front, all but these. Separate with commas or spaces.");
-                if ui.button("Clear").clicked() {
+                if ui.button("Clear").on_hover_text("Forget the packets read so far.").clicked() {
                     monitor.clear();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Filter");
+                let menu_width = 170.0;
+                ui.add(egui::TextEdit::singleline(&mut monitor.filter).desired_width((ui.available_width() - menu_width).max(120.0)).hint_text("40, VARP_LARGE or !PLAYER_INFO"))
+                    .on_hover_text("Only these packets, or with a ! in front, all but these. Opcodes or names (see the Names menu), separated by commas or spaces. UNKNOWN stands for the packets without a name.");
+                packet_names_menu(ui, monitor);
+                if ui.add_enabled(!monitor.filter.is_empty(), egui::Button::new("✖").small()).on_hover_text("Clear the filter").clicked() {
+                    monitor.filter.clear();
                 }
             });
             match &target {
@@ -1566,6 +1761,7 @@ impl LoaderApp {
                 None => ui.label("Select a client with agent loaded in the Clients tab."),
             };
             let visible = monitor.visible();
+            let table = monitor.table();
             ui.weak(format!(
                 "{} shown of {} kept{}",
                 visible.len(),
@@ -1582,28 +1778,56 @@ impl LoaderApp {
             let sent_color = ui.visuals().hyperlink_color;
             let detail_height = 150.0;
             let mut picked = None;
-            egui::ScrollArea::both()
-                .id_salt("packets")
-                .max_height((ui.available_height() - detail_height - 12.0).max(row_height * 4.0))
-                .auto_shrink([false, false])
-                .stick_to_bottom(monitor.follow)
-                .show_rows(ui, row_height, visible.len(), |ui, rows| {
-                    for packet in visible.range(rows) {
-                        let text = format!(
-                            "{:>9.3}  {}  {:>3}  {:>5}  {}",
-                            packet.time_ms as f64 / 1000.0,
-                            if packet.sent { "→" } else { "←" },
-                            packet.opcode,
-                            packet.length,
-                            crate::packets::payload_text(packet)
-                        );
-                        let text = egui::RichText::new(text).font(font.clone());
-                        let text = if packet.sent { text.color(sent_color) } else { text };
-                        if ui.selectable_label(monitor.selected == Some(packet.sequence), text).clicked() {
-                            picked = Some(packet.sequence);
-                        }
+            let height = (ui.available_height() - detail_height - 12.0).max(row_height * 4.0);
+            let log = LogTable { id: "packets", follow: monitor.follow, row_height, max_height: Some(height), clickable: true };
+            let selected = monitor.selected;
+            log.show(
+                ui,
+                vec![
+                    ("Time", narrow(70.0)),
+                    ("", narrow(24.0)),
+                    ("Opcode", narrow(56.0)),
+                    ("Length", narrow(50.0)),
+                    ("Name", narrow(120.0)),
+                    ("Fields", narrow(240.0)),
+                    ("Hex", egui_extras::Column::remainder().at_least(80.0).clip(true)),
+                ],
+                visible.len(),
+                |mut row| {
+                    let packet = &visible[row.index()];
+                    let def = table.lookup(packet.sent, packet.opcode);
+                    let colored = |text: String| {
+                        let text = mono(text);
+                        if packet.sent { text.color(sent_color) } else { text }
+                    };
+                    row.set_selected(selected == Some(packet.sequence));
+                    row.col(|ui| {
+                        ui.label(colored(format!("{:.3}", packet.time_ms as f64 / 1000.0)));
+                    });
+                    row.col(|ui| {
+                        ui.label(colored(if packet.sent { "→" } else { "←" }.into()));
+                    });
+                    row.col(|ui| {
+                        ui.label(colored(packet.opcode.to_string()));
+                    });
+                    row.col(|ui| {
+                        ui.label(colored(packet.length.to_string()));
+                    });
+                    row.col(|ui| {
+                        ui.label(colored(def.map_or(String::new(), |def| def.name.clone())));
+                    });
+                    row.col(|ui| {
+                        let fields = def.map(|def| crate::packet_defs::decode(def, &crate::packets::payload_bytes(packet), packet.length).fields.into_iter().map(|(_, value)| value).collect::<Vec<_>>().join(", "));
+                        ui.label(colored(fields.unwrap_or_default()));
+                    });
+                    row.col(|ui| {
+                        ui.label(colored(crate::packets::payload_text(packet)));
+                    });
+                    if row.response().clicked() {
+                        picked = Some(packet.sequence);
                     }
-                });
+                },
+            );
             drop(visible);
             if picked.is_some() {
                 monitor.selected = picked;
@@ -1632,7 +1856,24 @@ impl LoaderApp {
                     if !values.is_empty() {
                         ui.weak(values.iter().map(|(kind, value)| format!("{kind} {value}")).collect::<Vec<_>>().join("  ·  ") + "  (big endian, from the start)");
                     }
+                    let def = monitor.table().lookup(packet.sent, packet.opcode);
+                    let decoded = def.map(|def| crate::packet_defs::decode(def, &bytes, packet.length));
                     egui::ScrollArea::vertical().id_salt("packet_detail").auto_shrink([false, false]).show(ui, |ui| {
+                        if let (Some(def), Some(decoded)) = (def, &decoded) {
+                            let fields: Vec<String> = decoded.fields.iter().map(|(label, value)| format!("{label} = {value}")).collect();
+                            let title = if def.name.is_empty() { format!("opcode {}", def.opcode) } else { def.name.clone() };
+                            ui.label(egui::RichText::new(format!("{title}  {}", fields.join("  ·  "))).font(font.clone()).strong())
+                                .on_hover_text(format!("Layout: {}.", monitor.table().source));
+                            if !def.has_fields() {
+                                ui.weak("The layout of this packet isn't known (its handler reads conditionally or in a loop).");
+                            }
+                            if !def.touches.is_empty() {
+                                ui.weak(format!("the client's handler touches: {}", def.touches.join(", ")));
+                            }
+                            if let Some(note) = &decoded.note {
+                                ui.colored_label(ui.visuals().warn_fg_color, note);
+                            }
+                        }
                         for line in crate::packets::hex_dump(&bytes) {
                             ui.label(egui::RichText::new(line).font(font.clone()));
                         }
@@ -1731,7 +1972,7 @@ impl LoaderApp {
     fn handle_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
             // Tiles and the XP tracker's reads run in the background, so they must not clear another job's busy label.
-            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::AccountName(_) | Event::Packets { .. } | Event::Vars { .. } | Event::ScriptRuns { .. } | Event::Inventory { .. } | Event::Widgets { .. } | Event::WidgetMouse { .. }) {
+            if !matches!(event, Event::Tiles { .. } | Event::XpState(_) | Event::AccountName(_) | Event::Packets { .. } | Event::PacketLayouts { .. } | Event::Vars { .. } | Event::ScriptRuns { .. } | Event::Inventory { .. } | Event::Widgets { .. } | Event::WidgetMouse { .. }) {
                 self.busy = None;
             }
             match event {
@@ -1914,6 +2155,7 @@ impl LoaderApp {
                     }
                 }
                 Event::Packets { pid, result } => self.packets.finish(pid, Instant::now(), result),
+                Event::PacketLayouts { pid, result } => self.packets.finish_layouts(pid, result),
                 Event::ScriptRuns { pid, result } => self.script_inspector.finish(pid, Instant::now(), result),
                 Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
                 Event::Widgets { pid, result } => self.widgets.finish(pid, result),
@@ -2136,6 +2378,8 @@ impl LoaderApp {
                 ui.end_row();
             }
         });
+        // The entries are saved with the rest of the settings (`save`).
+        self.whitelist_page.ui(ui, &mut self.http_whitelist);
     }
 
     fn clients_ui(&mut self, ui: &mut egui::Ui) {
@@ -2178,25 +2422,49 @@ impl LoaderApp {
 
                             for target in &self.targets {
                                 let client = &target.client;
-                                ui.selectable_value(&mut self.selected, Some(target.key()), client.pid.to_string());
-                                ui.label(&client.title).on_hover_text(&client.exe);
+                                let enabled = client.foreign_bot.is_none();
+                                // the whole row, gaps included, is the click target; the highlight is painted behind the cells afterwards
+                                let highlight = ui.painter().add(egui::Shape::Noop);
+                                let mut row = egui::Rect::NOTHING;
+                                let mut cell = |ui: &mut egui::Ui, text: egui::RichText| {
+                                    let response = ui.add(egui::Label::new(text).selectable(false));
+                                    row = row.union(response.rect);
+                                    response
+                                };
+                                let is_selected = self.selected.as_ref() == Some(&target.key());
+                                let pid = egui::RichText::new(client.pid.to_string());
+                                cell(ui, if is_selected { pid.strong().color(crate::theme::GREEN) } else { pid });
+                                cell(ui, egui::RichText::new(&client.title)).on_hover_text(&client.exe);
                                 if show_prefix {
-                                    ui.label(target.location.label().unwrap_or_default());
+                                    cell(ui, egui::RichText::new(target.location.label().unwrap_or_default()));
                                 }
-                                if let Some(module) = &client.loaded {
+                                if let Some(bot) = &client.foreign_bot {
+                                    cell(ui, egui::RichText::new(format!("Controlled by {bot}")).color(crate::theme::RED));
+                                } else if let Some(module) = &client.loaded {
                                     let version = client.version.as_deref().unwrap_or("unknown version");
-                                    if self.dll_version.as_deref().is_some_and(|v| v != version) {
-                                        ui.colored_label(crate::theme::YELLOW, format!("Loaded {version}, outdated"))
+                                    let (text, color) = if self.dll_version.as_deref().is_some_and(|v| v != version) {
+                                        (format!("Loaded {version}, outdated"), crate::theme::YELLOW)
                                     } else {
-                                        ui.colored_label(crate::theme::GREEN, format!("Loaded {version}"))
-                                    }
-                                    .on_hover_text(module);
+                                        (format!("Loaded {version}"), crate::theme::GREEN)
+                                    };
+                                    cell(ui, egui::RichText::new(text).color(color)).on_hover_text(module);
                                 } else if !client.is_64bit {
-                                    ui.colored_label(crate::theme::RED, "32-bit, unsupported");
+                                    cell(ui, egui::RichText::new("32-bit, unsupported").color(crate::theme::RED));
                                 } else {
-                                    ui.label(egui::RichText::new("Not loaded").color(crate::theme::COMMENT));
+                                    cell(ui, egui::RichText::new("Not loaded").color(crate::theme::COMMENT));
                                 }
                                 ui.end_row();
+                                let row = row.expand2(egui::vec2(8.0, 3.0));
+                                let hovered = enabled
+                                    && ui.is_rect_visible(row)
+                                    && ui.input(|i| i.pointer.hover_pos()).is_some_and(|pos| row.contains(pos) && ui.clip_rect().contains(pos));
+                                if hovered {
+                                    ui.painter().set(highlight, egui::Shape::rect_filled(row, 3.0, ui.visuals().widgets.hovered.weak_bg_fill));
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    if ui.input(|i| i.pointer.primary_clicked()) {
+                                        self.selected = Some(target.key());
+                                    }
+                                }
                             }
                         });
                 });
@@ -2300,20 +2568,24 @@ impl LoaderApp {
         if !up && !down {
             return;
         }
-        let current = self.targets.iter().position(|t| Some(t.key()) == self.selected);
+        let keys: Vec<String> = self.targets.iter().filter(|t| t.client.foreign_bot.is_none()).map(Target::key).collect();
+        if keys.is_empty() {
+            return;
+        }
+        let current = keys.iter().position(|k| Some(k) == self.selected.as_ref());
         let next = match (current, down) {
             (None, true) => 0,
-            (None, false) => self.targets.len() - 1,
-            (Some(i), true) => (i + 1).min(self.targets.len() - 1),
+            (None, false) => keys.len() - 1,
+            (Some(i), true) => (i + 1).min(keys.len() - 1),
             (Some(i), false) => i.saturating_sub(1),
         };
-        self.selected = Some(self.targets[next].key());
+        self.selected = Some(keys[next].clone());
     }
 
     fn selected_target(&self) -> Option<Target> {
         self.selected
             .as_ref()
-            .and_then(|key| self.targets.iter().find(|t| &t.key() == key))
+            .and_then(|key| self.targets.iter().find(|t| &t.key() == key && t.client.foreign_bot.is_none()))
             .cloned()
     }
 
@@ -2453,6 +2725,11 @@ impl LoaderApp {
                         && let Err(error) = script.answer_pin(answer)
                     {
                         self.script_error(error);
+                    }
+                }
+                ScriptEvent::HttpRequest(payload) => {
+                    if let Some(script) = &self.script {
+                        script.answer_http(&payload, self.http_whitelist.clone());
                     }
                 }
                 ScriptEvent::Breaks(plan) => self.breaks.update(plan, std::time::Instant::now()),
@@ -3059,11 +3336,27 @@ impl LoaderApp {
         ui.separator();
         match self.dev_tab {
             DevTab::Tools => self.dev_tools_ui(ui),
-            DevTab::PacketInspector => self.packets_ui(ui),
-            DevTab::VarInspector => self.vars_ui(ui),
-            DevTab::ScriptInspector => self.script_log_ui(ui),
-            DevTab::InventoryInspector => self.inventory_ui(ui),
-            DevTab::WidgetInspector => self.widgets_ui(ui),
+            DevTab::Inspectors => self.inspectors_ui(ui),
+        }
+    }
+
+    fn widget_inspector_showing(&self) -> bool {
+        self.tab == Tab::Development && self.dev_tab == DevTab::Inspectors && self.inspector_tab == InspectorTab::Widget
+    }
+
+    fn inspectors_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for (tab, label) in InspectorTab::ALL {
+                ui.selectable_value(&mut self.inspector_tab, tab, label);
+            }
+        });
+        ui.separator();
+        match self.inspector_tab {
+            InspectorTab::Widget => self.widgets_ui(ui),
+            InspectorTab::Var => self.vars_ui(ui),
+            InspectorTab::Script => self.script_log_ui(ui),
+            InspectorTab::Inventory => self.inventory_ui(ui),
+            InspectorTab::Packet => self.packets_ui(ui),
         }
     }
 
@@ -3656,9 +3949,13 @@ impl eframe::App for LoaderApp {
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
         eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
+        eframe::set_value(storage, HTTP_WHITELIST_KEY, &self.http_whitelist.user());
     }
 
     fn on_exit(&mut self) {
+        if let Some(tiles) = self.tiles.take() {
+            tiles.finish();
+        }
         if let Some(terminal) = &mut self.terminal {
             terminal.close();
         }

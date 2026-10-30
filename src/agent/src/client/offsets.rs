@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+mod actor_path;
 mod camera;
 mod chat;
 mod ground_items;
@@ -12,6 +13,7 @@ mod local_projection;
 mod menu;
 mod minimap;
 mod model;
+mod packet_layouts;
 mod packets;
 mod projection;
 mod projectiles;
@@ -36,8 +38,10 @@ pub use scene::{
     LocConfigs, LocNames, Scene,
 };
 pub use menu::{find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, Menu, MenuClick, MenuLayout, Selection};
+pub use actor_path::find_actor_path;
 pub use camera::find_camera;
 pub use chat::find_chat;
+pub use packet_layouts::{find_packet_layouts, PacketLayouts};
 pub use packets::{find_packets, Packets, BUFFER_SIZE};
 pub use item_setter::find_item_setter;
 pub use varc_setters::{find_varc_setters, VarcSetters, VARIANT_KIND, VARIANT_STRING};
@@ -1562,6 +1566,31 @@ mod tests {
             let pe = Pe::parse(&image).unwrap();
             let flag = find_instance_flag(&pe).unwrap_or_else(|error| panic!("instance flag not found in {}: {error:?}", build.display()));
             println!("{}: instance flag {flag:x}", build.display());
+        }
+    }
+
+    #[test]
+    fn finds_actor_path_in_archived_builds() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let manifest = if cfg!(windows) && manifest.starts_with('/') { format!("Z:{manifest}") } else { manifest.into() };
+        let archive = std::path::Path::new(&manifest).join("../../archive");
+        let Ok(entries) = std::fs::read_dir(&archive) else {
+            eprintln!("skipped, no {}", archive.display());
+            return;
+        };
+        let mut builds: Vec<_> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
+            .collect();
+        builds.sort();
+        for build in builds {
+            let image = map_image(&std::fs::read(&build).unwrap());
+            let pe = Pe::parse(&image).unwrap();
+            let position = find_actor_position(&pe).unwrap();
+            let path = find_actor_path(&pe, position.x).unwrap_or_else(|error| panic!("actor path not found in {}: {error:?}", build.display()));
+            println!("{}: {path:x?}", build.display());
+            // ten ints of x, then ten of y, right after the length (Java's `new int[10]`)
+            assert_eq!((path.length, path.x, path.y), (0x3ec, 0x3f0, 0x418), "{}", build.display());
         }
     }
 

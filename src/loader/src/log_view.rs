@@ -3,7 +3,7 @@
 use std::{
     cell::{Ref, RefCell},
     collections::VecDeque,
-    ops::{Index, Range},
+    ops::Index,
 };
 
 /// Rows numbered from the first ever pushed, so the numbers stay put as the oldest go.
@@ -133,7 +133,8 @@ impl<'a, T, K> View<'a, T, K> {
         self.shown.shown.get(index).map(|&number| self.log.row(number))
     }
 
-    pub fn range(&self, rows: Range<usize>) -> impl Iterator<Item = &'a T> + '_ {
+    #[cfg(test)]
+    pub fn range(&self, rows: std::ops::Range<usize>) -> impl Iterator<Item = &'a T> + '_ {
         self.shown.shown.range(rows).map(|&number| self.log.row(number))
     }
 

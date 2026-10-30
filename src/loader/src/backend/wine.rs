@@ -327,6 +327,11 @@ pub fn packets(target: &Target, settings: &Settings, since: u64) -> Result<Packe
     run(&target.location, &helper, &["packets", &target.client.pid.to_string(), &since.to_string()])
 }
 
+pub fn packet_layouts(target: &Target, settings: &Settings) -> Result<Option<Vec<injector::PacketLayout>>, String> {
+    let helper = helper(settings)?;
+    run(&target.location, &helper, &["packet-layouts", &target.client.pid.to_string()])
+}
+
 pub fn script_runs(target: &Target, settings: &Settings, since: u64) -> Result<injector::ScriptPage, String> {
     let helper = helper(settings)?;
     run(&target.location, &helper, &["scripts", &target.client.pid.to_string(), &since.to_string()])
@@ -414,17 +419,26 @@ fn find_locations() -> Vec<Location> {
             continue;
         }
 
-        let wine = fs::read_link(proc.join("exe"))
-            .ok()
-            .and_then(|exe| {
-                let dir = exe.parent()?.to_path_buf();
-                ["wine", "wine64"].iter().map(|name| dir.join(name)).find(|p| p.is_file())
+        // Bundled Wines (AppImages) keep the launcher in `bin/` while the process runs from `lib/wine/<arch>-unix/`.
+        let wine = vars
+            .get("WINE")
+            .map(PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| {
+                let exe = fs::read_link(proc.join("exe")).ok()?;
+                exe.ancestors().skip(1).take(5).find_map(|dir| {
+                    ["wine", "wine64", "bin/wine", "bin/wine64"].iter().map(|name| dir.join(name)).find(|p| p.is_file())
+                })
             })
             .unwrap_or_else(|| PathBuf::from("wine"));
 
         let env = vars
             .into_iter()
-            .filter(|(k, _)| k.starts_with("WINE") && k != "WINELOADERNOEXEC" && k != "WINEDEBUG")
+            .filter(|(k, _)| {
+                k.starts_with("WINE")
+                    // Per-process state of the running client (an inherited socket fd, the preloader's address range).
+                    && !["WINELOADERNOEXEC", "WINEDEBUG", "WINESERVERSOCKET", "WINEPRELOADRESERVE"].contains(&k.as_str())
+            })
             .collect();
 
         locations.push(Location { prefix, wine, env });

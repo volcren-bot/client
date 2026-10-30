@@ -3,30 +3,31 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
         atomic::{AtomicIsize, AtomicPtr, Ordering},
-        OnceLock,
+        Mutex, OnceLock,
     },
     time::Instant,
 };
 
 use ipc::{
-    packets::{direction, packets_memory_name, Log, LOG_SIZE, PAYLOAD_SIZE},
-    read::Memory,
+    packets::{direction, packet_wake_event_name, packets_memory_name, Log, Movement, LOG_SIZE, NO_TICK, PAYLOAD_SIZE},
+    read::{client, Memory},
+    state::part,
 };
 use retour::GenericDetour;
 use windows::{
-    core::PCSTR,
+    core::{PCSTR, PCWSTR},
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
             Memory::{CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE},
-            Threading::GetCurrentProcessId,
+            Threading::{GetCurrentProcessId, OpenEventW, SetEvent, EVENT_MODIFY_STATE},
         },
     },
 };
 
 use super::{
-    offsets::{Packets, BUFFER_SIZE},
-    own::OwnMemory,
+    offsets::{PacketLayouts, Packets, BUFFER_SIZE},
+    own::{OwnMemory, LAYOUT},
     unload::HookCall,
 };
 
@@ -42,6 +43,9 @@ static SEND: OnceLock<(GenericDetour<Send>, Packets)> = OnceLock::new();
 static LOG: AtomicPtr<Log> = AtomicPtr::new(std::ptr::null_mut());
 static MAPPING: AtomicIsize = AtomicIsize::new(0);
 static START: OnceLock<Instant> = OnceLock::new();
+
+// What `observe_player` last published; only the game thread (the receive hook) touches it.
+static MOVEMENT: Mutex<Option<Movement>> = Mutex::new(None);
 
 fn open_log() -> bool {
     if !LOG.load(Ordering::Acquire).is_null() {
@@ -85,7 +89,31 @@ fn log(direction: u8, opcode: u16, length: u32, payload: &[u8]) {
         return;
     }
     let time_ms = START.get().map_or(0, |start| start.elapsed().as_millis() as u64);
-    unsafe { ipc::packets::push(log, time_ms, direction, opcode, length, payload) };
+    unsafe {
+        ipc::packets::push(log, time_ms, direction, opcode, length, payload);
+        wake_readers(log, direction, opcode);
+    }
+}
+
+// Wakes the readers that filter for this packet; one whose event is gone loses its slot.
+unsafe fn wake_readers(log: *const Log, direction: u8, opcode: u16) {
+    let mut mask = ipc::packets::subscribers_for(log, direction, opcode);
+    if mask == 0 {
+        return;
+    }
+    let pid = GetCurrentProcessId();
+    while mask != 0 {
+        let slot = mask.trailing_zeros();
+        mask &= mask - 1;
+        let name: Vec<u16> = packet_wake_event_name(pid, slot).encode_utf16().chain(std::iter::once(0)).collect();
+        match OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())) {
+            Ok(event) => {
+                let _ = SetEvent(event);
+                let _ = CloseHandle(event);
+            }
+            Err(_) => ipc::packets::unsubscribe(log, slot),
+        }
+    }
 }
 
 fn read_payload(memory: &OwnMemory, data: u64, length: u64, skip: u64) -> Vec<u8> {
@@ -96,6 +124,28 @@ fn read_payload(memory: &OwnMemory, data: u64, length: u64, skip: u64) -> Vec<u8
     }
     bytes.drain(..(skip as usize).min(bytes.len()));
     bytes
+}
+
+// Called before each packet is taken off the queue, so the previous one (Player Info too) has been handled: notes when the player's server tile changes.
+fn observe_player() -> Option<()> {
+    let log = LOG.load(Ordering::Acquire);
+    let layout = LAYOUT.get().filter(|layout| layout.has(part::TICK_COUNT | part::PATH))?;
+    if log.is_null() {
+        return None;
+    }
+    let memory = OwnMemory;
+    let tile = decode::state::server_tile(&memory, layout)?;
+    let tick = memory.i32(client(&memory, layout)? + layout.tick_count as u64)?;
+    let plane = tile.plane.unwrap_or(-1);
+    let mut last = MOVEMENT.lock().ok()?;
+    let next = match *last {
+        Some(seen) if (seen.x, seen.y, seen.plane) == (tile.x, tile.y, plane) => return Some(()),
+        Some(seen) => Movement { x: tile.x, y: tile.y, plane, moved_tick: tick, from_x: seen.x, from_y: seen.y, from_plane: seen.plane },
+        None => Movement { x: tile.x, y: tile.y, plane, moved_tick: NO_TICK, from_x: tile.x, from_y: tile.y, from_plane: plane },
+    };
+    *last = Some(next);
+    unsafe { ipc::packets::set_movement(log, &next) };
+    Some(())
 }
 
 // `out` was just filled by the receive function: the packet id, and a buffer object with its size and data pointer.
@@ -129,6 +179,7 @@ fn record_sent(packet: u64, rule: &Packets) -> Option<()> {
 unsafe extern "system" fn received(connection: *mut c_void, out: *mut u8) -> u8 {
     let _call = HookCall::enter();
     let (detour, rule) = RECEIVE.get().unwrap();
+    let _ = catch_unwind(observe_player);
     let got = detour.call(connection, out);
     if got != 0 && !out.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| record_received(out as u64, rule)));
@@ -145,9 +196,13 @@ unsafe extern "system" fn sent(connection: *mut c_void, result: *mut c_void, pac
     detour.call(connection, result, packet)
 }
 
-pub unsafe fn hook(module_base: u64, rule: Packets) {
+pub unsafe fn hook(module_base: u64, rule: Packets, layouts: Option<&PacketLayouts>) {
     if RECEIVE.get().is_some() || !open_log() {
         return;
+    }
+    if let Some(layouts) = layouts {
+        let published: Vec<_> = layouts.sizes.iter().copied().zip(layouts.layouts.iter().cloned()).collect();
+        ipc::packets::publish_layouts(LOG.load(Ordering::Acquire), &published);
     }
     let receive: Receive = std::mem::transmute((module_base + rule.receive as u64) as *const c_void);
     let send: Send = std::mem::transmute((module_base + rule.send as u64) as *const c_void);

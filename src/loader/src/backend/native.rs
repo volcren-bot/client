@@ -123,6 +123,11 @@ pub fn packets(target: &Target, _settings: &Settings, since: u64) -> Result<Pack
     injector::packets(target.client.pid, since, 1000)
 }
 
+/// What the agent read about every server packet from the client's code, once it has.
+pub fn packet_layouts(target: &Target, _settings: &Settings) -> Result<Option<Vec<injector::PacketLayout>>, String> {
+    injector::packet_layouts(target.client.pid)
+}
+
 /// One read of the script log is at most `SCRIPT_RUNS_PER_READ` runs, as through the helper.
 pub fn script_runs(target: &Target, _settings: &Settings, since: u64) -> Result<injector::ScriptPage, String> {
     injector::script_runs(target.client.pid, since, 2000)

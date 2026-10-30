@@ -13,6 +13,8 @@ use std::{
 use eframe::egui;
 use loader::backend::{self, Settings, Target};
 
+use crate::whitelist::Whitelist;
+
 pub enum ScriptEvent {
     Output(String),
     Form(serde_json::Value),
@@ -22,6 +24,8 @@ pub enum ScriptEvent {
     Breaks(injector::form::BreakPlan),
     /// What the script counts, from `report_counters`.
     Counters(Vec<injector::form::Counter>),
+    /// `http_request()` asks for this request (a JSON `injector::http::Request`); answer with `answer_http`.
+    HttpRequest(String),
     /// `bank_pin_enter()` asks for the PIN saved for the account with this name hash; answer with `answer_pin`.
     PinRequest(String),
     Finished { result: Result<(), String>, stopped: bool },
@@ -29,7 +33,8 @@ pub enum ScriptEvent {
 
 pub struct Script {
     child: Child,
-    stdin: Option<ChildStdin>,
+    /// Shared with the threads that answer HTTP requests, which write their reply when the response is in.
+    stdin: Arc<Mutex<ChildStdin>>,
     output: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
     finished: bool,
@@ -58,7 +63,7 @@ impl Script {
         let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
-        let pins = format!("{}\n", injector::form::PINS_PREFIX);
+        let pins = format!("{}\n{}\n", injector::form::PINS_PREFIX, injector::http::CAPABILITY_PREFIX);
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
         let files = if modules.is_empty() {
             String::new()
@@ -117,7 +122,7 @@ impl Script {
 
         Ok(Self {
             child,
-            stdin: Some(stdin),
+            stdin: Arc::new(Mutex::new(stdin)),
             output,
             stderr,
             finished: false,
@@ -128,19 +133,35 @@ impl Script {
         })
     }
 
+    fn reply(&self, line: &str, what: &str) -> Result<(), String> {
+        let mut stdin = self.stdin.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        writeln!(stdin, "{line}").and_then(|()| stdin.flush()).map_err(|e| format!("Couldn't answer the script's {what}: {e}"))
+    }
+
     pub fn answer_form(&mut self, values: Option<serde_json::Value>) -> Result<(), String> {
         let reply = match values {
             Some(values) => serde_json::json!({ "values": values }),
             None => serde_json::json!({ "cancelled": true }),
         };
-        let stdin = self.stdin.as_mut().ok_or("the script's input is closed")?;
-        writeln!(stdin, "{reply}").and_then(|()| stdin.flush()).map_err(|e| format!("Couldn't answer the script's form: {e}"))
+        self.reply(&reply.to_string(), "form")
     }
 
     /// Tells the script's injector the PIN for the hash it asked about, `None` if no saved account has it, or why we can't say.
     pub fn answer_pin(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
-        let stdin = self.stdin.as_mut().ok_or("the script's input is closed")?;
-        writeln!(stdin, "{}", injector::form::pin_reply_line(&answer)).and_then(|()| stdin.flush()).map_err(|e| format!("Couldn't answer the script's PIN request: {e}"))
+        self.reply(&injector::form::pin_reply_line(&answer), "PIN request")
+    }
+
+    /// Makes an `http_request` of the script on a thread of its own, if its host is on the whitelist, and sends the response
+    /// (or why there is none) when it is in. The script waits for it; nothing else uses its input meanwhile. A script that
+    /// ended before the answer is ignored.
+    pub fn answer_http(&self, payload: &str, whitelist: Whitelist) {
+        let stdin = self.stdin.clone();
+        let request = injector::http::parse_request(payload);
+        thread::spawn(move || {
+            let answer = request.and_then(|request| whitelist.perform(&request));
+            let mut stdin = stdin.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = writeln!(stdin, "{}", injector::http::reply_line(&answer)).and_then(|()| stdin.flush());
+        });
     }
 
     pub fn is_running(&self) -> bool {
@@ -193,6 +214,9 @@ impl Script {
                         Some((experience, gold, custom)) => ScriptEvent::Stats(experience, gold, custom),
                         None => ScriptEvent::Output(format!("Bad stats from the script: {payload}")),
                     };
+                }
+                if let Some(payload) = line.strip_prefix(injector::http::REQUEST_PREFIX) {
+                    return ScriptEvent::HttpRequest(payload.to_owned());
                 }
                 if let Some(hash) = line.strip_prefix(injector::form::PIN_REQUEST_PREFIX) {
                     return ScriptEvent::PinRequest(hash.trim().to_owned());
@@ -269,6 +293,7 @@ mod tests {
                     ScriptEvent::Breaks(plan) => lines.push(format!("breaks {}", plan.breaks.len())),
                     ScriptEvent::Counters(counters) => lines.push(format!("counters {}", counters.len())),
                     ScriptEvent::PinRequest(hash) => lines.push(format!("pin {hash}")),
+                    ScriptEvent::HttpRequest(payload) => lines.push(format!("http {payload}")),
                     ScriptEvent::Stats(experience, gold, _) => lines.push(format!("stats {experience} {gold}")),
                     ScriptEvent::Finished { result, stopped } => return (lines, Some((result, stopped))),
                 }
@@ -306,7 +331,7 @@ mod tests {
                 match event {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Stats(..) | ScriptEvent::Breaks(..) | ScriptEvent::Counters(..) | ScriptEvent::PinRequest(..) => {}
+                    ScriptEvent::Stats(..) | ScriptEvent::Breaks(..) | ScriptEvent::Counters(..) | ScriptEvent::PinRequest(..) | ScriptEvent::HttpRequest(..) => {}
                     ScriptEvent::Finished { .. } => panic!("the script ended before asking for a form"),
                 }
             }
@@ -382,6 +407,64 @@ mod tests {
         script.stop();
         let (_, end) = wait(&mut script, Duration::from_secs(3));
         assert_eq!(end.map(|(_, stopped)| stopped), Some(true));
+    }
+
+    /// A server on 127.0.0.1 that answers each connection by path: `/hi` with a body, `/hop` with a redirect to `localhost`.
+    fn serve() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming().map_while(Result::ok) {
+                let mut stream = stream;
+                let mut buf = [0u8; 2048];
+                let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let reply = if head.starts_with("GET /hop") {
+                    format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/hi\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                } else {
+                    format!("HTTP/1.1 404 Not Found\r\nX-Seen: {}\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", head.contains("x-token: abc") || head.contains("X-Token: abc"))
+                };
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn http_requests_only_reach_whitelisted_hosts() {
+        let port = serve();
+        let mut script = start(&format!(
+            "local r, e = http_request({{ url = 'http://127.0.0.1:{port}/hi', headers = {{ ['X-Token'] = 'abc' }} }})\n\
+             print(r.ok, r.status, r.body, r.headers['x-seen'])\n\
+             print(http_request({{ url = 'http://localhost:{port}/hi' }}))\n\
+             print(http_request({{ url = 'http://127.0.0.1:{port}/hop' }}))\n\
+             print(http_request({{ url = 'ftp://127.0.0.1/' }}))\n\
+             print(http_request({{ url = 'http://127.0.0.1:{port}/', headers = {{ Host = 'evil.com' }} }}))"
+        ));
+        let whitelist = Whitelist::new(vec!["127.0.0.1".into()], &crate::api::Config::default());
+        let (mut lines, start) = (Vec::new(), Instant::now());
+        let end = loop {
+            assert!(start.elapsed() < Duration::from_secs(10), "{lines:?}");
+            let mut finished = None;
+            for event in script.poll() {
+                match event {
+                    ScriptEvent::HttpRequest(payload) => script.answer_http(&payload, whitelist.clone()),
+                    ScriptEvent::Output(line) => lines.push(line),
+                    ScriptEvent::Finished { result, .. } => finished = Some(result),
+                    _ => {}
+                }
+            }
+            if let Some(result) = finished {
+                break result;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(end, Ok(()), "{lines:?}");
+        assert_eq!(lines[0], "false\t404\thello\ttrue");
+        assert!(lines[1].starts_with("nil\tlocalhost isn't on the HTTP whitelist"), "{}", lines[1]);
+        assert!(lines[2].starts_with("nil\tlocalhost isn't on the HTTP whitelist"), "a redirect off the list is refused: {}", lines[2]);
+        assert!(lines[3].starts_with("nil\t") && lines[3].contains("http or https"), "{}", lines[3]);
+        assert!(lines[4].contains("header can't be set"), "{}", lines[4]);
     }
 
     fn live_client() -> Option<(Target, Settings)> {

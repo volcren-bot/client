@@ -12,7 +12,7 @@ pub mod varc_log;
 pub mod read;
 pub mod state;
 
-pub const PROTOCOL_VERSION: u8 = 54;
+pub const PROTOCOL_VERSION: u8 = 56;
 
 pub const SHARED_MEMORY_PREFIX: &str = "AGENT_DATA_";
 

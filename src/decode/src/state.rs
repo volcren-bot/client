@@ -6,7 +6,7 @@ use ipc::{
 pub use ipc::read::current_game_state as current;
 
 use crate::{
-    Camera, GameState, Login, Minimap, Position, Skill, Tile,
+    Camera, GameState, Login, Minimap, Position, ServerTile, Skill, Tile,
     memory::{Memory, read_string},
 };
 
@@ -22,6 +22,22 @@ fn position(memory: &impl Memory, layout: &Layout) -> Option<Position> {
     // the player's own world view, not the top one: they differ on a boat
     let plane = layout.has(part::PROJECTION).then(|| memory.i32(view + layout.projection.plane as u64)).flatten();
     Some(Position { local_x, local_y, x: base_x + (local_x >> 7), y: base_y + (local_y >> 7), plane })
+}
+
+/// The local player's server tile: entry 0 of its path, on its own world view's base.
+pub fn server_tile(memory: &impl Memory, layout: &Layout) -> Option<ServerTile> {
+    if !layout.has(part::PLAYER | part::PATH) {
+        return None;
+    }
+    let (view, player) = local_player(memory, layout)?;
+    let path = &layout.path;
+    let scene_x = memory.i32(player + path.x as u64)?;
+    let scene_y = memory.i32(player + path.y as u64)?;
+    let steps = memory.i32(player + path.length as u64)?;
+    let base_x = memory.i32(view + layout.player.base_x as u64)?;
+    let base_y = memory.i32(view + layout.player.base_x as u64 + 4)?;
+    let plane = layout.has(part::PROJECTION).then(|| memory.i32(view + layout.projection.plane as u64)).flatten();
+    Some(ServerTile { x: base_x + scene_x, y: base_y + scene_y, plane, steps })
 }
 
 fn skills(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Vec<Skill>> {
@@ -218,7 +234,7 @@ pub fn varp(memory: &impl Memory, layout: &Layout, id: usize) -> Option<i32> {
 mod tests {
     use super::*;
     use crate::memory::Fake;
-    use ipc::state::{CameraLayout, InterfaceLayout, LoginLayout, MinimapLayout, PlayerLayout, ProjectionLayout, SkillsLayout, WorldLayout};
+    use ipc::state::{CameraLayout, InterfaceLayout, LoginLayout, MinimapLayout, PathLayout, PlayerLayout, ProjectionLayout, SkillsLayout, WorldLayout};
 
     const TABLE_BUCKETS: u64 = 0x8;
     const TABLE_COUNT: u64 = 0x10;
@@ -334,6 +350,22 @@ mod tests {
             m.put_i32(BASE + rva, 1);
         }
         m
+    }
+
+    #[test]
+    fn the_server_tile_is_the_head_of_the_path() {
+        let mut l = layout();
+        let mut m = logged_in();
+        let player = 0x21_0000;
+        // the model stands on scene tile (51, 53) while the server already put the player one tile east
+        l.found |= part::PATH;
+        l.path = PathLayout { x: 0x3f0, y: 0x418, length: 0x3ec, reserved: 0 };
+        m.put_i32(player + 0x3f0, 52);
+        m.put_i32(player + 0x418, 53);
+        m.put_i32(player + 0x3ec, 1);
+        assert_eq!(server_tile(&m, &l), Some(ServerTile { x: 3164, y: 3388, plane: Some(1), steps: 1 }));
+        assert_eq!(game_state(&m, &l).position.map(|p| (p.x, p.y)), Some((3163, 3388)));
+        assert_eq!(server_tile(&m, &layout()), None);
     }
 
     #[test]

@@ -43,15 +43,15 @@ use super::graphics::{
     restore_state,
 };
 use super::offsets::{
-    find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
+    find_actor_path, find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
     find_varps, find_interfaces, find_item_containers, find_item_setter, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
-    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_packets, find_script_runs, find_varc_setters, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
+    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_packets, find_packet_layouts, find_script_runs, find_varc_setters, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
     find_world_select, Pe, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
 use ipc::{cursor_style, overlay_mode};
 use ipc::state::{
-    part, CameraLayout, ChatLayout, CollisionLayout, SpotAnimLayout, GroundItemsLayout, InterfaceLayout, Layout, LoginLayout, MinimapLayout, PlayerLayout, ProjectileLayout, ProjectionLayout, SceneLoaderLayout, SkillsLayout, WorldLayout, WorldSelectLayout,
+    part, CameraLayout, ChatLayout, CollisionLayout, PathLayout, SpotAnimLayout, GroundItemsLayout, InterfaceLayout, Layout, LoginLayout, MinimapLayout, PlayerLayout, ProjectileLayout, ProjectionLayout, SceneLoaderLayout, SkillsLayout, WorldLayout, WorldSelectLayout,
 };
 use super::unload::HookCall;
 use crate::shared::{
@@ -525,6 +525,7 @@ unsafe fn find_offsets() {
     let pe = &pe;
 
     let actor = found("Actor position", find_actor_position(pe));
+    let path = actor.and_then(|a| found("Actor path", find_actor_path(pe, a.x)));
     let player = found("Local player", find_local_player(pe));
     let game_state = found("Game state", find_game_state(pe));
     let skills = player.and_then(|p| found("Skills", find_skills(pe, p.client)));
@@ -543,6 +544,17 @@ unsafe fn find_offsets() {
     let projectiles = found("Projectiles", find_projectiles(pe));
     let spot_anims = found("Spot animations", find_spot_anims(pe));
     let packets = found("Packets", find_packets(pe));
+    // not printed whole: it holds all 151 packets
+    let packet_layouts = packets.and_then(|p| match find_packet_layouts(pe, &p) {
+        Ok(layouts) => {
+            println!("[Agent]: Packet layouts found: {} of {} packets.\r\n", layouts.layouts.iter().filter(|l| l.is_some()).count(), layouts.layouts.len());
+            Some(layouts)
+        }
+        Err(error) => {
+            println!("[Agent]: Packet layouts not found: {error:?}.\r\n");
+            None
+        }
+    });
     let script_runs = found("Script runs", find_script_runs(pe));
     let varc_setters = found("Varc setters", find_varc_setters(pe));
     let containers = find_item_containers(pe);
@@ -769,6 +781,11 @@ unsafe fn find_offsets() {
             id: g.id,
         };
     }
+    // read on the local player, like its position
+    if let Some(p) = path.filter(|_| layout.has(part::PLAYER)) {
+        layout.found |= part::PATH;
+        layout.path = PathLayout { x: p.x, y: p.y, length: p.length, reserved: 0 };
+    }
     if let Some(flag) = instance_flag {
         layout.found |= part::SCENE_LOADER;
         layout.scene_loader = SceneLoaderLayout { instance_flag: flag };
@@ -822,7 +839,7 @@ unsafe fn find_offsets() {
         }
     }
     if let Some(rule) = packets {
-        super::packets::hook(module_base, rule);
+        super::packets::hook(module_base, rule, packet_layouts.as_ref());
     }
     if let Some(rule) = script_runs {
         super::script_runs::hook(module_base, rule, player.zip(tick_count).map(|(p, offset)| (p.client, offset)));

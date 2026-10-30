@@ -24,6 +24,7 @@ Real code only on Windows. On other targets the same API compiles to stubs retur
 | `devtools.rs` | Pure logic behind the loader's dev-tool overlays (tile and movement flags, line of sight, regions). The overlays themselves are `win::scene_tiles` layers; a `widget:x,y,width,height,rrggbb` layer boxes a canvas area (the widget inspector's selection), `spot-anims` outlines each spot animation's tile in magenta with its id, and `projectiles` labels each projectile with its id and cycles left at its 3D position (height from the terrain's heightmap) and draws a line to where it lands (the target actor's tile when it has one). |
 | `form.rs` | Script settings form spec and the `STATS_PREFIX` line format, shared with the loader. |
 | `bank_pin.rs` | Enters the bank PIN on the keypad (interface 213) for `bank_pin_enter()`. It hashes the logged in player's name (`hash_name`, the same hash the loader's Accounts page saves) and asks the loader for that account's PIN: a `PINREQ <hash>` line on stdout, answered on stdin by `form::pin_reply_line` (only when the loader's first line was `PINS`; otherwise every call is `no_pin`). Then it finds each button, moves the mouse and clicks, so no script ever sees the PIN or a digit. Reads the client through a small `Client` trait, so the tests run against a fake keypad. |
+| `http.rs` | `http_request`'s wire format: the `Request` a script makes, the `Response`, the `HTTPREQ` line the injector writes and the one line reply the loader sends back, and the handler the sandbox calls (`set_handler`, like `bank_pin::set_lookup`). It makes no connection itself. |
 | `sandbox.rs` | The Luau runtime (`mlua` with `luau-jit`) and every script global. |
 | `main.rs` | CLI. |
 
@@ -64,6 +65,10 @@ injector serve                                     JSON-lines server (the loader
 - `time()` is ms since start, `clock()` seconds since local midnight; `form(spec)` shows a settings dialog (defaults when no handler).
 - `report_stats(experience, gold, custom?)` writes a `form::STATS_PREFIX` line (`\u{1e}STATS {json}`) through the print sink; the loader sums these between heartbeats and sends them to the API. Experience must be 0 or more; values are rounded to integers. Outside a store run the loader drops them. The gains are since the last call, not totals; runtime is measured by the loader, never reported by the script.
 
+### HTTP
+
+`http_request(options)` returns `(response, err)`: `options` is `{ url, method?, headers?, body?, timeout? }` (`http::Request`), the response `{ ok, status, headers, body }`. The injector can't reach the network itself: it writes a `\u{1e}HTTPREQ <json>` line and waits for the loader's one line answer on stdin, the way `bank_pin_enter` asks for the PIN (`main.rs` installs the handler only when the loader's first lines include `http::CAPABILITY_PREFIX` (after `form::PINS_PREFIX`); without it the call returns "HTTP requests aren't available"). The loader checks the URL's host against the user's whitelist and makes the request, so what a script can reach is decided outside the sandbox (see [loader-gui.md](loader-gui.md)). Request bodies are at most 1 MB and responses 8 MB, both text; the timeout is 15 s unless given, 60 s at most. It raises nothing for a failed request (`nil, err`); a 404 is still a response.
+
 ### Async input
 
 `click_async`, `move_async`, `wind_mouse_async`, `type_text_async`, `mouse_down_async`, `mouse_up_async`, `scroll_async`, `key_down_async` and `key_up_async` queue the same input as their blocking twins on the script's `async_input::Worker` (one per `run`, created with the Lua state) and return immediately; jobs run in order. The script takes the input back with:
@@ -82,6 +87,14 @@ Cancelling drops the queue, interrupts the running job's sleeps and returns once
 ### Item change callbacks
 
 `on_item_change(fn) -> id`, `off_item_change(id)` and `wait_item_change(ms)` (typed in the lib's `host.luau`) register Luau callbacks for the item log. The first callback makes an `ItemWatcher` (a subscriber of the log, see [ipc-protocol.md](ipc-protocol.md)). The script is one thread running Luau, so a callback can't interrupt it: `sleep` (replaced while a callback is registered) and `wait_item_change` block on the watcher's event instead of a timer, so they wake when the agent logs a change, run the callbacks for what was logged and go on sleeping for the rest of the time. A script that never sleeps never runs its callbacks. An error in a callback is an error in `sleep`.
+
+### Packet callbacks
+
+`on_packet(opcodes, fn, sent?) -> id`, `off_packet(id)` and `wait_packet(opcodes, ms, sent?)` do the same for the packet log: received packets by server packet id, or with `sent` the client's own by client packet id (0 to 255). They share one `PacketWatcher` whose filter is the union of every callback's ids and those of a running `wait_packet` (`Callbacks::refresh_packets`); it exists only while something wants a packet. `sleep`, `wait_item_change` and `wait_packet` wait on the item and packet watchers' events together (`wait_watchers`), so a script with both kinds gets both. `wait_packet` returns the first matching packet logged after the call (not one waiting from before it) or nil, after running the callbacks for everything read with it. A packet reaches Luau as `{sequence, time_ms, sent, opcode, length, payload}`, `payload` a string of the first 104 bytes (`length` is the whole). The ring holds a few seconds of a busy client's traffic, so a script that doesn't sleep for longer loses packets.
+
+### Server tile and movement
+
+`server_tile()` reads the local player's path head (`decode::state::server_tile`): the tile the server last put them on, ahead of the smoothed `position`. `movement()` reads the packet log's `Movement` block and the tick counter fresh, and returns `{x, y, plane, from_x, from_y, from_plane, moving, moved_tick, tick}` (`crate::Movement`); `nil` when the hook hasn't seen the player or the path head can't be read (logged out: the block keeps the last tile). The agent fills the block before taking each packet, so `moving` is exact even when the script was busy through several ticks, which Luau callbacks can't be: a queued tick callback reads the tile as it is now.
 
 ### Adding a global
 

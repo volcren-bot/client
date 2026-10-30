@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use injector::{ScriptPage, ScriptRun};
 
 use crate::log_view::{Filtered, Log, View};
+use crate::script_names;
 
 /// Runs kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
@@ -44,30 +45,52 @@ impl Row {
         self.run.args.first()?.parse().ok()
     }
 
-    /// `Script 6697 (1, 2)` or, for a trigger event, `Trigger 12 (…)`; nested runs are indented.
+    /// `npc_name_timer (6697) (1, 2)` or, for a trigger event, `Trigger 12 (…)`; nested runs are indented.
+    /// The row's text on one line.
+    #[cfg(test)]
     pub fn text(&self) -> String {
+        let (name, args, took) = (self.name(), self.args_text(), self.took());
+        let took = if took.is_empty() { took } else { format!("  {took}") };
         let indent = "  ".repeat(self.run.depth as usize);
-        let (name, rest) = match self.script_id() {
-            Some(id) => (format!("Script {id}"), &self.run.args[1..]),
-            None => (format!("Trigger {}", self.run.event_type), &self.run.args[..]),
-        };
+        if args.is_empty() { format!("{indent}{name}{took}") } else { format!("{indent}{name} ({args}){took}") }
+    }
+
+    /// `npc_name_timer (6697)`, `Script 123` for one without a name, or `Trigger 7` for an event whose script id isn't known.
+    pub fn name(&self) -> String {
+        match self.script_id() {
+            Some(id) => match script_names::name(id) {
+                Some(name) => format!("{name} ({id})"),
+                None => format!("Script {id}"),
+            },
+            None => format!("Trigger {}", self.run.event_type),
+        }
+    }
+
+    /// The arguments after the script id, with how many more were left out.
+    pub fn args_text(&self) -> String {
+        let rest = if self.script_id().is_some() { &self.run.args[1..] } else { &self.run.args[..] };
         let more = (self.run.arg_count as usize).saturating_sub(self.run.args.len());
         let mut args = rest.join(", ");
         if more > 0 {
             args.push_str(&format!("{}… +{more}", if args.is_empty() { "" } else { ", " }));
         }
-        let took = self.duration_us.map_or(String::new(), |micros| format!("  {}", duration_text(micros)));
-        if args.is_empty() { format!("{indent}{name}{took}") } else { format!("{indent}{name} ({args}){took}") }
+        args
+    }
+
+    /// How long the run took, once its end was read.
+    pub fn took(&self) -> String {
+        self.duration_us.map_or(String::new(), duration_text)
     }
 }
 
-/// Script ids to leave out of the list, from text like `6697, 4730`.
+/// Scripts to leave out of the list, from text like `6697, npc_name_timer`: ids or script names (see `script_names`).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Blacklist(Vec<i32>);
 
 impl Blacklist {
     pub fn parse(text: &str) -> Self {
-        Self(text.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|word| word.parse().ok()).collect())
+        let words = text.split(|c: char| c == ',' || c.is_whitespace()).filter(|word| !word.is_empty());
+        Self(words.flat_map(|word| word.parse().map_or_else(|_| script_names::ids(word).to_vec(), |id| vec![id])).collect())
     }
 
     pub fn hides(&self, row: &Row) -> bool {
@@ -217,10 +240,11 @@ mod tests {
 
     #[test]
     fn rows_name_the_script_and_show_its_other_arguments() {
-        assert_eq!(row(script(0, 6697)).text(), "Script 6697");
-        assert_eq!(row(run(0, 76, 0, &["12", "-1", "\"…\""], 3)).text(), "Script 12 (-1, \"…\")");
+        assert_eq!(row(script(0, 6697)).text(), "npc_name_timer (6697)");
+        assert_eq!(row(script(0, 4730)).text(), "Script 4730");
+        assert_eq!(row(run(0, 76, 0, &["4730", "-1", "\"…\""], 3)).text(), "Script 4730 (-1, \"…\")");
         // nested runs are indented, and arguments the log didn't keep are counted
-        assert_eq!(row(run(0, 76, 2, &["12", "5"], 11)).text(), "    Script 12 (5, … +9)");
+        assert_eq!(row(run(0, 76, 2, &["4730", "5"], 11)).text(), "    Script 4730 (5, … +9)");
         assert_eq!(row(run(0, 12, 0, &["393217"], 1)).text(), "Trigger 12 (393217)");
         assert_eq!(row(run(0, 76, 0, &[], 0)).text(), "Trigger 76");
     }
@@ -234,13 +258,16 @@ mod tests {
     }
 
     #[test]
-    fn blacklist_text_hides_script_ids_and_ignores_the_rest() {
+    fn blacklist_text_hides_script_ids_and_names_and_ignores_the_rest() {
         let list = Blacklist::parse("6697, 4730 abc");
         assert!(list.hides(&row(script(0, 6697))) && list.hides(&row(script(0, 4730))));
         assert!(!list.hides(&row(script(0, 1))));
         // a trigger event's first argument is not a script id
         assert!(!list.hides(&row(run(0, 12, 0, &["6697"], 1))));
         assert!(!Blacklist::parse("").hides(&row(script(0, 6697))));
+        // a script's name stands for its id, in any case
+        let list = Blacklist::parse("Npc_Name_Timer");
+        assert!(list.hides(&row(script(0, 6697))) && !list.hides(&row(script(0, 4730))));
     }
 
     #[test]

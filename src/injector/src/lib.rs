@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 pub use ipc::PROTOCOL_VERSION;
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 6;
+pub const HOST_API: u32 = 7;
 pub use ipc::state::varp;
 
 pub mod async_input;
@@ -19,6 +19,7 @@ pub mod config;
 pub mod pathfinding;
 pub mod font;
 pub mod form;
+pub mod http;
 pub mod projection;
 pub mod sandbox;
 pub mod nav;
@@ -27,7 +28,7 @@ pub mod scene_graph;
 pub mod wind_mouse;
 pub use decode::{
     worker,
-    Camera, Chunk, GameState, Login, Minimap, Position, Skill, Tile, chat, game_state_name, memory, state, strip_tags, widgets, world,
+    Camera, Chunk, GameState, Login, Minimap, Position, ServerTile, Skill, Tile, chat, game_state_name, memory, state, strip_tags, widgets, world,
     world_select,
 };
 pub use decode::state::MAX_VARPS;
@@ -183,6 +184,34 @@ pub struct Packet {
     pub payload: String,
 }
 
+/// What the agent read from the client's code about one server packet (`ipc::packets::Layout`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PacketLayout {
+    pub opcode: u16,
+    /// the payload size: -1 a length byte follows, -2 a length short
+    pub size: i32,
+    /// the fields in order as `u16leadd`, `i32:2.3.0.1` (the loader's packet table spelling); `None` when only the size is known
+    pub fields: Option<Vec<String>>,
+}
+
+/// The local player's server tile and when it last changed, as the agent's receive hook saw it (`ipc::packets::Movement`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Movement {
+    pub x: i32,
+    pub y: i32,
+    pub plane: Option<i32>,
+    /// the tile before the last change
+    pub from_x: i32,
+    pub from_y: i32,
+    pub from_plane: Option<i32>,
+    /// the tile changed in the tick being received or in the last one that ended
+    pub moving: bool,
+    /// the client's tick counter when the tile last changed; `None` if it hasn't since the agent first saw the player
+    pub moved_tick: Option<i32>,
+    /// the client's tick counter now
+    pub tick: i32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PacketPage {
     pub packets: Vec<Packet>,
@@ -289,7 +318,7 @@ pub(crate) use win::paint_overlay;
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
 pub use win::{
-    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, item_stackable, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_containers, item_changes, item_changes_wait, ItemWatcher, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims, packets, script_runs, varc_changes,
+    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, item_stackable, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, server_tile, movement, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_containers, item_changes, item_changes_wait, ItemWatcher, PacketWatcher, wait_watchers, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims, packets, packet_layouts, script_runs, varc_changes,
     unload, varc, varp_value, varps, widget, widget_children, widget_dump, widget_tree, widget_words, world_select,
 };
 
@@ -310,6 +339,9 @@ pub struct Client {
     pub loaded: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
+    /// Another bot that already controls this client; it can be listed but never injected.
+    #[serde(default)]
+    pub foreign_bot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

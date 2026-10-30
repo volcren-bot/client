@@ -38,7 +38,7 @@ use windows_sys::{
                 CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE, ReleaseMutex, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
                 PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
                 PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
-                QueryFullProcessImageNameW, SetEvent, WaitForSingleObject,
+                QueryFullProcessImageNameW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
             },
         },
         UI::WindowsAndMessaging::{
@@ -148,6 +148,16 @@ fn agent_module(modules: &[Module]) -> Option<&Module> {
         .find(|m| m.name.to_ascii_lowercase().starts_with(MODULE_PREFIX))
 }
 
+/// Clients another bot has already taken over (Detuks loads its own `dc_*.dll` and runs the client from a `.dc` folder).
+fn foreign_bot(modules: &[Module]) -> Option<&'static str> {
+    let taken = modules.iter().any(|m| {
+        let name = m.name.to_ascii_lowercase();
+        let path = m.path.to_ascii_lowercase().replace('/', "\\");
+        (name.starts_with("dc_") && name.ends_with(".dll")) || (name.ends_with(".exe") && path.contains("\\.dc\\"))
+    });
+    taken.then_some("Detuks")
+}
+
 fn process_name(pid: u32) -> Option<String> {
     let process = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })?;
     let mut buffer = [0u16; 1024];
@@ -198,15 +208,15 @@ pub fn list_clients() -> Vec<Client> {
         .into_iter()
         .map(|(pid, title)| {
             let process = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
+            let modules = modules(pid).ok();
             Client {
                 pid,
                 exe: process_name(pid).unwrap_or_default(),
                 title,
                 is_64bit: process.is_some_and(|p| is_64bit(p.0)),
-                loaded: modules(pid)
-                    .ok()
-                    .and_then(|m| agent_module(&m).map(|m| m.path.clone())),
+                loaded: modules.as_deref().and_then(|m| agent_module(m).map(|m| m.path.clone())),
                 version: connection(pid).map(|c| c.version),
+                foreign_bot: modules.as_deref().and_then(foreign_bot).map(String::from),
             }
         })
         .collect()
@@ -300,6 +310,9 @@ pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<Load
     let is_loaded = |modules: &[Module]| modules.iter().any(|m| m.name.to_ascii_lowercase() == dll_name);
 
     let mut before = modules(pid)?;
+    if let Some(bot) = foreign_bot(&before) {
+        return Err(format!("Client {pid} is already controlled by {bot}, refusing to inject it."));
+    }
     let mut replaced = None;
     if agent_module(&before).is_some() {
         let current = connection(pid);
@@ -1464,6 +1477,12 @@ pub fn player_plane(pid: u32) -> Result<i32, String> {
     state::game_state(&memory, &layout).position.and_then(|p| p.plane).ok_or_else(|| "not logged in".into())
 }
 
+/// The tile the server last put the local player on; `None` when not logged in.
+pub fn server_tile(pid: u32) -> Result<Option<crate::ServerTile>, String> {
+    let (layout, memory) = reader(pid, part::PLAYER | part::PATH, "the player's path")?;
+    Ok(state::server_tile(&memory, &layout))
+}
+
 pub fn map_regions(pid: u32) -> Result<Vec<[i32; 2]>, String> {
     let (layout, memory) = reader(pid, part::PLAYER, "the scene")?;
     ipc::read::map_regions(&memory, &layout).ok_or_else(|| "the scene's map squares can't be found".into())
@@ -1936,8 +1955,8 @@ pub fn spot_anims(pid: u32) -> Result<Vec<crate::SpotAnim>, String> {
     Ok(worker::spot_anims(&memory, &layout))
 }
 
-/// The packets the client logged from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
-pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, String> {
+// Maps the packet log read only for the length of `read`.
+fn with_packet_log<T>(pid: u32, read: impl FnOnce(*const Log) -> T) -> Result<T, String> {
     let name = wide(packets_memory_name(pid));
     let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
         .ok_or_else(|| format!("No packet log in client {pid}: the agent isn't loaded, is too old, or didn't find the packet functions"))?;
@@ -1947,9 +1966,15 @@ pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, 
     }
     let log = view.Value as *const Log;
     // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let page = unsafe { packet_log::is_compatible(log).then(|| packet_log::read_since(log, since, limit)) };
+    let value = unsafe { packet_log::is_compatible(log) }.then(|| read(log));
     unsafe { UnmapViewOfFile(view) };
-    let page = page.ok_or_else(|| format!("The packet log of client {pid} has another layout: restart the client and load a matching agent"))?;
+    value.ok_or_else(|| format!("The packet log of client {pid} has another layout: restart the client and load a matching agent"))
+}
+
+/// The packets the client logged from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
+pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, String> {
+    // SAFETY: `with_packet_log` hands over a mapped, compatible log.
+    let page = with_packet_log(pid, |log| unsafe { packet_log::read_since(log, since, limit) })?;
     Ok(crate::PacketPage {
         next: page.next,
         dropped: page.dropped,
@@ -1966,6 +1991,158 @@ pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, 
             })
             .collect(),
     })
+}
+
+/// The size and layout of every server packet as the agent read them from the client's code; `None` until the agent has published them (it didn't find the rule, or is an older one).
+pub fn packet_layouts(pid: u32) -> Result<Option<Vec<crate::PacketLayout>>, String> {
+    // SAFETY: as in `packets`.
+    let layouts = with_packet_log(pid, |log| unsafe { packet_log::read_layouts(log) })?;
+    Ok(layouts.map(|layouts| {
+        layouts
+            .into_iter()
+            .map(|layout| crate::PacketLayout { opcode: layout.opcode, size: layout.size, fields: layout.fields.map(|fields| fields.iter().map(|field| field.spelling()).collect()) })
+            .collect()
+    }))
+}
+
+/// The local player's server tile and whether it changed this tick, as the agent's receive hook last saw it; `None` when not logged in or before the hook saw the player.
+pub fn movement(pid: u32) -> Result<Option<crate::Movement>, String> {
+    // SAFETY: as in `packets`.
+    let Some(seen) = with_packet_log(pid, |log| unsafe { packet_log::movement(log) })? else {
+        return Ok(None);
+    };
+    let (layout, memory) = reader(pid, part::PLAYER | part::PATH | part::TICK_COUNT, "the player's path and the tick counter")?;
+    // the hook keeps the last tile it saw after a logout
+    if state::server_tile(&memory, &layout).is_none() {
+        return Ok(None);
+    }
+    let tick = ipc::read::client(&memory, &layout)
+        .and_then(|client| memory.i32(client + layout.tick_count as u64))
+        .ok_or("the tick counter can't be read")?;
+    let plane = |plane: i32| (plane >= 0).then_some(plane);
+    Ok(Some(crate::Movement {
+        x: seen.x,
+        y: seen.y,
+        plane: plane(seen.plane),
+        from_x: seen.from_x,
+        from_y: seen.from_y,
+        from_plane: plane(seen.from_plane),
+        moving: seen.moving(tick),
+        moved_tick: (seen.moved_tick != packet_log::NO_TICK).then_some(seen.moved_tick),
+        tick,
+    }))
+}
+
+/// A reader of the packet log that waits on the agent's wake event for the packets in its filter; it claims a subscriber slot and gives it back on drop.
+pub struct PacketWatcher {
+    mapping: Handle,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    event: Handle,
+    slot: u32,
+    filter: packet_log::Filter,
+    next: u64,
+}
+
+// SAFETY: the view is a shared mapping used only through atomics and volatile accesses, and the handles may cross threads.
+unsafe impl Send for PacketWatcher {}
+
+impl PacketWatcher {
+    /// Starts with an empty filter: nothing wakes it until `set_filter`.
+    pub fn new(pid: u32) -> Result<Self, String> {
+        let name = wide(packets_memory_name(pid));
+        let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) })
+            .ok_or_else(|| format!("No packet log in client {pid}: the agent isn't loaded, is too old, or didn't find the packet functions"))?;
+        let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, LOG_SIZE) };
+        if view.Value.is_null() {
+            return Err(format!("Cannot map the packet log of client {pid}: restart the client and load a matching agent"));
+        }
+        let log = view.Value as *const Log;
+        // SAFETY: the mapping is LOG_SIZE bytes, writable, and stays mapped until the watcher is dropped.
+        if !unsafe { packet_log::is_compatible(log) } {
+            unsafe { UnmapViewOfFile(view) };
+            return Err(format!("The packet log of client {pid} has another layout: restart the client and load a matching agent"));
+        }
+        // as in `ItemWatcher::new`: a slot is ours once its event is new and the mask bit is ours
+        let mut event = None;
+        let slot = unsafe {
+            packet_log::subscribe(log, |slot| {
+                let name = wide(packet_log::packet_wake_event_name(pid, slot));
+                let handle = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
+                let taken = GetLastError() == ERROR_ALREADY_EXISTS;
+                match Handle::new(handle) {
+                    Some(handle) if !taken => {
+                        event = Some(handle);
+                        true
+                    }
+                    _ => false,
+                }
+            })
+        };
+        let (Some(slot), Some(event)) = (slot, event) else {
+            unsafe { UnmapViewOfFile(view) };
+            return Err(format!("Too many readers are waiting for packets in client {pid}"));
+        };
+        let next = unsafe { packet_log::written(log) };
+        Ok(Self { mapping, view, event, slot, filter: [0; packet_log::FILTER_WORDS], next })
+    }
+
+    fn log(&self) -> *const Log {
+        self.view.Value as *const Log
+    }
+
+    /// Replaces the packets that wake the watcher and that `read` returns.
+    pub fn set_filter(&mut self, filter: packet_log::Filter) {
+        self.filter = filter;
+        // SAFETY: the view stays mapped while `self` lives and the slot is ours.
+        unsafe { packet_log::set_filter(self.log(), self.slot, &filter) };
+    }
+
+    /// The sequence number the next logged packet gets.
+    pub fn written(&self) -> u64 {
+        // SAFETY: the view stays mapped while `self` lives.
+        unsafe { packet_log::written(self.log()) }
+    }
+
+    /// Whether packets were logged since the last read (not all of them need be in the filter).
+    fn pending(&self) -> bool {
+        // SAFETY: the view stays mapped while `self` lives.
+        unsafe { packet_log::written(self.log()) > self.next }
+    }
+
+    /// The packets in the filter logged since the last read, from the next `limit` entries of the log.
+    pub fn read(&mut self, limit: usize) -> packet_log::Page {
+        // SAFETY: as in `pending`, and the log was checked compatible when the watcher was made.
+        let mut page = unsafe { packet_log::read_since(self.log(), self.next, limit) };
+        self.next = page.next;
+        page.entries.retain(|entry| packet_log::filter_has(&self.filter, entry.direction, entry.opcode));
+        page
+    }
+}
+
+impl Drop for PacketWatcher {
+    fn drop(&mut self) {
+        // SAFETY: the view is still mapped; the event handle closes after the slot is given back (when `event` drops).
+        unsafe {
+            packet_log::unsubscribe(self.log(), self.slot);
+            UnmapViewOfFile(self.view);
+        }
+        let _ = &self.mapping;
+    }
+}
+
+/// Waits up to `timeout` for either watcher's agent to log something for it; true when one did (or something is already waiting to be read).
+pub fn wait_watchers(items: Option<&ItemWatcher>, packets: Option<&PacketWatcher>, timeout: Duration) -> bool {
+    if items.is_some_and(|items| items.pending()) || packets.is_some_and(|packets| packets.pending()) {
+        return true;
+    }
+    let events: Vec<HANDLE> = items.map(|items| items.event.0).into_iter().chain(packets.map(|packets| packets.event.0)).collect();
+    if events.is_empty() {
+        sleep(timeout);
+        return false;
+    }
+    let ms = timeout.as_millis().min(u32::MAX as u128 - 1) as u32;
+    let woke = unsafe { WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, ms) };
+    woke < WAIT_OBJECT_0 + events.len() as u32
 }
 
 pub fn world_select(pid: u32) -> Result<Option<WorldSelect>, String> {
@@ -3178,10 +3355,14 @@ impl ItemWatcher {
         self.view.Value as *const item_log::Log
     }
 
+    fn pending(&self) -> bool {
+        // SAFETY: the view stays mapped while `self` lives.
+        unsafe { item_log::written(self.log()) > self.next }
+    }
+
     /// Waits up to `timeout` for the agent to log a change; true when it did (or one is already waiting to be read).
     pub fn wait(&self, timeout: Duration) -> bool {
-        // SAFETY: the view stays mapped while `self` lives.
-        if unsafe { item_log::written(self.log()) } > self.next {
+        if self.pending() {
             return true;
         }
         unsafe { WaitForSingleObject(self.event.0, timeout.as_millis().min(u32::MAX as u128 - 1) as u32) == WAIT_OBJECT_0 }

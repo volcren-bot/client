@@ -3,12 +3,13 @@ use std::{cell::RefCell, collections::HashMap, path::{Component, Path, PathBuf},
 use mlua::{FromLuaMulti, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, serde::SerializeOptions};
 use serde::Serialize;
 
+use ipc::packets::{filter_add, filter_has, Filter};
 use crate::{Input, MouseButton, Overlay, Rgba, async_input::{Pace, Worker}, input_jobs::{self, Job}, projection::Via, wind_mouse};
 
 #[cfg(windows)]
 use crate::bank_pin::enter as bank_pin_enter;
 #[cfg(windows)]
-use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_hitsplats, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, projectiles, send_input, send_input_with, spot_anims, varc, varp_value, varps, widget, widget_children, world_select, ItemWatcher};
+use crate::{cache_locs, nav_plan, chat_messages, connection, draw, draw_batch, draw_lines, enum_def, selected_widget, find_path, item_params, varbit, game_state, game_val_names, ground_items, in_instance, map_regions, player_plane, server_tile, movement, scene_collision, scene_route, menu, menu_click, menu_layout, menu_open, project, project_moved, item_container, item_names, loc_model, locs, npc_hitsplats, npc_model, npc_sizes, npcs, sub_interfaces, player_model, players, projectiles, send_input, send_input_with, spot_anims, varc, varp_value, varps, widget, widget_children, world_select, ItemWatcher, PacketWatcher, wait_watchers};
 #[cfg(not(windows))]
 use offline::*;
 
@@ -24,12 +25,29 @@ mod offline {
         pub fn new(_: u32) -> Result<Self, String> {
             Err(NO_WIN32.into())
         }
-        pub fn wait(&self, _: std::time::Duration) -> bool {
-            false
-        }
         pub fn read(&mut self, _: usize) -> crate::ItemPage {
             crate::ItemPage::default()
         }
+    }
+
+    pub struct PacketWatcher;
+
+    impl PacketWatcher {
+        pub fn new(_: u32) -> Result<Self, String> {
+            Err(NO_WIN32.into())
+        }
+        pub fn set_filter(&mut self, _: ipc::packets::Filter) {}
+        pub fn written(&self) -> u64 {
+            0
+        }
+        pub fn read(&mut self, _: usize) -> ipc::packets::Page {
+            ipc::packets::Page::default()
+        }
+    }
+
+    pub fn wait_watchers(_: Option<&ItemWatcher>, _: Option<&PacketWatcher>, timeout: std::time::Duration) -> bool {
+        std::thread::sleep(timeout);
+        false
     }
 
     pub fn connection(_: u32) -> Option<Connection> {
@@ -122,6 +140,12 @@ mod offline {
     pub fn find_path(_: u32, _: i32, _: [i32; 2], _: [i32; 2], _: Option<usize>) -> Result<Vec<[i32; 2]>, String> {
         Err(NO_WIN32.into())
     }
+    pub fn server_tile(_: u32) -> Result<Option<crate::ServerTile>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn movement(_: u32) -> Result<Option<crate::Movement>, String> {
+        Err(NO_WIN32.into())
+    }
     pub fn player_plane(_: u32) -> Result<i32, String> {
         Err(NO_WIN32.into())
     }
@@ -210,6 +234,14 @@ fn script_model(m: crate::EntityModel) -> ScriptModel {
 }
 
 
+// An HTTP response as the script sees it.
+#[derive(Serialize)]
+struct ScriptResponse {
+    ok: bool,
+    #[serde(flatten)]
+    response: crate::http::Response,
+}
+
 fn to_lua<T: Serialize>(lua: &Lua, value: &T) -> mlua::Result<mlua::Value> {
     lua.to_value_with(value, SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false))
 }
@@ -238,54 +270,140 @@ struct Collision {
 }
 
 // `scene` cut to `area` (x1, y1, x2, y2, corners included), or whole without one.
-/// The registered item change callbacks and the watcher that wakes the script for them.
+/// The registered item change and packet callbacks and the watchers that wake the script for them.
 #[derive(Default)]
-struct ItemCallbacks {
-    watcher: Option<ItemWatcher>,
-    callbacks: Vec<(u64, mlua::Function)>,
+struct Callbacks {
+    items: Option<ItemWatcher>,
+    item_callbacks: Vec<(u64, mlua::Function)>,
+    packets: Option<PacketWatcher>,
+    packet_callbacks: Vec<(u64, Filter, mlua::Function)>,
+    /// the packets a running `wait_packet` waits for, on top of the callbacks'
+    waiting: Option<Filter>,
     last_id: u64,
 }
 
-/// Waits up to `time` for item changes, calling every callback per change; with `until_change` it returns after the first.
-fn pump_item_changes(lua: &Lua, items: &Rc<RefCell<ItemCallbacks>>, time: std::time::Duration, until_change: bool) -> mlua::Result<bool> {
+impl Callbacks {
+    fn watching(&self) -> bool {
+        self.items.is_some() || self.packets.is_some()
+    }
+
+    /// Makes the packet watcher filter for what the callbacks and a running wait want, and keeps it only while something does.
+    fn refresh_packets(&mut self, pid: Option<u32>) -> mlua::Result<()> {
+        let mut filter: Filter = self.waiting.unwrap_or_default();
+        for (_, wanted, _) in &self.packet_callbacks {
+            filter.iter_mut().zip(wanted).for_each(|(word, bits)| *word |= bits);
+        }
+        if filter == Filter::default() {
+            self.packets = None;
+            return Ok(());
+        }
+        if self.packets.is_none() {
+            let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
+            self.packets = Some(PacketWatcher::new(pid).map_err(mlua::Error::RuntimeError)?);
+        }
+        self.packets.as_mut().unwrap().set_filter(filter);
+        Ok(())
+    }
+}
+
+/// What a pump waits for besides the time running out.
+enum Until {
+    Time,
+    ItemChange,
+    /// a packet in the filter, from this sequence number on
+    Packet(Filter, u64),
+}
+
+/// Waits up to `time`, calling every callback for each item change and packet logged meanwhile; returns the first item change or packet `until` asks for.
+fn pump_events(lua: &Lua, callbacks: &Rc<RefCell<Callbacks>>, time: std::time::Duration, until: &Until) -> mlua::Result<Option<mlua::Value>> {
     let deadline = std::time::Instant::now() + time;
-    let mut any = false;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         // the borrow ends before any callback runs, so a callback may register or remove callbacks
-        let page = {
-            let mut items = items.borrow_mut();
-            let Some(watcher) = items.watcher.as_mut() else {
+        let (changes, packets) = {
+            let mut callbacks = callbacks.borrow_mut();
+            let callbacks = &mut *callbacks;
+            if !callbacks.watching() {
                 std::thread::sleep(left);
-                return Ok(any);
-            };
-            if !watcher.wait(left) {
-                return Ok(any);
+                return Ok(None);
             }
-            watcher.read(ITEM_CHANGES_PER_WAKE)
+            if !wait_watchers(callbacks.items.as_ref(), callbacks.packets.as_ref(), left) {
+                return Ok(None);
+            }
+            let changes = callbacks.items.as_mut().map(|watcher| watcher.read(ITEM_CHANGES_PER_WAKE).changes).unwrap_or_default();
+            let packets = callbacks.packets.as_mut().map(|watcher| watcher.read(PACKETS_PER_WAKE).entries).unwrap_or_default();
+            (changes, packets)
         };
-        if page.changes.is_empty() {
+        if changes.is_empty() && packets.is_empty() {
             if left.is_zero() {
-                return Ok(any);
+                return Ok(None);
             }
             continue;
         }
-        any = true;
-        let callbacks: Vec<mlua::Function> = items.borrow().callbacks.iter().map(|(_, callback)| callback.clone()).collect();
-        for change in &page.changes {
+        let mut found = None;
+        let item_callbacks: Vec<mlua::Function> = callbacks.borrow().item_callbacks.iter().map(|(_, callback)| callback.clone()).collect();
+        for change in &changes {
             let value = to_lua(lua, change)?;
-            for callback in &callbacks {
+            for callback in &item_callbacks {
                 callback.call::<()>(value.clone())?;
             }
+            if matches!(until, Until::ItemChange) && found.is_none() {
+                found = Some(value);
+            }
         }
-        if until_change {
-            return Ok(true);
+        let packet_callbacks: Vec<(Filter, mlua::Function)> = callbacks.borrow().packet_callbacks.iter().map(|(_, filter, callback)| (*filter, callback.clone())).collect();
+        for packet in &packets {
+            let value = packet_to_lua(lua, packet)?;
+            for (filter, callback) in &packet_callbacks {
+                if filter_has(filter, packet.direction, packet.opcode) {
+                    callback.call::<()>(value.clone())?;
+                }
+            }
+            if let Until::Packet(filter, since) = until
+                && found.is_none()
+                && packet.sequence >= *since
+                && filter_has(filter, packet.direction, packet.opcode)
+            {
+                found = Some(value);
+            }
+        }
+        if found.is_some() {
+            return Ok(found);
         }
     }
 }
 
 /// Changes a callback pass handles at most per read: a bank opening logs a few hundred in one tick.
 const ITEM_CHANGES_PER_WAKE: usize = 2000;
+
+/// Log entries a callback pass reads at most, before filtering: the whole ring.
+const PACKETS_PER_WAKE: usize = ipc::packets::SLOT_COUNT;
+
+fn packet_to_lua(lua: &Lua, packet: &ipc::packets::Entry) -> mlua::Result<mlua::Value> {
+    let table = lua.create_table()?;
+    table.set("sequence", packet.sequence)?;
+    table.set("time_ms", packet.time_ms)?;
+    table.set("sent", packet.direction == ipc::packets::direction::SENT)?;
+    table.set("opcode", packet.opcode)?;
+    table.set("length", packet.length)?;
+    table.set("payload", lua.create_string(&packet.payload)?)?;
+    Ok(mlua::Value::Table(table))
+}
+
+/// The filter for a script's list of packet ids, received ones or, with `sent`, the ones the client sends.
+fn packet_filter(name: &str, opcodes: &[u16], sent: Option<bool>) -> mlua::Result<Filter> {
+    let direction = if sent.unwrap_or(false) { ipc::packets::direction::SENT } else { ipc::packets::direction::RECEIVED };
+    let mut filter = Filter::default();
+    for &opcode in opcodes {
+        if !filter_add(&mut filter, direction, opcode) {
+            return Err(mlua::Error::RuntimeError(format!("{name}: packet {opcode} can't be listened for, only 0 to 255")));
+        }
+    }
+    if opcodes.is_empty() {
+        return Err(mlua::Error::RuntimeError(format!("{name}: no packets given")));
+    }
+    Ok(filter)
+}
 
 fn collision_cut(scene: (i32, i32, i32, Vec<Vec<u32>>), area: Option<[i32; 4]>) -> Result<Collision, String> {
     let (x0, y0, plane, columns) = scene;
@@ -717,48 +835,97 @@ pub fn run_with_modules(
     globals.set("time", lua.create_function(move |_, (): ()| Ok(started.elapsed().as_secs_f64() * 1000.0))?)?;
     globals.set("clock", lua.create_function(|_, (): ()| Ok(local_time_of_day()))?)?;
 
-    // Item change callbacks; they run inside `sleep` and `wait_item_change`, not interrupting the script.
-    let items = Rc::new(RefCell::new(ItemCallbacks::default()));
-    let registry = items.clone();
+    // Item change and packet callbacks; they run inside `sleep`, `wait_item_change` and `wait_packet`, not interrupting the script.
+    let events = Rc::new(RefCell::new(Callbacks::default()));
+    let registry = events.clone();
     globals.set(
         "on_item_change",
         lua.create_function(move |_, callback: mlua::Function| {
             let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
-            let mut items = registry.borrow_mut();
-            if items.watcher.is_none() {
-                items.watcher = Some(ItemWatcher::new(pid).map_err(mlua::Error::RuntimeError)?);
+            let mut events = registry.borrow_mut();
+            if events.items.is_none() {
+                events.items = Some(ItemWatcher::new(pid).map_err(mlua::Error::RuntimeError)?);
             }
-            items.last_id += 1;
-            let id = items.last_id;
-            items.callbacks.push((id, callback));
+            events.last_id += 1;
+            let id = events.last_id;
+            events.item_callbacks.push((id, callback));
             Ok(id)
         })?,
     )?;
-    let registry = items.clone();
+    let registry = events.clone();
     globals.set(
         "off_item_change",
         lua.create_function(move |_, id: u64| {
-            let mut items = registry.borrow_mut();
-            let before = items.callbacks.len();
-            items.callbacks.retain(|(known, _)| *known != id);
-            if items.callbacks.is_empty() {
-                items.watcher = None;
+            let mut events = registry.borrow_mut();
+            let before = events.item_callbacks.len();
+            events.item_callbacks.retain(|(known, _)| *known != id);
+            if events.item_callbacks.is_empty() {
+                events.items = None;
             }
-            Ok(items.callbacks.len() != before)
+            Ok(events.item_callbacks.len() != before)
         })?,
     )?;
-    let pump = items.clone();
+    let pump = events.clone();
     globals.set(
         "wait_item_change",
-        lua.create_function(move |lua, ms: u64| pump_item_changes(lua, &pump, std::time::Duration::from_millis(ms), true))?,
+        lua.create_function(move |lua, ms: u64| Ok(pump_events(lua, &pump, std::time::Duration::from_millis(ms), &Until::ItemChange)?.is_some()))?,
     )?;
-    let pump = items;
+    let registry = events.clone();
+    globals.set(
+        "on_packet",
+        lua.create_function(move |_, (opcodes, callback, sent): (Vec<u16>, mlua::Function, Option<bool>)| {
+            let filter = packet_filter("on_packet", &opcodes, sent)?;
+            let mut events = registry.borrow_mut();
+            events.last_id += 1;
+            let id = events.last_id;
+            events.packet_callbacks.push((id, filter, callback));
+            if let Err(error) = events.refresh_packets(pid) {
+                events.packet_callbacks.pop();
+                return Err(error);
+            }
+            Ok(id)
+        })?,
+    )?;
+    let registry = events.clone();
+    globals.set(
+        "off_packet",
+        lua.create_function(move |_, id: u64| {
+            let mut events = registry.borrow_mut();
+            let before = events.packet_callbacks.len();
+            events.packet_callbacks.retain(|(known, _, _)| *known != id);
+            events.refresh_packets(pid)?;
+            Ok(events.packet_callbacks.len() != before)
+        })?,
+    )?;
+    let pump = events.clone();
+    globals.set(
+        "wait_packet",
+        lua.create_function(move |lua, (opcodes, ms, sent): (Vec<u16>, u64, Option<bool>)| {
+            let filter = packet_filter("wait_packet", &opcodes, sent)?;
+            // only a packet logged from now on counts, not one waiting from before the call
+            let (previous, since) = {
+                let mut events = pump.borrow_mut();
+                let previous = events.waiting.replace(filter);
+                if let Err(error) = events.refresh_packets(pid) {
+                    events.waiting = previous;
+                    return Err(error);
+                }
+                (previous, events.packets.as_ref().map_or(0, |watcher| watcher.written()))
+            };
+            let found = pump_events(lua, &pump, std::time::Duration::from_millis(ms), &Until::Packet(filter, since));
+            let mut events = pump.borrow_mut();
+            events.waiting = previous;
+            events.refresh_packets(pid)?;
+            Ok(found?.unwrap_or(mlua::Value::Nil))
+        })?,
+    )?;
+    let pump = events;
     globals.set(
         "sleep",
         lua.create_function(move |lua, ms: u64| {
             let time = std::time::Duration::from_millis(ms);
-            if pump.borrow().watcher.is_some() {
-                pump_item_changes(lua, &pump, time, false)?;
+            if pump.borrow().watching() {
+                pump_events(lua, &pump, time, &Until::Time)?;
             } else {
                 std::thread::sleep(time);
             }
@@ -850,6 +1017,8 @@ pub fn run_with_modules(
     globals.set("locs", query(&lua, pid, |pid, plane: Option<i32>| locs(pid, plane))?)?;
     globals.set("map_regions", query(&lua, pid, |pid, (): ()| map_regions(pid))?)?;
     globals.set("in_instance", query(&lua, pid, |pid, (): ()| in_instance(pid))?)?;
+    globals.set("server_tile", query(&lua, pid, |pid, (): ()| server_tile(pid))?)?;
+    globals.set("movement", query(&lua, pid, |pid, (): ()| movement(pid))?)?;
     globals.set("ground_items", query(&lua, pid, |pid, (): ()| ground_items(pid))?)?;
     globals.set("projectiles", query(&lua, pid, |pid, (): ()| projectiles(pid))?)?;
     globals.set("spot_anims", query(&lua, pid, |pid, (): ()| spot_anims(pid))?)?;
@@ -992,6 +1161,20 @@ pub fn run_with_modules(
                 cancel_input(&worker);
                 bank_pin_enter(pid, &crate::async_input::Blocking).map(crate::bank_pin::Outcome::name).map_err(mlua::Error::RuntimeError)
             }
+        })?,
+    )?;
+    // Makes the request through the loader, which only reaches the hosts the user whitelisted. Needs no client.
+    globals.set(
+        "http_request",
+        lua.create_function(|lua, options: mlua::Value| -> mlua::Result<(mlua::Value, Option<String>)> {
+            let request: crate::http::Request = match lua.from_value(options) {
+                Ok(request) => request,
+                Err(error) => return Ok((mlua::Value::Nil, Some(format!("http_request: {error}")))),
+            };
+            Ok(match crate::http::request(&request) {
+                Ok(response) => (to_lua(lua, &ScriptResponse { ok: (200..300).contains(&response.status), response })?, None),
+                Err(error) => (mlua::Value::Nil, Some(error)),
+            })
         })?,
     )?;
     globals.set("click", input(&lua, pid, &worker, click_input)?)?;
@@ -1139,6 +1322,37 @@ mod tests {
         assert_eq!(cut.flags, vec![10, 11, 20, 21]);
         assert_eq!(collision_cut(scene.clone(), None).unwrap().flags.len(), 6);
         assert!(collision_cut(scene, Some([90, 190, 95, 195])).is_err());
+    }
+
+    #[test]
+    fn packet_filters_check_their_ids_and_need_a_client() {
+        let error = |source: &str| run_lines(source).1.unwrap_err().to_string();
+        assert!(error("on_packet({ 2, 300 }, function() end)").contains("packet 300 can't be listened for"));
+        assert!(error("wait_packet({}, 10)").contains("no packets given"));
+        assert!(error("on_packet({ 2 }, function() end)").contains(NO_CLIENT));
+        // the failed registration left nothing behind, so sleep is a plain sleep and off_packet knows no id
+        let (lines, result) = run_lines("pcall(on_packet, { 2 }, function() end) sleep(1) print(off_packet(1))");
+        result.unwrap();
+        assert_eq!(lines, ["false"]);
+    }
+
+    #[test]
+    fn a_packet_reaches_luau_with_its_payload_as_bytes() {
+        let lua = Lua::new();
+        let entry = ipc::packets::Entry { sequence: 7, time_ms: 1200, direction: ipc::packets::direction::SENT, opcode: 75, length: 300, payload: vec![0, 255, 10] };
+        lua.globals().set("packet", packet_to_lua(&lua, &entry).unwrap()).unwrap();
+        let seen: String = lua.load("return `{packet.sequence} {packet.time_ms} {packet.sent} {packet.opcode} {packet.length} {#packet.payload} {string.byte(packet.payload, 2)}`").eval().unwrap();
+        assert_eq!(seen, "7 1200 true 75 300 3 255");
+    }
+
+    #[test]
+    fn packet_filters_pick_the_direction() {
+        let received = packet_filter("t", &[2, 40], None).unwrap();
+        assert!(filter_has(&received, ipc::packets::direction::RECEIVED, 40));
+        assert!(!filter_has(&received, ipc::packets::direction::SENT, 40));
+        let sent = packet_filter("t", &[75], Some(true)).unwrap();
+        assert!(filter_has(&sent, ipc::packets::direction::SENT, 75));
+        assert!(!filter_has(&sent, ipc::packets::direction::RECEIVED, 75));
     }
 
     #[test]
