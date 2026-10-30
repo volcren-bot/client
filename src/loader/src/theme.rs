@@ -156,6 +156,7 @@ pub fn sidebar_item<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, 
         }
         let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
         let mut job = egui::text::LayoutJob::default();
+        job.wrap = egui::text::TextWrapping { max_width: rect.width() - 16.0, max_rows: 1, break_anywhere: true, overflow_character: Some('\u{2026}') };
         for (s, color) in [(if last { "└─ " } else { "├─ " }, COMMENT), (icon, text), (" ", text), (name, text), ("/", text)] {
             job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
         }

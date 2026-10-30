@@ -112,8 +112,6 @@ enum Event {
     StoreStarted {
         pid: u32,
         title: String,
-        /// The account is tester or above, so the script's source is shown in the editor; for everyone else it stays closed.
-        open: bool,
         result: Result<Prepared, String>,
     },
     Heartbeat {
@@ -766,9 +764,6 @@ pub struct LoaderApp {
     varp: usize,
     varps: Option<Vec<i32>>,
     script_file: ScriptFile,
-    /// A store script's source is open in the editor, read-only: its name and revision. The user's own file waits in `parked`.
-    viewing: Option<String>,
-    parked: Option<ScriptFile>,
     find: Find,
     highlighter: Highlighter,
     fold: crate::fold::Folds,
@@ -799,7 +794,7 @@ pub struct LoaderApp {
     /// A community script waiting for the user to accept the warning before it starts.
     warning: Option<(StoreScript, Target)>,
     store_run: Option<StoreRun>,
-    /// Whether the latest script run came from the editor, so its page hands back to the editor when it ends.
+    /// Whether the latest script run came from the editor, so its page hands back to the editor when it ends. The editor stays in the sidebar while it runs.
     run_was_local: bool,
     /// A newer launcher release, until the user dismisses it.
     update: Option<Release>,
@@ -854,8 +849,6 @@ impl LoaderApp {
             script_file: load_default_script()
                 .or_else(|| cc.storage.and_then(|s| eframe::get_value(s, SCRIPT_KEY)))
                 .unwrap_or_default(),
-            viewing: None,
-            parked: None,
             find: Find::default(),
             highlighter: Highlighter::default(),
             fold: crate::fold::Folds::default(),
@@ -991,8 +984,7 @@ impl LoaderApp {
         let (pid, title) = (target.client.pid, script.title.clone());
         // A community script only runs at the revision the user was warned about
         let warned = script.community.then_some(script.revision).flatten();
-        let open = self.auth.me().is_some_and(Me::can_view_source);
-        self.api_job(ctx, move |api| Event::StoreStarted { pid, title, open, result: session::prepare(&api, &script, warned) });
+        self.api_job(ctx, move |api| Event::StoreStarted { pid, title, result: session::prepare(&api, &script, warned) });
     }
 
     /// Ends the session of the store script that just stopped. Idempotent on the server, so it is safe to call twice.
@@ -1153,18 +1145,14 @@ impl LoaderApp {
         crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
         let before = self.tab;
         let running = self.running_title().map(|title| sidebar_name(&title));
-        // a running script's page takes the place of both Scripts and Editor
+        // a running script's page sits after Scripts and Editor, which stay available
         let items = [
             (Tab::Clients, "\u{f108}", "client".to_owned()),
+            (Tab::Store, "\u{f489}", "scripts".to_owned()),
+            (Tab::Scripts, "\u{f044}", "editor".to_owned()),
         ]
         .into_iter()
-        .chain(match running {
-            Some(name) => vec![(Tab::Running, "\u{f04b}", name)],
-            None => vec![
-                (Tab::Store, "\u{f489}", "scripts".to_owned()),
-                (Tab::Scripts, "\u{f044}", "editor".to_owned()),
-            ],
-        })
+        .chain(running.map(|name| (Tab::Running, "\u{f04b}", name)))
         .chain([
             (Tab::Development, "\u{f188}", "development".to_owned()),
             (Tab::Terminal, "\u{f120}", "terminal".to_owned()),
@@ -2118,10 +2106,10 @@ impl LoaderApp {
                         Err(error) => self.store.redeem_result = Some((false, error.to_string())),
                     }
                 }
-                Event::StoreStarted { pid, title, open, result } => {
+                Event::StoreStarted { pid, title, result } => {
                     self.starting = None;
                     match result {
-                        Ok(prepared) => self.run_prepared(ctx, pid, &title, open, prepared),
+                        Ok(prepared) => self.run_prepared(ctx, pid, &title, prepared),
                         Err(error) => {
                             self.script_error(format!("Couldn't start {title}: {error}"));
                             // The list may be stale (a new revision, a grant that was revoked)
@@ -2878,8 +2866,6 @@ impl LoaderApp {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                self.viewing = None;
-                self.parked = None;
                 self.script_file = ScriptFile {
                     path: path.display().to_string(),
                     disk: Some(text.clone()),
@@ -2888,26 +2874,6 @@ impl LoaderApp {
                 self.info(format!("Opened {}.", path.display()));
             }
             Err(error) => self.error(format!("Cannot open {}: {error}", path.display())),
-        }
-    }
-
-    /// Opens a store script's entry file in the editor, read-only, so every script can be read. The user's own file is parked until they leave the view.
-    fn view_store_source(&mut self, title: &str, revision: i64, entry: &std::path::Path, source: &str) {
-        if self.viewing.is_none() {
-            self.parked = Some(std::mem::take(&mut self.script_file));
-        }
-        self.script_file = ScriptFile {
-            path: entry.display().to_string(),
-            text: source.to_owned(),
-            disk: Some(source.to_owned()),
-        };
-        self.viewing = Some(format!("{title} (revision {revision})"));
-    }
-
-    /// Closes the read-only view and brings back the file that was open before it.
-    fn leave_view(&mut self) {
-        if self.viewing.take().is_some() {
-            self.script_file = self.parked.take().unwrap_or_default();
         }
     }
 
@@ -2920,7 +2886,7 @@ impl LoaderApp {
         }
     }
 
-    fn run_prepared(&mut self, ctx: &egui::Context, pid: u32, title: &str, open: bool, prepared: Prepared) {
+    fn run_prepared(&mut self, ctx: &egui::Context, pid: u32, title: &str, prepared: Prepared) {
         let session_id = prepared.session.session_id.clone();
         let Some(target) = self.targets.iter().find(|t| t.client.pid == pid && t.client.loaded.is_some()).cloned() else {
             self.script_error(format!("The client {pid} is gone, so {title} wasn't started."));
@@ -2934,12 +2900,6 @@ impl LoaderApp {
                 }
                 self.script_info(format!("Running {title} (revision {}).", prepared.session.revision));
                 self.script = Some(script);
-                if open {
-                    self.view_store_source(title, prepared.session.revision, &prepared.entry, &prepared.source);
-                } else {
-                    // a script that stays closed never replaces what the editor shows, not even one viewed before it
-                    self.leave_view();
-                }
                 self.start_xp_tracking(Some(target.clone()));
                 let interval = Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
                 self.store_run = Some(StoreRun { session_id, title: title.to_owned(), beat: Beat::new(std::time::Instant::now(), interval), stopping: false });
@@ -3060,29 +3020,18 @@ impl LoaderApp {
 
         let target = self.loaded_target_ui(ui);
 
-        // A store script is read-only here and can't be run from the editor, which would skip its billing.
-        let viewing = self.viewing.is_some();
-        if let Some(label) = self.viewing.clone() {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("Viewing {label}, read-only.")).strong());
-                if ui.add_enabled(!running, egui::Button::new("Back to my script")).clicked() {
-                    self.leave_view();
-                }
-            });
-            ui.add_space(4.0);
-        }
         ui.horizontal(|ui| {
             if ui.add_enabled(!running, egui::Button::new("Open…")).clicked() {
                 self.open_script();
             }
-            if ui.add_enabled(!running && !viewing && !self.script_file.path.is_empty(), egui::Button::new("Save")).clicked() {
+            if ui.add_enabled(!running && !self.script_file.path.is_empty(), egui::Button::new("Save")).clicked() {
                 self.save_script();
             }
             if ui.add_enabled(!running, egui::Button::new("Save as…")).on_hover_text("Saves a copy of what's in the editor.").clicked() {
                 self.save_script_as();
             }
             ui.add_space(16.0);
-            let can_run = !running && !viewing && !self.script_file.text.trim().is_empty();
+            let can_run = !running && !self.script_file.text.trim().is_empty();
             if ui
                 .add_enabled(can_run, egui::Button::new("Run"))
                 .on_hover_text("Runs what's in the editor, against the client selected above if any.")
@@ -3208,11 +3157,7 @@ impl LoaderApp {
                             }
                         }
                     }
-                    // read-only: a str is a TextBuffer that refuses edits but still lets the text be selected and copied
-                    let frozen = viewing.then(|| self.script_file.text.clone());
-                    let mut frozen_ref = frozen.as_deref().unwrap_or_default();
-                    let buffer: &mut dyn egui::TextBuffer = if frozen.is_some() { &mut frozen_ref } else { &mut self.script_file.text };
-                    let mut output = egui::TextEdit::multiline(buffer)
+                    let mut output = egui::TextEdit::multiline(&mut self.script_file.text)
                         .code_editor()
                         .margin(margin)
                         .desired_width(text_width)
@@ -3314,7 +3259,7 @@ impl LoaderApp {
             });
         });
 
-        if self.find.replace && self.viewing.is_none() {
+        if self.find.replace {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.find.replacement).hint_text("Replace with").desired_width(200.0));
                 if ui.add_enabled(count > 0, egui::Button::new("Replace")).clicked() {
@@ -3987,7 +3932,7 @@ impl eframe::App for LoaderApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
-        eframe::set_value(storage, SCRIPT_KEY, self.parked.as_ref().unwrap_or(&self.script_file));
+        eframe::set_value(storage, SCRIPT_KEY, &self.script_file);
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
         eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
