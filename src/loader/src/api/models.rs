@@ -80,6 +80,11 @@ pub fn normalize_share_code(input: &str) -> Option<String> {
 }
 
 impl Me {
+    /// Testers and above can read a store script's source in the editor.
+    pub fn can_view_source(&self) -> bool {
+        self.can_browse_community()
+    }
+
     /// Testers and above can list every community script (`GET /launcher/scripts?community=true`).
     pub fn can_browse_community(&self) -> bool {
         matches!(self.role.as_str(), "tester" | "scripter" | "moderator" | "administrator")
