@@ -92,7 +92,7 @@ pub fn parse_counters(payload: &str) -> Option<Vec<Counter>> {
 
 pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
 
-pub const KINDS: [&str; 5] = ["label", "check", "number", "text", "choice"];
+pub const KINDS: [&str; 6] = ["label", "check", "number", "text", "choice", "list"];
 
 pub fn fields(spec: &Value) -> &[Value] {
     spec.get("fields").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
@@ -112,6 +112,28 @@ pub fn options(field: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .map(|o| o.iter().map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_owned)).collect())
         .unwrap_or_default()
+}
+
+/// A list's rows: `(id, label, ticked by default)`. A row is a table `{ id, label, default }`.
+pub fn items(field: &Value) -> Vec<(String, String, bool)> {
+    field
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(Value::as_str)?;
+                    let label = row.get("label").and_then(Value::as_str).unwrap_or(id);
+                    Some((id.to_owned(), label.to_owned(), row.get("default").and_then(Value::as_bool).unwrap_or(false)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The id of the check that has to be ticked for the field to be usable, when it names one.
+pub fn enabled_by(field: &Value) -> Option<&str> {
+    field.get("enabled_by").and_then(Value::as_str)
 }
 
 pub fn validate(spec: &Value) -> Result<(), String> {
@@ -137,6 +159,9 @@ pub fn validate(spec: &Value) -> Result<(), String> {
         if kind == "choice" && options(field).is_empty() {
             return Err(format!("field \"{id}\": a choice needs options"));
         }
+        if kind == "list" && items(field).is_empty() {
+            return Err(format!("field \"{id}\": a list needs items, each with an id"));
+        }
     }
     Ok(())
 }
@@ -152,6 +177,7 @@ pub fn default_value(field: &Value) -> Option<Value> {
             let given = given.and_then(|v| v.as_str().map(str::to_owned)).filter(|g| options.contains(g));
             Some(json!(given.or_else(|| options.first().cloned()).unwrap_or_default()))
         }
+        "list" => Some(Value::Object(items(field).into_iter().map(|(id, _, on)| (id, json!(on))).collect())),
         _ => Some(json!(given.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default())),
     }
 }
@@ -242,6 +268,9 @@ mod tests {
         assert_eq!(defaults(&spec), json!({ "spot": "Harpoon", "bank": true, "hours": 1, "note": "" }));
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "slider" }] })).is_err());
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "choice" }] })).is_err());
+        assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "list" }] })).is_err());
+        let list = json!({ "id": "l", "kind": "list", "items": [{ "id": "x", "label": "X", "default": true }, { "id": "y" }] });
+        assert_eq!(default_value(&list), Some(json!({ "x": true, "y": false })));
         assert!(validate(&json!({ "fields": [{ "id": "a" }, { "id": "a" }] })).is_err());
         let line = stats_line(10, -5, &[1, 2]);
         assert_eq!(parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()), Some((10, -5, vec![1, 2])));
