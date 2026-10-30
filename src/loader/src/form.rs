@@ -100,17 +100,6 @@ impl Form {
         }
     }
 
-    /// The form in a window of its own, over whatever page is open.
-    pub fn show(&mut self, ctx: &egui::Context) -> Outcome {
-        let mut outcome = Outcome::Open;
-        egui::Window::new(&self.title)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| outcome = self.show_inline(ui));
-        outcome
-    }
-
     /// The form's fields and buttons in `ui`, for a page that hosts the form itself.
     pub fn show_inline(&mut self, ui: &mut egui::Ui) -> Outcome {
         let mut outcome = Outcome::Open;

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use injector::{ScriptPage, ScriptRun};
 
 use crate::log_view::{Filtered, Log, View};
-use crate::script_names;
+use crate::script_names::Names;
 
 /// Runs kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
@@ -48,17 +48,17 @@ impl Row {
     /// `npc_name_timer (6697) (1, 2)` or, for a trigger event, `Trigger 12 (…)`; nested runs are indented.
     /// The row's text on one line.
     #[cfg(test)]
-    pub fn text(&self) -> String {
-        let (name, args, took) = (self.name(), self.args_text(), self.took());
+    pub fn text(&self, names: &Names) -> String {
+        let (name, args, took) = (self.name(names), self.args_text(), self.took());
         let took = if took.is_empty() { took } else { format!("  {took}") };
         let indent = "  ".repeat(self.run.depth as usize);
         if args.is_empty() { format!("{indent}{name}{took}") } else { format!("{indent}{name} ({args}){took}") }
     }
 
-    /// `npc_name_timer (6697)`, `Script 123` for one without a name, or `Trigger 7` for an event whose script id isn't known.
-    pub fn name(&self) -> String {
+    /// `npc_name_timer (6697)`, `Script 123` for one without a (loaded) name, or `Trigger 7` for an event whose script id isn't known.
+    pub fn name(&self, names: &Names) -> String {
         match self.script_id() {
-            Some(id) => match script_names::name(id) {
+            Some(id) => match names.name(id) {
                 Some(name) => format!("{name} ({id})"),
                 None => format!("Script {id}"),
             },
@@ -83,14 +83,14 @@ impl Row {
     }
 }
 
-/// Scripts to leave out of the list, from text like `6697, npc_name_timer`: ids or script names (see `script_names`).
+/// Scripts to leave out of the list, from text like `6697, npc_name_timer`: ids, or script names once they are loaded (see `script_names`).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Blacklist(Vec<i32>);
 
 impl Blacklist {
-    pub fn parse(text: &str) -> Self {
+    pub fn parse(text: &str, names: &Names) -> Self {
         let words = text.split(|c: char| c == ',' || c.is_whitespace()).filter(|word| !word.is_empty());
-        Self(words.flat_map(|word| word.parse().map_or_else(|_| script_names::ids(word).to_vec(), |id| vec![id])).collect())
+        Self(words.flat_map(|word| word.parse().map_or_else(|_| names.ids(word).to_vec(), |id| vec![id])).collect())
     }
 
     pub fn hides(&self, row: &Row) -> bool {
@@ -103,6 +103,11 @@ pub struct Inspector {
     pub follow: bool,
     pub triggers: bool,
     pub blacklist: String,
+    /// The script names, once Load names has fetched them.
+    pub names: Names,
+    /// Load names is downloading.
+    pub loading_names: bool,
+    pub names_error: Option<String>,
     /// Runs lost to the log's ring overwriting them before the loader read them, since the last clear.
     pub dropped: u64,
     pub error: Option<String>,
@@ -123,6 +128,9 @@ impl Default for Inspector {
             follow: true,
             triggers: true,
             blacklist: DEFAULT_BLACKLIST.into(),
+            names: Names::default(),
+            loading_names: false,
+            names_error: None,
             dropped: 0,
             error: None,
             rows: Log::default(),
@@ -138,6 +146,18 @@ impl Default for Inspector {
 impl Inspector {
     pub fn kept(&self) -> usize {
         self.rows.len()
+    }
+
+    /// The result of the download Load names started.
+    pub fn finish_names(&mut self, result: Result<Names, String>) {
+        self.loading_names = false;
+        match result {
+            Ok(names) => {
+                self.names = names;
+                self.names_error = None;
+            }
+            Err(error) => self.names_error = Some(error),
+        }
     }
 
     pub fn clear(&mut self) {
@@ -179,7 +199,7 @@ impl Inspector {
                     self.rows.clear();
                 }
                 // the blacklist applies as runs arrive, so the scripts it names never push the others out of the list
-                let blacklist = Blacklist::parse(&self.blacklist);
+                let blacklist = Blacklist::parse(&self.blacklist, &self.names);
                 for run in page.runs {
                     if run.end {
                         self.finish_run(&run);
@@ -234,19 +254,26 @@ mod tests {
         Ok(Poll { page: ScriptPage { next: runs.last().map_or(0, |r| r.sequence + 1), runs, dropped } })
     }
 
+    fn names() -> Names {
+        crate::script_names::names_for_test(&[(6697, "npc_name_timer")])
+    }
+
     fn row(run: ScriptRun) -> Row {
         Row { run, duration_us: None }
     }
 
     #[test]
     fn rows_name_the_script_and_show_its_other_arguments() {
-        assert_eq!(row(script(0, 6697)).text(), "npc_name_timer (6697)");
-        assert_eq!(row(script(0, 4730)).text(), "Script 4730");
-        assert_eq!(row(run(0, 76, 0, &["4730", "-1", "\"…\""], 3)).text(), "Script 4730 (-1, \"…\")");
+        let (names, none) = (names(), Names::default());
+        // without loaded names every script is its id
+        assert_eq!(row(script(0, 6697)).text(&none), "Script 6697");
+        assert_eq!(row(script(0, 6697)).text(&names), "npc_name_timer (6697)");
+        assert_eq!(row(script(0, 4730)).text(&names), "Script 4730");
+        assert_eq!(row(run(0, 76, 0, &["4730", "-1", "\"…\""], 3)).text(&names), "Script 4730 (-1, \"…\")");
         // nested runs are indented, and arguments the log didn't keep are counted
-        assert_eq!(row(run(0, 76, 2, &["4730", "5"], 11)).text(), "    Script 4730 (5, … +9)");
-        assert_eq!(row(run(0, 12, 0, &["393217"], 1)).text(), "Trigger 12 (393217)");
-        assert_eq!(row(run(0, 76, 0, &[], 0)).text(), "Trigger 76");
+        assert_eq!(row(run(0, 76, 2, &["4730", "5"], 11)).text(&names), "    Script 4730 (5, … +9)");
+        assert_eq!(row(run(0, 12, 0, &["393217"], 1)).text(&names), "Trigger 12 (393217)");
+        assert_eq!(row(run(0, 76, 0, &[], 0)).text(&names), "Trigger 76");
     }
 
     #[test]
@@ -259,15 +286,17 @@ mod tests {
 
     #[test]
     fn blacklist_text_hides_script_ids_and_names_and_ignores_the_rest() {
-        let list = Blacklist::parse("6697, 4730 abc");
+        let list = Blacklist::parse("6697, 4730 abc", &Names::default());
         assert!(list.hides(&row(script(0, 6697))) && list.hides(&row(script(0, 4730))));
         assert!(!list.hides(&row(script(0, 1))));
         // a trigger event's first argument is not a script id
         assert!(!list.hides(&row(run(0, 12, 0, &["6697"], 1))));
-        assert!(!Blacklist::parse("").hides(&row(script(0, 6697))));
+        assert!(!Blacklist::parse("", &Names::default()).hides(&row(script(0, 6697))));
         // a script's name stands for its id, in any case
-        let list = Blacklist::parse("Npc_Name_Timer");
+        let list = Blacklist::parse("Npc_Name_Timer", &names());
         assert!(list.hides(&row(script(0, 6697))) && !list.hides(&row(script(0, 4730))));
+        // until the names are loaded a name hides nothing
+        assert!(!Blacklist::parse("Npc_Name_Timer", &Names::default()).hides(&row(script(0, 6697))));
     }
 
     #[test]
@@ -373,12 +402,12 @@ mod tests {
         let start = run(0, 76, 0, &["12"], 1);
         inspector.finish(32, now, poll(vec![start.clone()], 0, None));
         assert_eq!(inspector.visible()[0].duration_us, None);
-        assert_eq!(inspector.visible()[0].text(), "Script 12");
+        assert_eq!(inspector.visible()[0].text(&Names::default()), "Script 12");
         // the end can arrive in a later read
         inspector.start(32);
         inspector.finish(32, now, poll(vec![ended(start, 1, 1250)], 0, None));
         assert_eq!(inspector.visible()[0].duration_us, Some(1250));
-        assert_eq!(inspector.visible()[0].text(), "Script 12  1.25 ms");
+        assert_eq!(inspector.visible()[0].text(&Names::default()), "Script 12  1.25 ms");
         assert_eq!(duration_text(850), "850 µs");
     }
 

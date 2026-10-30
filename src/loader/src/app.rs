@@ -73,6 +73,8 @@ enum Event {
         pid: u32,
         result: Result<Option<Vec<injector::PacketLayout>>, String>,
     },
+    /// The script names the Script Inspector's Load names button downloaded.
+    ScriptNames(Result<crate::script_names::Names, String>),
     /// A read of the script log for the script inspector.
     ScriptRuns {
         pid: u32,
@@ -797,6 +799,8 @@ pub struct LoaderApp {
     /// A community script waiting for the user to accept the warning before it starts.
     warning: Option<(StoreScript, Target)>,
     store_run: Option<StoreRun>,
+    /// Whether the latest script run came from the editor, so its page hands back to the editor when it ends.
+    run_was_local: bool,
     /// A newer launcher release, until the user dismisses it.
     update: Option<Release>,
     /// Title of the store script being prepared (session start and download).
@@ -890,6 +894,7 @@ impl LoaderApp {
                 .unwrap_or_default(),
             warning: None,
             store_run: None,
+            run_was_local: false,
             update: None,
             starting: None,
             targets: Vec::new(),
@@ -1132,25 +1137,41 @@ impl LoaderApp {
         }
     }
 
+    /// The name of the script that is running, a store script's title or the editor's file: the page that replaces Scripts and Editor.
+    fn running_title(&self) -> Option<String> {
+        match &self.store_run {
+            Some(run) => Some(run.title.clone()),
+            None if self.script.as_ref().is_some_and(Script::is_running) => Some(self.script_file.name()),
+            None => None,
+        }
+    }
+
     /// The page tree on the left, after the website's neo-tree. Picking a page closes the drawer on narrow windows.
     fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
         crate::theme::sidebar_header(ui, "explorer");
         crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
         let before = self.tab;
-        let running = self.store_run.as_ref().map(|run| sidebar_name(&run.title));
+        let running = self.running_title().map(|title| sidebar_name(&title));
+        // a running script's page takes the place of both Scripts and Editor
         let items = [
             (Tab::Clients, "\u{f108}", "client".to_owned()),
-            match running {
-                Some(name) => (Tab::Running, "\u{f04b}", name),
-                None => (Tab::Store, "\u{f489}", "scripts".to_owned()),
-            },
-            (Tab::Scripts, "\u{f044}", "editor".to_owned()),
+        ]
+        .into_iter()
+        .chain(match running {
+            Some(name) => vec![(Tab::Running, "\u{f04b}", name)],
+            None => vec![
+                (Tab::Store, "\u{f489}", "scripts".to_owned()),
+                (Tab::Scripts, "\u{f044}", "editor".to_owned()),
+            ],
+        })
+        .chain([
             (Tab::Development, "\u{f188}", "development".to_owned()),
             (Tab::Terminal, "\u{f120}", "terminal".to_owned()),
             (Tab::Accounts, "\u{f007}", "accounts".to_owned()),
             (Tab::Settings, "\u{f013}", "settings".to_owned()),
-        ];
+        ])
+        .collect::<Vec<_>>();
         for (i, (tab, icon, name)) in items.iter().enumerate() {
             crate::theme::sidebar_item(ui, &mut self.tab, *tab, icon, name, i == items.len() - 1);
         }
@@ -1617,14 +1638,21 @@ impl LoaderApp {
     // The Script Inspector tab of the Development page: a log of the scripts the client runs for events while Enable is on.
     fn script_log_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
+        let mut load_names = false;
         let inspector = &mut self.script_inspector;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut inspector.enabled, "Enable");
             ui.checkbox(&mut inspector.triggers, "Trigger events").on_hover_text("Component and menu events, which find their script by trigger so their script id isn't known.");
             ui.checkbox(&mut inspector.follow, "Follow");
             ui.label("Blacklist");
-            ui.add(egui::TextEdit::singleline(&mut inspector.blacklist).desired_width(140.0).hint_text("6697, npc_name_timer"))
-                .on_hover_text("Scripts to leave out: ids or names. Separate with commas or spaces. A client runs a few scripts every frame; the default names the ones seen on an idle account.");
+            ui.add(egui::TextEdit::singleline(&mut inspector.blacklist).desired_width(140.0).hint_text("6697, 4730"))
+                .on_hover_text("Scripts to leave out: ids, or names once the names are loaded. Separate with commas or spaces. A client runs a few scripts every frame; the default names the ones seen on an idle account.");
+            let load = ui.add_enabled(!inspector.loading_names, egui::Button::new(if inspector.loading_names { "Loading names…" } else { "Load names" })).on_hover_text(
+                "Downloads RuneLite's names for the client's scripts from github.com/runelite/cs2-scripts (about 10 MB) and shows them in the list. The client has none of its own. They match the game build the repository was last decompiled from.",
+            );
+            if load.clicked() {
+                load_names = true;
+            }
             if ui.button("Clear").clicked() {
                 inspector.clear();
             }
@@ -1633,7 +1661,14 @@ impl LoaderApp {
             Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
             None => ui.label("Select a client with agent loaded in the Clients tab."),
         };
+        if let Some(error) = &inspector.names_error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         let visible = inspector.visible();
+        let names = &inspector.names;
+        if !names.is_empty() {
+            ui.weak(format!("{} script names, from RuneLite's cs2-scripts at {}.", names.len(), names.source));
+        }
         ui.weak(format!(
             "{} shown of {} kept{}. Scripts started by trigger lookup aren't listed.",
             visible.len(),
@@ -1658,7 +1693,7 @@ impl LoaderApp {
                 }
             });
             row.col(|ui| {
-                ui.label(mono(format!("{}{}", "  ".repeat(entry.run.depth as usize), entry.name())));
+                ui.label(mono(format!("{}{}", "  ".repeat(entry.run.depth as usize), entry.name(names))));
             });
             row.col(|ui| {
                 ui.label(mono(entry.args_text()));
@@ -1667,6 +1702,12 @@ impl LoaderApp {
                 ui.label(mono(entry.took()));
             });
         });
+        drop(visible);
+        if load_names {
+            inspector.loading_names = true;
+            inspector.names_error = None;
+            self.background(ui.ctx(), |_| Event::ScriptNames(crate::script_names::Names::download()));
+        }
     }
 
     // The Var Inspector tab of the Development page: a log of the varps and varbits that change while Enable is on.
@@ -2156,6 +2197,7 @@ impl LoaderApp {
                 }
                 Event::Packets { pid, result } => self.packets.finish(pid, Instant::now(), result),
                 Event::PacketLayouts { pid, result } => self.packets.finish_layouts(pid, result),
+                Event::ScriptNames(result) => self.script_inspector.finish_names(result),
                 Event::ScriptRuns { pid, result } => self.script_inspector.finish(pid, Instant::now(), result),
                 Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
                 Event::Widgets { pid, result } => self.widgets.finish(pid, result),
@@ -2698,9 +2740,7 @@ impl LoaderApp {
             match event {
                 ScriptEvent::Output(line) => self.script_info(line),
                 ScriptEvent::Form(spec) => {
-                    if self.store_run.is_some() {
-                        self.tab = Tab::Running;
-                    }
+                    self.tab = Tab::Running;
                     let title = spec
                         .get("title")
                         .and_then(serde_json::Value::as_str)
@@ -2746,17 +2786,11 @@ impl LoaderApp {
         }
     }
 
-    fn form_ui(&mut self, ctx: &egui::Context) {
+    /// Drops a form whose script is gone. The form itself is shown on the script's page (`running_ui`, or the editor's `scripts_ui` for a local run).
+    fn form_ui(&mut self) {
         if self.script.as_ref().is_none_or(|s| !s.is_running()) {
             self.form = None;
         }
-        // A store script's form is shown on its page instead
-        if self.store_run.is_some() {
-            return;
-        }
-        let Some(form) = &mut self.form else { return };
-        let outcome = form.show(ctx);
-        self.answer_form(outcome);
     }
 
     /// Sends the script what the user did with its form, and remembers the values for next time.
@@ -2778,9 +2812,9 @@ impl LoaderApp {
             }
     }
 
-    /// The page of the running store script: its controls, and its settings form while it is waiting for one.
+    /// The page of the running script, store or local: its controls, and its settings form while it is waiting for one.
     fn running_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(title) = self.store_run.as_ref().map(|run| run.title.clone()) else { return };
+        let Some(title) = self.running_title() else { return };
         let running = self.script.as_ref().is_some_and(Script::is_running);
         let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
         let stopping = self.script.as_ref().is_some_and(Script::stop_requested);
@@ -2788,7 +2822,11 @@ impl LoaderApp {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(running && !stopping, egui::Button::new(if paused { "Resume" } else { "Pause" }))
-                .on_hover_text("Suspends the script's process. It is still billed while paused: stop it to stop billing.")
+                .on_hover_text(if self.store_run.is_some() {
+                    "Suspends the script's process. It is still billed while paused: stop it to stop billing."
+                } else {
+                    "Suspends the script's process, so it takes effect immediately, even in a tight loop."
+                })
                 .clicked()
             {
                 self.toggle_pause();
@@ -2905,6 +2943,7 @@ impl LoaderApp {
                 self.start_xp_tracking(Some(target.clone()));
                 let interval = Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
                 self.store_run = Some(StoreRun { session_id, title: title.to_owned(), beat: Beat::new(std::time::Instant::now(), interval), stopping: false });
+                self.run_was_local = false;
                 self.tab = Tab::Running;
                 self.sidebar_open = false;
             }
@@ -2928,6 +2967,9 @@ impl LoaderApp {
             Ok(script) => {
                 self.script_info(format!("Running {name}…"));
                 self.script = Some(script);
+                self.run_was_local = true;
+                self.tab = Tab::Running;
+                self.sidebar_open = false;
                 self.start_xp_tracking(target.cloned());
             }
             Err(error) => self.script_error(format!("Couldn't start the script: {error}")),
@@ -3814,7 +3856,7 @@ impl eframe::App for LoaderApp {
         self.handle_script_events(&ctx);
         self.drive_session(&ctx);
         self.drive_xp(&ctx);
-        self.form_ui(&ctx);
+        self.form_ui();
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
         self.poll_packets(&ctx);
@@ -3923,8 +3965,8 @@ impl eframe::App for LoaderApp {
                 ui.separator();
             }
             // the script's page goes away with the script
-            if self.tab == Tab::Running && self.store_run.is_none() {
-                self.tab = Tab::Store;
+            if self.tab == Tab::Running && self.running_title().is_none() {
+                self.tab = if self.run_was_local { Tab::Scripts } else { Tab::Store };
             }
             if self.tab != self.followed_tab {
                 self.followed_tab = self.tab;
