@@ -429,6 +429,11 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         match first.trim_end() {
             form::PINS_PREFIX => loader_has_pins = true,
             injector::http::CAPABILITY_PREFIX => loader_has_http = true,
+            line if line.starts_with(injector::antiban::PREFIX) => {
+                if let Some(config) = injector::antiban::parse(&line[injector::antiban::PREFIX.len()..]) {
+                    injector::antiban::set(config);
+                }
+            }
             _ => break,
         }
         first.clear();
@@ -471,7 +476,15 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                     if !matches!(input.read_line(&mut line), Ok(read) if read > 0) {
                         break;
                     }
-                    if let Some(payload) = line.strip_prefix(form::UPDATE_PREFIX) {
+                    if let Some(payload) = line.strip_prefix(injector::antiban::PREFIX) {
+                        if let Some(config) = injector::antiban::parse(payload) {
+                            injector::antiban::set(config);
+                        }
+                    } else if let Some(payload) = line.strip_prefix(injector::antiban::SKIP_PREFIX) {
+                        if let Some(skip) = injector::antiban::parse_skip(payload) {
+                            injector::antiban::push_skip(skip);
+                        }
+                    } else if let Some(payload) = line.strip_prefix(form::UPDATE_PREFIX) {
                         if let Some(values) = form::parse_update(payload) {
                             form::push_update(values);
                         }

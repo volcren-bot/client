@@ -30,6 +30,9 @@ pub struct PlannedBreak {
     /// For a sleep, the time of day it is scheduled to, in seconds since local midnight.
     #[serde(default)]
     pub at: Option<f64>,
+    /// Its position in the config, which "Skip next" names it by.
+    #[serde(default)]
+    pub index: u32,
 }
 
 /// The break or sleep being taken right now.
@@ -313,8 +316,8 @@ mod tests {
         assert_eq!(parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()), Some((10, -5, vec![1, 2])));
         assert_eq!(parse_stats("nope"), None);
         let plan = BreakPlan {
-            breaks: vec![PlannedBreak { remaining: 1000.0, length: 500.0, at: None }],
-            sleeps: vec![PlannedBreak { remaining: 5000.0, length: 9000.0, at: Some(3600.0) }],
+            breaks: vec![PlannedBreak { remaining: 1000.0, length: 500.0, at: None, index: 0 }],
+            sleeps: vec![PlannedBreak { remaining: 5000.0, length: 9000.0, at: Some(3600.0), index: 0 }],
             active: Some(ActiveBreak { kind: "break".into(), remaining: 20.0 }),
         };
         assert_eq!(parse_breaks(breaks_line(&plan).strip_prefix(BREAKS_PREFIX).unwrap()), Some(plan));

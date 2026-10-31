@@ -108,6 +108,20 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
+/// The content under a row of nested tabs, with room around it.
+pub fn tab_content<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new().inner_margin(12.0).show(ui, add).inner
+}
+
+/// A bordered panel directly under a row of tabs, with room inside it.
+pub fn tab_panel<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .inner_margin(12.0)
+        .show(ui, add)
+        .inner
+}
+
 /// A bufferline tab: the open one sits on a lifted background with a blue top bar, the others are dim text.
 pub fn tab_value<T: PartialEq>(
     ui: &mut egui::Ui,

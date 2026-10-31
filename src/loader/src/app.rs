@@ -852,6 +852,13 @@ enum ToolsTab {
     Breaks,
 }
 
+/// The sub tabs of the Breaks tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BreaksTab {
+    Breaks,
+    Sleeps,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LogTab {
     Loader,
@@ -879,6 +886,8 @@ pub struct LoaderApp {
     /// What the script was last given from `form`: set once it is submitted, after which the form stays on the page and
     /// the button becomes Update. `None` while the script is still waiting for its settings.
     form_sent: Option<serde_json::Value>,
+    /// The break and sleep config the running script has.
+    antiban_sent: injector::antiban::Config,
     /// The file's new contents, while asking whether to reload it before running.
     reload_prompt: Option<String>,
     remembered_forms: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -928,6 +937,7 @@ pub struct LoaderApp {
     run_started: Option<std::time::Instant>,
     run_ended: Option<std::time::Instant>,
     tools_tab: ToolsTab,
+    breaks_tab: BreaksTab,
     /// The client the XP tracker reads while the script runs, when one was chosen.
     xp_target: Option<Target>,
     xp_next: std::time::Instant,
@@ -965,6 +975,7 @@ impl LoaderApp {
             script: None,
             form: None,
             form_sent: None,
+            antiban_sent: Default::default(),
             reload_prompt: None,
             remembered_forms: cc
                 .storage
@@ -1016,6 +1027,7 @@ impl LoaderApp {
             run_started: None,
             run_ended: None,
             tools_tab: ToolsTab::Settings,
+            breaks_tab: BreaksTab::Breaks,
             xp_target: None,
             xp_next: std::time::Instant::now(),
             xp_reading: false,
@@ -1126,6 +1138,7 @@ impl LoaderApp {
     fn start_xp_tracking(&mut self, target: Option<Target>) {
         self.xp.reset();
         self.breaks.reset();
+        self.antiban_sent = self.settings.antiban.clone();
         self.counters.reset();
         self.run_started = Some(std::time::Instant::now());
         self.run_ended = None;
@@ -3433,7 +3446,7 @@ impl LoaderApp {
         );
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.add_space(8.0);
-        match self.tools_tab {
+        crate::theme::tab_content(ui, |ui| match self.tools_tab {
             ToolsTab::Settings => match &mut self.form {
                 Some(form) => {
                     ui.label(egui::RichText::new(&form.title).strong());
@@ -3445,7 +3458,7 @@ impl LoaderApp {
             },
             ToolsTab::Xp => self.xp_tracker_ui(ui),
             ToolsTab::Breaks => self.breaks_ui(ui),
-        }
+        });
     }
 
     fn toggle_pause(&mut self) {
@@ -4095,10 +4108,10 @@ impl LoaderApp {
             }
         });
         ui.separator();
-        match self.dev_tab {
+        crate::theme::tab_content(ui, |ui| match self.dev_tab {
             DevTab::Tools => self.dev_tools_ui(ui),
             DevTab::Inspectors => self.inspectors_ui(ui),
-        }
+        });
     }
 
     fn widget_inspector_showing(&self) -> bool {
@@ -4114,13 +4127,13 @@ impl LoaderApp {
             }
         });
         ui.separator();
-        match self.inspector_tab {
+        crate::theme::tab_content(ui, |ui| match self.inspector_tab {
             InspectorTab::Widget => self.widgets_ui(ui),
             InspectorTab::Var => self.vars_ui(ui),
             InspectorTab::Script => self.script_log_ui(ui),
             InspectorTab::Inventory => self.inventory_ui(ui),
             InspectorTab::Packet => self.packets_ui(ui),
-        }
+        });
     }
 
     fn dev_tools_ui(&mut self, ui: &mut egui::Ui) {
@@ -4238,79 +4251,133 @@ impl LoaderApp {
             });
     }
 
-    fn breaks_ui(&self, ui: &mut egui::Ui) {
+    fn breaks_ui(&mut self, ui: &mut egui::Ui) {
         use crate::{breaks::clock, xp::duration};
         let running = self.script.as_ref().is_some_and(Script::is_running);
-        // counts down every second while the script runs, and stands at the last report once it has ended
-        let at = if running {
-            std::time::Instant::now()
-        } else {
-            self.breaks
-                .received()
-                .unwrap_or_else(std::time::Instant::now)
-        };
-        let Some(view) = self.breaks.view(at) else {
-            ui.weak("The script hasn't reported any breaks.");
-            return;
-        };
-        if running {
-            ui.ctx().request_repaint_after(Duration::from_secs(1));
-        }
-        if let Some(active) = &view.active {
-            ui.label(
-                egui::RichText::new(format!(
-                    "On a {} · {} left",
-                    active.kind,
-                    duration(active.remaining)
-                ))
-                .strong(),
-            );
-            ui.add_space(4.0);
-        }
+        let mut skip: Option<(&'static str, u32)> = None;
+        let mut update = false;
         egui::ScrollArea::both()
             .min_scrolled_height(0.0)
             .id_salt("breaks_rows")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if !view.breaks.is_empty() {
-                    ui.label(egui::RichText::new("Breaks").strong());
-                    egui::Grid::new("breaks_grid")
-                        .num_columns(2)
-                        .spacing([12.0, 2.0])
-                        .show(ui, |ui| {
-                            ui.weak("In");
-                            ui.weak("Length");
-                            ui.end_row();
-                            for row in &view.breaks {
-                                ui.label(duration(row.remaining));
-                                ui.label(format!("~{}", duration(row.length)));
-                                ui.end_row();
-                            }
-                        });
+                crate::breaks::header(ui);
+                ui.add_space(4.0);
+                // the panel sits right under its tabs
+                let spacing = ui.spacing().item_spacing.y;
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.horizontal(|ui| {
+                    crate::theme::tab_value(ui, &mut self.breaks_tab, BreaksTab::Breaks, "Breaks");
+                    crate::theme::tab_value(ui, &mut self.breaks_tab, BreaksTab::Sleeps, "Sleeps");
+                });
+                let sleeps = self.breaks_tab == BreaksTab::Sleeps;
+                crate::theme::tab_panel(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = spacing;
+                    if sleeps {
+                        crate::breaks::sleeps_editor(ui, &mut self.settings.antiban);
+                    } else {
+                        crate::breaks::breaks_editor(ui, &mut self.settings.antiban);
+                    }
+                });
+                ui.spacing_mut().item_spacing.y = spacing;
+                ui.add_space(6.0);
+                let valid = self.settings.antiban.validate();
+                if let Err(why) = &valid {
+                    ui.colored_label(egui::Color32::LIGHT_RED, why);
                 }
-                if !view.sleeps.is_empty() {
+                if running {
+                    let dirty = self.settings.antiban != self.antiban_sent;
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Sleeps").strong());
-                    egui::Grid::new("sleeps_grid")
+                    ui.horizontal(|ui| {
+                        update = ui
+                            .add_enabled(dirty && valid.is_ok(), egui::Button::new("Update"))
+                            .on_hover_text("Send these to the running script")
+                            .clicked();
+                        if dirty {
+                            ui.weak("Not sent to the script yet");
+                        }
+                    });
+                    ui.add_space(6.0);
+                } else {
+                    ui.weak("Used by the scripts you start. It is saved as you edit.");
+                    return;
+                }
+                // the schedule only exists while a script runs, counting down every second
+                let Some(view) = self.breaks.view(std::time::Instant::now()) else {
+                    ui.add_space(6.0);
+                    ui.weak("The script hasn't reported any breaks yet.");
+                    return;
+                };
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+                ui.separator();
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Queued").strong());
+                ui.add_space(4.0);
+                if let Some(active) = &view.active {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "On a {} · {} left",
+                            active.kind,
+                            duration(active.remaining)
+                        ))
+                        .strong(),
+                    );
+                }
+                if !sleeps && !view.breaks.is_empty() {
+                    ui.add_space(4.0);
+                    egui::Grid::new("breaks_grid")
                         .num_columns(3)
                         .spacing([12.0, 2.0])
                         .show(ui, |ui| {
-                            ui.weak("At");
-                            ui.weak("In");
-                            ui.weak("Length");
-                            ui.end_row();
-                            for row in &view.sleeps {
-                                ui.label(row.at.map_or("-".into(), clock));
-                                ui.label(duration(row.remaining));
+                            for row in &view.breaks {
+                                ui.label(format!("in {}", duration(row.remaining)));
                                 ui.label(format!("~{}", duration(row.length)));
+                                if ui.small_button("Skip next").clicked() {
+                                    skip = Some(("break", row.index));
+                                }
                                 ui.end_row();
                             }
                         });
                 }
-                if view.breaks.is_empty() && view.sleeps.is_empty() {
+                if sleeps && !view.sleeps.is_empty() {
+                    ui.add_space(4.0);
+                    egui::Grid::new("sleeps_grid")
+                        .num_columns(4)
+                        .spacing([12.0, 2.0])
+                        .show(ui, |ui| {
+                            for row in &view.sleeps {
+                                ui.label(row.at.map_or("-".into(), clock));
+                                ui.label(format!("in {}", duration(row.remaining)));
+                                ui.label(format!("~{}", duration(row.length)));
+                                if ui.small_button("Skip next").clicked() {
+                                    skip = Some(("sleep", row.index));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                }
+                if (sleeps && view.sleeps.is_empty()) || (!sleeps && view.breaks.is_empty()) {
                     ui.weak("Nothing is scheduled.");
                 }
             });
+        if update && let Some(script) = &mut self.script {
+            let config = self.settings.antiban.clone();
+            match script.push_antiban(&config) {
+                Ok(()) => {
+                    self.antiban_sent = config;
+                    self.script_info("Breaks updated.");
+                }
+                Err(error) => self.script_error(error),
+            }
+        }
+        if let Some((kind, index)) = skip
+            && let Some(script) = &mut self.script
+        {
+            match script.skip_next(kind, index) {
+                Ok(()) => self.script_info(format!("Skipping the next {kind}.")),
+                Err(error) => self.script_error(error),
+            }
+        }
     }
 
     /// The tag filter and the Copy all / Clear buttons above the output (the filter only for the script's); meant to run inside a horizontal row.
@@ -4760,7 +4827,9 @@ impl eframe::App for LoaderApp {
                     });
                 });
         }
-        egui::CentralPanel::default_margins().show(ui, |ui| {
+        // The tab's page is a panel with room around it.
+        let frame = egui::Frame::central_panel(ui.style()).inner_margin(16.0);
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if self.tab == Tab::Clients {
                 crate::logo::paint_background(ui, ui.max_rect());
             }

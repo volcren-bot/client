@@ -30,6 +30,8 @@ pub struct Settings {
     pub helper: String,
     /// Your own lib folder: local script files read `require("../lib/...")` from it instead of the downloaded lib.
     pub lib_dir: String,
+    /// The breaks and sleeps every script takes, sent to the script when it starts and when this changes.
+    pub antiban: injector::antiban::Config,
 }
 
 impl Default for Settings {
@@ -42,6 +44,7 @@ impl Default for Settings {
             dll: detect(&exe_dir, "agent.dll"),
             helper: detect(&exe_dir, "injector.exe"),
             lib_dir: String::new(),
+            antiban: Default::default(),
         }
     }
 }

@@ -808,6 +808,17 @@ pub fn run_with_modules(
             Ok(())
         })?,
     )?;
+    // Biometrics: the hash and the per-account profile are computed here; the lib caches the profile.
+    globals.set(
+        "murmur2a",
+        lua.create_function(|_, (text, seed): (mlua::LuaString, Option<f64>)| {
+            Ok(crate::biometrics::murmur2a(&text.as_bytes(), seed.unwrap_or(0.0).rem_euclid(4294967296.0) as u32))
+        })?,
+    )?;
+    globals.set(
+        "biometrics_profile",
+        lua.create_function(|_, name: mlua::LuaString| Ok(crate::biometrics::profile(&name.as_bytes()).to_vec()))?,
+    )?;
     // The loader shows these in its Breaks tab, in any run, and counts the times down itself.
     let breaks_print = print.clone();
     globals.set(
@@ -979,6 +990,26 @@ pub fn run_with_modules(
         lua.create_function(|lua, (): ()| match crate::form::take_update() {
             Some(values) => to_lua(lua, &values),
             None => Ok(mlua::Value::Nil),
+        })?,
+    )?;
+    // The global break and sleep config, with a `version` that changes whenever the loader sends a new one.
+    globals.set("antiban_config", lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::current_value()))?)?;
+    // The queued breaks and sleeps the user asked to skip once since the last call, as `{ kind, index }` (index from 0).
+    globals.set("antiban_skips", lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::take_skips()))?)?;
+    #[cfg(test)]
+    globals.set(
+        "test_skip",
+        lua.create_function(|_, (kind, index): (String, u32)| {
+            crate::antiban::push_skip(crate::antiban::Skip { kind, index });
+            Ok(())
+        })?,
+    )?;
+    #[cfg(test)]
+    globals.set(
+        "test_set_antiban",
+        lua.create_function(|_, json: String| {
+            crate::antiban::set(crate::antiban::parse(&json).ok_or_else(|| mlua::Error::RuntimeError("bad config".into()))?);
+            Ok(())
         })?,
     )?;
     // The live menu has to be read with the mouse still, so these take the input back first.
@@ -1752,7 +1783,49 @@ mod tests {
              print(first)",
         );
         assert_eq!(lines.len(), 5, "{lines:?}");
+        assert_eq!(lines[0], "3594132001\t139965599\t0\t1770672524");
+        assert_eq!(lines[2], "24\t33\t26\t58\t214");
+        assert_eq!(lines[4], "23:38:57");
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    // The only test that sets the global break config, so it can't race another.
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn breaks_follow_the_loaders_config_and_keep_their_time_when_it_changes() {
+        let (lines, result) = run_lines(
+            "local A = require('antiban')\n\
+             local function plan(json) test_set_antiban(json); assert(A.sync_config()) end\n\
+             plan('{\"breaks\":[{\"interval\":600000,\"length\":60000,\"randomness\":0.0,\"logout_chance\":0.0}],\"sleeps\":[{}]}')\n\
+             assert(not A.sync_config())\n\
+             assert(#A.breaks == 1 and #A.sleeps == 1)\n\
+             local first, sleep_due = A.breaks[1], A.sleeps[1].next\n\
+             assert(first.length == 60000 and first.logout_chance == 0)\n\
+             assert(A.sleeps[1].length >= 6 * A.HOUR and A.sleeps[1].length <= 10 * A.HOUR)\n\
+             local due = first.next\n\
+             -- only the length changed: the due time stays\n\
+             plan('{\"breaks\":[{\"interval\":600000,\"length\":90000,\"randomness\":0.0,\"logout_chance\":0.0}],\"sleeps\":[{}]}')\n\
+             assert(A.breaks[1].length == 90000 and A.breaks[1].next == due)\n\
+             assert(A.sleeps[1].next == sleep_due)\n\
+             -- a new interval re-plans, and a second break gets its own plan\n\
+             plan('{\"breaks\":[{\"interval\":300000,\"length\":90000,\"randomness\":0.0,\"logout_chance\":0.5},{\"interval\":60000,\"length\":10000}],\"sleeps\":[]}')\n\
+             assert(#A.breaks == 2 and #A.sleeps == 0)\n\
+             assert(A.breaks[1].next ~= due and A.breaks[1].logout_chance == 0.5)\n\
+             assert(A.breaks[2].logout_chance == 0.01)\n\
+             -- skipping: the next occurrence moves one interval on, and an unknown one is ignored\n\
+             local second = A.breaks[2].next\n\
+             test_skip('break', 1); test_skip('break', 7); test_skip('sleep', 0)\n\
+             assert(A.sync_config())\n\
+             assert(A.breaks[2].next > second + 40000 and A.breaks[1].next < second + 400000)\n\
+             assert(A.breaks[2].next < second + 80000)\n\
+             assert(not A.sync_config())\n\
+             -- off: nothing is ever due\n\
+             plan('{\"breaks_enabled\":false,\"sleeps_enabled\":false}')\n\
+             assert(#A.breaks == 0 and #A.sleeps == 0 and not A.break_due())\n\
+             print('ok')",
+        );
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
     }
 
     #[test]

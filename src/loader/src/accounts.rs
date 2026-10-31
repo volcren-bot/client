@@ -303,14 +303,7 @@ impl Accounts {
 
     /// `client` is whether a client with the agent loaded is selected, which "Load account from client" needs.
     pub fn ui(&mut self, ui: &mut egui::Ui, client: bool) -> Option<Action> {
-        egui::Frame::new()
-            .inner_margin(egui::Margin {
-                left: MARGIN,
-                right: MARGIN,
-                top: MARGIN,
-                bottom: 0,
-            })
-            .show(ui, |ui| self.page_ui(ui));
+        self.page_ui(ui);
         self.dialog_ui(ui.ctx(), client)
     }
 

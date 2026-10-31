@@ -8,8 +8,10 @@ pub use ipc::PROTOCOL_VERSION;
 pub const HOST_API: u32 = 8;
 pub use ipc::state::varp;
 
+pub mod antiban;
 pub mod async_input;
 pub mod bank_pin;
+pub mod biometrics;
 mod bank_pin_overlay;
 pub mod input_jobs;
 pub mod cache;

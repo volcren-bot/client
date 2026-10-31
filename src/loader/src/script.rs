@@ -87,9 +87,10 @@ impl Script {
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
         let pins = format!(
-            "{}\n{}\n",
+            "{}\n{}\n{}\n",
             injector::form::PINS_PREFIX,
-            injector::http::CAPABILITY_PREFIX
+            injector::http::CAPABILITY_PREFIX,
+            injector::antiban::line(&settings.antiban)
         );
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
         let files = if modules.is_empty() {
@@ -190,6 +191,16 @@ impl Script {
     /// Pushes new settings to the running script, which picks them up with `form_update()`.
     pub fn push_update(&mut self, values: &serde_json::Value) -> Result<(), String> {
         self.reply(&injector::form::update_line(values), "settings update")
+    }
+
+    /// Sends the running script a new break and sleep config, which it plans from at its next `do_antiban`.
+    pub fn push_antiban(&mut self, config: &injector::antiban::Config) -> Result<(), String> {
+        self.reply(&injector::antiban::line(config), "breaks update")
+    }
+
+    /// Asks the script to skip the next occurrence of break (or sleep) number `index` of the config, counting from 0.
+    pub fn skip_next(&mut self, kind: &str, index: u32) -> Result<(), String> {
+        self.reply(&injector::antiban::skip_line(kind, index), "skip")
     }
 
     /// Tells the script's injector the PIN for the hash it asked about, `None` if no saved account has it, or why we can't say.
