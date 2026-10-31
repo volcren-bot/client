@@ -1100,8 +1100,8 @@ fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, Sh
     Ok(shown)
 }
 
-/// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
-pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
+/// The placements the cache has inside `area` (`[x1, y1, x2, y2]`, both corners included) on `plane_wanted` (all when `None`), with their world tile.
+fn cache_placements(pid: u32, area: [i32; 4], plane_wanted: Option<i32>) -> Result<Vec<(crate::collision::Placement, i32, i32)>, String> {
     use crate::{cache::*, collision::*};
     let [x1, y1, x2, y2] = area;
     if x1 > x2 || y1 > y2 || x1 < 0 || y1 < 0 {
@@ -1124,12 +1124,17 @@ pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> R
         let placements = decode_locs(&data).ok_or_else(|| format!("map square {}'s locs don't decode", region_id(rx, ry)))?;
         for p in placements {
             let (x, y, plane) = (rx * 64 + p.x as i32, ry * 64 + p.y as i32, p.plane as i32);
-            if x >= x1 && x <= x2 && y >= y1 && y <= y2 && filter.plane.is_none_or(|want| want == plane) {
+            if x >= x1 && x <= x2 && y >= y1 && y <= y2 && plane_wanted.is_none_or(|want| want == plane) {
                 found.push((p, x, y));
             }
         }
     }
+    Ok(found)
+}
 
+/// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
+pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
+    let found = cache_placements(pid, area, filter.plane)?;
     let ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
     read_loc_texts(pid, &ids)?;
 
@@ -1163,6 +1168,32 @@ pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> R
     }
     out.sort_by_key(|l| (l.plane, l.x, l.y, l.id));
     Ok(out)
+}
+
+// The climbables the cache places inside `area` on every plane, but where `loaded` (the live scene has them, in their current state): ladders, caves and trapdoors that can be far from the scene (their transforms aren't resolved).
+fn cache_climbables(pid: u32, area: [i32; 4], request: &crate::nav::Request, flags: crate::nav::Flags, loaded: &dyn Fn(i32, i32) -> bool) -> Result<Vec<crate::nav::Climbable>, String> {
+    let found: Vec<_> = cache_placements(pid, area, None)?.into_iter().filter(|&(_, x, y)| !loaded(x, y)).collect();
+    let ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
+    read_loc_texts(pid, &ids)?;
+    let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+    let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
+    let lookup = |id: i32| known.and_then(|defs| defs.get(&(id as u32))).and_then(|d| d.as_ref());
+    let locs: Vec<crate::Loc> = found
+        .iter()
+        .filter_map(|&(p, x, y)| {
+            let (def, _) = lookup(p.id as i32)?;
+            let (size_x, size_y) = if p.rotation & 1 == 1 { (def.size_y, def.size_x) } else { (def.size_x, def.size_y) };
+            // the tag's type: walls, wall decorations, game objects, ground decorations
+            let kind = match p.shape {
+                0..=3 => 0,
+                4..=8 => 1,
+                9..=21 => 2,
+                _ => 3,
+            };
+            Some(crate::Loc { id: p.id as i32, name: None, kind, x, y, plane: p.plane as i32, scene_x: 0, scene_y: 0, size_x, size_y, shape: Some(p.shape), rotation: Some(p.rotation), clickable: true })
+        })
+        .collect();
+    Ok(crate::nav::scene_locs(flags, &locs, &lookup, request).1)
 }
 
 pub fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::WorldCollision, String> {
@@ -1377,10 +1408,10 @@ pub fn scene_route(pid: u32, from: [i32; 2], to: [i32; 2], options: Option<crate
 pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, request: &crate::nav::Request) -> Result<crate::nav::NavPlan, String> {
     use crate::{
         collision::{flag, REGION_SIZE},
-        nav::{NavAction, NavPlan, NavTile},
+        nav::{NavAction, NavPlan, NavTile, UNDERGROUND},
     };
-    // the largest box planned over in one go, a scene's size, and how many of its outermost tiles the cache knows better
-    const MAX_WINDOW: i32 = 400;
+    // the largest box planned over in one go (at most 8 map squares wide: `cache_placements` reads 64 at most), a scene's size, and how many of its outermost tiles the cache knows better
+    const MAX_WINDOW: i32 = 448;
     const SCENE_SIZE: i32 = 104;
     const SCENE_EDGE: i32 = 4;
     // how far past the goal (or the world path's stop) the box reaches
@@ -1398,56 +1429,85 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
         return Err(format!("{}, {} isn't in the loaded scene", from.0, from.1));
     }
 
+    // the surface and the underground are planned over one box of the surface's coordinates: the scene's, with the goal's tile folded onto it
+    let shift = if base_y >= UNDERGROUND { UNDERGROUND } else { 0 };
+    let goal_across = !instance && (to.1 >= UNDERGROUND) != (shift != 0);
+    let folded = |y: i32| if y >= UNDERGROUND { y - UNDERGROUND } else { y };
     // the box: the scene, grown to the goal when the cache can fill the rest, else to a stop along the world path
-    let scene_box = (base_x, base_y, base_x + SCENE_SIZE - 1, base_y + SCENE_SIZE - 1);
+    let scene_box = (base_x, base_y - shift, base_x + SCENE_SIZE - 1, base_y - shift + SCENE_SIZE - 1);
     let grown = |(x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)| (x1.min(x - MARGIN), y1.min(y - MARGIN), x2.max(x + MARGIN), y2.max(y + MARGIN));
     let fits = |(x1, y1, x2, y2): (i32, i32, i32, i32)| x2 - x1 < MAX_WINDOW && y2 - y1 < MAX_WINDOW;
     let mut goal = to;
     let mut bounds = scene_box;
-    if !in_scene(to.0, to.1, 0) && !instance {
-        if fits(grown(scene_box, (to.0, to.1))) {
-            bounds = grown(scene_box, (to.0, to.1));
-        } else if from.2 == to.2 {
+    if (goal_across || !in_scene(to.0, to.1, 0)) && !instance {
+        if fits(grown(scene_box, (to.0, folded(to.1)))) {
+            bounds = grown(scene_box, (to.0, folded(to.1)));
+        } else if from.2 == to.2 && !goal_across {
             let world = world_movement(pid)?;
             let path = crate::pathfinding::find_path_with(&world, to.2, (from.0, from.1), (to.0, to.1), PATH_MAX_TILES, true).unwrap_or_default();
-            if let Some(&(x, y)) = path.iter().rev().find(|&&(x, y)| fits(grown(scene_box, (x, y)))) {
+            if let Some(&(x, y)) = path.iter().rev().find(|&&(x, y)| fits(grown(scene_box, (x, y - shift)))) {
                 goal = (x, y, to.2);
-                bounds = grown(scene_box, (x, y));
+                bounds = grown(scene_box, (x, y - shift));
             }
         }
     }
-    let regions = if instance || bounds == scene_box {
-        Vec::new()
-    } else {
-        let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
-        cache_regions(pid, (square(bounds.0), square(bounds.1), square(bounds.2) + REGION_SIZE - 1, square(bounds.3) + REGION_SIZE - 1))?
-    };
-    let region_of = |x: i32, y: i32| crate::collision::region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
-    // the cache's tiles where the scene's aren't trusted (or there are none), its closed doors open
-    let cache = |x: i32, y: i32, plane: i32| {
-        let region = region_of(x, y);
-        let flags = regions.iter().find(|(r, _)| *r == region).and_then(|(_, world)| world.flags(plane, x, y))?;
-        Some(flags & !flag::door_blocks(flags) & !flag::DOORS)
-    };
-    let edge = if regions.is_empty() { 0 } else { SCENE_EDGE };
-    let flags = |x: i32, y: i32, plane: i32| -> Option<u32> {
-        let scene = live.get(plane as usize).and_then(Option::as_ref);
-        if in_scene(x, y, edge) {
-            return scene.and_then(|s| s.flags(x, y));
-        }
-        cache(x, y, plane).or_else(|| scene.and_then(|s| s.flags(x, y)).filter(|_| in_scene(x, y, 0)))
-    };
-
     let locs = clickable_locs(pid)?;
     let mut ids: Vec<u32> = locs.iter().map(|l| l.id as u32).collect();
     ids.sort_unstable();
     ids.dedup();
     let defs = shown_locs(pid, &ids)?;
     let lookup = |id: i32| defs.get(&(id as u32));
-    let (doors, climbables) = crate::nav::scene_locs(&flags, &locs, &lookup, request);
-    let climbs = crate::nav::climbs(&flags, &climbables);
-    let plan = crate::nav::plan(&flags, bounds, &doors, &climbs, from, goal, &request.options)
-        .ok_or_else(|| format!("no way from {}, {} (plane {}) toward {}, {} (plane {})", from.0, from.1, from.2, to.0, to.1, to.2))?;
+
+    // one go at planning. `across` also loads the other world and the cache's ladders, caves and the like all over the box (the scene's own are the live ones), so a plan can leave the world and come back to it
+    let attempt = |across: bool| -> Result<Option<crate::nav::Plan>, String> {
+        let regions = if instance || (bounds == scene_box && !across) {
+            Vec::new()
+        } else {
+            let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
+            let squares = |north: i32| cache_regions(pid, (square(bounds.0), square(bounds.1 + north), square(bounds.2) + REGION_SIZE - 1, square(bounds.3 + north) + REGION_SIZE - 1));
+            let mut regions = squares(shift)?;
+            if across {
+                regions.extend(squares(UNDERGROUND - shift)?);
+            }
+            regions
+        };
+        let region_of = |x: i32, y: i32| crate::collision::region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
+        // the cache's tiles where the scene's aren't trusted (or there are none), its closed doors open
+        let cache = |x: i32, y: i32, plane: i32| {
+            let region = region_of(x, y);
+            let flags = regions.iter().find(|(r, _)| *r == region).and_then(|(_, world)| world.flags(plane, x, y))?;
+            Some(flags & !flag::door_blocks(flags) & !flag::DOORS)
+        };
+        let edge = if regions.is_empty() { 0 } else { SCENE_EDGE };
+        let flags = |x: i32, y: i32, plane: i32| -> Option<u32> {
+            let scene = live.get(plane as usize).and_then(Option::as_ref);
+            if in_scene(x, y, edge) {
+                return scene.and_then(|s| s.flags(x, y));
+            }
+            cache(x, y, plane).or_else(|| scene.and_then(|s| s.flags(x, y)).filter(|_| in_scene(x, y, 0)))
+        };
+        let (doors, mut climbables) = crate::nav::scene_locs(&flags, &locs, &lookup, request);
+        if across && !instance {
+            for north in [shift, UNDERGROUND - shift] {
+                let area = [bounds.0.max(0), (bounds.1 + north).max(0), bounds.2, bounds.3 + north];
+                let loaded = |x: i32, y: i32| north == shift && in_scene(x, y, 0);
+                climbables.extend(cache_climbables(pid, area, request, &flags, &loaded)?);
+            }
+        }
+        let climbs = crate::nav::climbs(&flags, &climbables);
+        eprintln!("DBG attempt across={across} regions={} climbables={} climbs={} doors={}", regions.len(), climbables.len(), climbs.len(), doors.len());
+        Ok(crate::nav::plan(&flags, bounds, &doors, &climbs, from, goal, &request.options))
+    };
+    eprintln!("DBG nav bounds={bounds:?} scene_box={scene_box:?} goal={goal:?} to={to:?} shift={shift} goal_across={goal_across} instance={instance}");
+    let mut plan = attempt(goal_across)?;
+    // short of the goal: the way may be through the other world (a dungeon's exit, then another's entrance)
+    if !goal_across && !instance && goal == to && plan.as_ref().is_none_or(|p| !p.reached) {
+        plan = match (attempt(true)?, plan) {
+            (Some(through), first) if through.reached || first.is_none() => Some(through),
+            (_, first) => first,
+        };
+    }
+    let plan = plan.ok_or_else(|| format!("no way from {}, {} (plane {}) toward {}, {} (plane {})", from.0, from.1, from.2, to.0, to.1, to.2))?;
 
     let tile = |(x, y, plane): crate::nav::Point| NavTile { x, y, plane };
     let actions = plan
@@ -1455,6 +1515,8 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
         .into_iter()
         .map(|a| match a.what {
             crate::nav::Use::Door(loc) => NavAction { at: a.at + 1, kind: "door", to_plane: loc.plane, loc },
+            // opening a trapdoor leaves you where you are: like a door, the walk plans again after it
+            crate::nav::Use::Climb(loc, _) if request.door_options.iter().any(|o| o.eq_ignore_ascii_case(&loc.option)) => NavAction { at: a.at + 1, kind: "door", to_plane: loc.plane, loc },
             crate::nav::Use::Climb(loc, to_plane) => NavAction { at: a.at + 1, kind: "climb", loc, to_plane },
         })
         .collect();
