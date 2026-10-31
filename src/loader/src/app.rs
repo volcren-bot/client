@@ -224,8 +224,6 @@ const DEV_TOGGLES: [&str; 23] = [
 ];
 
 const DEV_COLUMNS: usize = 4;
-/// Below this width the script tab stacks the output and the tracker rather than putting them side by side.
-const SIDE_BY_SIDE_MIN_WIDTH: f32 = 560.0;
 
 const CURSOR_STYLES: [CursorStyle; 4] = [
     CursorStyle::Off,
@@ -846,9 +844,10 @@ fn line_tag(text: &str) -> Option<&str> {
     (end > 0 && end <= 32 && !rest[..end].contains('[')).then(|| &rest[..end])
 }
 
-/// The tabs of the panel beside the script output.
+/// The tabs of the running script's page.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolsTab {
+    Settings,
     Xp,
     Breaks,
 }
@@ -877,6 +876,9 @@ pub struct LoaderApp {
     fold: crate::fold::Folds,
     script: Option<Script>,
     form: Option<crate::form::Form>,
+    /// What the script was last given from `form`: set once it is submitted, after which the form stays on the page and
+    /// the button becomes Update. `None` while the script is still waiting for its settings.
+    form_sent: Option<serde_json::Value>,
     /// The file's new contents, while asking whether to reload it before running.
     reload_prompt: Option<String>,
     remembered_forms: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -962,6 +964,7 @@ impl LoaderApp {
             fold: crate::fold::Folds::default(),
             script: None,
             form: None,
+            form_sent: None,
             reload_prompt: None,
             remembered_forms: cc
                 .storage
@@ -1012,7 +1015,7 @@ impl LoaderApp {
             counters: Default::default(),
             run_started: None,
             run_ended: None,
-            tools_tab: ToolsTab::Xp,
+            tools_tab: ToolsTab::Settings,
             xp_target: None,
             xp_next: std::time::Instant::now(),
             xp_reading: false,
@@ -2465,8 +2468,10 @@ impl LoaderApp {
                     for error in scan.errors {
                         self.error(error);
                     }
-                    if !self.targets.iter().any(|t| Some(t.key()) == self.selected) {
-                        self.selected = self.targets.first().map(Target::key);
+                    // a client another bot controls, or a 32-bit one, can't be used: select the first that can be
+                    let usable = |t: &&Target| t.client.foreign_bot.is_none() && t.client.is_64bit;
+                    if !self.targets.iter().filter(usable).any(|t| Some(t.key()) == self.selected) {
+                        self.selected = self.targets.iter().find(usable).map(Target::key);
                     }
                 }
                 Event::Loaded { pid, result } => {
@@ -3244,6 +3249,7 @@ impl LoaderApp {
                 ScriptEvent::Output(line) => self.script_info(line),
                 ScriptEvent::Form(spec) => {
                     self.tab = Tab::Running;
+                    self.form_sent = None;
                     let title = spec
                         .get("title")
                         .and_then(serde_json::Value::as_str)
@@ -3295,10 +3301,12 @@ impl LoaderApp {
     fn form_ui(&mut self) {
         if self.script.as_ref().is_none_or(|s| !s.is_running()) {
             self.form = None;
+            self.form_sent = None;
         }
     }
 
-    /// Sends the script what the user did with its form, and remembers the values for next time.
+    /// Sends the script what the user did with its form, and remembers the values for next time. A submitted form stays on
+    /// the page so it can be changed and sent again (`push_form_update`); a cancelled one is dropped.
     fn answer_form(&mut self, outcome: crate::form::Outcome) {
         let answer = match outcome {
             crate::form::Outcome::Open => return,
@@ -3307,15 +3315,40 @@ impl LoaderApp {
                     self.remembered_forms
                         .insert(form.title.clone(), map.clone());
                 }
+                self.form_sent = Some(values.clone());
                 Some(values)
             }
-            crate::form::Outcome::Cancelled => None,
+            crate::form::Outcome::Cancelled => {
+                self.form = None;
+                None
+            }
         };
-        self.form = None;
         if let Some(script) = &mut self.script
             && let Err(error) = script.answer_form(answer)
         {
             self.script_error(error);
+        }
+    }
+
+    /// Pushes the form's current values to the running script, which reads them with `form_update()`.
+    fn push_form_update(&mut self) {
+        let Some(form) = &self.form else {
+            return;
+        };
+        let crate::form::Outcome::Submitted(values) = form.submitted() else {
+            return;
+        };
+        if let serde_json::Value::Object(map) = &values {
+            self.remembered_forms.insert(form.title.clone(), map.clone());
+        }
+        if let Some(script) = &mut self.script {
+            match script.push_update(&values) {
+                Ok(()) => {
+                    self.form_sent = Some(values);
+                    self.script_info("Settings updated.");
+                }
+                Err(error) => self.script_error(error),
+            }
         }
     }
 
@@ -3328,9 +3361,30 @@ impl LoaderApp {
         let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
         let stopping = self.script.as_ref().is_some_and(Script::stop_requested);
         ui.heading(&title);
+        // the script is waiting for its settings: it hasn't started yet
+        let waiting = self.form.is_some() && self.form_sent.is_none();
+        let mut outcome = crate::form::Outcome::Open;
+        let mut update = false;
         ui.horizontal(|ui| {
+            if self.form_sent.is_some() {
+                // the script has its settings: the same button sends it changes, once there are some
+                let changed = self.form.as_ref().is_some_and(|f| {
+                    matches!(f.submitted(), crate::form::Outcome::Submitted(v) if Some(&v) != self.form_sent.as_ref())
+                });
+                update = ui
+                    .add_enabled(running && !stopping && changed, egui::Button::new("Update"))
+                    .on_hover_text("Sends the changed settings to the running script.")
+                    .clicked();
+            } else {
+                let start = self.form.as_ref().map_or("Start", |f| f.submit_label());
+                if ui.add_enabled(waiting, egui::Button::new(start)).clicked()
+                    && let Some(form) = &self.form
+                {
+                    outcome = form.submitted();
+                }
+            }
             if ui
-                .add_enabled(running && !stopping, egui::Button::new(if paused { "Resume" } else { "Pause" }))
+                .add_enabled(running && !stopping && !waiting, egui::Button::new(if paused { "Resume" } else { "Pause" }))
                 .on_hover_text(if self.store_run.is_some() {
                     "Suspends the script's process. It is still billed while paused: stop it to stop billing."
                 } else {
@@ -3340,30 +3394,57 @@ impl LoaderApp {
             {
                 self.toggle_pause();
             }
-            if ui.add_enabled(running && !stopping, egui::Button::new("Stop")).clicked()
-                && let Some(script) = &mut self.script
+            if ui
+                .add_enabled(running && !stopping, egui::Button::new(if waiting { "Cancel" } else { "Stop" }))
+                .clicked()
             {
-                script.stop();
+                if waiting {
+                    outcome = crate::form::Outcome::Cancelled;
+                } else if let Some(script) = &mut self.script {
+                    script.stop();
+                }
             }
             ui.separator();
             ui.label(match (running, stopping, paused) {
                 (false, ..) => "ended",
                 (_, true, _) => "stopping",
                 (_, _, true) => "paused",
+                _ if waiting => "waiting",
                 _ => "running",
             });
         });
+        self.answer_form(outcome);
+        if update {
+            self.push_form_update();
+        }
         ui.add_space(8.0);
-        ui.separator();
-        match &mut self.form {
-            Some(form) => {
-                ui.label(egui::RichText::new(&form.title).strong());
-                let outcome = form.show_inline(ui);
-                self.answer_form(outcome);
-            }
-            None => {
-                ui.label(egui::RichText::new("The script isn't asking for settings.").weak());
-            }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.horizontal_wrapped(|ui| {
+            crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Settings, "Settings");
+            crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
+            crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
+        });
+        let (line, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().rect_filled(
+            line,
+            0.0,
+            ui.visuals().widgets.noninteractive.bg_stroke.color,
+        );
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.add_space(8.0);
+        match self.tools_tab {
+            ToolsTab::Settings => match &mut self.form {
+                Some(form) => {
+                    ui.label(egui::RichText::new(&form.title).strong());
+                    form.show_inline(ui);
+                }
+                None => {
+                    ui.label(egui::RichText::new("The script isn't asking for settings.").weak());
+                }
+            },
+            ToolsTab::Xp => self.xp_tracker_ui(ui),
+            ToolsTab::Breaks => self.breaks_ui(ui),
         }
     }
 
@@ -4292,45 +4373,6 @@ impl LoaderApp {
             ui.visuals().widgets.noninteractive.bg_stroke.color,
         );
         ui.spacing_mut().item_spacing.y = 4.0;
-        if self.log_tab == LogTab::Script {
-            // the output keeps the left half and the XP tracker the right; when too narrow the tracker goes under the output
-            let stacked = ui.available_width() < SIDE_BY_SIDE_MIN_WIDTH;
-            let panel = if stacked {
-                egui::Panel::bottom("script_side")
-                    .resizable(false)
-                    .exact_size(ui.available_height() * 0.4)
-            } else {
-                egui::Panel::right("script_side")
-                    .resizable(false)
-                    .exact_size(ui.available_width() * 0.5)
-            };
-            panel.show(ui, |ui| {
-                ui.shrink_clip_rect(ui.max_rect());
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.horizontal_wrapped(|ui| {
-                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
-                    crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
-                });
-                let (line, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 1.0),
-                    egui::Sense::hover(),
-                );
-                ui.painter().rect_filled(
-                    line,
-                    0.0,
-                    ui.visuals().widgets.noninteractive.bg_stroke.color,
-                );
-                ui.spacing_mut().item_spacing.y = 4.0;
-                match self.tools_tab {
-                    ToolsTab::Xp => self.xp_tracker_ui(ui),
-                    ToolsTab::Breaks => self.breaks_ui(ui),
-                }
-            });
-        }
-        // what's left once the side panel took its share; the output is cropped to it rather than drawn over the panel
-        ui.shrink_clip_rect(ui.available_rect_before_wrap());
-        // what is left after the tracker: anything that doesn't fit there is cut off rather than drawn over it
-        ui.shrink_clip_rect(ui.available_rect_before_wrap());
         ui.horizontal_wrapped(|ui| self.log_controls_ui(ui));
         self.log_ui(ui);
     }

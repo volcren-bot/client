@@ -461,18 +461,36 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                 eprintln!("Couldn't read the script from stdin.");
                 return std::process::ExitCode::from(2);
             }
-            // The form, PIN and HTTP requests share stdin: the script waits on each reply, so they never interleave.
-            let input = std::sync::Arc::new(std::sync::Mutex::new(input));
-            let ask = move |input: &std::sync::Mutex<std::io::BufReader<std::io::Stdin>>, request: String| -> Result<String, String> {
+            // The form, PIN and HTTP requests share stdin: the script waits on each reply, so they never interleave. The
+            // loader can also push a settings update at any time, so a thread reads stdin and keeps those apart from replies.
+            let (replies_in, replies) = std::sync::mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    if !matches!(input.read_line(&mut line), Ok(read) if read > 0) {
+                        break;
+                    }
+                    if let Some(payload) = line.strip_prefix(form::UPDATE_PREFIX) {
+                        if let Some(values) = form::parse_update(payload) {
+                            form::push_update(values);
+                        }
+                    } else if replies_in.send(line.clone()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let input = std::sync::Arc::new(std::sync::Mutex::new(replies));
+            let ask = move |input: &std::sync::Mutex<std::sync::mpsc::Receiver<String>>, request: String| -> Result<String, String> {
                 {
                     let mut out = std::io::stdout().lock();
                     write!(out, "{request}{}", form::ENTRY_END).and_then(|()| out.flush()).map_err(|e| e.to_string())?;
                 }
-                let mut reply = String::new();
-                match input.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read_line(&mut reply) {
-                    Ok(0) | Err(_) => Err("the loader closed the script's input".into()),
-                    Ok(_) => Ok(reply),
-                }
+                input
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv()
+                    .map_err(|_| "the loader closed the script's input".to_owned())
             };
             if loader_has_pins {
                 let input = input.clone();

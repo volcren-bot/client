@@ -10,6 +10,10 @@ pub const PINS_PREFIX: &str = "\u{1e}PINS";
 /// the script's stdin with `pin_reply_line`. The PIN goes no further than the injector's own code.
 pub const PIN_REQUEST_PREFIX: &str = "\u{1e}PINREQ ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
+/// A line the loader writes to the script's stdin, unprompted, when the user presses Update on the settings: the form's
+/// values, as JSON. Unlike a reply it can arrive at any time, so the injector reads stdin on a thread of its own and keeps
+/// the latest in `push_update` for `take_update` (the script's `form_update()`).
+pub const UPDATE_PREFIX: &str = "\u{1e}UPDATE ";
 /// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";
 
@@ -88,6 +92,28 @@ pub fn counters_line(counters: &[Counter]) -> String {
 /// The counters of a `COUNTERS_PREFIX` line, without the prefix.
 pub fn parse_counters(payload: &str) -> Option<Vec<Counter>> {
     serde_json::from_str(payload).ok()
+}
+
+static UPDATE: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+/// Keeps `values` for the script to pick up, replacing an update it hasn't picked up yet.
+pub fn push_update(values: Value) {
+    *UPDATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values);
+}
+
+/// The latest values the user updated the settings to since the last call, if any.
+pub fn take_update() -> Option<Value> {
+    UPDATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+}
+
+/// The line that tells a running script its settings changed.
+pub fn update_line(values: &Value) -> String {
+    format!("{UPDATE_PREFIX}{values}")
+}
+
+/// The values of an `UPDATE_PREFIX` line, without the prefix.
+pub fn parse_update(payload: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(payload.trim()).ok().filter(Value::is_object)
 }
 
 pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
@@ -243,6 +269,17 @@ pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updates_are_kept_until_taken() {
+        let line = update_line(&json!({ "bank": false }));
+        let values = parse_update(line.strip_prefix(UPDATE_PREFIX).unwrap()).unwrap();
+        assert!(parse_update("[1]").is_none());
+        push_update(json!({ "bank": true }));
+        push_update(values.clone());
+        assert_eq!(take_update(), Some(values));
+        assert_eq!(take_update(), None);
+    }
 
     #[test]
     fn pin_replies_round_trip() {

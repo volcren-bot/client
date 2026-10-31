@@ -187,6 +187,11 @@ impl Script {
         self.reply(&reply.to_string(), "form")
     }
 
+    /// Pushes new settings to the running script, which picks them up with `form_update()`.
+    pub fn push_update(&mut self, values: &serde_json::Value) -> Result<(), String> {
+        self.reply(&injector::form::update_line(values), "settings update")
+    }
+
     /// Tells the script's injector the PIN for the hash it asked about, `None` if no saved account has it, or why we can't say.
     pub fn answer_pin(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
         self.reply(&injector::form::pin_reply_line(&answer), "PIN request")

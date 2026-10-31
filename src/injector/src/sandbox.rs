@@ -973,6 +973,14 @@ pub fn run_with_modules(
             }
         })?,
     )?;
+    // The values the user last updated the settings to while the script runs, or nil when there is nothing new.
+    globals.set(
+        "form_update",
+        lua.create_function(|lua, (): ()| match crate::form::take_update() {
+            Some(values) => to_lua(lua, &values),
+            None => Ok(mlua::Value::Nil),
+        })?,
+    )?;
     // The live menu has to be read with the mouse still, so these take the input back first.
     globals.set("menu", query(&lua, pid, menu_read(&worker, menu))?)?;
     globals.set("menu_click", query(&lua, pid, |pid, (): ()| menu_click(pid))?)?;
@@ -1111,6 +1119,12 @@ pub fn run_with_modules(
                 }
                 if let Some(options) = t.get::<Option<std::collections::BTreeMap<String, i32>>>("climb_options").map_err(err)? {
                     request.climb_options = options.into_iter().collect();
+                }
+                if let Some(options) = t.get::<Option<Vec<String>>>("portal_options").map_err(err)? {
+                    request.portal_options = options;
+                }
+                if let Some(names) = t.get::<Option<Vec<String>>>("portal_names").map_err(err)? {
+                    request.portal_names = names;
                 }
                 for loc in t.get::<Option<Vec<mlua::Table>>>("avoid").map_err(err)?.unwrap_or_default() {
                     let field = |name: &str| loc.get::<i32>(name).map_err(err);

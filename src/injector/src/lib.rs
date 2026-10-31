@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 pub use ipc::PROTOCOL_VERSION;
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 7;
+pub const HOST_API: u32 = 8;
 pub use ipc::state::varp;
 
 pub mod async_input;
