@@ -119,8 +119,9 @@ impl Store {
     /// `run_block` is why Run is disabled for reasons outside the script (no client, a script already running).
     pub fn ui(&mut self, ui: &mut egui::Ui, me: &Me, run_block: Option<&str>) -> Option<Action> {
         let mut action = None;
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search scripts").desired_width(220.0));
+        let width = ui.available_width();
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search scripts").desired_width((width * 0.4).clamp(100.0, 220.0)));
             let categories = self.categories();
             egui::ComboBox::from_id_salt("store-category")
                 .selected_text(if self.category.is_empty() { "All categories" } else { &self.category })
@@ -145,12 +146,12 @@ impl Store {
                 ui.spinner();
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let editing = ui.add_enabled(
                 !self.redeeming,
                 egui::TextEdit::singleline(&mut self.code)
                     .hint_text("Paste a share code")
-                    .desired_width(420.0)
+                    .desired_width((width - 190.0).clamp(120.0, 420.0))
                     .password(false),
             );
             let submitted = editing.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -199,7 +200,7 @@ impl Store {
             for script in self.visible() {
                 ui.group(|ui| {
                     ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(egui::RichText::new(&script.title).strong().size(16.0));
                         ui.label(egui::RichText::new(format!("by {}", script.author)).weak());
                         ui.label(egui::RichText::new(&script.stage).small());
@@ -213,8 +214,10 @@ impl Store {
                         if script.granted {
                             ui.label(egui::RichText::new("shared with you").small().color(egui::Color32::from_rgb(0x9e, 0xce, 0x6a)));
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.credits, me.min_balance_minutes));
+                    });
+                    // price, online count and Run get a row of their own so a narrow card wraps instead of overlapping
+                    ui.horizontal_wrapped(|ui| {
+                        let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.credits, me.min_balance_minutes));
                             let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
                             let button = match &blocked {
                                 Some(reason) => button.on_disabled_hover_text(reason),
@@ -223,9 +226,8 @@ impl Store {
                             if button.clicked() {
                                 run = Some(Box::new(script.clone()));
                             }
-                            ui.label(format!("{} online", script.online));
                             ui.label(price_label(script));
-                        });
+                        ui.label(format!("{} online", script.online));
                     });
                     if !script.description.is_empty() {
                         ui.label(egui::RichText::new(&script.description).weak());

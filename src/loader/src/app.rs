@@ -194,6 +194,8 @@ fn sidebar_name(title: &str) -> String {
 /// Window width from which the sidebar is always shown.
 const SIDEBAR_MIN_WINDOW: f32 = 760.0;
 const SIDEBAR_WIDTH: f32 = 190.0;
+/// Window width below which the header drops the wordmark and the account details.
+const HEADER_COMPACT_WINDOW: f32 = 640.0;
 /// Width of the strip that toggles the sidebar on narrow windows.
 const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
 
@@ -1380,7 +1382,7 @@ impl LoaderApp {
         });
     }
 
-    fn account_ui(&mut self, ui: &mut egui::Ui) {
+    fn account_ui(&mut self, ui: &mut egui::Ui, compact: bool) {
         let ctx = ui.ctx().clone();
         match &self.auth {
             Auth::SignedIn(me) => {
@@ -1389,11 +1391,18 @@ impl LoaderApp {
                     self.sign_out(None);
                     return;
                 }
-                if !self.api.config().site_url.is_empty() && ui.button("Buy credits").clicked() {
+                if !self.api.config().site_url.is_empty()
+                    && ui
+                        .button(if compact { "Buy" } else { "Buy credits" })
+                        .on_hover_text("Buy credits")
+                        .clicked()
+                {
                     let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
                 }
                 ui.label(balance);
-                ui.label(egui::RichText::new(name).strong());
+                if !compact {
+                    ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
+                }
             }
             Auth::SigningIn(cancel) => {
                 if ui.button("Cancel").clicked() {
@@ -2856,16 +2865,19 @@ impl LoaderApp {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        // Fields take what is left after the label and the Browse button, down to a usable minimum.
+        let field = (ui.available_width() - 190.0).clamp(120.0, 460.0);
+        egui::ScrollArea::both().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
         egui::Grid::new("settings").num_columns(3).show(ui, |ui| {
             ui.label("agent DLL");
-            ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(460.0));
+            ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(field));
             if ui.button("Browse…").clicked() {
                 pick_file(&mut self.settings.dll, "DLL", "dll");
             }
             ui.end_row();
 
             ui.label("lib folder").on_hover_text("Optional. Scripts you run from a file read require(\"../lib/...\") from this folder, e.g. your lib checkout. Store scripts always use the downloaded lib.");
-            ui.add(egui::TextEdit::singleline(&mut self.settings.lib_dir).desired_width(460.0).hint_text("empty: the lib beside the script, or the built-in one"));
+            ui.add(egui::TextEdit::singleline(&mut self.settings.lib_dir).desired_width(field).hint_text("empty: the lib beside the script, or the built-in one"));
             if ui.button("Browse…").clicked() {
                 pick_folder(&mut self.settings.lib_dir);
             }
@@ -2873,7 +2885,7 @@ impl LoaderApp {
 
             if !cfg!(windows) {
                 ui.label("injector.exe");
-                ui.add(egui::TextEdit::singleline(&mut self.settings.helper).desired_width(460.0));
+                ui.add(egui::TextEdit::singleline(&mut self.settings.helper).desired_width(field));
                 if ui.button("Browse…").clicked() {
                     pick_file(&mut self.settings.helper, "Executable", "exe");
                 }
@@ -2882,6 +2894,7 @@ impl LoaderApp {
         });
         // The entries are saved with the rest of the settings (`save`).
         self.whitelist_page.ui(ui, &mut self.http_whitelist);
+        });
     }
 
     fn clients_ui(&mut self, ui: &mut egui::Ui) {
@@ -2913,6 +2926,7 @@ impl LoaderApp {
                 .auto_shrink([false, true])
                 .max_height((ui.available_height() - 120.0).max(60.0))
                 .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     egui::Grid::new("clients")
                         .num_columns(if show_prefix { 4 } else { 3 })
                         .striped(true)
@@ -3034,7 +3048,7 @@ impl LoaderApp {
         let can_unload = self.busy.is_none() && loaded;
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let load = if loaded { "Reload" } else { "Load" };
             if ui
                 .add_enabled(can_load, egui::Button::new(load))
@@ -3066,7 +3080,7 @@ impl LoaderApp {
             let mut changed = false;
             egui::Grid::new("client_options").num_columns(2).spacing(egui::vec2(16.0, 6.0)).show(ui, |ui| {
                 ui.label("Mouse cursor");
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     egui::ComboBox::from_id_salt("cursor_style")
                         .selected_text(cursor_style_label(self.cursor.style))
                         .show_ui(ui, |ui| {
@@ -3352,7 +3366,8 @@ impl LoaderApp {
             return;
         };
         if let serde_json::Value::Object(map) = &values {
-            self.remembered_forms.insert(form.title.clone(), map.clone());
+            self.remembered_forms
+                .insert(form.title.clone(), map.clone());
         }
         if let Some(script) = &mut self.script {
             match script.push_update(&values) {
@@ -3373,12 +3388,12 @@ impl LoaderApp {
         let running = self.script.as_ref().is_some_and(Script::is_running);
         let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
         let stopping = self.script.as_ref().is_some_and(Script::stop_requested);
-        ui.heading(&title);
+        ui.add(egui::Label::new(egui::RichText::new(&title).heading()).truncate());
         // the script is waiting for its settings: it hasn't started yet
         let waiting = self.form.is_some() && self.form_sent.is_none();
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if self.form_sent.is_some() {
                 // the script has its settings: the same button sends it changes, once there are some
                 let changed = self.form.as_ref().is_some_and(|f| {
@@ -3688,7 +3703,7 @@ impl LoaderApp {
 
         let target = self.loaded_target_ui(ui);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(!running, egui::Button::new("Open…")).clicked() {
                 self.open_script();
             }
@@ -4023,7 +4038,7 @@ impl LoaderApp {
         });
 
         if self.find.replace {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.find.replacement)
                         .hint_text("Replace with")
@@ -4731,7 +4746,10 @@ impl eframe::App for LoaderApp {
         self.poll_inventory(&ctx);
         self.poll_widget_mouse(&ctx);
 
-        let narrow = ctx.content_rect().width() < SIDEBAR_MIN_WINDOW;
+        let window = ctx.content_rect();
+        let narrow = window.width() < SIDEBAR_MIN_WINDOW;
+        // Below this the header drops the wordmark and the account row its balance and buy button.
+        let compact = window.width() < HEADER_COMPACT_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
             ui.add_space(6.0);
             ui.allocate_ui_with_layout(
@@ -4740,22 +4758,30 @@ impl eframe::App for LoaderApp {
                 |ui| {
                     let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg"))
                         .fit_to_exact_size(egui::vec2(32.0, 32.0));
+                    // The sidebar drawer's toggle on narrow windows is this logo, so it always stays.
                     ui.add(logo);
-                    ui.label(
-                        egui::RichText::new("VOLCREN")
-                            .font(egui::FontId::new(22.0, crate::theme::bold_family())),
-                    );
+                    if !compact {
+                        ui.label(
+                            egui::RichText::new("VOLCREN")
+                                .font(egui::FontId::new(22.0, crate::theme::bold_family())),
+                        );
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.account_ui(ui)
+                        ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                        self.account_ui(ui, compact)
                     });
                 },
             );
             ui.add_space(6.0);
         });
         self.update_banner_ui(&ctx, ui);
+        // The log scales with the window: a short window can't be eaten by it, a tall one gets a roomier default.
+        let log_max = (window.height() * 0.5).max(60.0);
         egui::Panel::bottom("log")
             .resizable(true)
-            .default_size(140.0)
+            .default_size((window.height() * 0.22).clamp(70.0, 180.0))
+            .min_size(48.0)
+            .max_size(log_max)
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 self.log_panel_ui(ui);
@@ -4828,7 +4854,8 @@ impl eframe::App for LoaderApp {
                 });
         }
         // The tab's page is a panel with room around it.
-        let frame = egui::Frame::central_panel(ui.style()).inner_margin(16.0);
+        let frame = egui::Frame::central_panel(ui.style())
+            .inner_margin((window.width() * 0.02).clamp(8.0, 16.0));
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if self.tab == Tab::Clients {
                 crate::logo::paint_background(ui, ui.max_rect());
