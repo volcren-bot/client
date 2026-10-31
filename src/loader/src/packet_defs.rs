@@ -26,7 +26,11 @@ enum Transform {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Kind {
     /// `shifts` is the shift in bits of each wire byte in the value.
-    Int { signed: bool, shifts: Vec<u8>, transform: Transform },
+    Int {
+        signed: bool,
+        shifts: Vec<u8>,
+        transform: Transform,
+    },
     Bool,
     /// Bytes up to a 0 terminator.
     Str,
@@ -44,7 +48,18 @@ impl Kind {
     /// Whether both read the same bytes the same way: the client's code doesn't say whether a short is signed, only its caller does.
     fn same_wire(&self, other: &Kind) -> bool {
         match (self, other) {
-            (Kind::Int { shifts: a, transform: ta, .. }, Kind::Int { shifts: b, transform: tb, .. }) => a == b && ta == tb,
+            (
+                Kind::Int {
+                    shifts: a,
+                    transform: ta,
+                    ..
+                },
+                Kind::Int {
+                    shifts: b,
+                    transform: tb,
+                    ..
+                },
+            ) => a == b && ta == tb,
             _ => self == other,
         }
     }
@@ -65,7 +80,10 @@ impl Kind {
             b'i' => true,
             _ => return None,
         };
-        let digits = token[1..].chars().take_while(char::is_ascii_digit).collect::<String>();
+        let digits = token[1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
         let bytes = digits.parse::<usize>().ok()? / 8;
         let rest = &token[1 + digits.len()..];
         if bytes == 1 {
@@ -76,7 +94,11 @@ impl Kind {
                 "sub" => Transform::Sub,
                 _ => return None,
             };
-            return Some(Kind::Int { signed, shifts: vec![0], transform });
+            return Some(Kind::Int {
+                signed,
+                shifts: vec![0],
+                transform,
+            });
         }
         let (order, transform) = match rest.strip_suffix("add") {
             Some(order) => (order, Transform::Add),
@@ -85,9 +107,17 @@ impl Kind {
         let shifts: Vec<u8> = match order {
             "be" => (0..bytes).rev().map(|i| i as u8 * 8).collect(),
             "le" => (0..bytes).map(|i| i as u8 * 8).collect(),
-            _ => order.strip_prefix(':')?.split('.').map(|s| s.parse::<u8>().ok().map(|s| s * 8)).collect::<Option<_>>()?,
+            _ => order
+                .strip_prefix(':')?
+                .split('.')
+                .map(|s| s.parse::<u8>().ok().map(|s| s * 8))
+                .collect::<Option<_>>()?,
         };
-        (shifts.len() == bytes && (2..=4).contains(&bytes)).then_some(Kind::Int { signed, shifts, transform })
+        (shifts.len() == bytes && (2..=4).contains(&bytes)).then_some(Kind::Int {
+            signed,
+            shifts,
+            transform,
+        })
     }
 }
 
@@ -125,16 +155,41 @@ fn parse(text: &str) -> Vec<Def> {
             let size = columns.next()?.parse().ok()?;
             let name = columns.next()?.to_string();
             let layout = columns.next()?;
-            let touches = columns.next().unwrap_or("").split(',').filter(|t| !t.is_empty()).map(str::to_string).collect();
-            let field_names = columns.next().unwrap_or("").split(',').filter(|t| !t.is_empty()).map(str::to_string).collect();
+            let touches = columns
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect();
+            let field_names = columns
+                .next()
+                .unwrap_or("")
+                .split(',')
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect();
             let fields = if layout.is_empty() {
                 None
             } else if layout == "-" {
                 Some(Vec::new())
             } else {
-                Some(layout.split(',').map(Kind::parse).collect::<Option<Vec<_>>>()?)
+                Some(
+                    layout
+                        .split(',')
+                        .map(Kind::parse)
+                        .collect::<Option<Vec<_>>>()?,
+                )
             };
-            Some(Def { sent, opcode, size, name, touches, field_names, fields })
+            Some(Def {
+                sent,
+                opcode,
+                size,
+                name,
+                touches,
+                field_names,
+                fields,
+            })
         })
         .collect()
 }
@@ -148,17 +203,25 @@ pub struct Table {
 
 impl Table {
     pub fn lookup(&self, sent: bool, opcode: u16) -> Option<&Def> {
-        self.defs.iter().find(|def| def.sent == sent && def.opcode == opcode)
+        self.defs
+            .iter()
+            .find(|def| def.sent == sent && def.opcode == opcode)
     }
 
     /// The packets that have a name, as (sent, opcode, name).
     pub fn named(&self) -> impl Iterator<Item = (bool, u16, &str)> {
-        self.defs.iter().filter(|d| !d.name.is_empty()).map(|d| (d.sent, d.opcode, d.name.as_str()))
+        self.defs
+            .iter()
+            .filter(|d| !d.name.is_empty())
+            .map(|d| (d.sent, d.opcode, d.name.as_str()))
     }
 
     /// The packets called `name` (in any case), as (sent, opcode).
     pub fn by_name<'a>(&'a self, name: &'a str) -> impl Iterator<Item = (bool, u16)> + 'a {
-        self.defs.iter().filter(move |d| d.name.eq_ignore_ascii_case(name)).map(|d| (d.sent, d.opcode))
+        self.defs
+            .iter()
+            .filter(move |d| d.name.eq_ignore_ascii_case(name))
+            .map(|d| (d.sent, d.opcode))
     }
 
     /// What the agent read from the running client. When every size matches the shipped table's, the opcodes haven't
@@ -169,27 +232,69 @@ impl Table {
         let shipped = shipped();
         // the sizes of all the packets are the closest thing to a build number the client gives
         let received: Vec<&Def> = shipped.defs.iter().filter(|d| !d.sent).collect();
-        let same_protocol = received.len() == layouts.len() && layouts.iter().all(|l| received.iter().any(|d| d.opcode == l.opcode && d.size == l.size));
-        let signature = |size: i32, fields: &Option<Vec<Kind>>| fields.as_ref().filter(|f| !f.is_empty()).map(|f| (size, f.clone()));
-        let parsed: Vec<Option<Vec<Kind>>> = layouts.iter().map(|l| l.fields.as_ref().and_then(|fields| fields.iter().map(|f| Kind::parse(f)).collect::<Option<Vec<_>>>())).collect();
+        let same_protocol = received.len() == layouts.len()
+            && layouts.iter().all(|l| {
+                received
+                    .iter()
+                    .any(|d| d.opcode == l.opcode && d.size == l.size)
+            });
+        let signature = |size: i32, fields: &Option<Vec<Kind>>| {
+            fields
+                .as_ref()
+                .filter(|f| !f.is_empty())
+                .map(|f| (size, f.clone()))
+        };
+        let parsed: Vec<Option<Vec<Kind>>> = layouts
+            .iter()
+            .map(|l| {
+                l.fields.as_ref().and_then(|fields| {
+                    fields
+                        .iter()
+                        .map(|f| Kind::parse(f))
+                        .collect::<Option<Vec<_>>>()
+                })
+            })
+            .collect();
         let defs = layouts
             .iter()
             .zip(&parsed)
             .map(|(layout, fields)| {
                 // a layout the client's code doesn't give (strings, loops) can't contradict the shipped one
                 let fits = |d: &Def| match (&d.fields, fields) {
-                    (Some(a), Some(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_wire(y)),
+                    (Some(a), Some(b)) => {
+                        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_wire(y))
+                    }
                     _ => true,
                 };
-                let by_opcode = shipped.lookup(false, layout.opcode).filter(|d| same_protocol && d.size == layout.size && fits(d));
+                let by_opcode = shipped
+                    .lookup(false, layout.opcode)
+                    .filter(|d| same_protocol && d.size == layout.size && fits(d));
                 let by_shape = || {
                     let sig = signature(layout.size, fields)?;
-                    let named = || shipped.defs.iter().filter(|d| !d.sent && !d.name.is_empty() && signature(d.size, &d.fields).as_ref() == Some(&sig));
-                    let here = layouts.iter().zip(&parsed).filter(|(l, f)| signature(l.size, f).as_ref() == Some(&sig)).count();
+                    let named = || {
+                        shipped.defs.iter().filter(|d| {
+                            !d.sent
+                                && !d.name.is_empty()
+                                && signature(d.size, &d.fields).as_ref() == Some(&sig)
+                        })
+                    };
+                    let here = layouts
+                        .iter()
+                        .zip(&parsed)
+                        .filter(|(l, f)| signature(l.size, f).as_ref() == Some(&sig))
+                        .count();
                     let mut matches = named();
-                    let only = matches.next().filter(|_| matches.next().is_none() && here == 1)?;
+                    let only = matches
+                        .next()
+                        .filter(|_| matches.next().is_none() && here == 1)?;
                     // the shipped table must not have another packet with this shape, named or not
-                    (shipped.defs.iter().filter(|d| !d.sent && signature(d.size, &d.fields).as_ref() == Some(&sig)).count() == 1).then_some(only)
+                    (shipped
+                        .defs
+                        .iter()
+                        .filter(|d| !d.sent && signature(d.size, &d.fields).as_ref() == Some(&sig))
+                        .count()
+                        == 1)
+                        .then_some(only)
                 };
                 let named = by_opcode.filter(|d| !d.name.is_empty()).or_else(by_shape);
                 Def {
@@ -197,27 +302,46 @@ impl Table {
                     opcode: layout.opcode,
                     size: layout.size,
                     name: named.map(|d| d.name.clone()).unwrap_or_default(),
-                    touches: by_opcode.or(named).map(|d| d.touches.clone()).unwrap_or_default(),
+                    touches: by_opcode
+                        .or(named)
+                        .map(|d| d.touches.clone())
+                        .unwrap_or_default(),
                     // the names belong to the layout, so they come along with the name only
                     field_names: named.map(|d| d.field_names.clone()).unwrap_or_default(),
                     fields: fields.clone(),
                 }
             })
-            .chain(shipped.defs.iter().filter(|d| d.sent && same_protocol).map(Def::clone))
+            .chain(
+                shipped
+                    .defs
+                    .iter()
+                    .filter(|d| d.sent && same_protocol)
+                    .map(Def::clone),
+            )
             .collect();
-        Self { defs, source: "read from the running client's code (client packets from the shipped table)".into() }
+        Self {
+            defs,
+            source: "read from the running client's code (client packets from the shipped table)"
+                .into(),
+        }
     }
 }
 
 /// The table that was generated from the Java client.
 pub fn shipped() -> &'static Table {
     static TABLE_ONCE: OnceLock<Table> = OnceLock::new();
-    TABLE_ONCE.get_or_init(|| Table { defs: parse(TABLE), source: format!("the table shipped for the {} build", build()) })
+    TABLE_ONCE.get_or_init(|| Table {
+        defs: parse(TABLE),
+        source: format!("the table shipped for the {} build", build()),
+    })
 }
 
 /// The build the shipped table was generated for.
 pub fn build() -> &'static str {
-    TABLE.lines().find_map(|line| line.strip_prefix("# build\t")).unwrap_or("unknown")
+    TABLE
+        .lines()
+        .find_map(|line| line.strip_prefix("# build\t"))
+        .unwrap_or("unknown")
 }
 
 /// A packet read through its `Def`.
@@ -234,40 +358,66 @@ pub fn decode(def: &Def, bytes: &[u8], length: u32) -> Decoded {
     let mut fields = Vec::new();
     let mut note = None;
     if def.size >= 0 && def.size as u32 != length {
-        note = Some(format!("the client expects {} bytes here, the packet has {length}: opcodes change with game updates", def.size));
+        note = Some(format!(
+            "the client expects {} bytes here, the packet has {length}: opcodes change with game updates",
+            def.size
+        ));
     }
-    let Some(kinds) = &def.fields else { return Decoded { fields, note } };
+    let Some(kinds) = &def.fields else {
+        return Decoded { fields, note };
+    };
     let mut at = 0;
     for kind in kinds {
         match read(kind, &bytes[at.min(bytes.len())..]) {
             Some((value, used)) => {
-                let label = def.field_names.get(fields.len()).cloned().unwrap_or_else(|| label(kind));
+                let label = def
+                    .field_names
+                    .get(fields.len())
+                    .cloned()
+                    .unwrap_or_else(|| label(kind));
                 fields.push((label, value));
                 at += used;
             }
             None => {
                 if note.is_none() {
-                    note = Some(if bytes.len() < length as usize { format!("only the first {} of {length} bytes were kept", bytes.len()) } else { "a field runs past the end of the payload".to_string() });
+                    note = Some(if bytes.len() < length as usize {
+                        format!("only the first {} of {length} bytes were kept", bytes.len())
+                    } else {
+                        "a field runs past the end of the payload".to_string()
+                    });
                 }
                 break;
             }
         }
     }
     if note.is_none() && at != length as usize && bytes.len() >= length as usize {
-        note = Some(format!("layout mismatch: the fields take {at} bytes, the packet has {length}"));
+        note = Some(format!(
+            "layout mismatch: the fields take {at} bytes, the packet has {length}"
+        ));
     }
     Decoded { fields, note }
 }
 
 fn label(kind: &Kind) -> String {
     match kind {
-        Kind::Int { signed, shifts, transform } => {
+        Kind::Int {
+            signed,
+            shifts,
+            transform,
+        } => {
             let order = if shifts.windows(2).all(|w| w[0] > w[1]) {
                 "be".to_string()
             } else if shifts.windows(2).all(|w| w[0] < w[1]) {
                 "le".to_string()
             } else {
-                format!("mixed order {}", shifts.iter().map(|s| (s / 8).to_string()).collect::<Vec<_>>().join("."))
+                format!(
+                    "mixed order {}",
+                    shifts
+                        .iter()
+                        .map(|s| (s / 8).to_string())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                )
             };
             let transform = match transform {
                 Transform::None => "",
@@ -276,7 +426,14 @@ fn label(kind: &Kind) -> String {
                 Transform::Sub => ", 128 minus",
             };
             let width = shifts.len() * 8;
-            if shifts.len() == 1 { format!("{}{width}{transform}", if *signed { "i" } else { "u" }) } else { format!("{}{width} {order}{transform}", if *signed { "i" } else { "u" }) }
+            if shifts.len() == 1 {
+                format!("{}{width}{transform}", if *signed { "i" } else { "u" })
+            } else {
+                format!(
+                    "{}{width} {order}{transform}",
+                    if *signed { "i" } else { "u" }
+                )
+            }
         }
         Kind::Bool => "bool".into(),
         Kind::Str | Kind::Str0 => "string".into(),
@@ -289,7 +446,11 @@ fn label(kind: &Kind) -> String {
 /// The text of one field at the start of `bytes` and the bytes it took.
 fn read(kind: &Kind, bytes: &[u8]) -> Option<(String, usize)> {
     match kind {
-        Kind::Int { signed, shifts, transform } => {
+        Kind::Int {
+            signed,
+            shifts,
+            transform,
+        } => {
             let width = shifts.len();
             let mut value = 0u32;
             for (&byte, &shift) in bytes.get(..width)?.iter().zip(shifts) {
@@ -305,13 +466,25 @@ fn read(kind: &Kind, bytes: &[u8]) -> Option<(String, usize)> {
                 };
                 value |= (byte as u32) << shift;
             }
-            let value = if *signed && width < 4 && value >> (width * 8 - 1) & 1 == 1 { value as i64 - (1i64 << (width * 8)) } else if *signed { value as i32 as i64 } else { value as i64 };
+            let value = if *signed && width < 4 && value >> (width * 8 - 1) & 1 == 1 {
+                value as i64 - (1i64 << (width * 8))
+            } else if *signed {
+                value as i32 as i64
+            } else {
+                value as i64
+            };
             Some((value.to_string(), width))
         }
         Kind::Bool => Some(((bytes.first()? & 1 == 1).to_string(), 1)),
         Kind::Str => {
             let end = bytes.iter().position(|&c| c == 0)?;
-            Some((format!("{:?}", bytes[..end].iter().map(|&c| c as char).collect::<String>()), end + 1))
+            Some((
+                format!(
+                    "{:?}",
+                    bytes[..end].iter().map(|&c| c as char).collect::<String>()
+                ),
+                end + 1,
+            ))
         }
         Kind::Str0 => {
             let (value, used) = read(&Kind::Str, bytes.get(1..)?)?;
@@ -319,7 +492,10 @@ fn read(kind: &Kind, bytes: &[u8]) -> Option<(String, usize)> {
         }
         Kind::Smart => match *bytes.first()? {
             first if first < 128 => Some((first.to_string(), 1)),
-            first => Some(((u16::from_be_bytes([first, *bytes.get(1)?]) - 0x8000).to_string(), 2)),
+            first => Some((
+                (u16::from_be_bytes([first, *bytes.get(1)?]) - 0x8000).to_string(),
+                2,
+            )),
         },
         Kind::Varint => {
             let mut value = 0u32;
@@ -341,30 +517,76 @@ mod tests {
     use super::*;
 
     fn def(size: i32, layout: &str) -> Def {
-        parse(&format!("R\t1\t{size}\tTEST\t{layout}\t")).pop().unwrap()
+        parse(&format!("R\t1\t{size}\tTEST\t{layout}\t"))
+            .pop()
+            .unwrap()
     }
 
     fn values(def: &Def, bytes: &[u8]) -> Vec<String> {
-        decode(def, bytes, bytes.len() as u32).fields.into_iter().map(|(_, value)| value).collect()
+        decode(def, bytes, bytes.len() as u32)
+            .fields
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect()
     }
 
     #[test]
     fn the_shipped_table_parses_and_knows_its_first_packets() {
         assert!(!build().is_empty());
         let tick = shipped().lookup(false, 2).unwrap();
-        assert_eq!((tick.name.as_str(), tick.size, tick.has_fields()), ("TICK", 0, true));
+        assert_eq!(
+            (tick.name.as_str(), tick.size, tick.has_fields()),
+            ("TICK", 0, true)
+        );
         assert!(shipped().lookup(true, 2).is_none());
         // every line of the table parsed (a kind that doesn't parse drops its whole line)
-        assert_eq!(shipped().defs.len(), TABLE.lines().filter(|l| l.starts_with("R\t") || l.starts_with("S\t")).count());
+        assert_eq!(
+            shipped().defs.len(),
+            TABLE
+                .lines()
+                .filter(|l| l.starts_with("R\t") || l.starts_with("S\t"))
+                .count()
+        );
     }
 
     #[test]
     fn kinds_parse_from_the_generator_spelling() {
-        assert_eq!(Kind::parse("u8"), Some(Kind::Int { signed: false, shifts: vec![0], transform: Transform::None }));
-        assert_eq!(Kind::parse("i16leadd"), Some(Kind::Int { signed: true, shifts: vec![0, 8], transform: Transform::Add }));
-        assert_eq!(Kind::parse("u16be"), Some(Kind::Int { signed: false, shifts: vec![8, 0], transform: Transform::None }));
-        assert_eq!(Kind::parse("i32:2.3.0.1"), Some(Kind::Int { signed: true, shifts: vec![16, 24, 0, 8], transform: Transform::None }));
-        assert_eq!(Kind::parse("u24:2.0.1").map(|k| label(&k)), Some("u24 mixed order 2.0.1".into()));
+        assert_eq!(
+            Kind::parse("u8"),
+            Some(Kind::Int {
+                signed: false,
+                shifts: vec![0],
+                transform: Transform::None
+            })
+        );
+        assert_eq!(
+            Kind::parse("i16leadd"),
+            Some(Kind::Int {
+                signed: true,
+                shifts: vec![0, 8],
+                transform: Transform::Add
+            })
+        );
+        assert_eq!(
+            Kind::parse("u16be"),
+            Some(Kind::Int {
+                signed: false,
+                shifts: vec![8, 0],
+                transform: Transform::None
+            })
+        );
+        assert_eq!(
+            Kind::parse("i32:2.3.0.1"),
+            Some(Kind::Int {
+                signed: true,
+                shifts: vec![16, 24, 0, 8],
+                transform: Transform::None
+            })
+        );
+        assert_eq!(
+            Kind::parse("u24:2.0.1").map(|k| label(&k)),
+            Some("u24 mixed order 2.0.1".into())
+        );
         assert_eq!(Kind::parse("nonsense"), None);
         assert_eq!(Kind::parse("u16sideways"), None);
     }
@@ -373,8 +595,14 @@ mod tests {
     fn varp_large_reads_its_id_and_value() {
         // id 0x0102 little endian with +128 on the low byte; the value's bytes in the order 2.3.0.1
         let varp = def(6, "u16leadd,i32:2.3.0.1");
-        assert_eq!(values(&varp, &[0x82, 0x01, 0x00, 0x00, 0x01, 0x00]), ["258", "1"]);
-        assert_eq!(values(&varp, &[0x80, 0x00, 0xff, 0xff, 0xff, 0xff]), ["0", "-1"]);
+        assert_eq!(
+            values(&varp, &[0x82, 0x01, 0x00, 0x00, 0x01, 0x00]),
+            ["258", "1"]
+        );
+        assert_eq!(
+            values(&varp, &[0x80, 0x00, 0xff, 0xff, 0xff, 0xff]),
+            ["0", "-1"]
+        );
     }
 
     #[test]
@@ -392,9 +620,15 @@ mod tests {
 
     #[test]
     fn strings_smarts_and_varints() {
-        assert_eq!(values(&def(-1, "str,u8"), &[b'h', b'i', 0, 7]), ["\"hi\"", "7"]);
+        assert_eq!(
+            values(&def(-1, "str,u8"), &[b'h', b'i', 0, 7]),
+            ["\"hi\"", "7"]
+        );
         assert_eq!(values(&def(-1, "str0"), &[0, b'o', b'k', 0]), ["\"ok\""]);
-        assert_eq!(values(&def(-1, "smart,smart"), &[5, 0x80, 0x10]), ["5", "16"]);
+        assert_eq!(
+            values(&def(-1, "smart,smart"), &[5, 0x80, 0x10]),
+            ["5", "16"]
+        );
         assert_eq!(values(&def(-1, "varint"), &[0x81, 0x01]), ["129"]);
     }
 
@@ -402,9 +636,19 @@ mod tests {
     fn a_wrong_length_is_flagged_not_decoded_silently() {
         let tick = shipped().lookup(false, 2).unwrap();
         assert_eq!(decode(tick, &[], 0).note, None);
-        assert!(decode(tick, &[1, 2], 2).note.unwrap().contains("expects 0 bytes"));
+        assert!(
+            decode(tick, &[1, 2], 2)
+                .note
+                .unwrap()
+                .contains("expects 0 bytes")
+        );
         // a variable size packet with bytes left over
-        assert!(decode(&def(-1, "u8"), &[1, 2], 2).note.unwrap().contains("layout mismatch"));
+        assert!(
+            decode(&def(-1, "u8"), &[1, 2], 2)
+                .note
+                .unwrap()
+                .contains("layout mismatch")
+        );
     }
 
     #[test]
@@ -415,7 +659,11 @@ mod tests {
     }
 
     fn layout(opcode: u16, size: i32, fields: Option<&[&str]>) -> injector::PacketLayout {
-        injector::PacketLayout { opcode, size, fields: fields.map(|f| f.iter().map(|s| s.to_string()).collect()) }
+        injector::PacketLayout {
+            opcode,
+            size,
+            fields: fields.map(|f| f.iter().map(|s| s.to_string()).collect()),
+        }
     }
 
     /// The shipped table's own sizes as a client with the same protocol reports them, with `changes` applied to its layouts.
@@ -424,7 +672,11 @@ mod tests {
             .defs
             .iter()
             .filter(|d| !d.sent)
-            .map(|d| injector::PacketLayout { opcode: d.opcode, size: d.size, fields: None })
+            .map(|d| injector::PacketLayout {
+                opcode: d.opcode,
+                size: d.size,
+                fields: None,
+            })
             .collect();
         for change in changes {
             let slot = all.iter_mut().find(|l| l.opcode == change.opcode).unwrap();
@@ -436,11 +688,17 @@ mod tests {
     #[test]
     fn a_table_from_the_client_keeps_names_while_the_protocol_is_the_same() {
         // opcode 2 is TICK in the shipped table, with no fields and no bytes
-        let table = Table::from_client(&same_protocol(&[layout(2, 0, Some(&[])), layout(3, 2, Some(&["u16be"]))]));
+        let table = Table::from_client(&same_protocol(&[
+            layout(2, 0, Some(&[])),
+            layout(3, 2, Some(&["u16be"])),
+        ]));
         assert_eq!(table.lookup(false, 2).unwrap().name, "TICK");
         assert_eq!(table.lookup(false, 3).unwrap().name, "UPDATE_RUNENERGY");
         // fields are decoded from what the client said
-        assert_eq!(decode(table.lookup(false, 3).unwrap(), &[1, 2], 2).fields, [("energy".to_string(), "258".to_string())]);
+        assert_eq!(
+            decode(table.lookup(false, 3).unwrap(), &[1, 2], 2).fields,
+            [("energy".to_string(), "258".to_string())]
+        );
         assert!(!table.lookup(false, 4).unwrap().has_fields());
         assert!(table.lookup(false, 9999).is_none());
     }
@@ -448,14 +706,23 @@ mod tests {
     #[test]
     fn names_survive_a_layout_the_client_cant_read_and_signedness() {
         // IF_SETTEXT (-2, i32be then a string) is a layout the agent can't read; VARP_LARGE's int is signed in the shipped table
-        let table = Table::from_client(&same_protocol(&[layout(40, 6, Some(&["u16leadd", "i32:2.3.0.1"])), layout(7, 6, Some(&["u32be", "i16leadd"]))]));
+        let table = Table::from_client(&same_protocol(&[
+            layout(40, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
+            layout(7, 6, Some(&["u32be", "i16leadd"])),
+        ]));
         assert_eq!(table.lookup(false, 11).unwrap().name, "IF_SETTEXT");
         assert_eq!(table.lookup(false, 40).unwrap().name, "VARP_LARGE");
         assert_eq!(table.lookup(false, 7).unwrap().name, "IF_SETANIM");
         // the shipped layout isn't used to decode what the client didn't give
         assert!(!table.lookup(false, 11).unwrap().has_fields());
         // but a layout that really differs is another packet
-        assert_eq!(Table::from_client(&same_protocol(&[layout(40, 6, Some(&["u16be", "i32be"]))])).lookup(false, 40).unwrap().name, "");
+        assert_eq!(
+            Table::from_client(&same_protocol(&[layout(40, 6, Some(&["u16be", "i32be"]))]))
+                .lookup(false, 40)
+                .unwrap()
+                .name,
+            ""
+        );
     }
 
     #[test]
@@ -469,30 +736,57 @@ mod tests {
         // and the client packets, which can't be checked, are dropped
         assert!(table.lookup(true, 75).is_none());
         // a different number of packets is a different protocol as well
-        assert_eq!(Table::from_client(&same_protocol(&[])[..150]).lookup(false, 2).unwrap().name, "");
+        assert_eq!(
+            Table::from_client(&same_protocol(&[])[..150])
+                .lookup(false, 2)
+                .unwrap()
+                .name,
+            ""
+        );
     }
 
     #[test]
     fn a_name_follows_its_packet_when_an_update_moves_the_opcode() {
         // VARP_LARGE (u16leadd, i32:2.3.0.1, 6 bytes) is the only packet of that shape in the shipped table
-        let table = Table::from_client(&[layout(90, 6, Some(&["u16leadd", "i32:2.3.0.1"])), layout(91, 6, Some(&["u16be", "i32be"]))]);
+        let table = Table::from_client(&[
+            layout(90, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
+            layout(91, 6, Some(&["u16be", "i32be"])),
+        ]);
         assert_eq!(table.lookup(false, 90).unwrap().name, "VARP_LARGE");
         assert_eq!(table.lookup(false, 91).unwrap().name, "");
         // the same shape twice in the client's packets is not told apart
-        let twice = Table::from_client(&[layout(90, 6, Some(&["u16leadd", "i32:2.3.0.1"])), layout(91, 6, Some(&["u16leadd", "i32:2.3.0.1"]))]);
+        let twice = Table::from_client(&[
+            layout(90, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
+            layout(91, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
+        ]);
         assert_eq!(twice.lookup(false, 90).unwrap().name, "");
         // a packet without bytes has no shape to follow
-        assert_eq!(Table::from_client(&[layout(7, 0, Some(&[]))]).lookup(false, 7).unwrap().name, "");
+        assert_eq!(
+            Table::from_client(&[layout(7, 0, Some(&[]))])
+                .lookup(false, 7)
+                .unwrap()
+                .name,
+            ""
+        );
     }
 
     #[test]
     fn client_packets_come_from_the_shipped_table() {
-        assert_eq!(shipped().lookup(true, 75).map(|d| (d.name.as_str(), d.size)), Some(("NO_TIMEOUT", 0)));
+        assert_eq!(
+            shipped()
+                .lookup(true, 75)
+                .map(|d| (d.name.as_str(), d.size)),
+            Some(("NO_TIMEOUT", 0))
+        );
         let table = Table::from_client(&same_protocol(&[]));
         // a received 75 is another packet; the sent one is still there
         assert_eq!(table.lookup(false, 75).unwrap().name, "");
         assert_eq!(table.lookup(true, 75).unwrap().name, "NO_TIMEOUT");
-        assert!(decode(table.lookup(true, 75).unwrap(), &[], 0).note.is_none());
+        assert!(
+            decode(table.lookup(true, 75).unwrap(), &[], 0)
+                .note
+                .is_none()
+        );
     }
 
     #[test]

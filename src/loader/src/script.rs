@@ -28,7 +28,10 @@ pub enum ScriptEvent {
     HttpRequest(String),
     /// `bank_pin_enter()` asks for the PIN saved for the account with this name hash; answer with `answer_pin`.
     PinRequest(String),
-    Finished { result: Result<(), String>, stopped: bool },
+    Finished {
+        result: Result<(), String>,
+        stopped: bool,
+    },
 }
 
 pub struct Script {
@@ -46,29 +49,59 @@ pub struct Script {
 
 impl Script {
     /// `lib` is your own lib folder, for a script run from a local file.
-    pub fn start(ctx: &egui::Context, source: &str, path: Option<&Path>, lib: Option<&Path>, target: Option<&Target>, settings: &Settings) -> Result<Self, String> {
+    pub fn start(
+        ctx: &egui::Context,
+        source: &str,
+        path: Option<&Path>,
+        lib: Option<&Path>,
+        target: Option<&Target>,
+        settings: &Settings,
+    ) -> Result<Self, String> {
         Self::start_with(ctx, source, &[], path, lib, target, settings)
     }
 
     /// `modules` are the script's other files by name, sent to the injector to keep in memory, beside `path`.
-    pub fn start_with(ctx: &egui::Context, source: &str, modules: &[(String, String)], path: Option<&Path>, lib: Option<&Path>, target: Option<&Target>, settings: &Settings) -> Result<Self, String> {
+    pub fn start_with(
+        ctx: &egui::Context,
+        source: &str,
+        modules: &[(String, String)],
+        path: Option<&Path>,
+        lib: Option<&Path>,
+        target: Option<&Target>,
+        settings: &Settings,
+    ) -> Result<Self, String> {
         let mut command = backend::script_command(target, settings, path, lib)?;
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("Couldn't run {}: {e}", command.get_program().to_string_lossy()))?;
+            .map_err(|e| {
+                format!(
+                    "Couldn't run {}: {e}",
+                    command.get_program().to_string_lossy()
+                )
+            })?;
 
         let mut stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
-        let pins = format!("{}\n{}\n", injector::form::PINS_PREFIX, injector::http::CAPABILITY_PREFIX);
+        let pins = format!(
+            "{}\n{}\n",
+            injector::form::PINS_PREFIX,
+            injector::http::CAPABILITY_PREFIX
+        );
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
         let files = if modules.is_empty() {
             String::new()
         } else {
-            let json = serde_json::to_string(&modules.iter().cloned().collect::<std::collections::HashMap<_, _>>()).expect("strings serialize");
+            let json = serde_json::to_string(
+                &modules
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashMap<_, _>>(),
+            )
+            .expect("strings serialize");
             format!("{}{}\n{json}", injector::form::MODULES_PREFIX, json.len())
         };
         if let Err(error) = stdin
@@ -96,7 +129,10 @@ impl Script {
         thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             let mut entry = Vec::new();
-            while stdout.read_until(injector::form::ENTRY_END as u8, &mut entry).is_ok_and(|read| read > 0) {
+            while stdout
+                .read_until(injector::form::ENTRY_END as u8, &mut entry)
+                .is_ok_and(|read| read > 0)
+            {
                 if entry.last() == Some(&(injector::form::ENTRY_END as u8)) {
                     entry.pop();
                 }
@@ -134,8 +170,13 @@ impl Script {
     }
 
     fn reply(&self, line: &str, what: &str) -> Result<(), String> {
-        let mut stdin = self.stdin.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        writeln!(stdin, "{line}").and_then(|()| stdin.flush()).map_err(|e| format!("Couldn't answer the script's {what}: {e}"))
+        let mut stdin = self
+            .stdin
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        writeln!(stdin, "{line}")
+            .and_then(|()| stdin.flush())
+            .map_err(|e| format!("Couldn't answer the script's {what}: {e}"))
     }
 
     pub fn answer_form(&mut self, values: Option<serde_json::Value>) -> Result<(), String> {
@@ -159,8 +200,11 @@ impl Script {
         let request = injector::http::parse_request(payload);
         thread::spawn(move || {
             let answer = request.and_then(|request| whitelist.perform(&request));
-            let mut stdin = stdin.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = writeln!(stdin, "{}", injector::http::reply_line(&answer)).and_then(|()| stdin.flush());
+            let mut stdin = stdin
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = writeln!(stdin, "{}", injector::http::reply_line(&answer))
+                .and_then(|()| stdin.flush());
         });
     }
 
@@ -211,8 +255,12 @@ impl Script {
             .map(|line| {
                 if let Some(payload) = line.strip_prefix(injector::form::STATS_PREFIX) {
                     return match injector::form::parse_stats(payload) {
-                        Some((experience, gold, custom)) => ScriptEvent::Stats(experience, gold, custom),
-                        None => ScriptEvent::Output(format!("Bad stats from the script: {payload}")),
+                        Some((experience, gold, custom)) => {
+                            ScriptEvent::Stats(experience, gold, custom)
+                        }
+                        None => {
+                            ScriptEvent::Output(format!("Bad stats from the script: {payload}"))
+                        }
                     };
                 }
                 if let Some(payload) = line.strip_prefix(injector::http::REQUEST_PREFIX) {
@@ -224,31 +272,53 @@ impl Script {
                 if let Some(payload) = line.strip_prefix(injector::form::BREAKS_PREFIX) {
                     return match injector::form::parse_breaks(payload) {
                         Some(plan) => ScriptEvent::Breaks(plan),
-                        None => ScriptEvent::Output(format!("Bad breaks from the script: {payload}")),
+                        None => {
+                            ScriptEvent::Output(format!("Bad breaks from the script: {payload}"))
+                        }
                     };
                 }
                 if let Some(payload) = line.strip_prefix(injector::form::COUNTERS_PREFIX) {
                     return match injector::form::parse_counters(payload) {
                         Some(counters) => ScriptEvent::Counters(counters),
-                        None => ScriptEvent::Output(format!("Bad counters from the script: {payload}")),
+                        None => {
+                            ScriptEvent::Output(format!("Bad counters from the script: {payload}"))
+                        }
                     };
                 }
-                match line.strip_prefix(injector::form::FORM_PREFIX).map(serde_json::from_str) {
+                match line
+                    .strip_prefix(injector::form::FORM_PREFIX)
+                    .map(serde_json::from_str)
+                {
                     Some(Ok(spec)) => ScriptEvent::Form(spec),
-                    Some(Err(error)) => ScriptEvent::Output(format!("Bad form from the script: {error}")),
+                    Some(Err(error)) => {
+                        ScriptEvent::Output(format!("Bad form from the script: {error}"))
+                    }
                     None => ScriptEvent::Output(line),
                 }
             })
             .collect();
-        if !self.finished && let Ok(Some(status)) = self.child.try_wait() {
+        if !self.finished
+            && let Ok(Some(status)) = self.child.try_wait()
+        {
             self.finished = true;
             let result = if status.success() {
                 Ok(())
             } else {
-                let detail = self.stderr.lock().map(|lines| lines.join("\n")).unwrap_or_default();
-                Err(if detail.is_empty() { format!("Script failed ({status}).") } else { detail })
+                let detail = self
+                    .stderr
+                    .lock()
+                    .map(|lines| lines.join("\n"))
+                    .unwrap_or_default();
+                Err(if detail.is_empty() {
+                    format!("Script failed ({status}).")
+                } else {
+                    detail
+                })
             };
-            events.push(ScriptEvent::Finished { result, stopped: self.stopped });
+            events.push(ScriptEvent::Finished {
+                result,
+                stopped: self.stopped,
+            });
         }
         events
     }
@@ -256,7 +326,11 @@ impl Script {
 
 #[cfg(unix)]
 fn suspend_process(pid: u32, suspend: bool) {
-    let signal = if suspend { libc::SIGSTOP } else { libc::SIGCONT };
+    let signal = if suspend {
+        libc::SIGSTOP
+    } else {
+        libc::SIGCONT
+    };
     unsafe {
         libc::kill(pid as libc::pid_t, signal);
     }
@@ -277,7 +351,10 @@ mod tests {
                 .args(["build", "-p", "injector", "--bin", "injector"])
                 .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .status();
-            assert!(status.is_ok_and(|s| s.success()), "couldn't build injector for tests");
+            assert!(
+                status.is_ok_and(|s| s.success()),
+                "couldn't build injector for tests"
+            );
         });
     }
 
@@ -290,12 +367,20 @@ mod tests {
                 match event {
                     ScriptEvent::Output(line) => lines.push(line),
                     ScriptEvent::Form(spec) => lines.push(format!("form {spec}")),
-                    ScriptEvent::Breaks(plan) => lines.push(format!("breaks {}", plan.breaks.len())),
-                    ScriptEvent::Counters(counters) => lines.push(format!("counters {}", counters.len())),
+                    ScriptEvent::Breaks(plan) => {
+                        lines.push(format!("breaks {}", plan.breaks.len()))
+                    }
+                    ScriptEvent::Counters(counters) => {
+                        lines.push(format!("counters {}", counters.len()))
+                    }
                     ScriptEvent::PinRequest(hash) => lines.push(format!("pin {hash}")),
                     ScriptEvent::HttpRequest(payload) => lines.push(format!("http {payload}")),
-                    ScriptEvent::Stats(experience, gold, _) => lines.push(format!("stats {experience} {gold}")),
-                    ScriptEvent::Finished { result, stopped } => return (lines, Some((result, stopped))),
+                    ScriptEvent::Stats(experience, gold, _) => {
+                        lines.push(format!("stats {experience} {gold}"))
+                    }
+                    ScriptEvent::Finished { result, stopped } => {
+                        return (lines, Some((result, stopped)));
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(10));
@@ -305,7 +390,15 @@ mod tests {
 
     fn start(source: &str) -> Script {
         ensure_runner_built();
-        Script::start(&egui::Context::default(), source, None, None, None, &Settings::default()).unwrap()
+        Script::start(
+            &egui::Context::default(),
+            source,
+            None,
+            None,
+            None,
+            &Settings::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -331,8 +424,14 @@ mod tests {
                 match event {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Stats(..) | ScriptEvent::Breaks(..) | ScriptEvent::Counters(..) | ScriptEvent::PinRequest(..) | ScriptEvent::HttpRequest(..) => {}
-                    ScriptEvent::Finished { .. } => panic!("the script ended before asking for a form"),
+                    ScriptEvent::Stats(..)
+                    | ScriptEvent::Breaks(..)
+                    | ScriptEvent::Counters(..)
+                    | ScriptEvent::PinRequest(..)
+                    | ScriptEvent::HttpRequest(..) => {}
+                    ScriptEvent::Finished { .. } => {
+                        panic!("the script ended before asking for a form")
+                    }
                 }
             }
             thread::sleep(Duration::from_millis(10));
@@ -350,7 +449,9 @@ mod tests {
         let mut lines = Vec::new();
         let spec = wait_form(&mut script, &mut lines);
         assert_eq!(spec["title"], "Fisher");
-        script.answer_form(Some(serde_json::json!({ "spot": "Cage", "hours": 3 }))).unwrap();
+        script
+            .answer_form(Some(serde_json::json!({ "spot": "Cage", "hours": 3 })))
+            .unwrap();
         wait_form(&mut script, &mut lines);
         script.answer_form(None).unwrap();
         let (rest, end) = wait(&mut script, Duration::from_secs(5));
@@ -392,7 +493,11 @@ mod tests {
         thread::sleep(Duration::from_millis(300));
         script.stop();
         let (_, end) = wait(&mut script, Duration::from_secs(3));
-        assert_eq!(end.map(|(_, stopped)| stopped), Some(true), "JIT-compiled busy loop didn't stop");
+        assert_eq!(
+            end.map(|(_, stopped)| stopped),
+            Some(true),
+            "JIT-compiled busy loop didn't stop"
+        );
     }
 
     #[cfg(unix)]
@@ -403,7 +508,10 @@ mod tests {
         script.set_paused(true);
         assert!(script.is_running());
         thread::sleep(Duration::from_millis(200));
-        assert!(script.is_running(), "a paused process shouldn't exit on its own");
+        assert!(
+            script.is_running(),
+            "a paused process shouldn't exit on its own"
+        );
         script.stop();
         let (_, end) = wait(&mut script, Duration::from_secs(3));
         assert_eq!(end.map(|(_, stopped)| stopped), Some(true));
@@ -420,9 +528,14 @@ mod tests {
                 let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
                 let head = String::from_utf8_lossy(&buf[..n]).into_owned();
                 let reply = if head.starts_with("GET /hop") {
-                    format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/hi\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/hi\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
                 } else {
-                    format!("HTTP/1.1 404 Not Found\r\nX-Seen: {}\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", head.contains("x-token: abc") || head.contains("X-Token: abc"))
+                    format!(
+                        "HTTP/1.1 404 Not Found\r\nX-Seen: {}\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                        head.contains("x-token: abc") || head.contains("X-Token: abc")
+                    )
                 };
                 let _ = stream.write_all(reply.as_bytes());
             }
@@ -448,7 +561,9 @@ mod tests {
             let mut finished = None;
             for event in script.poll() {
                 match event {
-                    ScriptEvent::HttpRequest(payload) => script.answer_http(&payload, whitelist.clone()),
+                    ScriptEvent::HttpRequest(payload) => {
+                        script.answer_http(&payload, whitelist.clone())
+                    }
                     ScriptEvent::Output(line) => lines.push(line),
                     ScriptEvent::Finished { result, .. } => finished = Some(result),
                     _ => {}
@@ -461,30 +576,54 @@ mod tests {
         };
         assert_eq!(end, Ok(()), "{lines:?}");
         assert_eq!(lines[0], "false\t404\thello\ttrue");
-        assert!(lines[1].starts_with("nil\tlocalhost isn't on the HTTP whitelist"), "{}", lines[1]);
-        assert!(lines[2].starts_with("nil\tlocalhost isn't on the HTTP whitelist"), "a redirect off the list is refused: {}", lines[2]);
-        assert!(lines[3].starts_with("nil\t") && lines[3].contains("http or https"), "{}", lines[3]);
+        assert!(
+            lines[1].starts_with("nil\tlocalhost isn't on the HTTP whitelist"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].starts_with("nil\tlocalhost isn't on the HTTP whitelist"),
+            "a redirect off the list is refused: {}",
+            lines[2]
+        );
+        assert!(
+            lines[3].starts_with("nil\t") && lines[3].contains("http or https"),
+            "{}",
+            lines[3]
+        );
         assert!(lines[4].contains("header can't be set"), "{}", lines[4]);
     }
 
     fn live_client() -> Option<(Target, Settings)> {
         let mut settings = Settings::default();
         if settings.helper.is_empty() {
-            let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/x86_64-pc-windows-gnu/release/injector.exe");
+            let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/x86_64-pc-windows-gnu/release/injector.exe");
             if helper.is_file() {
                 settings.helper = helper.display().to_string();
             }
         }
         let scan = backend::scan(&settings);
         let Some(target) = scan.targets.into_iter().find(|t| t.client.loaded.is_some()) else {
-            eprintln!("skipped, no client with agent loaded was found: {:?}", scan.errors);
+            eprintln!(
+                "skipped, no client with agent loaded was found: {:?}",
+                scan.errors
+            );
             return None;
         };
         Some((target, settings))
     }
 
     fn run_live(client: &(Target, Settings), source: &str) -> Run {
-        let mut script = Script::start(&egui::Context::default(), source, None, None, Some(&client.0), &client.1).unwrap();
+        let mut script = Script::start(
+            &egui::Context::default(),
+            source,
+            None,
+            None,
+            Some(&client.0),
+            &client.1,
+        )
+        .unwrap();
         let (lines, end) = wait(&mut script, Duration::from_secs(30));
         for line in &lines {
             println!("{line}");

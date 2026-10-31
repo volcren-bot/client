@@ -1,6 +1,9 @@
 //! The webapp landing page's ASCII art, painted faintly behind a page, with colors from `webapp/src/routes/+page.svelte`.
 
-use eframe::egui::{self, Color32, Rect, text::{LayoutJob, TextFormat}};
+use eframe::egui::{
+    self, Color32, Rect,
+    text::{LayoutJob, TextFormat},
+};
 
 const FLAME: [&str; 34] = [
     "                      .=-",
@@ -47,12 +50,30 @@ enum WordColor {
 }
 
 const WORDMARK: [(WordColor, &str); 6] = [
-    (WordColor::Blue, "██╗   ██╗ ██████╗ ██╗      ██████╗██████╗ ███████╗███╗   ██╗"),
-    (WordColor::Blue, "██║   ██║██╔═══██╗██║     ██╔════╝██╔══██╗██╔════╝████╗  ██║"),
-    (WordColor::Cyan, "██║   ██║██║   ██║██║     ██║     ██████╔╝█████╗  ██╔██╗ ██║"),
-    (WordColor::Cyan, "╚██╗ ██╔╝██║   ██║██║     ██║     ██╔══██╗██╔══╝  ██║╚██╗██║"),
-    (WordColor::Purple, " ╚████╔╝ ╚██████╔╝███████╗╚██████╗██║  ██║███████╗██║ ╚████║"),
-    (WordColor::Purple, "  ╚═══╝   ╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝"),
+    (
+        WordColor::Blue,
+        "██╗   ██╗ ██████╗ ██╗      ██████╗██████╗ ███████╗███╗   ██╗",
+    ),
+    (
+        WordColor::Blue,
+        "██║   ██║██╔═══██╗██║     ██╔════╝██╔══██╗██╔════╝████╗  ██║",
+    ),
+    (
+        WordColor::Cyan,
+        "██║   ██║██║   ██║██║     ██║     ██████╔╝█████╗  ██╔██╗ ██║",
+    ),
+    (
+        WordColor::Cyan,
+        "╚██╗ ██╔╝██║   ██║██║     ██║     ██╔══██╗██╔══╝  ██║╚██╗██║",
+    ),
+    (
+        WordColor::Purple,
+        " ╚████╔╝ ╚██████╔╝███████╗╚██████╗██║  ██║███████╗██║ ╚████║",
+    ),
+    (
+        WordColor::Purple,
+        "  ╚═══╝   ╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝",
+    ),
 ];
 
 const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
@@ -102,7 +123,11 @@ const FONT_SIZE: f32 = 9.0;
 
 /// Paints the art centered in `rect` at a fixed size, under whatever is drawn next.
 pub fn paint_background(ui: &egui::Ui, rect: Rect) {
-    let columns = WORDMARK.iter().map(|(_, line)| line.chars().count()).max().unwrap_or(0);
+    let columns = WORDMARK
+        .iter()
+        .map(|(_, line)| line.chars().count())
+        .max()
+        .unwrap_or(0);
     let size = FONT_SIZE.min(rect.width() * 0.92 / (columns as f32 * GLYPH_WIDTH));
     if size < 5.0 {
         return;
@@ -124,7 +149,11 @@ pub fn paint_background(ui: &egui::Ui, rect: Rect) {
         let mut run_color = None;
         for (j, c) in line.char_indices() {
             let bias = jitter(i, j);
-            let color = if c == '@' { inner_color(i, j, bias) } else { outer_color(i, j, width, bias) };
+            let color = if c == '@' {
+                inner_color(i, j, bias)
+            } else {
+                outer_color(i, j, width, bias)
+            };
             if let Some(last) = run_color
                 && last != color
             {

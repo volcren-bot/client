@@ -1,6 +1,10 @@
 //! The whole run-a-store-script flow (lib install, start, download, heartbeat, end) against a fake server.
 
-use std::{fs, io::{Cursor, Write}, path::PathBuf};
+use std::{
+    fs,
+    io::{Cursor, Write},
+    path::PathBuf,
+};
 
 use serde_json::json;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
@@ -45,24 +49,43 @@ fn seal(revision: i64, name: &str, plain: &str) -> Vec<u8> {
     let nonce = [7u8; 12];
     let mut body = plain.as_bytes().to_vec();
     let aad = format!("volcren:{SCRIPT_ID}/{revision:09}/{name}");
-    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::from(aad.as_bytes()), &mut body).unwrap();
+    key.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::from(aad.as_bytes()),
+        &mut body,
+    )
+    .unwrap();
     [nonce.to_vec(), body].concat()
 }
 
 impl Server {
     const fn healthy() -> Self {
-        Self { revision: 4, start_status: 200, file_status: 200, wrong_checksum: false, entry: "main.luau", no_lib: false, price: 30, encrypted: false }
+        Self {
+            revision: 4,
+            start_status: 200,
+            file_status: 200,
+            wrong_checksum: false,
+            entry: "main.luau",
+            no_lib: false,
+            price: 30,
+            encrypted: false,
+        }
     }
 
     fn start(self) -> FakeServer {
-        let lib = archive(&[("host.luau", "return {}"), ("main/game_state.luau", "return 1")]);
+        let lib = archive(&[
+            ("host.luau", "return {}"),
+            ("main/game_state.luau", "return 1"),
+        ]);
         FakeServer::start(move |base, request| self.answer(base, request, &lib))
     }
 
     fn answer(&self, base: &str, request: &Request, lib: &[u8]) -> Reply {
         let path = request.path.split('?').next().unwrap_or("");
         match (request.method.as_str(), path) {
-            ("GET", "/storage/v1/object/public/client/lib/index.json") if self.no_lib => Reply::status(404),
+            ("GET", "/storage/v1/object/public/client/lib/index.json") if self.no_lib => {
+                Reply::status(404)
+            }
             ("GET", "/storage/v1/object/public/client/lib/index.json") => Reply::json(
                 200,
                 json!({ "versions": [{
@@ -79,21 +102,45 @@ impl Server {
                     json!({ "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 30, "revision": 4, "can_access": true }),
                     json!({ "id": COMMUNITY_ID, "url": "mine", "title": "Mine", "price": 0, "revision": 4, "can_access": true, "community": true, "granted": true }),
                 ];
-                let scripts: Vec<_> = scripts.into_iter().filter(|s| !only_community || s["community"] == true).collect();
+                let scripts: Vec<_> = scripts
+                    .into_iter()
+                    .filter(|s| !only_community || s["community"] == true)
+                    .collect();
                 Reply::json(200, json!({ "scripts": scripts }))
             }
-            ("POST", "/launcher/scripts/redeem") => match request.json()["code"].as_str().and_then(|code| code.chars().next()) {
+            ("POST", "/launcher/scripts/redeem") => match request.json()["code"]
+                .as_str()
+                .and_then(|code| code.chars().next())
+            {
                 Some('a') => Reply::json(200, json!({ "script_id": COMMUNITY_ID, "url": "mine" })),
-                Some('b') => Reply::json(409, json!({ "error": "This share code has already been used.", "reason": "used" })),
-                Some('c') => Reply::json(410, json!({ "error": "This share code has expired.", "reason": "expired" })),
-                Some('d') => Reply::json(429, json!({ "error": "Too many failed attempts. Try again later.", "reason": "rate_limited" })),
-                _ => Reply::json(404, json!({ "error": "This share code is not valid.", "reason": "invalid" })),
+                Some('b') => Reply::json(
+                    409,
+                    json!({ "error": "This share code has already been used.", "reason": "used" }),
+                ),
+                Some('c') => Reply::json(
+                    410,
+                    json!({ "error": "This share code has expired.", "reason": "expired" }),
+                ),
+                Some('d') => Reply::json(
+                    429,
+                    json!({ "error": "Too many failed attempts. Try again later.", "reason": "rate_limited" }),
+                ),
+                _ => Reply::json(
+                    404,
+                    json!({ "error": "This share code is not valid.", "reason": "invalid" }),
+                ),
             },
-            ("DELETE", p) if p == format!("/launcher/scripts/{COMMUNITY_ID}/grant") => Reply::json(200, json!({ "removed": true })),
-            ("DELETE", p) if p.starts_with("/launcher/scripts/") => Reply::json(404, json!({ "error": "This script isn't granted to your account." })),
-            ("POST", "/launcher/sessions") if self.start_status == 402 => {
-                Reply::json(402, json!({ "error": "Not enough credits.", "required": 300 }))
+            ("DELETE", p) if p == format!("/launcher/scripts/{COMMUNITY_ID}/grant") => {
+                Reply::json(200, json!({ "removed": true }))
             }
+            ("DELETE", p) if p.starts_with("/launcher/scripts/") => Reply::json(
+                404,
+                json!({ "error": "This script isn't granted to your account." }),
+            ),
+            ("POST", "/launcher/sessions") if self.start_status == 402 => Reply::json(
+                402,
+                json!({ "error": "Not enough credits.", "required": 300 }),
+            ),
             ("POST", "/launcher/sessions") => {
                 // the checksum is of the file as stored, so of the ciphertext when encrypted
                 let checksum = |name: &str, text: &str| {
@@ -121,15 +168,24 @@ impl Server {
                     }),
                 )
             }
-            ("GET", "/files/main.luau") if self.file_status == 200 && self.encrypted => Reply::bytes(seal(self.revision, "main.luau", MAIN)),
-            ("GET", "/files/util.luau") if self.file_status == 200 && self.encrypted => Reply::bytes(seal(self.revision, "util.luau", UTIL)),
+            ("GET", "/files/main.luau") if self.file_status == 200 && self.encrypted => {
+                Reply::bytes(seal(self.revision, "main.luau", MAIN))
+            }
+            ("GET", "/files/util.luau") if self.file_status == 200 && self.encrypted => {
+                Reply::bytes(seal(self.revision, "util.luau", UTIL))
+            }
             ("GET", "/files/main.luau") if self.file_status == 200 => Reply::bytes(MAIN),
             ("GET", "/files/util.luau") if self.file_status == 200 => Reply::bytes(UTIL),
             ("GET", p) if p.starts_with("/files/") => Reply::status(self.file_status),
-            ("POST", "/launcher/sessions/s1/heartbeat") => match request.json()["stats"]["experience"].as_i64() {
-                Some(9999) => Reply::json(200, json!({ "alive": false, "reason": "insufficient_credits", "credits": 0 })),
-                _ => Reply::json(200, json!({ "alive": true, "credits": 120 })),
-            },
+            ("POST", "/launcher/sessions/s1/heartbeat") => {
+                match request.json()["stats"]["experience"].as_i64() {
+                    Some(9999) => Reply::json(
+                        200,
+                        json!({ "alive": false, "reason": "insufficient_credits", "credits": 0 }),
+                    ),
+                    _ => Reply::json(200, json!({ "alive": true, "credits": 120 })),
+                }
+            }
             ("POST", "/launcher/sessions/s1/end") => Reply::json(200, json!({ "charged": 60 })),
             _ => Reply::status(404),
         }
@@ -139,7 +195,12 @@ impl Server {
 fn archive(files: &[(&str, &str)]) -> Vec<u8> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, text) in files {
-        writer.start_file(*name, SimpleFileOptions::default().compression_method(CompressionMethod::Deflated)).unwrap();
+        writer
+            .start_file(
+                *name,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
         writer.write_all(text.as_bytes()).unwrap();
     }
     writer.finish().unwrap().into_inner()
@@ -153,7 +214,12 @@ fn cache(name: &str) -> PathBuf {
 }
 
 fn api(server: &FakeServer) -> Api {
-    let config = Config { api_url: server.url.clone(), supabase_url: server.url.clone(), anon_key: "anon".into(), site_url: String::new() };
+    let config = Config {
+        api_url: server.url.clone(),
+        supabase_url: server.url.clone(),
+        anon_key: "anon".into(),
+        site_url: String::new(),
+    };
     Api::signed_in(config, "token-1")
 }
 
@@ -184,31 +250,84 @@ fn a_store_script_runs_from_start_to_end() {
     let dir = revision_dir(&root, SCRIPT_ID, 4);
     assert_eq!(prepared.entry, dir.join("main.luau"));
     // A script is never written to disk: its other files are handed over in memory.
-    assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
-    assert_eq!(fs::read_dir(&dir).unwrap().count(), 0, "the revision folder is empty");
+    assert_eq!(
+        prepared.modules,
+        vec![("util.luau".to_owned(), UTIL.to_owned())]
+    );
+    assert_eq!(
+        fs::read_dir(&dir).unwrap().count(),
+        0,
+        "the revision folder is empty"
+    );
     // The lib sits beside the revision folders, which is where `require("../lib/...")` looks.
-    assert_eq!(fs::read_to_string(root.join("lib/main/game_state.luau")).unwrap(), "return 1");
-    assert_eq!(fs::read_to_string(root.join("lib/.version")).unwrap(), LIB_VERSION);
+    assert_eq!(
+        fs::read_to_string(root.join("lib/main/game_state.luau")).unwrap(),
+        "return 1"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("lib/.version")).unwrap(),
+        LIB_VERSION
+    );
 
-    let order: Vec<String> = fake.requests().iter().map(|r| format!("{} {}", r.method, r.path.split('?').next().unwrap())).collect();
-    let position = |needle: &str| order.iter().position(|line| line.contains(needle)).unwrap_or_else(|| panic!("{needle} not requested: {order:?}"));
-    assert!(position("lib/index.json") < position("POST /launcher/sessions"), "the lib is fetched before the session starts, so it is never billed");
+    let order: Vec<String> = fake
+        .requests()
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.path.split('?').next().unwrap()))
+        .collect();
+    let position = |needle: &str| {
+        order
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} not requested: {order:?}"))
+    };
+    assert!(
+        position("lib/index.json") < position("POST /launcher/sessions"),
+        "the lib is fetched before the session starts, so it is never billed"
+    );
     assert!(position("POST /launcher/sessions") < position("/files/main.luau"));
 
-    let start = fake.requests().into_iter().find(|r| r.path == "/launcher/sessions").unwrap();
+    let start = fake
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/launcher/sessions")
+        .unwrap();
     assert_eq!(start.header("authorization"), Some("Bearer token-1"));
     assert_eq!(start.header("origin"), Some(fake.url.as_str()));
     assert_eq!(start.json(), json!({ "script_id": SCRIPT_ID }));
-    assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 0, "a good start is not ended");
+    assert_eq!(
+        fake.count("POST", "/launcher/sessions/s1/end"),
+        0,
+        "a good start is not ended"
+    );
 
-    let stats = Stats { experience: 500, gold: 20, minutes: 1.0, custom: vec![3] };
+    let stats = Stats {
+        experience: 500,
+        gold: 20,
+        minutes: 1.0,
+        custom: vec![3],
+    };
     let beat = api.heartbeat("s1", Some(&stats)).unwrap();
     assert!(beat.alive);
     assert_eq!(beat.credits, Some(120));
-    let sent = fake.requests().into_iter().rfind(|r| r.path.ends_with("/heartbeat")).unwrap();
-    assert_eq!(sent.json(), json!({ "stats": { "experience": 500, "gold": 20, "minutes": 1.0, "custom": [3] } }));
+    let sent = fake
+        .requests()
+        .into_iter()
+        .rfind(|r| r.path.ends_with("/heartbeat"))
+        .unwrap();
+    assert_eq!(
+        sent.json(),
+        json!({ "stats": { "experience": 500, "gold": 20, "minutes": 1.0, "custom": [3] } })
+    );
 
-    let beat = api.heartbeat("s1", Some(&Stats { experience: 9999, ..Stats::default() })).unwrap();
+    let beat = api
+        .heartbeat(
+            "s1",
+            Some(&Stats {
+                experience: 9999,
+                ..Stats::default()
+            }),
+        )
+        .unwrap();
     assert!(!beat.alive);
     assert_eq!(beat.reason.as_deref(), Some("insufficient_credits"));
 
@@ -219,35 +338,73 @@ fn a_store_script_runs_from_start_to_end() {
 #[test]
 fn encrypted_files_are_opened_with_the_session_key() {
     let root = cache("encrypted");
-    let fake = Server { encrypted: true, ..Server::healthy() }.start();
+    let fake = Server {
+        encrypted: true,
+        ..Server::healthy()
+    }
+    .start();
     let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
     assert_eq!(prepared.source, MAIN);
-    assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
-    assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 4)).unwrap().count(), 0);
+    assert_eq!(
+        prepared.modules,
+        vec![("util.luau".to_owned(), UTIL.to_owned())]
+    );
+    assert_eq!(
+        fs::read_dir(revision_dir(&root, SCRIPT_ID, 4))
+            .unwrap()
+            .count(),
+        0
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn a_free_script_is_never_written_to_disk_either() {
     let root = cache("free");
-    let free = Server { price: 0, ..Server::healthy() }.start();
+    let free = Server {
+        price: 0,
+        ..Server::healthy()
+    }
+    .start();
     let prepared = prepare_in(&api(&free), &free_script(), &root).unwrap();
     assert_eq!(prepared.source, MAIN);
-    assert_eq!(prepared.modules, vec![("util.luau".to_owned(), UTIL.to_owned())]);
-    assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 4)).unwrap().count(), 0);
+    assert_eq!(
+        prepared.modules,
+        vec![("util.luau".to_owned(), UTIL.to_owned())]
+    );
+    assert_eq!(
+        fs::read_dir(revision_dir(&root, SCRIPT_ID, 4))
+            .unwrap()
+            .count(),
+        0
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn every_start_downloads_the_files_again_but_reuses_the_lib() {
-    let fake = Server { price: 0, ..Server::healthy() }.start();
+    let fake = Server {
+        price: 0,
+        ..Server::healthy()
+    }
+    .start();
     let api = api(&fake);
     let root = cache("reuse");
     prepare_in(&api, &free_script(), &root).unwrap();
     prepare_in(&api, &free_script(), &root).unwrap();
     assert_eq!(fake.count("GET", "/files/main.luau"), 2);
-    assert_eq!(fake.count("GET", "/storage/v1/object/public/client/lib/index.json"), 2, "the index is checked every time");
-    assert_eq!(fake.count("GET", &format!("/storage/v1/object/public/client/lib/{LIB_VERSION}/lib.zip")), 1);
+    assert_eq!(
+        fake.count("GET", "/storage/v1/object/public/client/lib/index.json"),
+        2,
+        "the index is checked every time"
+    );
+    assert_eq!(
+        fake.count(
+            "GET",
+            &format!("/storage/v1/object/public/client/lib/{LIB_VERSION}/lib.zip")
+        ),
+        1
+    );
     assert_eq!(fake.count("POST", "/launcher/sessions"), 2);
     let _ = fs::remove_dir_all(&root);
 }
@@ -259,18 +416,34 @@ fn a_new_revision_removes_the_old_one_from_the_cache() {
     let old = revision_dir(&root, SCRIPT_ID, 4);
     fs::create_dir_all(&old).unwrap();
     fs::write(old.join("main.luau"), MAIN).unwrap();
-    let new = Server { revision: 5, price: 0, ..Server::healthy() }.start();
+    let new = Server {
+        revision: 5,
+        price: 0,
+        ..Server::healthy()
+    }
+    .start();
     prepare_in(&api(&new), &free_script(), &root).unwrap();
     assert!(!old.exists());
-    assert_eq!(fs::read_dir(revision_dir(&root, SCRIPT_ID, 5)).unwrap().count(), 0);
+    assert_eq!(
+        fs::read_dir(revision_dir(&root, SCRIPT_ID, 5))
+            .unwrap()
+            .count(),
+        0
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn a_failed_download_ends_the_session_so_nothing_is_billed() {
-    let fake = Server { file_status: 500, ..Server::healthy() }.start();
+    let fake = Server {
+        file_status: 500,
+        ..Server::healthy()
+    }
+    .start();
     let root = cache("download-fails");
-    let error = prepare_in(&api(&fake), &script(), &root).err().expect("fails");
+    let error = prepare_in(&api(&fake), &script(), &root)
+        .err()
+        .expect("fails");
     assert!(error.contains("Couldn't download"), "{error}");
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
     let _ = fs::remove_dir_all(&root);
@@ -278,28 +451,47 @@ fn a_failed_download_ends_the_session_so_nothing_is_billed() {
 
 #[test]
 fn the_entry_file_comes_from_the_server_and_needs_no_particular_name() {
-    let fake = Server { entry: "util.luau", ..Server::healthy() }.start();
+    let fake = Server {
+        entry: "util.luau",
+        ..Server::healthy()
+    }
+    .start();
     let root = cache("entry");
 
     let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
     assert_eq!(prepared.source, UTIL);
-    assert_eq!(prepared.entry, revision_dir(&root, SCRIPT_ID, 4).join("util.luau"));
+    assert_eq!(
+        prepared.entry,
+        revision_dir(&root, SCRIPT_ID, 4).join("util.luau")
+    );
 }
 
 #[test]
 fn an_entry_that_is_not_one_of_the_files_is_rejected_and_the_session_ended() {
-    let fake = Server { entry: "gone.luau", ..Server::healthy() }.start();
+    let fake = Server {
+        entry: "gone.luau",
+        ..Server::healthy()
+    }
+    .start();
 
-    let error = prepare_in(&api(&fake), &script(), &cache("bad_entry")).err().expect("must fail");
+    let error = prepare_in(&api(&fake), &script(), &cache("bad_entry"))
+        .err()
+        .expect("must fail");
     assert!(error.contains("gone.luau"), "{error}");
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
 }
 
 #[test]
 fn a_file_with_the_wrong_checksum_is_rejected_and_the_session_ended() {
-    let fake = Server { wrong_checksum: true, ..Server::healthy() }.start();
+    let fake = Server {
+        wrong_checksum: true,
+        ..Server::healthy()
+    }
+    .start();
     let root = cache("checksum");
-    let error = prepare_in(&api(&fake), &script(), &root).err().expect("fails");
+    let error = prepare_in(&api(&fake), &script(), &root)
+        .err()
+        .expect("fails");
     assert!(error.contains("checksum"), "{error}");
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
     let _ = fs::remove_dir_all(&root);
@@ -307,22 +499,42 @@ fn a_file_with_the_wrong_checksum_is_rejected_and_the_session_ended() {
 
 #[test]
 fn too_few_credits_downloads_nothing_and_ends_nothing() {
-    let fake = Server { start_status: 402, ..Server::healthy() }.start();
+    let fake = Server {
+        start_status: 402,
+        ..Server::healthy()
+    }
+    .start();
     let root = cache("credits");
-    let error = prepare_in(&api(&fake), &script(), &root).err().expect("fails");
+    let error = prepare_in(&api(&fake), &script(), &root)
+        .err()
+        .expect("fails");
     assert!(error.contains("300"), "{error}");
     assert_eq!(fake.count("GET", "/files/"), 0);
-    assert_eq!(fake.count("POST", "/launcher/sessions/"), 0, "there is no session to end");
+    assert_eq!(
+        fake.count("POST", "/launcher/sessions/"),
+        0,
+        "there is no session to end"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn without_any_lib_the_start_fails_before_a_session_exists() {
-    let fake = Server { no_lib: true, ..Server::healthy() }.start();
+    let fake = Server {
+        no_lib: true,
+        ..Server::healthy()
+    }
+    .start();
     let root = cache("no-lib");
-    let error = prepare_in(&api(&fake), &script(), &root).err().expect("fails");
+    let error = prepare_in(&api(&fake), &script(), &root)
+        .err()
+        .expect("fails");
     assert!(error.contains("script library"), "{error}");
-    assert_eq!(fake.count("POST", "/launcher/sessions"), 0, "nothing is started, so nothing can be billed");
+    assert_eq!(
+        fake.count("POST", "/launcher/sessions"),
+        0,
+        "nothing is started, so nothing can be billed"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -330,7 +542,11 @@ fn without_any_lib_the_start_fails_before_a_session_exists() {
 fn an_old_cached_lib_is_used_when_the_index_cannot_be_read() {
     let root = cache("offline");
     prepare_in(&api(&Server::healthy().start()), &script(), &root).unwrap();
-    let fake = Server { no_lib: true, ..Server::healthy() }.start();
+    let fake = Server {
+        no_lib: true,
+        ..Server::healthy()
+    }
+    .start();
     prepare_in(&api(&fake), &script(), &root).expect("the cached lib is enough");
     let _ = fs::remove_dir_all(&root);
 }
@@ -352,7 +568,11 @@ fn a_redeemed_code_adds_the_script() {
     let redeemed = api(&fake).redeem(&code('a')).expect("redeem");
     assert_eq!(redeemed.script_id, COMMUNITY_ID);
     assert_eq!(redeemed.url.as_deref(), Some("mine"));
-    let sent = fake.requests().into_iter().find(|r| r.path == "/launcher/scripts/redeem").unwrap();
+    let sent = fake
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/launcher/scripts/redeem")
+        .unwrap();
     assert_eq!(sent.header("authorization"), Some("Bearer token-1"));
     assert_eq!(sent.json(), json!({ "code": code('a') }));
 }
@@ -361,10 +581,22 @@ fn a_redeemed_code_adds_the_script() {
 fn a_code_the_server_refuses_says_why() {
     let fake = Server::healthy().start();
     let api = api(&fake);
-    assert_eq!(api.redeem(&code('b')).unwrap_err(), ApiError::Conflict("This share code has already been used.".into()));
-    assert_eq!(api.redeem(&code('c')).unwrap_err().to_string(), "This share code has expired.");
-    assert_eq!(api.redeem(&code('d')).unwrap_err().to_string(), "Too many failed attempts. Try again later.");
-    assert_eq!(api.redeem(&code('e')).unwrap_err(), ApiError::NotFound("This share code is not valid.".into()));
+    assert_eq!(
+        api.redeem(&code('b')).unwrap_err(),
+        ApiError::Conflict("This share code has already been used.".into())
+    );
+    assert_eq!(
+        api.redeem(&code('c')).unwrap_err().to_string(),
+        "This share code has expired."
+    );
+    assert_eq!(
+        api.redeem(&code('d')).unwrap_err().to_string(),
+        "Too many failed attempts. Try again later."
+    );
+    assert_eq!(
+        api.redeem(&code('e')).unwrap_err(),
+        ApiError::NotFound("This share code is not valid.".into())
+    );
 }
 
 #[test]
@@ -372,11 +604,21 @@ fn a_granted_script_can_be_removed_from_the_account() {
     let fake = Server::healthy().start();
     let api = api(&fake);
     assert!(api.remove_grant(COMMUNITY_ID).unwrap().removed);
-    assert_eq!(fake.count("DELETE", &format!("/launcher/scripts/{COMMUNITY_ID}/grant")), 1);
-    let sent = fake.requests().into_iter().find(|r| r.method == "DELETE").unwrap();
+    assert_eq!(
+        fake.count("DELETE", &format!("/launcher/scripts/{COMMUNITY_ID}/grant")),
+        1
+    );
+    let sent = fake
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "DELETE")
+        .unwrap();
     assert_eq!(sent.header("authorization"), Some("Bearer token-1"));
     // The server says no for a script that isn't granted
-    assert!(matches!(api.remove_grant(SCRIPT_ID), Err(ApiError::NotFound(_))));
+    assert!(matches!(
+        api.remove_grant(SCRIPT_ID),
+        Err(ApiError::NotFound(_))
+    ));
 }
 
 #[test]
@@ -384,7 +626,10 @@ fn an_id_that_isnt_plain_never_reaches_the_server() {
     let fake = Server::healthy().start();
     let api = api(&fake);
     for id in ["", "../me", "a/b", "a?b=1", "a b"] {
-        assert!(matches!(api.remove_grant(id), Err(ApiError::NotFound(_))), "{id:?}");
+        assert!(
+            matches!(api.remove_grant(id), Err(ApiError::NotFound(_))),
+            "{id:?}"
+        );
     }
     assert_eq!(fake.count("DELETE", ""), 0);
 }
@@ -400,10 +645,19 @@ fn the_list_carries_the_community_tag_and_the_filter_asks_for_it() {
     assert!(all[1].community && all[1].granted);
     assert_eq!(crate::store::origin_label(&all[0]), "official");
     assert_eq!(crate::store::origin_label(&all[1]), "community");
-    assert!(!fake.requests().iter().any(|r| r.path.contains("community")), "the default list doesn't ask for the filter");
+    assert!(
+        !fake.requests().iter().any(|r| r.path.contains("community")),
+        "the default list doesn't ask for the filter"
+    );
 
     let community = api.scripts("", "", true).unwrap();
-    assert_eq!(community.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Mine"]);
+    assert_eq!(
+        community
+            .iter()
+            .map(|s| s.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Mine"]
+    );
     assert_eq!(fake.count("GET", "/launcher/scripts?community=true"), 1);
 }
 
@@ -419,9 +673,15 @@ fn a_community_script_runs_only_at_the_revision_the_user_was_warned_about() {
     let _ = fs::remove_dir_all(&root);
 
     // A new revision went live after the warning: nothing runs, the session is ended and nothing is downloaded
-    let fake = Server { revision: 5, ..Server::healthy() }.start();
+    let fake = Server {
+        revision: 5,
+        ..Server::healthy()
+    }
+    .start();
     let root = cache("warned-new-revision");
-    let error = prepare_warned(&api(&fake), &community_script(), &root, Some(4)).err().expect("refused");
+    let error = prepare_warned(&api(&fake), &community_script(), &root, Some(4))
+        .err()
+        .expect("refused");
     assert!(error.contains("new revision"), "{error}");
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
     assert_eq!(fake.count("GET", "/files/"), 0);

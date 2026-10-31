@@ -241,7 +241,11 @@ impl Accounts {
         if let Some(why) = &self.locked {
             return Err(format!("the saved accounts can't be read: {why}"));
         }
-        Ok(self.entries.iter().find(|entry| entry.hash == hash).map(|entry| entry.pin.clone()))
+        Ok(self
+            .entries
+            .iter()
+            .find(|entry| entry.hash == hash)
+            .map(|entry| entry.pin.clone()))
     }
 
     fn persist(&mut self) {

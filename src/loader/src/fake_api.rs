@@ -17,7 +17,10 @@ pub struct Request {
 
 impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.as_str())
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     pub fn json(&self) -> serde_json::Value {
@@ -32,15 +35,24 @@ pub struct Reply {
 
 impl Reply {
     pub fn json(status: u16, value: serde_json::Value) -> Self {
-        Self { status, body: value.to_string().into_bytes() }
+        Self {
+            status,
+            body: value.to_string().into_bytes(),
+        }
     }
 
     pub fn bytes(body: impl Into<Vec<u8>>) -> Self {
-        Self { status: 200, body: body.into() }
+        Self {
+            status: 200,
+            body: body.into(),
+        }
     }
 
     pub fn status(status: u16) -> Self {
-        Self { status, body: Vec::new() }
+        Self {
+            status,
+            body: Vec::new(),
+        }
     }
 }
 
@@ -72,12 +84,22 @@ impl FakeServer {
 
     /// How many requests had this method and a path starting with `prefix`.
     pub fn count(&self, method: &str, prefix: &str) -> usize {
-        self.requests().iter().filter(|r| r.method == method && r.path.starts_with(prefix)).count()
+        self.requests()
+            .iter()
+            .filter(|r| r.method == method && r.path.starts_with(prefix))
+            .count()
     }
 }
 
-fn serve(stream: TcpStream, base: &str, seen: &Mutex<Vec<Request>>, handler: &dyn Fn(&str, &Request) -> Reply) {
-    let Some(request) = read_request(&stream) else { return };
+fn serve(
+    stream: TcpStream,
+    base: &str,
+    seen: &Mutex<Vec<Request>>,
+    handler: &dyn Fn(&str, &Request) -> Reply,
+) {
+    let Some(request) = read_request(&stream) else {
+        return;
+    };
     seen.lock().unwrap().push(request.clone());
     let reply = handler(base, &request);
     let reason = match reply.status {
@@ -86,9 +108,15 @@ fn serve(stream: TcpStream, base: &str, seen: &Mutex<Vec<Request>>, handler: &dy
         404 => "Not Found",
         _ => "Status",
     };
-    let head = format!("HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.status, reply.body.len());
+    let head = format!(
+        "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        reply.status,
+        reply.body.len()
+    );
     let mut stream = stream;
-    let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&reply.body));
+    let _ = stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(&reply.body));
 }
 
 fn read_request(stream: &TcpStream) -> Option<Request> {
@@ -115,5 +143,10 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
         .unwrap_or(0);
     let mut body = vec![0; length];
     reader.read_exact(&mut body).ok()?;
-    Some(Request { method, path, headers, body })
+    Some(Request {
+        method,
+        path,
+        headers,
+        body,
+    })
 }

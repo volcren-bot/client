@@ -32,7 +32,10 @@ impl Pkce {
 
     pub fn from_verifier(verifier: String) -> Self {
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        Self { verifier, challenge }
+        Self {
+            verifier,
+            challenge,
+        }
     }
 }
 
@@ -83,7 +86,9 @@ pub fn redirect_uri() -> String {
 fn urlencode(text: &str) -> String {
     text.bytes()
         .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (byte as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
             _ => format!("%{byte:02X}"),
         })
         .collect()
@@ -127,7 +132,10 @@ fn urldecode(text: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'+' => out.push(b' '),
-            b'%' if bytes.get(i + 1..i + 3).is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)) => {
+            b'%' if bytes
+                .get(i + 1..i + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)) =>
+            {
                 out.push(u8::from_str_radix(&text[i + 1..i + 3], 16).unwrap_or(b'?'));
                 i += 2;
             }
@@ -151,7 +159,11 @@ fn respond(mut stream: TcpStream, status: &str, body: &str) {
 }
 
 /// Waits for the browser to come back to the loopback address, until `timeout` or `cancel`.
-pub fn wait_for_callback(listener: &TcpListener, timeout: Duration, cancel: &AtomicBool) -> Result<String, String> {
+pub fn wait_for_callback(
+    listener: &TcpListener,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let started = Instant::now();
     loop {
@@ -166,7 +178,10 @@ pub fn wait_for_callback(listener: &TcpListener, timeout: Duration, cancel: &Ato
                 stream.set_nonblocking(false).ok();
                 stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 let mut line = String::new();
-                if BufReader::new((&stream).take(8192)).read_line(&mut line).is_err() {
+                if BufReader::new((&stream).take(8192))
+                    .read_line(&mut line)
+                    .is_err()
+                {
                     continue;
                 }
                 match parse_callback(&line) {
@@ -182,7 +197,9 @@ pub fn wait_for_callback(listener: &TcpListener, timeout: Duration, cancel: &Ato
                     None => respond(stream, "404 Not Found", ""),
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
             Err(e) => return Err(format!("The sign-in listener failed: {e}")),
         }
     }
@@ -206,7 +223,12 @@ pub enum TokenError {
     Other(ApiError),
 }
 
-fn token_request<T: Serialize>(agent: &ureq::Agent, config: &Config, grant: &str, body: &T) -> Result<Tokens, TokenError> {
+fn token_request<T: Serialize>(
+    agent: &ureq::Agent,
+    config: &Config,
+    grant: &str,
+    body: &T,
+) -> Result<Tokens, TokenError> {
     let mut response = agent
         .post(&config.auth("/token"))
         .query("grant_type", grant)
@@ -215,10 +237,9 @@ fn token_request<T: Serialize>(agent: &ureq::Agent, config: &Config, grant: &str
         .map_err(|e| TokenError::Other(ApiError::Network(e.to_string())))?;
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
-        return response
-            .body_mut()
-            .read_json::<Tokens>()
-            .map_err(|e| TokenError::Other(ApiError::Network(format!("unexpected sign-in answer: {e}"))));
+        return response.body_mut().read_json::<Tokens>().map_err(|e| {
+            TokenError::Other(ApiError::Network(format!("unexpected sign-in answer: {e}")))
+        });
     }
     let detail: serde_json::Value = response.body_mut().read_json().unwrap_or_default();
     let message = ["error_description", "msg", "message", "error"]
@@ -233,12 +254,34 @@ fn token_request<T: Serialize>(agent: &ureq::Agent, config: &Config, grant: &str
     }
 }
 
-pub fn exchange_code(agent: &ureq::Agent, config: &Config, code: &str, pkce: &Pkce) -> Result<Tokens, TokenError> {
-    token_request(agent, config, "pkce", &PkceGrant { auth_code: code, code_verifier: &pkce.verifier })
+pub fn exchange_code(
+    agent: &ureq::Agent,
+    config: &Config,
+    code: &str,
+    pkce: &Pkce,
+) -> Result<Tokens, TokenError> {
+    token_request(
+        agent,
+        config,
+        "pkce",
+        &PkceGrant {
+            auth_code: code,
+            code_verifier: &pkce.verifier,
+        },
+    )
 }
 
-pub fn refresh(agent: &ureq::Agent, config: &Config, refresh_token: &str) -> Result<Tokens, TokenError> {
-    token_request(agent, config, "refresh_token", &RefreshGrant { refresh_token })
+pub fn refresh(
+    agent: &ureq::Agent,
+    config: &Config,
+    refresh_token: &str,
+) -> Result<Tokens, TokenError> {
+    token_request(
+        agent,
+        config,
+        "refresh_token",
+        &RefreshGrant { refresh_token },
+    )
 }
 
 /// The refresh token lives in the OS keyring (Credential Manager / Secret Service), never in eframe's settings storage.
@@ -250,11 +293,17 @@ impl TokenStore {
     }
 
     pub fn load() -> Option<String> {
-        Self::entry().ok()?.get_password().ok().filter(|token| !token.is_empty())
+        Self::entry()
+            .ok()?
+            .get_password()
+            .ok()
+            .filter(|token| !token.is_empty())
     }
 
     pub fn save(refresh_token: &str) -> Result<(), String> {
-        Self::entry()?.set_password(refresh_token).map_err(|e| e.to_string())
+        Self::entry()?
+            .set_password(refresh_token)
+            .map_err(|e| e.to_string())
     }
 
     pub fn clear() {
@@ -271,7 +320,10 @@ mod tests {
     #[test]
     fn challenge_matches_the_rfc_7636_example() {
         let pkce = Pkce::from_verifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".into());
-        assert_eq!(pkce.challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        assert_eq!(
+            pkce.challenge,
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]
@@ -279,12 +331,19 @@ mod tests {
         let (a, b) = (Pkce::generate(), Pkce::generate());
         assert_ne!(a.verifier, b.verifier);
         assert!((43..=128).contains(&a.verifier.len()));
-        assert!(a.verifier.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+        assert!(
+            a.verifier
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        );
     }
 
     #[test]
     fn callback_code_and_errors_are_parsed() {
-        assert_eq!(parse_callback("GET /?code=abc%2Fdef HTTP/1.1"), Some(Callback::Code("abc/def".into())));
+        assert_eq!(
+            parse_callback("GET /?code=abc%2Fdef HTTP/1.1"),
+            Some(Callback::Code("abc/def".into()))
+        );
         assert_eq!(
             parse_callback("GET /?error=access_denied&error_description=User+said+no HTTP/1.1"),
             Some(Callback::Denied("User said no".into()))
@@ -295,7 +354,12 @@ mod tests {
 
     #[test]
     fn authorize_url_carries_the_challenge_and_the_loopback_redirect() {
-        let config = Config { api_url: String::new(), supabase_url: "http://sb".into(), anon_key: String::new(), site_url: String::new() };
+        let config = Config {
+            api_url: String::new(),
+            supabase_url: "http://sb".into(),
+            anon_key: String::new(),
+            site_url: String::new(),
+        };
         let url = authorize_url(&config, &Pkce::from_verifier("v".into()));
         assert!(url.starts_with("http://sb/auth/v1/authorize?provider=discord&redirect_to=http%3A%2F%2Flocalhost%3A5217%2F&code_challenge="));
         assert!(url.ends_with("&code_challenge_method=s256"));
@@ -307,12 +371,15 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let client = std::thread::spawn(move || {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            stream.write_all(b"GET /?code=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            stream
+                .write_all(b"GET /?code=xyz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
             let mut reply = String::new();
             stream.read_to_string(&mut reply).unwrap();
             reply
         });
-        let code = wait_for_callback(&listener, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
+        let code =
+            wait_for_callback(&listener, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
         assert_eq!(code, "xyz");
         assert!(client.join().unwrap().contains("You can close this tab"));
     }
@@ -320,7 +387,18 @@ mod tests {
     #[test]
     fn waiting_can_be_cancelled_and_times_out() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        assert_eq!(wait_for_callback(&listener, Duration::from_secs(5), &AtomicBool::new(true)), Err("Sign-in cancelled.".into()));
-        assert!(wait_for_callback(&listener, Duration::from_millis(150), &AtomicBool::new(false)).unwrap_err().contains("timed out"));
+        assert_eq!(
+            wait_for_callback(&listener, Duration::from_secs(5), &AtomicBool::new(true)),
+            Err("Sign-in cancelled.".into())
+        );
+        assert!(
+            wait_for_callback(
+                &listener,
+                Duration::from_millis(150),
+                &AtomicBool::new(false)
+            )
+            .unwrap_err()
+            .contains("timed out")
+        );
     }
 }

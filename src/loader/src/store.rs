@@ -67,24 +67,40 @@ pub enum Action {
 
 /// The tag next to a script's title: where it comes from.
 pub fn origin_label(script: &StoreScript) -> &'static str {
-    if script.community { "community" } else { "official" }
+    if script.community {
+        "community"
+    } else {
+        "official"
+    }
 }
 
 pub fn price_label(script: &StoreScript) -> String {
     if script.is_free() {
         "Free".into()
     } else {
-        format!("{} credits/min (€{:.2}/h)", script.price, eur_per_hour(script.price))
+        format!(
+            "{} credits/min (€{:.2}/h)",
+            script.price,
+            eur_per_hour(script.price)
+        )
     }
 }
 
 pub fn balance_label(me: &Me) -> String {
-    format!("{} credits (€{:.2})", me.credits, credits_to_eur(me.credits))
+    format!(
+        "{} credits (€{:.2})",
+        me.credits,
+        credits_to_eur(me.credits)
+    )
 }
 
 impl Store {
     pub fn categories(&self) -> Vec<String> {
-        let mut all: Vec<String> = self.scripts.iter().flat_map(|s| s.categories.iter().cloned()).collect();
+        let mut all: Vec<String> = self
+            .scripts
+            .iter()
+            .flat_map(|s| s.categories.iter().cloned())
+            .collect();
         all.sort();
         all.dedup();
         all
@@ -94,7 +110,9 @@ impl Store {
         let search = self.search.trim().to_lowercase();
         self.scripts.iter().filter(move |s| {
             (self.category.is_empty() || s.categories.contains(&self.category))
-                && (search.is_empty() || s.title.to_lowercase().contains(&search) || s.description.to_lowercase().contains(&search))
+                && (search.is_empty()
+                    || s.title.to_lowercase().contains(&search)
+                    || s.description.to_lowercase().contains(&search))
         })
     }
 
@@ -130,22 +148,41 @@ impl Store {
         ui.horizontal(|ui| {
             let editing = ui.add_enabled(
                 !self.redeeming,
-                egui::TextEdit::singleline(&mut self.code).hint_text("Paste a share code").desired_width(420.0).password(false),
+                egui::TextEdit::singleline(&mut self.code)
+                    .hint_text("Paste a share code")
+                    .desired_width(420.0)
+                    .password(false),
             );
             let submitted = editing.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.add_enabled(!self.redeeming && !self.code.trim().is_empty(), egui::Button::new("Redeem")).clicked() || submitted)
+            if (ui
+                .add_enabled(
+                    !self.redeeming && !self.code.trim().is_empty(),
+                    egui::Button::new("Redeem"),
+                )
+                .clicked()
+                || submitted)
                 && !self.redeeming
             {
                 match normalize_share_code(&self.code) {
                     Some(code) => action = Some(Action::Redeem(code)),
-                    None => self.redeem_result = Some((false, "A share code is 64 characters: the digits 0-9 and the letters a-f.".into())),
+                    None => {
+                        self.redeem_result = Some((
+                            false,
+                            "A share code is 64 characters: the digits 0-9 and the letters a-f."
+                                .into(),
+                        ))
+                    }
                 }
             }
             if self.redeeming {
                 ui.spinner();
             }
             if let Some((ok, message)) = &self.redeem_result {
-                let color = if *ok { egui::Color32::from_rgb(0x9e, 0xce, 0x6a) } else { ui.visuals().error_fg_color };
+                let color = if *ok {
+                    egui::Color32::from_rgb(0x9e, 0xce, 0x6a)
+                } else {
+                    ui.visuals().error_fg_color
+                };
                 ui.colored_label(color, message);
             }
         });
@@ -217,7 +254,9 @@ impl Store {
         if cancel_remove {
             self.removing = None;
         }
-        run.map(Action::Run).or(remove.map(Action::RemoveGrant)).or(action)
+        run.map(Action::Run)
+            .or(remove.map(Action::RemoveGrant))
+            .or(action)
     }
 }
 
@@ -261,7 +300,10 @@ mod tests {
         assert!(!confirmed.has("a", 2), "a new revision warns again");
         assert!(!confirmed.has("b", 1), "so does a different script");
         confirmed.confirm("a", 2);
-        assert!(confirmed.has("a", 2) && !confirmed.has("a", 1), "only the latest confirmed revision is kept");
+        assert!(
+            confirmed.has("a", 2) && !confirmed.has("a", 1),
+            "only the latest confirmed revision is kept"
+        );
         confirmed.forget("a");
         assert!(!confirmed.has("a", 2));
     }
@@ -273,7 +315,8 @@ mod tests {
             confirmed.confirm(&format!("script-{i:04}"), 1);
         }
         assert_eq!(confirmed.0.len(), MAX_CONFIRMED);
-        let again: Confirmed = serde_json::from_str(&serde_json::to_string(&confirmed).unwrap()).unwrap();
+        let again: Confirmed =
+            serde_json::from_str(&serde_json::to_string(&confirmed).unwrap()).unwrap();
         assert_eq!(again, confirmed);
         // Confirming a script that is already remembered never evicts another one
         let before = confirmed.0.len();
@@ -284,18 +327,39 @@ mod tests {
     #[test]
     fn prices_read_as_credits_and_euros() {
         assert_eq!(price_label(&script("a", 0, &[])), "Free");
-        assert_eq!(price_label(&script("a", 30, &[])), "30 credits/min (€0.18/h)");
+        assert_eq!(
+            price_label(&script("a", 30, &[])),
+            "30 credits/min (€0.18/h)"
+        );
     }
 
     #[test]
     fn search_and_category_filter_the_list() {
-        let mut store = Store { scripts: vec![script("Tempoross", 0, &["fishing"]), script("Miner", 5, &["mining"])], ..Store::default() };
+        let mut store = Store {
+            scripts: vec![
+                script("Tempoross", 0, &["fishing"]),
+                script("Miner", 5, &["mining"]),
+            ],
+            ..Store::default()
+        };
         assert_eq!(store.visible().count(), 2);
         store.search = "temp".into();
-        assert_eq!(store.visible().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Tempoross"]);
+        assert_eq!(
+            store
+                .visible()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Tempoross"]
+        );
         store.search.clear();
         store.category = "mining".into();
-        assert_eq!(store.visible().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Miner"]);
+        assert_eq!(
+            store
+                .visible()
+                .map(|s| s.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Miner"]
+        );
         assert_eq!(store.categories(), ["fishing", "mining"]);
     }
 }

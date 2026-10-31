@@ -76,13 +76,20 @@ pub struct Removed {
 /// A share code is 64 hex digits; whitespace and case are forgiven, anything else is refused before asking the server.
 pub fn normalize_share_code(input: &str) -> Option<String> {
     let code = input.trim().to_ascii_lowercase();
-    (code.len() == 64 && code.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))).then_some(code)
+    (code.len() == 64
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(code)
 }
 
 impl Me {
     /// Testers and above can list every community script (`GET /launcher/scripts?community=true`).
     pub fn can_browse_community(&self) -> bool {
-        matches!(self.role.as_str(), "tester" | "scripter" | "moderator" | "administrator")
+        matches!(
+            self.role.as_str(),
+            "tester" | "scripter" | "moderator" | "administrator"
+        )
     }
 }
 
@@ -100,7 +107,8 @@ impl StoreScript {
             return Some("This script has no live revision yet.".into());
         }
         let required = self.price * min_balance_minutes;
-        (credits < required).then(|| format!("Needs at least {required} credits to start ({credits} available)."))
+        (credits < required)
+            .then(|| format!("Needs at least {required} credits to start ({credits} available)."))
     }
 }
 
@@ -216,7 +224,12 @@ mod tests {
         assert!(locked.blocked(1_000_000, 5).unwrap().contains("access"));
         locked.can_access = true;
         locked.revision = None;
-        assert!(locked.blocked(1_000_000, 5).unwrap().contains("live revision"));
+        assert!(
+            locked
+                .blocked(1_000_000, 5)
+                .unwrap()
+                .contains("live revision")
+        );
     }
 
     #[test]
@@ -247,7 +260,10 @@ mod tests {
     fn share_codes_are_checked_before_the_server_is_asked() {
         let code = "0123456789abcdef".repeat(4);
         assert_eq!(normalize_share_code(&code), Some(code.clone()));
-        assert_eq!(normalize_share_code(&format!("  {}\n", code.to_uppercase())), Some(code.clone()));
+        assert_eq!(
+            normalize_share_code(&format!("  {}\n", code.to_uppercase())),
+            Some(code.clone())
+        );
         assert_eq!(normalize_share_code(&code[1..]), None);
         assert_eq!(normalize_share_code(&format!("{code}0")), None);
         assert_eq!(normalize_share_code(&format!("g{}", &code[1..])), None);
@@ -266,7 +282,8 @@ mod tests {
 
     #[test]
     fn heartbeat_reasons_parse_and_read_well() {
-        let beat: Heartbeat = serde_json::from_str(r#"{"alive":false,"reason":"insufficient_credits"}"#).unwrap();
+        let beat: Heartbeat =
+            serde_json::from_str(r#"{"alive":false,"reason":"insufficient_credits"}"#).unwrap();
         assert!(!beat.alive);
         assert!(end_reason_message(beat.reason.as_deref()).contains("top up"));
     }
@@ -277,7 +294,18 @@ mod tests {
         assert!(stats.is_empty());
         stats.add(10, 5, &[1]);
         stats.add(20, 0, &[1, 7]);
-        assert_eq!(stats, Stats { experience: 30, gold: 5, minutes: 0.0, custom: vec![2, 7] });
-        assert_eq!(serde_json::to_value(&stats).unwrap()["custom"], serde_json::json!([2, 7]));
+        assert_eq!(
+            stats,
+            Stats {
+                experience: 30,
+                gold: 5,
+                minutes: 0.0,
+                custom: vec![2, 7]
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&stats).unwrap()["custom"],
+            serde_json::json!([2, 7])
+        );
     }
 }

@@ -27,14 +27,21 @@ pub struct File {
 }
 
 pub fn bucket_url(api: &Api, path: &str) -> String {
-    format!("{}/storage/v1/object/public/client/{path}", api.config().supabase_url)
+    format!(
+        "{}/storage/v1/object/public/client/{path}",
+        api.config().supabase_url
+    )
 }
 
 /// `2026.10.26-abc1234`: a date and a commit. Anything else, such as `dev`, doesn't parse.
 fn parse_version(text: &str) -> Option<([u32; 3], &str)> {
     let (date, commit) = text.trim().split_once('-')?;
     let mut parts = date.split('.');
-    let date = [parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?];
+    let date = [
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ];
     (parts.next().is_none() && !commit.is_empty()).then_some((date, commit))
 }
 
@@ -51,7 +58,11 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 impl Release {
     /// The file for this platform.
     pub fn file(&self) -> Option<&File> {
-        if cfg!(windows) { self.files.windows.as_ref() } else { self.files.linux.as_ref() }
+        if cfg!(windows) {
+            self.files.windows.as_ref()
+        } else {
+            self.files.linux.as_ref()
+        }
     }
 
     pub fn download_url(&self, api: &Api) -> Option<String> {
@@ -64,11 +75,18 @@ pub fn check(api: &Api) -> Result<Option<Release>, String> {
     if api.config().supabase_url.is_empty() {
         return Ok(None);
     }
-    let mut response = api.agent().get(&bucket_url(api, "latest.json")).call().map_err(|e| e.to_string())?;
+    let mut response = api
+        .agent()
+        .get(&bucket_url(api, "latest.json"))
+        .call()
+        .map_err(|e| e.to_string())?;
     if !response.status().is_success() {
         return Err(format!("the server answered {}", response.status()));
     }
-    let release: Release = response.body_mut().read_json().map_err(|e| format!("unexpected update manifest: {e}"))?;
+    let release: Release = response
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("unexpected update manifest: {e}"))?;
     Ok(is_newer(&release.version, VERSION).then_some(release))
 }
 
@@ -81,7 +99,10 @@ mod tests {
         assert!(is_newer("2026.10.27-bbbbbbb", "2026.10.26-aaaaaaa"));
         assert!(is_newer("2026.11.01-bbbbbbb", "2026.10.31-aaaaaaa"));
         assert!(is_newer("2027.01.01-bbbbbbb", "2026.12.31-aaaaaaa"));
-        assert!(is_newer("2026.10.26-bbbbbbb", "2026.10.26-aaaaaaa"), "same day, another commit");
+        assert!(
+            is_newer("2026.10.26-bbbbbbb", "2026.10.26-aaaaaaa"),
+            "same day, another commit"
+        );
         assert!(!is_newer("2026.10.26-aaaaaaa", "2026.10.26-aaaaaaa"));
         assert!(!is_newer("2026.10.25-bbbbbbb", "2026.10.26-aaaaaaa"));
     }
@@ -101,6 +122,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(release.version, "2026.10.26-abc1234");
-        assert_eq!(release.files.linux.unwrap().path, "2026.10.26-abc1234/a.tar.gz");
+        assert_eq!(
+            release.files.linux.unwrap().path,
+            "2026.10.26-abc1234/a.tar.gz"
+        );
     }
 }

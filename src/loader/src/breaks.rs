@@ -49,7 +49,11 @@ impl BreaksTracker {
     pub fn view(&self, at: Instant) -> Option<BreaksView> {
         let (plan, received) = self.plan.as_ref()?;
         let passed = at.saturating_duration_since(*received);
-        let counting = if plan.active.is_some() { Duration::ZERO } else { passed };
+        let counting = if plan.active.is_some() {
+            Duration::ZERO
+        } else {
+            passed
+        };
         let rows = |list: &[injector::form::PlannedBreak]| {
             let mut rows: Vec<BreakRow> = list
                 .iter()
@@ -65,7 +69,10 @@ impl BreaksTracker {
         Some(BreaksView {
             breaks: rows(&plan.breaks),
             sleeps: rows(&plan.sleeps),
-            active: plan.active.as_ref().map(|a| ActiveRow { kind: a.kind.clone(), remaining: ms(a.remaining).saturating_sub(passed) }),
+            active: plan.active.as_ref().map(|a| ActiveRow {
+                kind: a.kind.clone(),
+                remaining: ms(a.remaining).saturating_sub(passed),
+            }),
         })
     }
 }
@@ -80,7 +87,11 @@ mod tests {
     use injector::form::{ActiveBreak, PlannedBreak};
 
     fn planned(remaining: f64, at: Option<f64>) -> PlannedBreak {
-        PlannedBreak { remaining, length: 60_000.0, at }
+        PlannedBreak {
+            remaining,
+            length: 60_000.0,
+            at,
+        }
     }
 
     #[test]
@@ -88,22 +99,43 @@ mod tests {
         let start = Instant::now();
         let mut tracker = BreaksTracker::default();
         assert!(tracker.view(start).is_none());
-        let plan = BreakPlan { breaks: vec![planned(90_000.0, None), planned(10_000.0, None)], sleeps: vec![planned(5_000.0, Some(90_000.0))], active: None };
+        let plan = BreakPlan {
+            breaks: vec![planned(90_000.0, None), planned(10_000.0, None)],
+            sleeps: vec![planned(5_000.0, Some(90_000.0))],
+            active: None,
+        };
         tracker.update(plan, start);
         let view = tracker.view(start + Duration::from_secs(4)).unwrap();
         assert_eq!(view.breaks[0].remaining, Duration::from_secs(6));
         assert_eq!(view.breaks[1].remaining, Duration::from_secs(86));
         assert_eq!(view.sleeps[0].remaining, Duration::from_secs(1));
         assert_eq!(view.sleeps[0].at, Some(3600 * 25 % 86400));
-        assert_eq!(tracker.view(start + Duration::from_secs(60)).unwrap().sleeps[0].remaining, Duration::ZERO);
+        assert_eq!(
+            tracker
+                .view(start + Duration::from_secs(60))
+                .unwrap()
+                .sleeps[0]
+                .remaining,
+            Duration::ZERO
+        );
     }
 
     #[test]
     fn a_break_in_progress_freezes_the_rest() {
         let start = Instant::now();
         let mut tracker = BreaksTracker::default();
-        let active = ActiveBreak { kind: "break".into(), remaining: 30_000.0 };
-        tracker.update(BreakPlan { breaks: vec![planned(10_000.0, None)], sleeps: vec![], active: Some(active) }, start);
+        let active = ActiveBreak {
+            kind: "break".into(),
+            remaining: 30_000.0,
+        };
+        tracker.update(
+            BreakPlan {
+                breaks: vec![planned(10_000.0, None)],
+                sleeps: vec![],
+                active: Some(active),
+            },
+            start,
+        );
         let view = tracker.view(start + Duration::from_secs(5)).unwrap();
         assert_eq!(view.breaks[0].remaining, Duration::from_secs(10));
         assert_eq!(view.active.unwrap().remaining, Duration::from_secs(25));

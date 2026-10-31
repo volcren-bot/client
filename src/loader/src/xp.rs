@@ -27,7 +27,9 @@ pub struct XpRow {
 
 /// Experience needed for `level`, as in the game.
 pub fn xp_for_level(level: i64) -> i64 {
-    let points: f64 = (1..level).map(|l| (l as f64 + 300.0 * 2f64.powf(l as f64 / 7.0)).floor()).sum();
+    let points: f64 = (1..level)
+        .map(|l| (l as f64 + 300.0 * 2f64.powf(l as f64 / 7.0)).floor())
+        .sum();
     (points / 4.0).floor() as i64
 }
 
@@ -58,7 +60,10 @@ impl XpTracker {
     pub fn total(&self) -> i64 {
         self.latest
             .iter()
-            .filter_map(|skill| Some(skill.xp - self.first.iter().find(|first| first.name == skill.name)?.xp).filter(|&gained| gained > 0))
+            .filter_map(|skill| {
+                Some(skill.xp - self.first.iter().find(|first| first.name == skill.name)?.xp)
+                    .filter(|&gained| gained > 0)
+            })
             .sum()
     }
 
@@ -75,11 +80,19 @@ impl XpTracker {
                     return None;
                 }
                 let per_hour = (hours > 0.0).then(|| (gained as f64 / hours).round() as i64);
-                let to_level = per_hour.filter(|&rate| rate > 0 && skill.level < 99).map(|rate| {
-                    let missing = (xp_for_level(skill.level + 1) - skill.xp).max(0) as f64;
-                    Duration::from_secs_f64(missing / rate as f64 * 3600.0)
-                });
-                Some(XpRow { name: skill.name.clone(), level: skill.level, gained, per_hour, to_level })
+                let to_level = per_hour
+                    .filter(|&rate| rate > 0 && skill.level < 99)
+                    .map(|rate| {
+                        let missing = (xp_for_level(skill.level + 1) - skill.xp).max(0) as f64;
+                        Duration::from_secs_f64(missing / rate as f64 * 3600.0)
+                    });
+                Some(XpRow {
+                    name: skill.name.clone(),
+                    level: skill.level,
+                    gained,
+                    per_hour,
+                    to_level,
+                })
             })
             .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.gained));
@@ -109,7 +122,11 @@ mod tests {
     use super::*;
 
     fn skill(name: &str, level: i64, xp: i64) -> SkillXp {
-        SkillXp { name: name.into(), level, xp }
+        SkillXp {
+            name: name.into(),
+            level,
+            xp,
+        }
     }
 
     #[test]
@@ -124,15 +141,24 @@ mod tests {
     fn tracks_gains_from_the_first_snapshot() {
         let mut tracker = XpTracker::default();
         assert!(tracker.is_empty());
-        tracker.update(vec![skill("Fishing", 70, 737_627), skill("Attack", 50, 100)], Duration::ZERO);
+        tracker.update(
+            vec![skill("Fishing", 70, 737_627), skill("Attack", 50, 100)],
+            Duration::ZERO,
+        );
         assert!(tracker.rows().is_empty());
-        tracker.update(vec![skill("Fishing", 70, 747_627), skill("Attack", 50, 100)], Duration::from_secs(3600));
+        tracker.update(
+            vec![skill("Fishing", 70, 747_627), skill("Attack", 50, 100)],
+            Duration::from_secs(3600),
+        );
         let rows = tracker.rows();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].gained, rows[0].per_hour), (10_000, Some(10_000)));
         assert_eq!(tracker.total(), 10_000);
         let missing = xp_for_level(71) - 747_627;
-        assert_eq!(rows[0].to_level.unwrap().as_secs(), (missing as f64 / 10_000.0 * 3600.0) as u64);
+        assert_eq!(
+            rows[0].to_level.unwrap().as_secs(),
+            (missing as f64 / 10_000.0 * 3600.0) as u64
+        );
         tracker.reset();
         assert!(tracker.is_empty());
     }

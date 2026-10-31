@@ -1,4 +1,7 @@
-use std::{hash::{DefaultHasher, Hash, Hasher}, ops::Range};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    ops::Range,
+};
 
 use eframe::egui::{self, Color32, FontId, TextFormat, text::LayoutJob};
 
@@ -15,19 +18,68 @@ pub enum Kind {
 }
 
 const KEYWORDS: &[&str] = &[
-    "and", "break", "continue", "do", "else", "elseif", "end", "for", "function", "if", "in", "local", "not",
-    "or", "repeat", "return", "then", "until", "while",
+    "and", "break", "continue", "do", "else", "elseif", "end", "for", "function", "if", "in",
+    "local", "not", "or", "repeat", "return", "then", "until", "while",
 ];
 const LITERALS: &[&str] = &["true", "false", "nil"];
 const BUILTINS: &[&str] = &[
-    "assert", "bit32", "buffer", "coroutine", "error", "getmetatable", "ipairs", "math", "next", "pairs",
-    "pcall", "rawequal", "rawget", "rawlen", "rawset", "select", "self", "setmetatable", "string", "table",
-    "tonumber", "tostring", "type", "typeof", "unpack", "utf8", "vector", "xpcall", "_G", "_VERSION",
+    "assert",
+    "bit32",
+    "buffer",
+    "coroutine",
+    "error",
+    "getmetatable",
+    "ipairs",
+    "math",
+    "next",
+    "pairs",
+    "pcall",
+    "rawequal",
+    "rawget",
+    "rawlen",
+    "rawset",
+    "select",
+    "self",
+    "setmetatable",
+    "string",
+    "table",
+    "tonumber",
+    "tostring",
+    "type",
+    "typeof",
+    "unpack",
+    "utf8",
+    "vector",
+    "xpcall",
+    "_G",
+    "_VERSION",
 ];
 const HOST: &[&str] = &[
-    "print", "sleep", "require", "game_state", "connection", "widget", "item_container", "varc", "npcs", "npc_model", "locs", "loc_model", "players", "click",
-    "draw_rect", "clear_overlay", "wind_mouse", "mouse_down", "mouse_up", "scroll", "key_down", "key_up", "widget_children",
-    "world_select", "time",
+    "print",
+    "sleep",
+    "require",
+    "game_state",
+    "connection",
+    "widget",
+    "item_container",
+    "varc",
+    "npcs",
+    "npc_model",
+    "locs",
+    "loc_model",
+    "players",
+    "click",
+    "draw_rect",
+    "clear_overlay",
+    "wind_mouse",
+    "mouse_down",
+    "mouse_up",
+    "scroll",
+    "key_down",
+    "key_up",
+    "widget_children",
+    "world_select",
+    "time",
 ];
 
 fn is_name_start(c: u8) -> bool {
@@ -50,7 +102,12 @@ fn long_bracket_end(text: &[u8], from: usize, level: usize) -> usize {
     let mut i = from;
     while i < text.len() {
         if text[i] == b']'
-            && text[i + 1..].iter().take(level).filter(|&&c| c == b'=').count() == level
+            && text[i + 1..]
+                .iter()
+                .take(level)
+                .filter(|&&c| c == b'=')
+                .count()
+                == level
             && text.get(i + 1 + level) == Some(&b']')
         {
             return i + level + 2;
@@ -105,7 +162,9 @@ fn push(tokens: &mut Vec<(Range<usize>, Kind)>, range: Range<usize>, kind: Kind)
         return;
     }
     match tokens.last_mut() {
-        Some((last, last_kind)) if *last_kind == kind && last.end == range.start => last.end = range.end,
+        Some((last, last_kind)) if *last_kind == kind && last.end == range.start => {
+            last.end = range.end
+        }
         _ => tokens.push((range, kind)),
     }
 }
@@ -154,7 +213,8 @@ fn tokenize_into(text: &[u8], start: usize, end: usize, tokens: &mut Vec<(Range<
             let mut j = i + 1;
             while j < end {
                 let d = text[j];
-                let exponent_sign = !hex && matches!(d, b'+' | b'-') && matches!(text[j - 1], b'e' | b'E');
+                let exponent_sign =
+                    !hex && matches!(d, b'+' | b'-') && matches!(text[j - 1], b'e' | b'E');
                 if !(is_name(d) || d == b'.' || exponent_sign) {
                     break;
                 }
@@ -165,11 +225,21 @@ fn tokenize_into(text: &[u8], start: usize, end: usize, tokens: &mut Vec<(Range<
         } else if is_name_start(c) {
             let j = i + rest.iter().take_while(|&&c| is_name(c)).count();
             let word = std::str::from_utf8(&text[i..j]).unwrap_or("");
-            let after = text[j..end].iter().position(|c| !c.is_ascii_whitespace()).map(|n| text[j + n]);
-            let field = i > 0 && matches!(text[i - 1], b'.' | b':') && !(i > 1 && text[i - 2] == b'.');
+            let after = text[j..end]
+                .iter()
+                .position(|c| !c.is_ascii_whitespace())
+                .map(|n| text[j + n]);
+            let field =
+                i > 0 && matches!(text[i - 1], b'.' | b':') && !(i > 1 && text[i - 2] == b'.');
             let kind = if field {
-                if after == Some(b'(') { Kind::Call } else { Kind::Plain }
-            } else if KEYWORDS.contains(&word) || (matches!(word, "type" | "export") && after.is_some_and(is_name_start)) {
+                if after == Some(b'(') {
+                    Kind::Call
+                } else {
+                    Kind::Plain
+                }
+            } else if KEYWORDS.contains(&word)
+                || (matches!(word, "type" | "export") && after.is_some_and(is_name_start))
+            {
                 Kind::Keyword
             } else if LITERALS.contains(&word) {
                 Kind::Literal
@@ -197,14 +267,38 @@ fn tokenize_into(text: &[u8], start: usize, end: usize, tokens: &mut Vec<(Range<
 
 fn color(kind: Kind, dark: bool) -> Color32 {
     let (dark_color, light_color) = match kind {
-        Kind::Plain => (Color32::from_rgb(0xd4, 0xd4, 0xd4), Color32::from_rgb(0x24, 0x29, 0x2e)),
-        Kind::Comment => (Color32::from_rgb(0x6a, 0x99, 0x55), Color32::from_rgb(0x5a, 0x7a, 0x4a)),
-        Kind::String => (Color32::from_rgb(0xce, 0x91, 0x78), Color32::from_rgb(0xa3, 0x15, 0x15)),
-        Kind::Literal => (Color32::from_rgb(0xb5, 0xce, 0xa8), Color32::from_rgb(0x09, 0x86, 0x58)),
-        Kind::Keyword => (Color32::from_rgb(0xc5, 0x86, 0xc0), Color32::from_rgb(0xaf, 0x00, 0xdb)),
-        Kind::Builtin => (Color32::from_rgb(0x4e, 0xc9, 0xb0), Color32::from_rgb(0x26, 0x7f, 0x99)),
-        Kind::Host => (Color32::from_rgb(0x56, 0x9c, 0xd6), Color32::from_rgb(0x00, 0x50, 0xb0)),
-        Kind::Call => (Color32::from_rgb(0xdc, 0xdc, 0xaa), Color32::from_rgb(0x79, 0x5e, 0x26)),
+        Kind::Plain => (
+            Color32::from_rgb(0xd4, 0xd4, 0xd4),
+            Color32::from_rgb(0x24, 0x29, 0x2e),
+        ),
+        Kind::Comment => (
+            Color32::from_rgb(0x6a, 0x99, 0x55),
+            Color32::from_rgb(0x5a, 0x7a, 0x4a),
+        ),
+        Kind::String => (
+            Color32::from_rgb(0xce, 0x91, 0x78),
+            Color32::from_rgb(0xa3, 0x15, 0x15),
+        ),
+        Kind::Literal => (
+            Color32::from_rgb(0xb5, 0xce, 0xa8),
+            Color32::from_rgb(0x09, 0x86, 0x58),
+        ),
+        Kind::Keyword => (
+            Color32::from_rgb(0xc5, 0x86, 0xc0),
+            Color32::from_rgb(0xaf, 0x00, 0xdb),
+        ),
+        Kind::Builtin => (
+            Color32::from_rgb(0x4e, 0xc9, 0xb0),
+            Color32::from_rgb(0x26, 0x7f, 0x99),
+        ),
+        Kind::Host => (
+            Color32::from_rgb(0x56, 0x9c, 0xd6),
+            Color32::from_rgb(0x00, 0x50, 0xb0),
+        ),
+        Kind::Call => (
+            Color32::from_rgb(0xdc, 0xdc, 0xaa),
+            Color32::from_rgb(0x79, 0x5e, 0x26),
+        ),
     };
     if dark { dark_color } else { light_color }
 }
@@ -213,8 +307,15 @@ fn color(kind: Kind, dark: bool) -> Color32 {
 pub fn layout_job(source: &str, font: FontId, dark: bool, hidden: &[Range<usize>]) -> LayoutJob {
     let mut job = LayoutJob::default();
     let tokens = tokenize(source);
-    if tokens.iter().any(|(range, _)| source.get(range.clone()).is_none()) {
-        job.append(source, 0.0, TextFormat::simple(font, color(Kind::Plain, dark)));
+    if tokens
+        .iter()
+        .any(|(range, _)| source.get(range.clone()).is_none())
+    {
+        job.append(
+            source,
+            0.0,
+            TextFormat::simple(font, color(Kind::Plain, dark)),
+        );
         return job;
     }
     let folded = TextFormat {
@@ -235,7 +336,11 @@ pub fn layout_job(source: &str, font: FontId, dark: bool, hidden: &[Range<usize>
                 Some(h) => (h.start.min(range.end), false),
                 None => (range.end, false),
             };
-            let format = if is_hidden { folded.clone() } else { TextFormat::simple(font.clone(), color(kind, dark)) };
+            let format = if is_hidden {
+                folded.clone()
+            } else {
+                TextFormat::simple(font.clone(), color(kind, dark))
+            };
             job.append(&source[at..end], 0.0, format);
             at = end;
         }
@@ -269,12 +374,17 @@ mod tests {
     use super::*;
 
     fn colored(source: &str) -> Vec<(&str, Kind)> {
-        tokenize(source).into_iter().filter(|(_, k)| *k != Kind::Plain).map(|(r, k)| (&source[r], k)).collect()
+        tokenize(source)
+            .into_iter()
+            .filter(|(_, k)| *k != Kind::Plain)
+            .map(|(r, k)| (&source[r], k))
+            .collect()
     }
 
     #[test]
     fn tokens_cover_the_whole_text() {
-        let source = "local s = `a {b} é` -- ü\nprint([==[x]] ]==], 0x1F, 1e-3)\n\"unterminated\nend";
+        let source =
+            "local s = `a {b} é` -- ü\nprint([==[x]] ]==], 0x1F, 1e-3)\n\"unterminated\nend";
         let mut at = 0;
         for (range, _) in tokenize(source) {
             assert_eq!(range.start, at);
@@ -313,21 +423,32 @@ mod tests {
 
     #[test]
     fn strings_comments_and_interpolation() {
-        assert_eq!(colored("--[[ a\n b ]] x"), [("--[[ a\n b ]]", Kind::Comment)]);
+        assert_eq!(
+            colored("--[[ a\n b ]] x"),
+            [("--[[ a\n b ]]", Kind::Comment)]
+        );
         assert_eq!(colored("s = [=[ ]] ]=]"), [("[=[ ]] ]=]", Kind::String)]);
         assert_eq!(colored(r#"s = "a \" b""#), [(r#""a \" b""#, Kind::String)]);
         assert_eq!(
             colored("s = `hp {hp + 1}!`"),
-            [("`hp {", Kind::String), ("hp", Kind::Plain), ("1", Kind::Literal), ("}!`", Kind::String)]
-                .into_iter()
-                .filter(|(_, k)| *k != Kind::Plain)
-                .collect::<Vec<_>>()
+            [
+                ("`hp {", Kind::String),
+                ("hp", Kind::Plain),
+                ("1", Kind::Literal),
+                ("}!`", Kind::String)
+            ]
+            .into_iter()
+            .filter(|(_, k)| *k != Kind::Plain)
+            .collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn type_is_contextual() {
         assert_eq!(colored("type Point = {}"), [("type", Kind::Keyword)]);
-        assert_eq!(colored("print(type(x))"), [("print", Kind::Host), ("type", Kind::Builtin)]);
+        assert_eq!(
+            colored("print(type(x))"),
+            [("print", Kind::Host), ("type", Kind::Builtin)]
+        );
     }
 }

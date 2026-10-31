@@ -7,7 +7,9 @@ pub enum ApiError {
     /// The refresh token was rejected (banned, deleted, revoked): the stored session is gone and the user must sign in again.
     SignedOut(String),
     Forbidden(String),
-    InsufficientCredits { required: Option<i64> },
+    InsufficientCredits {
+        required: Option<i64>,
+    },
     Conflict(String),
     NotFound(String),
     /// The server can't be reached, or answered something that isn't the contract.
@@ -21,9 +23,13 @@ impl fmt::Display for ApiError {
             Self::Unauthorized => write!(f, "You are signed out. Sign in again."),
             Self::SignedOut(why) => write!(f, "Signed out: {why}"),
             Self::Forbidden(message) => write!(f, "{message}"),
-            Self::InsufficientCredits { required: Some(required) } => write!(f, "Not enough credits: {required} needed to start."),
+            Self::InsufficientCredits {
+                required: Some(required),
+            } => write!(f, "Not enough credits: {required} needed to start."),
             Self::InsufficientCredits { required: None } => write!(f, "Not enough credits."),
-            Self::Conflict(message) | Self::NotFound(message) | Self::Server(message) => write!(f, "{message}"),
+            Self::Conflict(message) | Self::NotFound(message) | Self::Server(message) => {
+                write!(f, "{message}")
+            }
             Self::Network(message) => write!(f, "Can't reach Volcren: {message}"),
         }
     }
@@ -42,10 +48,16 @@ pub struct ErrorBody {
 
 impl ApiError {
     pub fn from_status(status: u16, body: ErrorBody) -> Self {
-        let message = if body.error.is_empty() { format!("The server answered {status}.") } else { body.error };
+        let message = if body.error.is_empty() {
+            format!("The server answered {status}.")
+        } else {
+            body.error
+        };
         match status {
             401 => Self::Unauthorized,
-            402 => Self::InsufficientCredits { required: body.required },
+            402 => Self::InsufficientCredits {
+                required: body.required,
+            },
             403 => Self::Forbidden(message),
             404 => Self::NotFound(message),
             409 => Self::Conflict(message),
@@ -64,13 +76,27 @@ mod tests {
 
     #[test]
     fn statuses_map_to_variants() {
-        assert_eq!(ApiError::from_status(401, body("{}")), ApiError::Unauthorized);
+        assert_eq!(
+            ApiError::from_status(401, body("{}")),
+            ApiError::Unauthorized
+        );
         assert_eq!(
             ApiError::from_status(402, body(r#"{"error":"no","required":300}"#)),
-            ApiError::InsufficientCredits { required: Some(300) }
+            ApiError::InsufficientCredits {
+                required: Some(300)
+            }
         );
-        assert_eq!(ApiError::from_status(403, body(r#"{"error":"banned"}"#)), ApiError::Forbidden("banned".into()));
-        assert_eq!(ApiError::from_status(409, body(r#"{"error":"no live revision"}"#)), ApiError::Conflict("no live revision".into()));
-        assert_eq!(ApiError::from_status(500, body("{}")), ApiError::Server("The server answered 500.".into()));
+        assert_eq!(
+            ApiError::from_status(403, body(r#"{"error":"banned"}"#)),
+            ApiError::Forbidden("banned".into())
+        );
+        assert_eq!(
+            ApiError::from_status(409, body(r#"{"error":"no live revision"}"#)),
+            ApiError::Conflict("no live revision".into())
+        );
+        assert_eq!(
+            ApiError::from_status(500, body("{}")),
+            ApiError::Server("The server answered 500.".into())
+        );
     }
 }

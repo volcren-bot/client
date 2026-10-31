@@ -28,7 +28,11 @@ pub struct Row {
 
 /// `850 µs` or `1.25 ms`.
 pub fn duration_text(micros: u64) -> String {
-    if micros < 1000 { format!("{micros} µs") } else { format!("{:.2} ms", micros as f64 / 1000.0) }
+    if micros < 1000 {
+        format!("{micros} µs")
+    } else {
+        format!("{:.2} ms", micros as f64 / 1000.0)
+    }
 }
 
 /// Event types whose script is found by trigger (components, menus): argument 0 is not the script id.
@@ -50,9 +54,17 @@ impl Row {
     #[cfg(test)]
     pub fn text(&self, names: &Names) -> String {
         let (name, args, took) = (self.name(names), self.args_text(), self.took());
-        let took = if took.is_empty() { took } else { format!("  {took}") };
+        let took = if took.is_empty() {
+            took
+        } else {
+            format!("  {took}")
+        };
         let indent = "  ".repeat(self.run.depth as usize);
-        if args.is_empty() { format!("{indent}{name}{took}") } else { format!("{indent}{name} ({args}){took}") }
+        if args.is_empty() {
+            format!("{indent}{name}{took}")
+        } else {
+            format!("{indent}{name} ({args}){took}")
+        }
     }
 
     /// `npc_name_timer (6697)`, `Script 123` for one without a (loaded) name, or `Trigger 7` for an event whose script id isn't known.
@@ -68,11 +80,18 @@ impl Row {
 
     /// The arguments after the script id, with how many more were left out.
     pub fn args_text(&self) -> String {
-        let rest = if self.script_id().is_some() { &self.run.args[1..] } else { &self.run.args[..] };
+        let rest = if self.script_id().is_some() {
+            &self.run.args[1..]
+        } else {
+            &self.run.args[..]
+        };
         let more = (self.run.arg_count as usize).saturating_sub(self.run.args.len());
         let mut args = rest.join(", ");
         if more > 0 {
-            args.push_str(&format!("{}… +{more}", if args.is_empty() { "" } else { ", " }));
+            args.push_str(&format!(
+                "{}… +{more}",
+                if args.is_empty() { "" } else { ", " }
+            ));
         }
         args
     }
@@ -89,8 +108,17 @@ pub struct Blacklist(Vec<i32>);
 
 impl Blacklist {
     pub fn parse(text: &str, names: &Names) -> Self {
-        let words = text.split(|c: char| c == ',' || c.is_whitespace()).filter(|word| !word.is_empty());
-        Self(words.flat_map(|word| word.parse().map_or_else(|_| names.ids(word).to_vec(), |id| vec![id])).collect())
+        let words = text
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|word| !word.is_empty());
+        Self(
+            words
+                .flat_map(|word| {
+                    word.parse()
+                        .map_or_else(|_| names.ids(word).to_vec(), |id| vec![id])
+                })
+                .collect(),
+        )
     }
 
     pub fn hides(&self, row: &Row) -> bool {
@@ -167,7 +195,9 @@ impl Inspector {
 
     /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
-        self.enabled && (!self.reading || self.pid != Some(pid)) && self.next_poll.is_none_or(|at| now >= at)
+        self.enabled
+            && (!self.reading || self.pid != Some(pid))
+            && self.next_poll.is_none_or(|at| now >= at)
     }
 
     /// Marks a read started and says which sequence number to ask for. Another client than last time starts from its oldest run.
@@ -204,7 +234,10 @@ impl Inspector {
                     if run.end {
                         self.finish_run(&run);
                     } else {
-                        let row = Row { run, duration_us: None };
+                        let row = Row {
+                            run,
+                            duration_us: None,
+                        };
                         if !blacklist.hides(&row) {
                             self.rows.push(row);
                         }
@@ -223,7 +256,10 @@ impl Inspector {
                 return;
             }
             if row.run.depth == end.depth {
-                if row.duration_us.is_none() && row.run.event_type == end.event_type && row.run.args == end.args {
+                if row.duration_us.is_none()
+                    && row.run.event_type == end.event_type
+                    && row.run.args == end.args
+                {
                     row.duration_us = Some(end.time_us.saturating_sub(row.run.time_us));
                 }
                 return;
@@ -234,7 +270,9 @@ impl Inspector {
     /// The kept rows that pass the trigger box, oldest first.
     pub fn visible(&self) -> View<'_, Row, bool> {
         let triggers = self.triggers;
-        self.shown.view(&self.rows, triggers, |row| triggers || row.script_id().is_some())
+        self.shown.view(&self.rows, triggers, |row| {
+            triggers || row.script_id().is_some()
+        })
     }
 }
 
@@ -243,7 +281,16 @@ mod tests {
     use super::*;
 
     fn run(sequence: u64, event_type: i32, depth: u8, args: &[&str], arg_count: u16) -> ScriptRun {
-        ScriptRun { sequence, time_us: sequence * 10, tick: Some(7), end: false, event_type, arg_count, depth, args: args.iter().map(|a| a.to_string()).collect() }
+        ScriptRun {
+            sequence,
+            time_us: sequence * 10,
+            tick: Some(7),
+            end: false,
+            event_type,
+            arg_count,
+            depth,
+            args: args.iter().map(|a| a.to_string()).collect(),
+        }
     }
 
     fn script(sequence: u64, id: i32) -> ScriptRun {
@@ -251,7 +298,13 @@ mod tests {
     }
 
     fn poll(runs: Vec<ScriptRun>, dropped: u64, _tick: Option<i32>) -> Result<Poll, String> {
-        Ok(Poll { page: ScriptPage { next: runs.last().map_or(0, |r| r.sequence + 1), runs, dropped } })
+        Ok(Poll {
+            page: ScriptPage {
+                next: runs.last().map_or(0, |r| r.sequence + 1),
+                runs,
+                dropped,
+            },
+        })
     }
 
     fn names() -> Names {
@@ -259,7 +312,10 @@ mod tests {
     }
 
     fn row(run: ScriptRun) -> Row {
-        Row { run, duration_us: None }
+        Row {
+            run,
+            duration_us: None,
+        }
     }
 
     #[test]
@@ -269,10 +325,19 @@ mod tests {
         assert_eq!(row(script(0, 6697)).text(&none), "Script 6697");
         assert_eq!(row(script(0, 6697)).text(&names), "npc_name_timer (6697)");
         assert_eq!(row(script(0, 4730)).text(&names), "Script 4730");
-        assert_eq!(row(run(0, 76, 0, &["4730", "-1", "\"…\""], 3)).text(&names), "Script 4730 (-1, \"…\")");
+        assert_eq!(
+            row(run(0, 76, 0, &["4730", "-1", "\"…\""], 3)).text(&names),
+            "Script 4730 (-1, \"…\")"
+        );
         // nested runs are indented, and arguments the log didn't keep are counted
-        assert_eq!(row(run(0, 76, 2, &["4730", "5"], 11)).text(&names), "    Script 4730 (5, … +9)");
-        assert_eq!(row(run(0, 12, 0, &["393217"], 1)).text(&names), "Trigger 12 (393217)");
+        assert_eq!(
+            row(run(0, 76, 2, &["4730", "5"], 11)).text(&names),
+            "    Script 4730 (5, … +9)"
+        );
+        assert_eq!(
+            row(run(0, 12, 0, &["393217"], 1)).text(&names),
+            "Trigger 12 (393217)"
+        );
         assert_eq!(row(run(0, 76, 0, &[], 0)).text(&names), "Trigger 76");
     }
 
@@ -296,7 +361,9 @@ mod tests {
         let list = Blacklist::parse("Npc_Name_Timer", &names());
         assert!(list.hides(&row(script(0, 6697))) && !list.hides(&row(script(0, 4730))));
         // until the names are loaded a name hides nothing
-        assert!(!Blacklist::parse("Npc_Name_Timer", &Names::default()).hides(&row(script(0, 6697))));
+        assert!(
+            !Blacklist::parse("Npc_Name_Timer", &Names::default()).hides(&row(script(0, 6697)))
+        );
     }
 
     #[test]
@@ -319,10 +386,28 @@ mod tests {
     #[test]
     fn blacklisted_scripts_are_dropped_on_arrival() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
-        inspector.finish(32, now, poll(vec![script(0, 6697), script(1, 2), script(2, 4730)], 0, None));
-        assert_eq!(inspector.visible().iter().map(|r| r.run.sequence).collect::<Vec<_>>(), [1]);
+        inspector.finish(
+            32,
+            now,
+            poll(
+                vec![script(0, 6697), script(1, 2), script(2, 4730)],
+                0,
+                None,
+            ),
+        );
+        assert_eq!(
+            inspector
+                .visible()
+                .iter()
+                .map(|r| r.run.sequence)
+                .collect::<Vec<_>>(),
+            [1]
+        );
         inspector.blacklist.clear();
         inspector.start(32);
         inspector.finish(32, now, poll(vec![script(3, 6697)], 0, None));
@@ -332,7 +417,10 @@ mod tests {
     #[test]
     fn another_client_starts_over() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
         inspector.finish(32, now, poll(vec![script(7, 1)], 3, None));
         assert_eq!((inspector.kept(), inspector.dropped), (1, 3));
@@ -346,20 +434,42 @@ mod tests {
     #[test]
     fn a_reloaded_agent_replaces_the_old_runs() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
         inspector.finish(32, now, poll(vec![script(100, 1), script(101, 1)], 0, None));
         inspector.start(32);
         inspector.finish(32, now, poll(vec![script(0, 2)], 0, None));
-        assert_eq!(inspector.visible().iter().map(|r| r.script_id()).collect::<Vec<_>>(), [Some(2)]);
+        assert_eq!(
+            inspector
+                .visible()
+                .iter()
+                .map(|r| r.script_id())
+                .collect::<Vec<_>>(),
+            [Some(2)]
+        );
     }
 
     #[test]
     fn keeps_only_the_newest_runs() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, blacklist: String::new(), ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            blacklist: String::new(),
+            ..Inspector::default()
+        };
         inspector.start(32);
-        inspector.finish(32, now, poll((0..KEEP as u64 + 10).map(|i| script(i, 1)).collect(), 0, None));
+        inspector.finish(
+            32,
+            now,
+            poll(
+                (0..KEEP as u64 + 10).map(|i| script(i, 1)).collect(),
+                0,
+                None,
+            ),
+        );
         assert_eq!(inspector.kept(), KEEP);
         assert_eq!(inspector.visible()[0].run.sequence, 10);
     }
@@ -367,9 +477,16 @@ mod tests {
     #[test]
     fn the_trigger_box_hides_trigger_events() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
-        inspector.finish(32, now, poll(vec![script(0, 1), run(1, 12, 0, &["5"], 1)], 0, None));
+        inspector.finish(
+            32,
+            now,
+            poll(vec![script(0, 1), run(1, 12, 0, &["5"], 1)], 0, None),
+        );
         assert_eq!(inspector.visible().len(), 2);
         inspector.triggers = false;
         assert_eq!(inspector.visible().len(), 1);
@@ -378,7 +495,10 @@ mod tests {
     #[test]
     fn errors_are_kept_until_the_next_good_read() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
         inspector.finish(32, now, Err("no log".into()));
         assert_eq!(inspector.error.as_deref(), Some("no log"));
@@ -397,7 +517,10 @@ mod tests {
     #[test]
     fn an_end_entry_gives_its_start_a_duration() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
         let start = run(0, 76, 0, &["12"], 1);
         inspector.finish(32, now, poll(vec![start.clone()], 0, None));
@@ -407,34 +530,79 @@ mod tests {
         inspector.start(32);
         inspector.finish(32, now, poll(vec![ended(start, 1, 1250)], 0, None));
         assert_eq!(inspector.visible()[0].duration_us, Some(1250));
-        assert_eq!(inspector.visible()[0].text(&Names::default()), "Script 12  1.25 ms");
+        assert_eq!(
+            inspector.visible()[0].text(&Names::default()),
+            "Script 12  1.25 ms"
+        );
         assert_eq!(duration_text(850), "850 µs");
     }
 
     #[test]
     fn nested_ends_find_their_own_starts() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, blacklist: String::new(), ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            blacklist: String::new(),
+            ..Inspector::default()
+        };
         inspector.start(32);
-        let (parent, child_a, child_b) = (run(0, 76, 0, &["1"], 1), run(1, 76, 1, &["2"], 1), run(3, 76, 1, &["2"], 1));
+        let (parent, child_a, child_b) = (
+            run(0, 76, 0, &["1"], 1),
+            run(1, 76, 1, &["2"], 1),
+            run(3, 76, 1, &["2"], 1),
+        );
         inspector.finish(
             32,
             now,
-            poll(vec![parent.clone(), child_a.clone(), ended(child_a, 2, 100), child_b.clone(), ended(child_b, 4, 400), ended(parent, 5, 900)], 0, None),
+            poll(
+                vec![
+                    parent.clone(),
+                    child_a.clone(),
+                    ended(child_a, 2, 100),
+                    child_b.clone(),
+                    ended(child_b, 4, 400),
+                    ended(parent, 5, 900),
+                ],
+                0,
+                None,
+            ),
         );
         // times are in microseconds since the start of the log: starts at 0, 10 and 30
-        assert_eq!(inspector.visible().iter().map(|r| r.duration_us).collect::<Vec<_>>(), [Some(900), Some(90), Some(370)]);
+        assert_eq!(
+            inspector
+                .visible()
+                .iter()
+                .map(|r| r.duration_us)
+                .collect::<Vec<_>>(),
+            [Some(900), Some(90), Some(370)]
+        );
     }
 
     #[test]
     fn a_blacklisted_scripts_end_is_not_given_to_another_row() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
         let kept = run(0, 76, 0, &["12"], 1);
         let hidden = run(1, 76, 1, &["6697"], 1);
         // the hidden child ends inside the kept parent; the parent's own end still lands on the parent
-        inspector.finish(32, now, poll(vec![kept.clone(), hidden.clone(), ended(hidden, 2, 50), ended(kept, 3, 70)], 0, None));
+        inspector.finish(
+            32,
+            now,
+            poll(
+                vec![
+                    kept.clone(),
+                    hidden.clone(),
+                    ended(hidden, 2, 50),
+                    ended(kept, 3, 70),
+                ],
+                0,
+                None,
+            ),
+        );
         assert_eq!(inspector.visible().len(), 1);
         assert_eq!(inspector.visible()[0].duration_us, Some(70));
     }
@@ -442,9 +610,16 @@ mod tests {
     #[test]
     fn an_end_with_no_start_kept_is_ignored() {
         let now = Instant::now();
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         inspector.start(32);
-        inspector.finish(32, now, poll(vec![ended(run(0, 76, 0, &["12"], 1), 1, 50)], 0, None));
+        inspector.finish(
+            32,
+            now,
+            poll(vec![ended(run(0, 76, 0, &["12"], 1), 1, 50)], 0, None),
+        );
         assert_eq!(inspector.kept(), 0);
     }
 }

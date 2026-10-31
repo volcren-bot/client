@@ -63,17 +63,41 @@ impl Built {
     pub fn new(tree: &WidgetTree) -> Self {
         let mut nodes: Vec<Node> = Vec::with_capacity(tree.widgets.len());
         let mut by_id: HashMap<i32, usize> = HashMap::new();
-        for TreeWidget { widget, detail, dynamic, .. } in &tree.widgets {
+        for TreeWidget {
+            widget,
+            detail,
+            dynamic,
+            ..
+        } in &tree.widgets
+        {
             if !dynamic {
                 by_id.insert(widget.id, nodes.len());
             }
-            nodes.push(Node { widget: widget.clone(), detail: detail.clone(), kind: Kind::Static, children: Vec::new() });
+            nodes.push(Node {
+                widget: widget.clone(),
+                detail: detail.clone(),
+                kind: Kind::Static,
+                children: Vec::new(),
+            });
         }
-        let opened_in: HashMap<i32, i32> = tree.sub_interfaces.iter().map(|sub| (sub.group, sub.parent)).collect();
+        let opened_in: HashMap<i32, i32> = tree
+            .sub_interfaces
+            .iter()
+            .map(|sub| (sub.group, sub.parent))
+            .collect();
         let mut roots = Vec::new();
         // (parent node, order within it, child): sorted afterwards, so a node's children come out dynamic, static, nested
         let mut links: Vec<(usize, u8, usize)> = Vec::new();
-        for (index, TreeWidget { widget, dynamic, owner, .. }) in tree.widgets.iter().enumerate() {
+        for (
+            index,
+            TreeWidget {
+                widget,
+                dynamic,
+                owner,
+                ..
+            },
+        ) in tree.widgets.iter().enumerate()
+        {
             let (parent, kind) = if *dynamic {
                 (by_id.get(owner).copied(), Kind::Dynamic)
             } else if widget.parent != -1 {
@@ -81,7 +105,13 @@ impl Built {
             } else if widget.group == tree.root {
                 (None, Kind::Root)
             } else {
-                (opened_in.get(&widget.group).and_then(|mount| by_id.get(mount)).copied(), Kind::Nested)
+                (
+                    opened_in
+                        .get(&widget.group)
+                        .and_then(|mount| by_id.get(mount))
+                        .copied(),
+                    Kind::Nested,
+                )
             };
             nodes[index].kind = if parent.is_none() { Kind::Root } else { kind };
             match parent {
@@ -98,7 +128,9 @@ impl Built {
 
     /// The node for a widget, by component id and index (a dynamic child has its own index under its owner's id).
     pub fn find(&self, id: i32, index: i32) -> Option<usize> {
-        self.nodes.iter().position(|node| node.widget.id == id && node.widget.index == index)
+        self.nodes
+            .iter()
+            .position(|node| node.widget.id == id && node.widget.index == index)
     }
 
     /// The indices from a root down to `target`, for opening the tree to it.
@@ -127,8 +159,13 @@ impl Built {
                 continue;
             }
             let area = i64::from(widget.width) * i64::from(widget.height);
-            let inside = (widget.x..widget.x + widget.width).contains(&x) && (widget.y..widget.y + widget.height).contains(&y);
-            if !widget.hidden && area > 0 && inside && found.is_none_or(|(smallest, _)| area <= smallest) {
+            let inside = (widget.x..widget.x + widget.width).contains(&x)
+                && (widget.y..widget.y + widget.height).contains(&y);
+            if !widget.hidden
+                && area > 0
+                && inside
+                && found.is_none_or(|(smallest, _)| area <= smallest)
+            {
                 found = Some((area, index));
             }
             stack.extend(self.nodes[index].children.iter().rev());
@@ -181,7 +218,10 @@ pub struct Inspector {
 
 impl Inspector {
     pub fn new() -> Self {
-        Self { hide_hidden: true, ..Self::default() }
+        Self {
+            hide_hidden: true,
+            ..Self::default()
+        }
     }
 
     pub fn built(&self) -> &Built {
@@ -242,7 +282,10 @@ impl Inspector {
                 self.built = Built::new(&tree);
                 self.read = true;
                 // the selection stays if the widget is still there
-                if self.selected.is_some_and(|(id, index)| self.built.find(id, index).is_none()) {
+                if self
+                    .selected
+                    .is_some_and(|(id, index)| self.built.find(id, index).is_none())
+                {
                     self.selected = None;
                 }
             }
@@ -252,12 +295,18 @@ impl Inspector {
 
     pub fn selected_node(&self) -> Option<&Node> {
         let (id, index) = self.selected?;
-        self.built.find(id, index).map(|node| &self.built.nodes[node])
+        self.built
+            .find(id, index)
+            .map(|node| &self.built.nodes[node])
     }
 
     /// Selects the widget under the client's mouse, when "Follow mouse" is on and it is time to look.
     pub fn follow_due(&mut self, now: Instant) -> bool {
-        if !self.follow_mouse || !self.read || self.mouse_busy || self.next_follow.is_some_and(|at| now < at) {
+        if !self.follow_mouse
+            || !self.read
+            || self.mouse_busy
+            || self.next_follow.is_some_and(|at| now < at)
+        {
             return false;
         }
         self.next_follow = Some(now + FOLLOW_EVERY);
@@ -284,15 +333,25 @@ impl Inspector {
 
     /// The nodes to open so the selection shows.
     pub fn open_path(&self) -> HashSet<usize> {
-        let Some((id, index)) = self.selected else { return HashSet::new() };
-        self.built.find(id, index).map(|node| self.built.path_to(node).into_iter().collect()).unwrap_or_default()
+        let Some((id, index)) = self.selected else {
+            return HashSet::new();
+        };
+        self.built
+            .find(id, index)
+            .map(|node| self.built.path_to(node).into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// The layer that draws the selected widget's bounds on the client (see `injector::scene_tiles`).
     pub fn highlight_layers(&self) -> Vec<String> {
         self.selected_node()
             .filter(|node| node.widget.width > 0 && node.widget.height > 0)
-            .map(|node| format!("widget:{},{},{},{},{SELECTED_COLOR}", node.widget.x, node.widget.y, node.widget.width, node.widget.height))
+            .map(|node| {
+                format!(
+                    "widget:{},{},{},{},{SELECTED_COLOR}",
+                    node.widget.x, node.widget.y, node.widget.width, node.widget.height
+                )
+            })
             .into_iter()
             .collect()
     }
@@ -300,8 +359,20 @@ impl Inspector {
     /// The fields of a widget the loader can read, as (name, value) rows: RuneLite's, in its order, for those the agent reads.
     pub fn fields(&self, node: &Node) -> Vec<(&'static str, String)> {
         let (w, d) = (&node.widget, &node.detail);
-        let color = |value: i32| if value < 0 { "none".to_owned() } else { format!("{value} (#{:06x})", value & 0xffffff) };
-        let id_text = |id: i32| if id == -1 { "-1".to_owned() } else { format!("{id} ({}.{})", id >> 16, id & 0xffff) };
+        let color = |value: i32| {
+            if value < 0 {
+                "none".to_owned()
+            } else {
+                format!("{value} (#{:06x})", value & 0xffffff)
+            }
+        };
+        let id_text = |id: i32| {
+            if id == -1 {
+                "-1".to_owned()
+            } else {
+                format!("{id} ({}.{})", id >> 16, id & 0xffff)
+            }
+        };
         vec![
             ("Id", format!("{} ({})", w.id, self.identifier(w))),
             ("Node", node.kind.letter().to_string()),
@@ -337,7 +408,10 @@ impl Inspector {
             ("Width", w.width.to_string()),
             ("Height", w.height.to_string()),
             ("CanvasLocation", format!("{}, {}", w.x, w.y)),
-            ("Bounds", format!("{}, {}, {}, {}", w.x, w.y, w.width, w.height)),
+            (
+                "Bounds",
+                format!("{}, {}, {}, {}", w.x, w.y, w.width, w.height),
+            ),
             ("ScrollX", w.scroll_x.to_string()),
             ("ScrollY", w.scroll_y.to_string()),
             ("ScrollWidth", w.scroll_width.to_string()),
@@ -385,13 +459,43 @@ mod tests {
         let id = |group: i32, child: i32| group << 16 | child;
         WidgetTree {
             root: 161,
-            sub_interfaces: vec![SubInterface { group: 149, parent: id(161, 2), parent_group: 161, parent_child: 2 }],
+            sub_interfaces: vec![SubInterface {
+                group: 149,
+                parent: id(161, 2),
+                parent_group: 161,
+                parent_child: 2,
+            }],
             widgets: vec![
-                TreeWidget { widget: at(widget(161, 0, -1, -1), 0, 0, 500, 400), detail: WidgetDetail::default(), dynamic: false, owner: -1 },
-                TreeWidget { widget: widget(161, 2, id(161, 0), -1), detail: WidgetDetail::default(), dynamic: false, owner: -1 },
-                TreeWidget { widget: at(widget(149, 0, -1, -1), 20, 20, 100, 100), detail: WidgetDetail::default(), dynamic: false, owner: -1 },
-                TreeWidget { widget: at(widget(149, 1, id(149, 0), -1), 30, 30, 20, 20), detail: WidgetDetail::default(), dynamic: false, owner: -1 },
-                TreeWidget { widget: at(widget(149, 0, id(149, 0), 0), 40, 40, 5, 5), detail: WidgetDetail::default(), dynamic: true, owner: id(149, 0) },
+                TreeWidget {
+                    widget: at(widget(161, 0, -1, -1), 0, 0, 500, 400),
+                    detail: WidgetDetail::default(),
+                    dynamic: false,
+                    owner: -1,
+                },
+                TreeWidget {
+                    widget: widget(161, 2, id(161, 0), -1),
+                    detail: WidgetDetail::default(),
+                    dynamic: false,
+                    owner: -1,
+                },
+                TreeWidget {
+                    widget: at(widget(149, 0, -1, -1), 20, 20, 100, 100),
+                    detail: WidgetDetail::default(),
+                    dynamic: false,
+                    owner: -1,
+                },
+                TreeWidget {
+                    widget: at(widget(149, 1, id(149, 0), -1), 30, 30, 20, 20),
+                    detail: WidgetDetail::default(),
+                    dynamic: false,
+                    owner: -1,
+                },
+                TreeWidget {
+                    widget: at(widget(149, 0, id(149, 0), 0), 40, 40, 5, 5),
+                    detail: WidgetDetail::default(),
+                    dynamic: true,
+                    owner: id(149, 0),
+                },
             ],
         }
     }
@@ -444,21 +548,45 @@ mod tests {
     fn the_selection_survives_a_refresh_and_draws_a_box() {
         let mut inspector = Inspector::new();
         inspector.start(1);
-        inspector.finish(1, Ok(Poll { tree: tree(), names: vec![(149, "inventory".into())] }));
+        inspector.finish(
+            1,
+            Ok(Poll {
+                tree: tree(),
+                names: vec![(149, "inventory".into())],
+            }),
+        );
         inspector.pick_at(31, 31);
         assert_eq!(inspector.selected, Some((149 << 16 | 1, -1)));
         assert!(inspector.reveal);
         assert_eq!(inspector.highlight_layers(), ["widget:30,30,20,20,00ffff"]);
-        assert_eq!(inspector.identifier(&inspector.built().nodes[3].widget), "149.1 inventory");
-        assert_eq!(inspector.identifier(&inspector.built().nodes[4].widget), "149.0[0] inventory");
+        assert_eq!(
+            inspector.identifier(&inspector.built().nodes[3].widget),
+            "149.1 inventory"
+        );
+        assert_eq!(
+            inspector.identifier(&inspector.built().nodes[4].widget),
+            "149.0[0] inventory"
+        );
         inspector.start(1);
-        inspector.finish(1, Ok(Poll { tree: tree(), names: vec![] }));
+        inspector.finish(
+            1,
+            Ok(Poll {
+                tree: tree(),
+                names: vec![],
+            }),
+        );
         assert_eq!(inspector.selected, Some((149 << 16 | 1, -1)));
         // a widget that went away is no longer selected
         let mut gone = tree();
         gone.widgets.remove(3);
         inspector.start(1);
-        inspector.finish(1, Ok(Poll { tree: gone, names: vec![] }));
+        inspector.finish(
+            1,
+            Ok(Poll {
+                tree: gone,
+                names: vec![],
+            }),
+        );
         assert_eq!(inspector.selected, None);
         assert!(inspector.highlight_layers().is_empty());
     }

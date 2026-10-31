@@ -33,7 +33,9 @@ struct Index {
 
 /// The lib to use: the newest the loader can run, and whether a newer one exists that it can't.
 fn choose(releases: &[Release], host_api: u32) -> Option<(&Release, bool)> {
-    let position = releases.iter().position(|release| release.requires_host <= host_api)?;
+    let position = releases
+        .iter()
+        .position(|release| release.requires_host <= host_api)?;
     Some((&releases[position], position > 0))
 }
 
@@ -50,11 +52,18 @@ const OUTDATED: &str = "A newer script library is available but needs a newer lo
 /// Makes sure `<root>/lib` is the newest published lib this loader can run; offline, a cached lib is used.
 pub fn ensure(api: &Api, root: &Path) -> Result<Lib, String> {
     let dir = root.join("lib");
-    let installed = fs::read_to_string(dir.join(VERSION_FILE)).ok().map(|v| v.trim().to_owned());
+    let installed = fs::read_to_string(dir.join(VERSION_FILE))
+        .ok()
+        .map(|v| v.trim().to_owned());
     let cached = |why: String| match &installed {
         Some(version) => {
-            eprintln!("lib: using the cached copy ({version}), couldn't check for a newer one: {why}");
-            Ok(Lib { version: version.clone(), warning: None })
+            eprintln!(
+                "lib: using the cached copy ({version}), couldn't check for a newer one: {why}"
+            );
+            Ok(Lib {
+                version: version.clone(),
+                warning: None,
+            })
         }
         None => Err(format!("Couldn't get the script library: {why}")),
     };
@@ -71,24 +80,45 @@ pub fn ensure(api: &Api, root: &Path) -> Result<Lib, String> {
     {
         return cached(error).map(|lib| Lib { warning, ..lib });
     }
-    Ok(Lib { version: release.version.clone(), warning })
+    Ok(Lib {
+        version: release.version.clone(),
+        warning,
+    })
 }
 
 fn fetch_index(api: &Api) -> Result<Index, String> {
-    let mut response = api.agent().get(&bucket_url(api, "lib/index.json")).call().map_err(|e| e.to_string())?;
+    let mut response = api
+        .agent()
+        .get(&bucket_url(api, "lib/index.json"))
+        .call()
+        .map_err(|e| e.to_string())?;
     if !response.status().is_success() {
         return Err(format!("the server answered {}", response.status()));
     }
-    response.body_mut().read_json().map_err(|e| format!("unexpected lib index: {e}"))
+    response
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("unexpected lib index: {e}"))
 }
 
 fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
-    if manifest.path.split('/').any(|part| part.is_empty() || part == "..") {
+    if manifest
+        .path
+        .split('/')
+        .any(|part| part.is_empty() || part == "..")
+    {
         return Err("the lib manifest has a path that can't be used".into());
     }
-    let mut response = api.agent().get(&bucket_url(api, &manifest.path)).call().map_err(|e| format!("Couldn't download the script library: {e}"))?;
+    let mut response = api
+        .agent()
+        .get(&bucket_url(api, &manifest.path))
+        .call()
+        .map_err(|e| format!("Couldn't download the script library: {e}"))?;
     if !response.status().is_success() {
-        return Err(format!("Couldn't download the script library: the server answered {}.", response.status()));
+        return Err(format!(
+            "Couldn't download the script library: the server answered {}.",
+            response.status()
+        ));
     }
     let bytes = response
         .body_mut()
@@ -105,7 +135,9 @@ fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("Couldn't create the cache folder: {e}"))?;
     let result = unpack(&bytes, &staging)
-        .and_then(|()| fs::write(staging.join(VERSION_FILE), &manifest.version).map_err(|e| e.to_string()))
+        .and_then(|()| {
+            fs::write(staging.join(VERSION_FILE), &manifest.version).map_err(|e| e.to_string())
+        })
         .and_then(|()| {
             let dir = root.join("lib");
             let _ = fs::remove_dir_all(&dir);
@@ -123,8 +155,15 @@ fn safe_entry(name: &str) -> Option<PathBuf> {
         return None;
     }
     let path = Path::new(name);
-    let plain = path.components().all(|part| matches!(part, Component::Normal(part) if !part.to_string_lossy().starts_with('.')));
-    (plain && matches!(path.extension().and_then(|e| e.to_str()), Some("luau" | "lua"))).then(|| path.to_path_buf())
+    let plain = path.components().all(
+        |part| matches!(part, Component::Normal(part) if !part.to_string_lossy().starts_with('.')),
+    );
+    (plain
+        && matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("luau" | "lua")
+        ))
+    .then(|| path.to_path_buf())
 }
 
 fn unpack(bytes: &[u8], into: &Path) -> Result<(), String> {
@@ -138,9 +177,14 @@ fn unpack(bytes: &[u8], into: &Path) -> Result<(), String> {
             continue;
         }
         let name = entry.name().map_err(|e| e.to_string())?.into_owned();
-        let relative = safe_entry(&name).ok_or_else(|| format!("the archive has a file that can't be used: {name:?}"))?;
+        let relative = safe_entry(&name)
+            .ok_or_else(|| format!("the archive has a file that can't be used: {name:?}"))?;
         let mut contents = Vec::new();
-        entry.by_ref().take(MAX_FILE_BYTES + 1).read_to_end(&mut contents).map_err(|e| e.to_string())?;
+        entry
+            .by_ref()
+            .take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut contents)
+            .map_err(|e| e.to_string())?;
         if contents.len() as u64 > MAX_FILE_BYTES {
             return Err(format!("{} is too large", relative.display()));
         }
@@ -167,7 +211,12 @@ mod tests {
     fn archive(files: &[(&str, &str)]) -> Vec<u8> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         for (name, text) in files {
-            writer.start_file(*name, SimpleFileOptions::default().compression_method(CompressionMethod::Deflated)).unwrap();
+            writer
+                .start_file(
+                    *name,
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+                )
+                .unwrap();
             writer.write_all(text.as_bytes()).unwrap();
         }
         writer.finish().unwrap().into_inner()
@@ -182,18 +231,41 @@ mod tests {
 
     #[test]
     fn entries_cannot_escape_the_lib_folder() {
-        for bad in ["../x.luau", "/etc/x.luau", "a/../../x.luau", "a\\b.luau", "C:x.luau", ".hidden.luau", "a/.git/x.luau", "x.exe", "x"] {
+        for bad in [
+            "../x.luau",
+            "/etc/x.luau",
+            "a/../../x.luau",
+            "a\\b.luau",
+            "C:x.luau",
+            ".hidden.luau",
+            "a/.git/x.luau",
+            "x.exe",
+            "x",
+        ] {
             assert_eq!(safe_entry(bad), None, "{bad:?}");
         }
         assert_eq!(safe_entry("host.luau"), Some(PathBuf::from("host.luau")));
-        assert_eq!(safe_entry("main/interfaces/login.luau"), Some(PathBuf::from("main/interfaces/login.luau")));
+        assert_eq!(
+            safe_entry("main/interfaces/login.luau"),
+            Some(PathBuf::from("main/interfaces/login.luau"))
+        );
     }
 
     #[test]
     fn unpacks_a_lib_with_folders() {
         let dir = temp("lib-ok");
-        unpack(&archive(&[("host.luau", "return {}"), ("main/game_state.luau", "return 1")]), &dir).unwrap();
-        assert_eq!(fs::read_to_string(dir.join("main/game_state.luau")).unwrap(), "return 1");
+        unpack(
+            &archive(&[
+                ("host.luau", "return {}"),
+                ("main/game_state.luau", "return 1"),
+            ]),
+            &dir,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("main/game_state.luau")).unwrap(),
+            "return 1"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -203,21 +275,40 @@ mod tests {
         assert!(unpack(&archive(&[("host.luau", ""), ("../evil.luau", "")]), &dir).is_err());
         assert!(!dir.parent().unwrap().join("evil.luau").exists());
         let _ = fs::remove_dir_all(&dir);
-        assert!(unpack(&archive(&[("main/x.luau", "")]), &temp("lib-bad")).unwrap_err().contains("host.luau"));
+        assert!(
+            unpack(&archive(&[("main/x.luau", "")]), &temp("lib-bad"))
+                .unwrap_err()
+                .contains("host.luau")
+        );
         assert!(unpack(b"not a zip", &temp("lib-bad")).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
     fn release(version: &str, requires_host: u32) -> Release {
-        Release { version: version.into(), requires_host, path: format!("lib/{version}/lib.zip"), sha256: String::new() }
+        Release {
+            version: version.into(),
+            requires_host,
+            path: format!("lib/{version}/lib.zip"),
+            sha256: String::new(),
+        }
     }
 
     #[test]
     fn picks_the_newest_lib_the_loader_can_run() {
         let releases = [release("c", 3), release("b", 2), release("a", 1)];
-        assert_eq!(choose(&releases, 3).map(|(r, outdated)| (r.version.as_str(), outdated)), Some(("c", false)));
-        assert_eq!(choose(&releases, 2).map(|(r, outdated)| (r.version.as_str(), outdated)), Some(("b", true)), "c needs a newer loader");
-        assert_eq!(choose(&releases, 1).map(|(r, outdated)| (r.version.as_str(), outdated)), Some(("a", true)));
+        assert_eq!(
+            choose(&releases, 3).map(|(r, outdated)| (r.version.as_str(), outdated)),
+            Some(("c", false))
+        );
+        assert_eq!(
+            choose(&releases, 2).map(|(r, outdated)| (r.version.as_str(), outdated)),
+            Some(("b", true)),
+            "c needs a newer loader"
+        );
+        assert_eq!(
+            choose(&releases, 1).map(|(r, outdated)| (r.version.as_str(), outdated)),
+            Some(("a", true))
+        );
         assert!(choose(&releases, 0).is_none());
         assert!(choose(&[], 1).is_none());
     }

@@ -14,9 +14,15 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let compiled: Self = serde_json::from_str(include_str!("../../config.json")).expect("config.json is valid");
+        let compiled: Self =
+            serde_json::from_str(include_str!("../../config.json")).expect("config.json is valid");
         let var = |name: &str, compiled: String| {
-            std::env::var(name).ok().unwrap_or(compiled).trim().trim_end_matches('/').to_owned()
+            std::env::var(name)
+                .ok()
+                .unwrap_or(compiled)
+                .trim()
+                .trim_end_matches('/')
+                .to_owned()
         };
         Self {
             api_url: var("API_URL", compiled.api_url),
@@ -28,11 +34,15 @@ impl Config {
 
     /// Names of the settings that are empty, so the UI can say what is missing instead of failing on a blank URL.
     pub fn missing(&self) -> Vec<&'static str> {
-        [("API_URL", &self.api_url), ("SUPABASE_URL", &self.supabase_url), ("SUPABASE_ANON_KEY", &self.anon_key)]
-            .into_iter()
-            .filter(|(_, value)| value.is_empty())
-            .map(|(name, _)| name)
-            .collect()
+        [
+            ("API_URL", &self.api_url),
+            ("SUPABASE_URL", &self.supabase_url),
+            ("SUPABASE_ANON_KEY", &self.anon_key),
+        ]
+        .into_iter()
+        .filter(|(_, value)| value.is_empty())
+        .map(|(name, _)| name)
+        .collect()
     }
 
     pub fn api(&self, path: &str) -> String {
@@ -62,8 +72,14 @@ mod tests {
             anon_key: String::new(),
             site_url: String::new(),
         };
-        assert_eq!(config.api("/api/launcher/me"), "http://localhost:5173/api/launcher/me");
-        assert_eq!(config.auth("/token"), "http://localhost:54321/auth/v1/token");
+        assert_eq!(
+            config.api("/api/launcher/me"),
+            "http://localhost:5173/api/launcher/me"
+        );
+        assert_eq!(
+            config.auth("/token"),
+            "http://localhost:54321/auth/v1/token"
+        );
         assert_eq!(config.missing(), ["SUPABASE_ANON_KEY"]);
     }
 }

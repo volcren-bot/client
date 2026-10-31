@@ -15,7 +15,10 @@ pub struct Log<T> {
 
 impl<T> Default for Log<T> {
     fn default() -> Self {
-        Self { rows: VecDeque::new(), first: 0 }
+        Self {
+            rows: VecDeque::new(),
+            first: 0,
+        }
     }
 }
 
@@ -83,17 +86,32 @@ struct Cache<K> {
 
 impl<K> Default for Filtered<K> {
     fn default() -> Self {
-        Self { cache: RefCell::new(Cache { key: None, seen: 0, shown: VecDeque::new() }) }
+        Self {
+            cache: RefCell::new(Cache {
+                key: None,
+                seen: 0,
+                shown: VecDeque::new(),
+            }),
+        }
     }
 }
 
 impl<K: PartialEq> Filtered<K> {
     /// The rows of `log` that `shows`, filtering only the rows new since the last call unless `key` changed.
-    pub fn view<'a, T>(&'a self, log: &'a Log<T>, key: K, shows: impl Fn(&T) -> bool) -> View<'a, T, K> {
+    pub fn view<'a, T>(
+        &'a self,
+        log: &'a Log<T>,
+        key: K,
+        shows: impl Fn(&T) -> bool,
+    ) -> View<'a, T, K> {
         let mut cache = self.cache.borrow_mut();
         // a log that ends before what was seen is another log: filter it all
         let from = if cache.key.as_ref() == Some(&key) && cache.seen <= log.end() {
-            while cache.shown.front().is_some_and(|&number| number < log.first) {
+            while cache
+                .shown
+                .front()
+                .is_some_and(|&number| number < log.first)
+            {
                 cache.shown.pop_front();
             }
             cache.seen.max(log.first)
@@ -109,7 +127,10 @@ impl<K: PartialEq> Filtered<K> {
         }
         cache.seen = log.end();
         drop(cache);
-        View { log, shown: self.cache.borrow() }
+        View {
+            log,
+            shown: self.cache.borrow(),
+        }
     }
 }
 
@@ -130,12 +151,18 @@ impl<'a, T, K> View<'a, T, K> {
     }
 
     pub fn get(&self, index: usize) -> Option<&'a T> {
-        self.shown.shown.get(index).map(|&number| self.log.row(number))
+        self.shown
+            .shown
+            .get(index)
+            .map(|&number| self.log.row(number))
     }
 
     #[cfg(test)]
     pub fn range(&self, rows: std::ops::Range<usize>) -> impl Iterator<Item = &'a T> + '_ {
-        self.shown.shown.range(rows).map(|&number| self.log.row(number))
+        self.shown
+            .shown
+            .range(rows)
+            .map(|&number| self.log.row(number))
     }
 
     #[cfg(test)]
@@ -176,14 +203,26 @@ mod tests {
             }
         };
         log.extend(0..10);
-        assert_eq!(shown(filtered.view(&log, false, parity(false))), [0, 2, 4, 6, 8]);
+        assert_eq!(
+            shown(filtered.view(&log, false, parity(false))),
+            [0, 2, 4, 6, 8]
+        );
         assert_eq!(looked.replace(0), 10);
-        assert_eq!(shown(filtered.view(&log, false, parity(false))), [0, 2, 4, 6, 8]);
+        assert_eq!(
+            shown(filtered.view(&log, false, parity(false))),
+            [0, 2, 4, 6, 8]
+        );
         assert_eq!(looked.replace(0), 0);
         log.extend(10..13);
-        assert_eq!(shown(filtered.view(&log, false, parity(false))), [0, 2, 4, 6, 8, 10, 12]);
+        assert_eq!(
+            shown(filtered.view(&log, false, parity(false))),
+            [0, 2, 4, 6, 8, 10, 12]
+        );
         assert_eq!(looked.replace(0), 3);
-        assert_eq!(shown(filtered.view(&log, true, parity(true))), [1, 3, 5, 7, 9, 11]);
+        assert_eq!(
+            shown(filtered.view(&log, true, parity(true))),
+            [1, 3, 5, 7, 9, 11]
+        );
         assert_eq!(looked.replace(0), 13);
     }
 
@@ -203,7 +242,14 @@ mod tests {
         log.clear();
         assert!(filtered.view(&log, (), |_| true).is_empty());
         log.push(11);
-        assert_eq!(filtered.view(&log, (), |_| true).iter().copied().collect::<Vec<_>>(), [11]);
+        assert_eq!(
+            filtered
+                .view(&log, (), |_| true)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [11]
+        );
     }
 
     #[test]
@@ -214,6 +260,13 @@ mod tests {
         assert_eq!(filtered.view(&log, (), |_| true).len(), 5);
         let mut fresh = Log::default();
         fresh.extend(0..2);
-        assert_eq!(filtered.view(&fresh, (), |_| true).iter().copied().collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(
+            filtered
+                .view(&fresh, (), |_| true)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 }

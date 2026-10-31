@@ -1,8 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod api;
 mod account;
 mod accounts;
+mod api;
 mod app;
 mod breaks;
 mod counters;
@@ -10,11 +10,16 @@ mod counters;
 mod fake_api;
 #[cfg(test)]
 mod flow_tests;
-mod form;
 mod fold;
+mod form;
 mod highlight;
 mod http;
 mod inventory;
+mod libs;
+mod log_view;
+mod logo;
+mod packet_defs;
+mod packets;
 mod script;
 mod script_log;
 mod script_names;
@@ -22,11 +27,6 @@ mod session;
 mod store;
 mod terminal;
 mod theme;
-mod libs;
-mod log_view;
-mod logo;
-mod packet_defs;
-mod packets;
 mod update;
 mod vars;
 mod whitelist;

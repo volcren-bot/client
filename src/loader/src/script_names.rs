@@ -27,46 +27,82 @@ pub struct Names {
 
 /// `name` from `[clientscript,name].cs2` or `[proc,name].cs2`; scripts the decompiler couldn't name (`script4730`) have none.
 fn script_name(file: &str) -> Option<&str> {
-    let name = file.strip_suffix(".cs2")?.strip_prefix('[')?.strip_suffix(']')?;
+    let name = file
+        .strip_suffix(".cs2")?
+        .strip_prefix('[')?
+        .strip_suffix(']')?;
     let (kind, name) = name.split_once(',')?;
-    let unnamed = name.strip_prefix("script").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
+    let unnamed = name
+        .strip_prefix("script")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()));
     (matches!(kind, "clientscript" | "proc") && !name.is_empty() && !unnamed).then_some(name)
 }
 
 /// The script id in the first line of a file: `// 6697`, or an error from the decompiler like `... in script 5474 not implemented`.
 fn script_id(head: &str) -> Option<i32> {
     let line = head.lines().next()?.trim();
-    let digits = line.strip_prefix("// ").or_else(|| line.split_once("in script ").map(|(_, rest)| rest))?;
-    let end = digits.find(|c: char| !c.is_ascii_digit()).unwrap_or(digits.len());
+    let digits = line
+        .strip_prefix("// ")
+        .or_else(|| line.split_once("in script ").map(|(_, rest)| rest))?;
+    let end = digits
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(digits.len());
     digits[..end].parse().ok()
 }
 
 impl Names {
     /// Names from (file name, start of the file) pairs; files that aren't named scripts, or whose id can't be read, are left out.
     fn from_files<'a>(files: impl Iterator<Item = (&'a str, String)>, source: String) -> Self {
-        let mut names = Self { source, ..Self::default() };
+        let mut names = Self {
+            source,
+            ..Self::default()
+        };
         for (file, head) in files {
-            let (Some(name), Some(id)) = (script_name(file), script_id(&head)) else { continue };
+            let (Some(name), Some(id)) = (script_name(file), script_id(&head)) else {
+                continue;
+            };
             names.by_id.insert(id, name.to_owned());
-            names.by_name.entry(name.to_ascii_lowercase()).or_default().push(id);
+            names
+                .by_name
+                .entry(name.to_ascii_lowercase())
+                .or_default()
+                .push(id);
         }
         names
     }
 
     /// Names from the repository's zip: the commit it is of is in the archive's comment.
     pub fn from_zip(zip: &[u8]) -> Result<Self, String> {
-        let mut archive = zip::ZipArchive::new(Cursor::new(zip)).map_err(|e| format!("the download isn't a zip: {e}"))?;
-        let source = String::from_utf8_lossy(archive.comment()).chars().take(7).collect();
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip))
+            .map_err(|e| format!("the download isn't a zip: {e}"))?;
+        let source = String::from_utf8_lossy(archive.comment())
+            .chars()
+            .take(7)
+            .collect();
         let mut files = Vec::new();
         for index in 0..archive.len() {
             let file = archive.by_index(index).map_err(|e| e.to_string())?;
             let Ok(path) = file.name() else { continue };
-            let Some(base) = path.rsplit('/').next().filter(|base| script_name(base).is_some()).map(str::to_owned) else { continue };
+            let Some(base) = path
+                .rsplit('/')
+                .next()
+                .filter(|base| script_name(base).is_some())
+                .map(str::to_owned)
+            else {
+                continue;
+            };
             let mut head = Vec::new();
-            file.take(HEAD).read_to_end(&mut head).map_err(|e| format!("{base}: {e}"))?;
+            file.take(HEAD)
+                .read_to_end(&mut head)
+                .map_err(|e| format!("{base}: {e}"))?;
             files.push((base, String::from_utf8_lossy(&head).into_owned()));
         }
-        let names = Self::from_files(files.iter().map(|(file, head)| (file.as_str(), head.clone())), source);
+        let names = Self::from_files(
+            files
+                .iter()
+                .map(|(file, head)| (file.as_str(), head.clone())),
+            source,
+        );
         if names.is_empty() {
             return Err("the download has no script names".into());
         }
@@ -75,9 +111,21 @@ impl Names {
 
     /// Downloads the names; slow (the whole repository), so not on the UI thread.
     pub fn download() -> Result<Self, String> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION"))).build().into();
-        let mut response = agent.get(URL).call().map_err(|e| format!("couldn't download the script names: {e}"))?;
-        let zip = response.body_mut().with_config().limit(MAX_DOWNLOAD).read_to_vec().map_err(|e| format!("couldn't download the script names: {e}"))?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION")))
+            .build()
+            .into();
+        let mut response = agent
+            .get(URL)
+            .call()
+            .map_err(|e| format!("couldn't download the script names: {e}"))?;
+        let zip = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_DOWNLOAD)
+            .read_to_vec()
+            .map_err(|e| format!("couldn't download the script names: {e}"))?;
         Self::from_zip(&zip)
     }
 
@@ -96,14 +144,24 @@ impl Names {
 
     /// The ids named `name`, in any case; a client script and a proc can share a name.
     pub fn ids(&self, name: &str) -> &[i32] {
-        self.by_name.get(&name.to_ascii_lowercase()).map_or(&[], Vec::as_slice)
+        self.by_name
+            .get(&name.to_ascii_lowercase())
+            .map_or(&[], Vec::as_slice)
     }
 }
 
 #[cfg(test)]
 pub fn names_for_test(pairs: &[(i32, &str)]) -> Names {
-    let files: Vec<(String, String)> = pairs.iter().map(|(id, name)| (format!("[clientscript,{name}].cs2"), format!("// {id}\n"))).collect();
-    Names::from_files(files.iter().map(|(file, head)| (file.as_str(), head.clone())), "test".into())
+    let files: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(id, name)| (format!("[clientscript,{name}].cs2"), format!("// {id}\n")))
+        .collect();
+    Names::from_files(
+        files
+            .iter()
+            .map(|(file, head)| (file.as_str(), head.clone())),
+        "test".into(),
+    )
 }
 
 #[cfg(test)]
@@ -113,10 +171,16 @@ mod tests {
 
     #[test]
     fn only_named_scripts_have_names() {
-        assert_eq!(script_name("[clientscript,npc_name_timer].cs2"), Some("npc_name_timer"));
+        assert_eq!(
+            script_name("[clientscript,npc_name_timer].cs2"),
+            Some("npc_name_timer")
+        );
         assert_eq!(script_name("[proc,hex_to_rgb].cs2"), Some("hex_to_rgb"));
         assert_eq!(script_name("[clientscript,script4730].cs2"), None);
-        assert_eq!(script_name("[proc,script_helper].cs2"), Some("script_helper"));
+        assert_eq!(
+            script_name("[proc,script_helper].cs2"),
+            Some("script_helper")
+        );
         assert_eq!(script_name("README.md"), None);
         assert_eq!(script_name("[other,x].cs2"), None);
     }
@@ -124,8 +188,16 @@ mod tests {
     #[test]
     fn the_id_is_in_the_first_line_or_in_a_decompiler_error() {
         assert_eq!(script_id("// 3604\n[clientscript,x]()\n"), Some(3604));
-        assert_eq!(script_id("java.lang.IllegalStateException: Opcode 7204 in script 5474 not implemented"), Some(5474));
-        assert_eq!(script_id("java.lang.IllegalStateException: Check failed."), None);
+        assert_eq!(
+            script_id(
+                "java.lang.IllegalStateException: Opcode 7204 in script 5474 not implemented"
+            ),
+            Some(5474)
+        );
+        assert_eq!(
+            script_id("java.lang.IllegalStateException: Check failed."),
+            None
+        );
         assert_eq!(script_id(""), None);
     }
 
@@ -134,7 +206,10 @@ mod tests {
         let names = names_for_test(&[(6697, "npc_name_timer"), (2, "hex_to_rgb")]);
         assert_eq!(names.name(6697), Some("npc_name_timer"));
         assert_eq!(names.ids("NPC_name_timer"), [6697]);
-        assert_eq!((names.name(5), names.ids("nope").len(), names.len()), (None, 0, 2));
+        assert_eq!(
+            (names.name(5), names.ids("nope").len(), names.len()),
+            (None, 0, 2)
+        );
     }
 
     #[test]
@@ -145,9 +220,18 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
             zip.set_comment("404eb7bdeadbeef");
             for (path, body) in [
-                ("cs2-scripts-master/scripts/[clientscript,npc_name_timer].cs2", "// 6697\nbody\n"),
-                ("cs2-scripts-master/scripts/[proc,broken].cs2", "java.lang.IllegalStateException: x in script 12 y\n"),
-                ("cs2-scripts-master/scripts/[clientscript,script4730].cs2", "// 4730\n"),
+                (
+                    "cs2-scripts-master/scripts/[clientscript,npc_name_timer].cs2",
+                    "// 6697\nbody\n",
+                ),
+                (
+                    "cs2-scripts-master/scripts/[proc,broken].cs2",
+                    "java.lang.IllegalStateException: x in script 12 y\n",
+                ),
+                (
+                    "cs2-scripts-master/scripts/[clientscript,script4730].cs2",
+                    "// 4730\n",
+                ),
                 ("cs2-scripts-master/README.md", "hello"),
             ] {
                 zip.start_file(path, options).unwrap();
@@ -156,7 +240,15 @@ mod tests {
             zip.finish().unwrap();
         }
         let names = Names::from_zip(&bytes).unwrap();
-        assert_eq!((names.name(6697), names.name(12), names.name(4730), names.source.as_str()), (Some("npc_name_timer"), Some("broken"), None, "404eb7b"));
+        assert_eq!(
+            (
+                names.name(6697),
+                names.name(12),
+                names.name(4730),
+                names.source.as_str()
+            ),
+            (Some("npc_name_timer"), Some("broken"), None, "404eb7b")
+        );
         assert!(Names::from_zip(b"not a zip").is_err());
     }
 

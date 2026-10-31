@@ -33,7 +33,10 @@ impl CountersTracker {
     }
 
     fn label_of(&self, id: &str) -> Option<(&str, f64)> {
-        self.counters.iter().find(|c| c.id == id).map(|c| (c.label.as_str(), c.value))
+        self.counters
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| (c.label.as_str(), c.value))
     }
 
     /// The rows with rates over the run up to the last report, in the order the script sent them.
@@ -45,16 +48,25 @@ impl CountersTracker {
                 let per_hour = (c.hourly && hours > 0.0).then(|| c.value / hours);
                 let ratio = if let Some(of) = c.percent_of.as_deref() {
                     Some(match self.label_of(of) {
-                        Some((label, whole)) if whole > 0.0 => format!("{} of {label}", percent(c.value * 100.0 / whole)),
+                        Some((label, whole)) if whole > 0.0 => {
+                            format!("{} of {label}", percent(c.value * 100.0 / whole))
+                        }
                         _ => "-".into(),
                     })
                 } else {
                     c.per.as_deref().map(|per| match self.label_of(per) {
-                        Some((label, by)) if by > 0.0 => format!("{} per {label}", number(c.value / by)),
+                        Some((label, by)) if by > 0.0 => {
+                            format!("{} per {label}", number(c.value / by))
+                        }
                         _ => "-".into(),
                     })
                 };
-                CounterRow { label: c.label.clone(), total: c.value, per_hour, ratio }
+                CounterRow {
+                    label: c.label.clone(),
+                    total: c.value,
+                    per_hour,
+                    ratio,
+                }
             })
             .collect()
     }
@@ -77,7 +89,14 @@ mod tests {
     use super::*;
 
     fn counter(id: &str, label: &str, value: f64) -> Counter {
-        Counter { id: id.into(), label: label.into(), value, hourly: true, per: None, percent_of: None }
+        Counter {
+            id: id.into(),
+            label: label.into(),
+            value,
+            hourly: true,
+            per: None,
+            percent_of: None,
+        }
     }
 
     #[test]
@@ -88,7 +107,10 @@ mod tests {
         let mut points = counter("points", "Points", 9_000.0);
         points.per = Some("games".into());
         points.hourly = false;
-        tracker.update(vec![counter("games", "Games", 12.0), wins, points], Duration::from_secs(1800));
+        tracker.update(
+            vec![counter("games", "Games", 12.0), wins, points],
+            Duration::from_secs(1800),
+        );
 
         let rows = tracker.rows();
         assert_eq!((rows[0].total, rows[0].per_hour), (12.0, Some(24.0)));
@@ -98,7 +120,10 @@ mod tests {
 
         // rates hold still until the next report, which brings new totals and a new clock
         assert_eq!(tracker.rows()[0].per_hour, Some(24.0));
-        tracker.update(vec![counter("games", "Games", 24.0)], Duration::from_secs(3600));
+        tracker.update(
+            vec![counter("games", "Games", 24.0)],
+            Duration::from_secs(3600),
+        );
         assert_eq!(tracker.rows()[0].per_hour, Some(24.0));
         tracker.update(vec![counter("games", "Games", 24.0)], Duration::ZERO);
         assert_eq!(tracker.rows()[0].per_hour, None);
@@ -111,7 +136,10 @@ mod tests {
         wins.percent_of = Some("games".into());
         let mut points = counter("points", "Points", 5.0);
         points.per = Some("nothing".into());
-        tracker.update(vec![wins, points, counter("games", "Games", 0.0)], Duration::from_secs(60));
+        tracker.update(
+            vec![wins, points, counter("games", "Games", 0.0)],
+            Duration::from_secs(60),
+        );
         let rows = tracker.rows();
         assert_eq!(rows[0].ratio.as_deref(), Some("-"));
         assert_eq!(rows[1].ratio.as_deref(), Some("-"));

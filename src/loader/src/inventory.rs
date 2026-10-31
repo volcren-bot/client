@@ -46,7 +46,11 @@ const MAX_COPIES: i64 = 4096;
 pub type Delta = (i32, i32);
 
 /// Items `current` has that `previous` didn't (added) and the reverse (removed), summed by id; unknown items are taken to stack.
-pub fn compare(previous: &[Item], current: &[Item], stackable: impl Fn(i32) -> bool) -> (Vec<Delta>, Vec<Delta>) {
+pub fn compare(
+    previous: &[Item],
+    current: &[Item],
+    stackable: impl Fn(i32) -> bool,
+) -> (Vec<Delta>, Vec<Delta>) {
     let mut quantities: BTreeMap<i32, i64> = BTreeMap::new();
     for item in previous.iter().filter(|item| item.id >= 0) {
         *quantities.entry(item.id).or_default() -= i64::from(item.quantity);
@@ -56,12 +60,19 @@ pub fn compare(previous: &[Item], current: &[Item], stackable: impl Fn(i32) -> b
     }
     let (mut added, mut removed) = (Vec::new(), Vec::new());
     for (id, quantity) in quantities {
-        let (list, copies) = if quantity > 0 { (&mut added, quantity) } else { (&mut removed, -quantity) };
+        let (list, copies) = if quantity > 0 {
+            (&mut added, quantity)
+        } else {
+            (&mut removed, -quantity)
+        };
         if copies == 0 {
         } else if stackable(id) {
             list.push((id, copies.min(i64::from(i32::MAX)) as i32));
         } else {
-            list.extend(std::iter::repeat_n((id, 1), copies.min(MAX_COPIES) as usize));
+            list.extend(std::iter::repeat_n(
+                (id, 1),
+                copies.min(MAX_COPIES) as usize,
+            ));
         }
     }
     (added, removed)
@@ -138,7 +149,10 @@ impl Inspector {
     pub fn picked(&self) -> Option<(&Snapshot, Option<&Snapshot>)> {
         let (id, index) = self.selected?;
         let log = self.logs.get(&id)?;
-        Some((log.get(index)?, index.checked_sub(1).and_then(|before| log.get(before))))
+        Some((
+            log.get(index)?,
+            index.checked_sub(1).and_then(|before| log.get(before)),
+        ))
     }
 
     /// How long until the read that follows a failed one may start; none when no read is waiting for that.
@@ -148,7 +162,9 @@ impl Inspector {
 
     /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
-        self.enabled && (!self.reading || self.pid != Some(pid)) && self.next_poll.is_none_or(|at| now >= at)
+        self.enabled
+            && (!self.reading || self.pid != Some(pid))
+            && self.next_poll.is_none_or(|at| now >= at)
     }
 
     /// Marks a read started and says what it needs. Another client than last time starts over.
@@ -160,7 +176,11 @@ impl Inspector {
             self.next = None;
         }
         self.reading = true;
-        Request { since: self.next, known_containers: self.container_names.keys().copied().collect(), known_items: self.item_names.keys().copied().collect() }
+        Request {
+            since: self.next,
+            known_containers: self.container_names.keys().copied().collect(),
+            known_items: self.item_names.keys().copied().collect(),
+        }
     }
 
     pub fn finish(&mut self, pid: u32, now: Instant, result: Result<Poll, String>) {
@@ -170,7 +190,13 @@ impl Inspector {
             return;
         }
         match result {
-            Ok(Poll { page, baseline, container_names, item_names, stackable }) => {
+            Ok(Poll {
+                page,
+                baseline,
+                container_names,
+                item_names,
+                stackable,
+            }) => {
                 self.error = None;
                 self.container_names.extend(container_names);
                 self.item_names.extend(item_names);
@@ -182,7 +208,12 @@ impl Inspector {
                 }
                 // a log that skipped changes (overwritten, or a new agent's log) can't be applied to the copy: read it all again
                 let expected = self.next.unwrap_or(0);
-                if page.dropped > 0 || page.changes.first().is_some_and(|first| first.sequence != expected) {
+                if page.dropped > 0
+                    || page
+                        .changes
+                        .first()
+                        .is_some_and(|first| first.sequence != expected)
+                {
                     self.next = None;
                     return;
                 }
@@ -206,11 +237,21 @@ impl Inspector {
             if !change.old_known {
                 items.clear();
             }
-            let Ok(slot) = usize::try_from(change.slot) else { continue };
+            let Ok(slot) = usize::try_from(change.slot) else {
+                continue;
+            };
             while items.len() <= slot {
-                items.push(Item { slot: items.len() as i32, id: -1, quantity: 0 });
+                items.push(Item {
+                    slot: items.len() as i32,
+                    id: -1,
+                    quantity: 0,
+                });
             }
-            items[slot] = Item { slot: change.slot, id: change.new_item, quantity: change.new_quantity };
+            items[slot] = Item {
+                slot: change.slot,
+                id: change.new_item,
+                quantity: change.new_quantity,
+            };
         }
         if let Some(run) = run {
             self.snapshot(run);
@@ -219,7 +260,13 @@ impl Inspector {
 
     fn snapshot(&mut self, (container, tick): (i32, Option<i32>)) {
         if let Some(items) = self.copy.get(&container) {
-            self.pending.push((container, Snapshot { tick, items: items.clone() }));
+            self.pending.push((
+                container,
+                Snapshot {
+                    tick,
+                    items: items.clone(),
+                },
+            ));
         }
     }
 }
@@ -237,24 +284,47 @@ mod tests {
         let before = [item(0, 995, 100), item(1, 1511, 1), item(2, -1, 0)];
         let after = [item(0, 1511, 1), item(1, 995, 250), item(2, 590, 1)];
         let stacks = |id| id == 995;
-        assert_eq!(compare(&before, &after, stacks), (vec![(590, 1), (995, 150)], vec![]));
-        assert_eq!(compare(&after, &before, stacks), (vec![], vec![(590, 1), (995, 150)]));
+        assert_eq!(
+            compare(&before, &after, stacks),
+            (vec![(590, 1), (995, 150)], vec![])
+        );
+        assert_eq!(
+            compare(&after, &before, stacks),
+            (vec![], vec![(590, 1), (995, 150)])
+        );
         assert_eq!(compare(&before, &before, stacks), (vec![], vec![]));
     }
 
     #[test]
     fn lists_each_copy_of_an_item_that_does_not_stack() {
         let after = [item(0, 1511, 1), item(1, 1511, 1), item(2, 995, 3)];
-        assert_eq!(compare(&[], &after, |id| id == 995), (vec![(995, 3), (1511, 1), (1511, 1)], vec![]));
-        assert_eq!(compare(&after, &[], |id| id == 995), (vec![], vec![(995, 3), (1511, 1), (1511, 1)]));
+        assert_eq!(
+            compare(&[], &after, |id| id == 995),
+            (vec![(995, 3), (1511, 1), (1511, 1)], vec![])
+        );
+        assert_eq!(
+            compare(&after, &[], |id| id == 995),
+            (vec![], vec![(995, 3), (1511, 1), (1511, 1)])
+        );
     }
 
     #[test]
     fn compares_containers_of_different_size() {
-        assert_eq!(compare(&[item(0, 1, 1)], &[item(0, 1, 1), item(1, 2, 3)], |_| true), (vec![(2, 3)], vec![]));
+        assert_eq!(
+            compare(&[item(0, 1, 1)], &[item(0, 1, 1), item(1, 2, 3)], |_| true),
+            (vec![(2, 3)], vec![])
+        );
     }
 
-    fn change(sequence: u64, container: i32, tick: i32, slot: i32, old_known: bool, new_item: i32, new_quantity: i32) -> ItemChange {
+    fn change(
+        sequence: u64,
+        container: i32,
+        tick: i32,
+        slot: i32,
+        old_known: bool,
+        new_item: i32,
+        new_quantity: i32,
+    ) -> ItemChange {
         ItemChange {
             sequence,
             time_ms: 0,
@@ -269,9 +339,17 @@ mod tests {
         }
     }
 
-    fn poll(next: u64, baseline: Option<Vec<(i32, Vec<Item>)>>, changes: Vec<ItemChange>) -> Result<Poll, String> {
+    fn poll(
+        next: u64,
+        baseline: Option<Vec<(i32, Vec<Item>)>>,
+        changes: Vec<ItemChange>,
+    ) -> Result<Poll, String> {
         Ok(Poll {
-            page: ItemPage { changes, next, dropped: 0 },
+            page: ItemPage {
+                changes,
+                next,
+                dropped: 0,
+            },
             baseline,
             container_names: vec![(93, "inv".into())],
             item_names: vec![],
@@ -280,9 +358,20 @@ mod tests {
     }
 
     fn started() -> Inspector {
-        let mut inspector = Inspector { enabled: true, ..Inspector::default() };
+        let mut inspector = Inspector {
+            enabled: true,
+            ..Inspector::default()
+        };
         assert_eq!(inspector.start(1).since, None);
-        inspector.finish(1, Instant::now(), poll(10, Some(vec![(93, vec![item(0, 995, 5), item(1, -1, 0)])]), vec![]));
+        inspector.finish(
+            1,
+            Instant::now(),
+            poll(
+                10,
+                Some(vec![(93, vec![item(0, 995, 5), item(1, -1, 0)])]),
+                vec![],
+            ),
+        );
         inspector
     }
 
@@ -296,7 +385,18 @@ mod tests {
         let mut inspector = started();
         assert_eq!(inspector.pending(), 0);
         assert_eq!(inspector.start(1).since, Some(10));
-        inspector.finish(1, Instant::now(), poll(12, None, vec![change(10, 93, 7, 1, true, 1511, 1), change(11, 93, 7, 0, true, 995, 9)]));
+        inspector.finish(
+            1,
+            Instant::now(),
+            poll(
+                12,
+                None,
+                vec![
+                    change(10, 93, 7, 1, true, 1511, 1),
+                    change(11, 93, 7, 0, true, 995, 9),
+                ],
+            ),
+        );
         // both changes are in one tick of one container: one snapshot
         assert_eq!(inspector.pending(), 1);
         assert!(inspector.logs().is_empty());
@@ -311,7 +411,15 @@ mod tests {
     #[test]
     fn each_tick_and_container_is_its_own_snapshot() {
         let mut inspector = started();
-        read(&mut inspector, 13, vec![change(10, 93, 7, 1, true, 1511, 1), change(11, 93, 8, 1, true, 590, 1), change(12, 94, 8, 0, false, 4151, 1)]);
+        read(
+            &mut inspector,
+            13,
+            vec![
+                change(10, 93, 7, 1, true, 1511, 1),
+                change(11, 93, 8, 1, true, 590, 1),
+                change(12, 94, 8, 0, false, 4151, 1),
+            ],
+        );
         inspector.refresh();
         assert_eq!(inspector.logs()[&93].len(), 2);
         assert_eq!(inspector.logs()[&93][1].items[1], item(1, 590, 1));
@@ -325,9 +433,21 @@ mod tests {
     #[test]
     fn a_write_that_makes_the_container_starts_it_empty() {
         let mut inspector = started();
-        read(&mut inspector, 11, vec![change(10, 93, 7, 3, false, 1511, 1)]);
+        read(
+            &mut inspector,
+            11,
+            vec![change(10, 93, 7, 3, false, 1511, 1)],
+        );
         inspector.refresh();
-        assert_eq!(inspector.logs()[&93][0].items, [item(0, -1, 0), item(1, -1, 0), item(2, -1, 0), item(3, 1511, 1)]);
+        assert_eq!(
+            inspector.logs()[&93][0].items,
+            [
+                item(0, -1, 0),
+                item(1, -1, 0),
+                item(2, -1, 0),
+                item(3, 1511, 1)
+            ]
+        );
     }
 
     #[test]
@@ -337,10 +457,28 @@ mod tests {
         read(&mut inspector, 21, vec![change(20, 93, 7, 0, true, 1, 1)]);
         assert_eq!(inspector.pending(), 0);
         assert_eq!(inspector.start(1).since, None);
-        inspector.finish(1, Instant::now(), poll(30, Some(vec![(93, vec![item(0, 1, 1)])]), vec![]));
+        inspector.finish(
+            1,
+            Instant::now(),
+            poll(30, Some(vec![(93, vec![item(0, 1, 1)])]), vec![]),
+        );
         assert_eq!(inspector.start(1).since, Some(30));
         // so is one that says it dropped some
-        inspector.finish(1, Instant::now(), Ok(Poll { page: ItemPage { changes: vec![], next: 40, dropped: 3 }, baseline: None, container_names: vec![], item_names: vec![], stackable: vec![] }));
+        inspector.finish(
+            1,
+            Instant::now(),
+            Ok(Poll {
+                page: ItemPage {
+                    changes: vec![],
+                    next: 40,
+                    dropped: 3,
+                },
+                baseline: None,
+                container_names: vec![],
+                item_names: vec![],
+                stackable: vec![],
+            }),
+        );
         assert_eq!(inspector.start(1).since, None);
     }
 
@@ -349,7 +487,11 @@ mod tests {
         let mut inspector = started();
         for quantity in 0..(KEEP as i32 + 5) {
             let sequence = 10 + quantity as u64;
-            read(&mut inspector, sequence + 1, vec![change(sequence, 93, quantity, 0, true, 995, quantity)]);
+            read(
+                &mut inspector,
+                sequence + 1,
+                vec![change(sequence, 93, quantity, 0, true, 995, quantity)],
+            );
             inspector.refresh();
         }
         let log = &inspector.logs()[&93];

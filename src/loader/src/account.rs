@@ -36,19 +36,25 @@ impl Auth {
 pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Me, String> {
     let missing = api.config().missing();
     if !missing.is_empty() {
-        return Err(format!("This build isn't configured for sign-in: {} not set.", missing.join(", ")));
+        return Err(format!(
+            "This build isn't configured for sign-in: {} not set.",
+            missing.join(", ")
+        ));
     }
     let pkce = Pkce::generate();
     // Bind first, so a busy port is reported before a browser tab opens.
     let listener = auth::bind()?;
     let url = auth::authorize_url(api.config(), &pkce);
-    webbrowser::open(&url).map_err(|e| format!("Couldn't open the browser ({e}). Open this address yourself: {url}"))?;
+    webbrowser::open(&url).map_err(|e| {
+        format!("Couldn't open the browser ({e}). Open this address yourself: {url}")
+    })?;
     let code = auth::wait_for_callback(&listener, auth::LOGIN_TIMEOUT, cancel)?;
     drop(listener);
-    let tokens = auth::exchange_code(api.agent(), api.config(), &code, &pkce).map_err(|e| match e {
-        TokenError::Rejected(why) => format!("Sign-in was refused: {why}"),
-        TokenError::Other(error) => error.to_string(),
-    })?;
+    let tokens =
+        auth::exchange_code(api.agent(), api.config(), &code, &pkce).map_err(|e| match e {
+            TokenError::Rejected(why) => format!("Sign-in was refused: {why}"),
+            TokenError::Other(error) => error.to_string(),
+        })?;
     api.set_tokens(tokens);
     api.me().map_err(|e| e.to_string())
 }

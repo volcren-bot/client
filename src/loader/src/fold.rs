@@ -19,7 +19,9 @@ pub fn ranges(source: &str) -> Vec<(usize, usize)> {
     // the `do` of a `for` or `while` belongs to that loop, not to a block of its own
     let mut loop_do = false;
     for (range, kind) in tokenize(source) {
-        let Some(text) = source.get(range) else { return Vec::new() };
+        let Some(text) = source.get(range) else {
+            return Vec::new();
+        };
         match kind {
             Kind::Keyword => {
                 match text {
@@ -30,7 +32,9 @@ pub fn ranges(source: &str) -> Vec<(usize, usize)> {
                     }
                     "do" if loop_do => loop_do = false,
                     "do" => stack.push((Open::Block, line)),
-                    "end" | "until" if stack.last().is_some_and(|(open, _)| *open == Open::Block) => {
+                    "end" | "until"
+                        if stack.last().is_some_and(|(open, _)| *open == Open::Block) =>
+                    {
                         let (_, start) = stack.pop().unwrap();
                         found.push((start, line));
                     }
@@ -103,7 +107,10 @@ impl Folds {
             let cursor = self.cursor.1;
             let moved: BTreeSet<usize> = if lines > before {
                 let first = cursor.saturating_sub(lines - before);
-                self.folded.iter().map(|&at| if at > first { at + lines - before } else { at }).collect()
+                self.folded
+                    .iter()
+                    .map(|&at| if at > first { at + lines - before } else { at })
+                    .collect()
             } else {
                 let removed = before - lines;
                 self.folded
@@ -117,9 +124,18 @@ impl Folds {
         self.seen = Some((hash, lines));
         self.ranges = ranges(text);
         self.newlines = text.match_indices('\n').map(|(at, _)| at).collect();
-        self.longest = text.lines().map(|l| l.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum::<usize>()).max().unwrap_or(0);
+        self.longest = text
+            .lines()
+            .map(|l| {
+                l.chars()
+                    .map(|c| if c == '\t' { 4 } else { 1 })
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0);
         let starts = &self.ranges;
-        self.folded.retain(|at| starts.binary_search_by_key(at, |&(start, _)| start).is_ok());
+        self.folded
+            .retain(|at| starts.binary_search_by_key(at, |&(start, _)| start).is_ok());
     }
 
     /// The number of lines in the text of the last `sync`.
@@ -133,7 +149,10 @@ impl Folds {
     }
 
     fn end_of(&self, line: usize) -> Option<usize> {
-        self.ranges.binary_search_by_key(&line, |&(start, _)| start).ok().map(|i| self.ranges[i].1)
+        self.ranges
+            .binary_search_by_key(&line, |&(start, _)| start)
+            .ok()
+            .map(|i| self.ranges[i].1)
     }
 
     pub fn is_foldable(&self, line: usize) -> bool {
@@ -154,7 +173,9 @@ impl Folds {
     pub fn reveal(&mut self, line: usize) {
         let ranges = &self.ranges;
         self.folded.retain(|&start| {
-            let end = ranges.binary_search_by_key(&start, |&(s, _)| s).map_or(start, |i| ranges[i].1);
+            let end = ranges
+                .binary_search_by_key(&start, |&(s, _)| s)
+                .map_or(start, |i| ranges[i].1);
             !(start < line && line <= end)
         });
     }
@@ -172,11 +193,19 @@ impl Folds {
     /// `text` is the one of the last `sync`.
     pub fn view(&self, text: &str) -> View {
         let (lines, newlines) = (self.line_count(), &self.newlines);
-        let mut view = View { visible: Vec::new(), hidden: Vec::new(), headers: Vec::new() };
+        let mut view = View {
+            visible: Vec::new(),
+            hidden: Vec::new(),
+            headers: Vec::new(),
+        };
         let mut line = 0;
         while line < lines {
             view.visible.push(line);
-            let end = self.folded.contains(&line).then(|| self.end_of(line)).flatten();
+            let end = self
+                .folded
+                .contains(&line)
+                .then(|| self.end_of(line))
+                .flatten();
             let Some(end) = end else {
                 line += 1;
                 continue;
@@ -204,7 +233,10 @@ mod tests {
     #[test]
     fn single_line_blocks_and_loop_do() {
         assert_eq!(ranges("if x then y() end\nwhile x do\nx()\nend"), [(1, 3)]);
-        assert_eq!(ranges("do\nx()\nend\nrepeat\nx()\nuntil y"), [(0, 2), (3, 5)]);
+        assert_eq!(
+            ranges("do\nx()\nend\nrepeat\nx()\nuntil y"),
+            [(0, 2), (3, 5)]
+        );
     }
 
     #[test]

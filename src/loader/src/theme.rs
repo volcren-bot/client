@@ -5,14 +5,25 @@ fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "fira_code".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/FiraCodeNerdFontMono-Regular.ttf"))),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/FiraCodeNerdFontMono-Regular.ttf"
+        ))),
     );
-    fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "fira_code".to_owned());
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .insert(0, "fira_code".to_owned());
     fonts.font_data.insert(
         "fira_code_bold".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/FiraCodeNerdFontMono-Bold.ttf"))),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/FiraCodeNerdFontMono-Bold.ttf"
+        ))),
     );
-    fonts.families.insert(bold_family(), vec!["fira_code_bold".to_owned(), "fira_code".to_owned()]);
+    fonts.families.insert(
+        bold_family(),
+        vec!["fira_code_bold".to_owned(), "fira_code".to_owned()],
+    );
     ctx.set_fonts(fonts);
 }
 
@@ -54,7 +65,10 @@ pub fn apply(ctx: &egui::Context) {
             (egui::TextStyle::Monospace, 13.0),
             (egui::TextStyle::Heading, 16.0),
         ] {
-            style.text_styles.insert(text_style, egui::FontId::new(size, egui::FontFamily::Monospace));
+            style.text_styles.insert(
+                text_style,
+                egui::FontId::new(size, egui::FontFamily::Monospace),
+            );
         }
 
         let visuals = &mut style.visuals;
@@ -76,7 +90,12 @@ pub fn apply(ctx: &egui::Context) {
         let w = &mut visuals.widgets;
         w.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
         w.noninteractive.fg_stroke = Stroke::new(1.0, FG_DARK);
-        for (widget, fill) in [(&mut w.inactive, BG_HL), (&mut w.hovered, SEL), (&mut w.active, SEL), (&mut w.open, BG_HL)] {
+        for (widget, fill) in [
+            (&mut w.inactive, BG_HL),
+            (&mut w.hovered, SEL),
+            (&mut w.active, SEL),
+            (&mut w.open, BG_HL),
+        ] {
             widget.corner_radius = CornerRadius::ZERO;
             widget.bg_fill = fill;
             widget.weak_bg_fill = fill;
@@ -90,7 +109,12 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 /// A bufferline tab: the open one sits on a lifted background with a blue top bar, the others are dim text.
-pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, label: &str) -> egui::Response {
+pub fn tab_value<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    value: T,
+    label: &str,
+) -> egui::Response {
     let selected = *current == value;
     let galley = egui::WidgetText::from(label).into_galley(
         ui,
@@ -98,7 +122,8 @@ pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, lab
         f32::INFINITY,
         egui::TextStyle::Button,
     );
-    let (rect, mut response) = ui.allocate_exact_size(galley.size() + vec2(20.0, 8.0), egui::Sense::click());
+    let (rect, mut response) =
+        ui.allocate_exact_size(galley.size() + vec2(20.0, 8.0), egui::Sense::click());
     if response.clicked() && !selected {
         *current = value;
         response.mark_changed();
@@ -114,9 +139,14 @@ pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, lab
         };
         if selected {
             ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
-            ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, vec2(rect.width(), 2.0)), CornerRadius::ZERO, BLUE);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(rect.min, vec2(rect.width(), 2.0)),
+                CornerRadius::ZERO,
+                BLUE,
+            );
         }
-        ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, color);
     }
     response
 }
@@ -124,20 +154,37 @@ pub fn tab_value<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, lab
 /// The webapp's neo-tree header: a bold, spaced, uppercase purple label.
 pub fn sidebar_header(ui: &mut egui::Ui, label: &str) {
     ui.add_space(4.0);
-    ui.label(egui::RichText::new(label.to_uppercase()).font(egui::FontId::new(11.0, bold_family())).color(PURPLE));
+    ui.label(
+        egui::RichText::new(label.to_uppercase())
+            .font(egui::FontId::new(11.0, bold_family()))
+            .color(PURPLE),
+    );
     ui.add_space(2.0);
 }
 
 /// The tree's root row (not clickable): `icon name/` in yellow.
 pub fn sidebar_root(ui: &mut egui::Ui, icon: &str, name: &str) {
-    ui.label(egui::RichText::new(format!("{icon} {name}/")).size(SIDEBAR_FONT_SIZE).color(YELLOW));
+    ui.label(
+        egui::RichText::new(format!("{icon} {name}/"))
+            .size(SIDEBAR_FONT_SIZE)
+            .color(YELLOW),
+    );
 }
 
 /// A neo-tree row: dim guide, icon and `name/`; the open one is lifted and blue, hover brightens it.
-pub fn sidebar_item<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, icon: &str, name: &str, last: bool) -> egui::Response {
+pub fn sidebar_item<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    value: T,
+    icon: &str,
+    name: &str,
+    last: bool,
+) -> egui::Response {
     let selected = *current == value;
-    let (rect, mut response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), ui.spacing().interact_size.y), egui::Sense::click());
+    let (rect, mut response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), ui.spacing().interact_size.y),
+        egui::Sense::click(),
+    );
     if response.clicked() && !selected {
         *current = value;
         response.mark_changed();
@@ -156,12 +203,27 @@ pub fn sidebar_item<T: PartialEq>(ui: &mut egui::Ui, current: &mut T, value: T, 
         }
         let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
         let mut job = egui::text::LayoutJob::default();
-        job.wrap = egui::text::TextWrapping { max_width: rect.width() - 16.0, max_rows: 1, break_anywhere: true, overflow_character: Some('\u{2026}') };
-        for (s, color) in [(if last { "└─ " } else { "├─ " }, COMMENT), (icon, text), (" ", text), (name, text), ("/", text)] {
+        job.wrap = egui::text::TextWrapping {
+            max_width: rect.width() - 16.0,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('\u{2026}'),
+        };
+        for (s, color) in [
+            (if last { "└─ " } else { "├─ " }, COMMENT),
+            (icon, text),
+            (" ", text),
+            (name, text),
+            ("/", text),
+        ] {
             job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
         }
         let galley = ui.painter().layout_job(job);
-        ui.painter().galley(egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0), galley, text);
+        ui.painter().galley(
+            egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text,
+        );
     }
     response
 }
@@ -177,18 +239,34 @@ pub fn sidebar_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(BG_DARK)
         .stroke(Stroke::NONE)
-        .inner_margin(egui::Margin { left: SIDEBAR_INSET, right: 0, top: 6, bottom: 6 })
+        .inner_margin(egui::Margin {
+            left: SIDEBAR_INSET,
+            right: 0,
+            top: 6,
+            bottom: 6,
+        })
 }
 
 /// The narrow-window sidebar toggle: a skinny strip with a chevron pointing right (closed, `open` 0) to left (open, `open` 1).
 pub fn sidebar_handle(ui: &mut egui::Ui, open: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Toggle the sidebar");
-    ui.painter().rect_filled(rect, CornerRadius::ZERO, if response.hovered() { BG_HL } else { BG_DARK });
-    let color = if response.hovered() || open > 0.5 { FG } else { FG_DARK };
+    let response = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Toggle the sidebar");
+    ui.painter().rect_filled(
+        rect,
+        CornerRadius::ZERO,
+        if response.hovered() { BG_HL } else { BG_DARK },
+    );
+    let color = if response.hovered() || open > 0.5 {
+        FG
+    } else {
+        FG_DARK
+    };
     let (sin, cos) = (open * std::f32::consts::PI).sin_cos();
     let points = [vec2(-3.0, -7.0), vec2(3.0, 0.0), vec2(-3.0, 7.0)]
         .map(|p| rect.center() + vec2(p.x * cos - p.y * sin, p.x * sin + p.y * cos));
-    ui.painter().add(egui::Shape::line(points.to_vec(), Stroke::new(2.0, color)));
+    ui.painter()
+        .add(egui::Shape::line(points.to_vec(), Stroke::new(2.0, color)));
     response
 }

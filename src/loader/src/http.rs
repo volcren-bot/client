@@ -14,7 +14,15 @@ use crate::whitelist::Whitelist;
 
 const MAX_REDIRECTS: usize = 5;
 /// A script can't set these: the HTTP client owns them.
-const FORBIDDEN_HEADERS: [&str; 7] = ["host", "content-length", "transfer-encoding", "connection", "upgrade", "te", "trailer"];
+const FORBIDDEN_HEADERS: [&str; 7] = [
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "upgrade",
+    "te",
+    "trailer",
+];
 /// Not sent to another host than the request began at.
 const PRIVATE_HEADERS: [&str; 3] = ["authorization", "cookie", "proxy-authorization"];
 
@@ -43,7 +51,9 @@ fn check(allowed: &Whitelist, uri: &Uri) -> Result<(), String> {
     if allowed.allows(&host) {
         Ok(())
     } else {
-        Err(format!("{host} isn't on the HTTP whitelist; add it under Settings in the loader"))
+        Err(format!(
+            "{host} isn't on the HTTP whitelist; add it under Settings in the loader"
+        ))
     }
 }
 
@@ -54,17 +64,26 @@ fn resolve(from: &Uri, location: &str) -> Result<Uri, String> {
     if target.scheme().is_some() {
         return Ok(target);
     }
-    let (scheme, authority) = (from.scheme_str().unwrap_or("https"), from.authority().ok_or_else(|| bad(&"no host"))?);
+    let (scheme, authority) = (
+        from.scheme_str().unwrap_or("https"),
+        from.authority().ok_or_else(|| bad(&"no host"))?,
+    );
     let path = if location.starts_with('/') {
         location.to_owned()
     } else {
         let base = from.path();
         format!("{}{location}", &base[..=base.rfind('/').unwrap_or(0)])
     };
-    format!("{scheme}://{authority}{path}").parse().map_err(|e| bad(&e))
+    format!("{scheme}://{authority}{path}")
+        .parse()
+        .map_err(|e| bad(&e))
 }
 
-fn run(agent: &ureq::Agent, request: http::Request<()>, body: Option<&str>) -> Result<http::Response<ureq::Body>, String> {
+fn run(
+    agent: &ureq::Agent,
+    request: http::Request<()>,
+    body: Option<&str>,
+) -> Result<http::Response<ureq::Body>, String> {
     match body {
         Some(body) => agent.run(request.map(|()| body.as_bytes().to_vec())),
         None => agent.run(request),
@@ -77,14 +96,20 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
     request.validate()?;
     let started = Instant::now();
     let total = Duration::from_millis(request.timeout_ms);
-    let mut uri: Uri = request.url.trim().parse().map_err(|e| format!("\"{}\" isn't a URL: {e}", request.url))?;
+    let mut uri: Uri = request
+        .url
+        .trim()
+        .parse()
+        .map_err(|e| format!("\"{}\" isn't a URL: {e}", request.url))?;
     let first_host = host_of(&uri)?;
     let mut method = request.method.to_ascii_uppercase();
     let mut body = request.body.as_deref();
     let mut headers = Vec::new();
     for (name, value) in &request.headers {
         let lower = name.to_ascii_lowercase();
-        if FORBIDDEN_HEADERS.contains(&lower.as_str()) || lower.starts_with("proxy-") && lower != "proxy-authorization" {
+        if FORBIDDEN_HEADERS.contains(&lower.as_str())
+            || lower.starts_with("proxy-") && lower != "proxy-authorization"
+        {
             return Err(format!("http_request: the {name} header can't be set"));
         }
         headers.push((name.as_str(), value.as_str()));
@@ -92,9 +117,14 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
 
     for _ in 0..=MAX_REDIRECTS {
         check(allowed, &uri)?;
-        let left = total.checked_sub(started.elapsed()).filter(|left| !left.is_zero()).ok_or("the request timed out")?;
+        let left = total
+            .checked_sub(started.elapsed())
+            .filter(|left| !left.is_zero())
+            .ok_or("the request timed out")?;
         let same_host = host_of(&uri)? == first_host;
-        let mut builder = http::Request::builder().method(method.as_str()).uri(uri.clone());
+        let mut builder = http::Request::builder()
+            .method(method.as_str())
+            .uri(uri.clone());
         for &(name, value) in &headers {
             if same_host || !PRIVATE_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
                 builder = builder.header(name, value);
@@ -103,8 +133,15 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
         let built = builder.body(()).map_err(|e| format!("http_request: {e}"))?;
         let mut response = run(&agent(left), built, body)?;
         let status = response.status().as_u16();
-        let location = response.headers().get(http::header::LOCATION).and_then(|v| v.to_str().ok()).map(str::to_owned);
-        if let (true, Some(location)) = ((301..=308).contains(&status) && status != 304 && status != 305 && status != 306, location) {
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        if let (true, Some(location)) = (
+            (301..=308).contains(&status) && status != 304 && status != 305 && status != 306,
+            location,
+        ) {
             uri = resolve(&uri, &location)?;
             // As browsers do: these turn the request into a GET without its body; 307 and 308 repeat it as it was.
             if matches!(status, 301..=303) && method != "GET" && method != "HEAD" {
@@ -117,10 +154,12 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
         let mut out = BTreeMap::new();
         for (name, value) in response.headers() {
             let value = String::from_utf8_lossy(value.as_bytes());
-            out.entry(name.as_str().to_owned()).and_modify(|have: &mut String| {
-                have.push_str(", ");
-                have.push_str(&value);
-            }).or_insert_with(|| value.into_owned());
+            out.entry(name.as_str().to_owned())
+                .and_modify(|have: &mut String| {
+                    have.push_str(", ");
+                    have.push_str(&value);
+                })
+                .or_insert_with(|| value.into_owned());
         }
         let bytes = response
             .body_mut()
@@ -128,7 +167,11 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
             .limit(MAX_RESPONSE_BODY as u64)
             .read_to_vec()
             .map_err(|e| format!("couldn't read the response: {e}"))?;
-        return Ok(Response { status, headers: out, body: String::from_utf8_lossy(&bytes).into_owned() });
+        return Ok(Response {
+            status,
+            headers: out,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        });
     }
     Err(format!("more than {MAX_REDIRECTS} redirects"))
 }

@@ -36,13 +36,27 @@ pub fn normalize(input: &str) -> Result<String, String> {
         Some(rest) => (true, rest),
         None => (false, input),
     };
-    let rest = if rest.contains("://") { rest.to_owned() } else { format!("https://{rest}") };
+    let rest = if rest.contains("://") {
+        rest.to_owned()
+    } else {
+        format!("https://{rest}")
+    };
     if rest.contains('*') || input.contains(char::is_whitespace) {
         return Err("Use a host like example.com, or *.example.com for its subdomains.".into());
     }
-    let uri: ureq::http::Uri = rest.parse().map_err(|_| "That isn't a valid host or URL.".to_owned())?;
-    let host = crate::http::host_of(&uri).map_err(|_| "Only http and https URLs can be whitelisted.".to_owned())?;
-    let label = |label: &str| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-') && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let uri: ureq::http::Uri = rest
+        .parse()
+        .map_err(|_| "That isn't a valid host or URL.".to_owned())?;
+    let host = crate::http::host_of(&uri)
+        .map_err(|_| "Only http and https URLs can be whitelisted.".to_owned())?;
+    let label = |label: &str| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
     let valid = host.starts_with('[') || host.split('.').all(label);
     if host.is_empty() || !valid {
         return Err("That isn't a valid host.".into());
@@ -55,7 +69,9 @@ pub fn normalize(input: &str) -> Result<String, String> {
 
 fn matches(entry: &str, host: &str) -> bool {
     match entry.strip_prefix("*.") {
-        Some(domain) => host.strip_suffix(domain).is_some_and(|label| label.len() > 1 && label.ends_with('.')),
+        Some(domain) => host
+            .strip_suffix(domain)
+            .is_some_and(|label| label.len() > 1 && label.ends_with('.')),
         None => entry == host,
     }
 }
@@ -72,12 +88,21 @@ impl Whitelist {
                 builtin.push(host);
             }
         }
-        Self { builtin, user: user.into_iter().filter_map(|entry| normalize(&entry).ok()).collect() }
+        Self {
+            builtin,
+            user: user
+                .into_iter()
+                .filter_map(|entry| normalize(&entry).ok())
+                .collect(),
+        }
     }
 
     /// Whether a script may reach this host (lowercase, no trailing dot).
     pub fn allows(&self, host: &str) -> bool {
-        self.builtin.iter().chain(&self.user).any(|entry| matches(entry, host))
+        self.builtin
+            .iter()
+            .chain(&self.user)
+            .any(|entry| matches(entry, host))
     }
 
     pub fn user(&self) -> &[String] {
@@ -91,7 +116,9 @@ impl Whitelist {
             return Err(format!("{entry} is already on the list."));
         }
         if self.user.len() >= MAX_USER_ENTRIES {
-            return Err(format!("The list holds at most {MAX_USER_ENTRIES} entries of your own."));
+            return Err(format!(
+                "The list holds at most {MAX_USER_ENTRIES} entries of your own."
+            ));
         }
         self.user.push(entry);
         Ok(())
@@ -140,7 +167,12 @@ impl Page {
 
     fn list_ui(&mut self, ui: &mut egui::Ui, list: &mut Whitelist) {
         let mut remove = None;
-        let rows: Vec<(&str, bool)> = list.builtin.iter().map(|h| (h.as_str(), true)).chain(list.user.iter().map(|h| (h.as_str(), false))).collect();
+        let rows: Vec<(&str, bool)> = list
+            .builtin
+            .iter()
+            .map(|h| (h.as_str(), true))
+            .chain(list.user.iter().map(|h| (h.as_str(), false)))
+            .collect();
         egui_extras::TableBuilder::new(ui)
             .id_salt("http-whitelist")
             .striped(true)
@@ -164,7 +196,8 @@ impl Page {
                     row.col(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if builtin {
-                                ui.label(egui::RichText::new("Built in").weak()).on_hover_text("The Volcren hosts are always allowed");
+                                ui.label(egui::RichText::new("Built in").weak())
+                                    .on_hover_text("The Volcren hosts are always allowed");
                             } else {
                                 let armed = self.deleting.as_deref() == Some(host);
                                 if ui.button(if armed { "Sure?" } else { "Delete" }).clicked() {
@@ -185,7 +218,9 @@ impl Page {
     }
 
     fn dialog_ui(&mut self, ctx: &egui::Context, list: &mut Whitelist) {
-        let Some(mut draft) = self.draft.take() else { return };
+        let Some(mut draft) = self.draft.take() else {
+            return;
+        };
         let mut decision = None;
         egui::Window::new("Add URL")
             .id(egui::Id::new("http-whitelist-dialog"))
@@ -255,7 +290,19 @@ mod tests {
         ] {
             assert_eq!(normalize(input).as_deref(), Ok(host), "{input:?}");
         }
-        for bad in ["", "  ", "ftp://example.com", "exa mple.com", "ex*mple.com", "*.com", "*", "https://", "a..b", "-.", "a/b c"] {
+        for bad in [
+            "",
+            "  ",
+            "ftp://example.com",
+            "exa mple.com",
+            "ex*mple.com",
+            "*.com",
+            "*",
+            "https://",
+            "a..b",
+            "-.",
+            "a/b c",
+        ] {
             assert!(normalize(bad).is_err(), "{bad:?}");
         }
     }
@@ -269,7 +316,10 @@ mod tests {
         assert!(!list.allows("example.com"));
         assert!(!list.allows("evil-volcren.com"));
         assert!(!list.allows("volcren.com.evil.com"));
-        assert!(!list.allows("www.volcren.com"), "an exact host does not cover subdomains");
+        assert!(
+            !list.allows("www.volcren.com"),
+            "an exact host does not cover subdomains"
+        );
     }
 
     #[test]
@@ -300,7 +350,10 @@ mod tests {
 
     #[test]
     fn saved_entries_that_are_no_longer_valid_are_dropped() {
-        let list = Whitelist::new(vec!["Example.com".into(), "not a host".into(), "*.com".into()], &config());
+        let list = Whitelist::new(
+            vec!["Example.com".into(), "not a host".into(), "*.com".into()],
+            &config(),
+        );
         assert_eq!(list.user(), ["example.com"]);
     }
 
