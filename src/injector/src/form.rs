@@ -63,6 +63,9 @@ pub fn parse_breaks(payload: &str) -> Option<BreakPlan> {
     serde_json::from_str(payload).ok()
 }
 
+/// A line a script writes with `report_warning`: text the loader shows in its log in the warning color.
+pub const WARN_PREFIX: &str = "\u{1e}WARN ";
+
 /// A line a script writes with `report_counters`: what it counts, for the loader's XP Tracker tab.
 pub const COUNTERS_PREFIX: &str = "\u{1e}COUNTERS ";
 

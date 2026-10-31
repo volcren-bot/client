@@ -17,6 +17,8 @@ use crate::whitelist::Whitelist;
 
 pub enum ScriptEvent {
     Output(String),
+    /// A line from `report_warning`, shown in the warning color.
+    Warning(String),
     Form(serde_json::Value),
     /// Experience, gold and custom tracker gains from `report_stats`.
     Stats(i64, i64, Vec<i64>),
@@ -279,6 +281,9 @@ impl Script {
                         }
                     };
                 }
+                if let Some(text) = line.strip_prefix(injector::form::WARN_PREFIX) {
+                    return ScriptEvent::Warning(text.to_owned());
+                }
                 if let Some(payload) = line.strip_prefix(injector::http::REQUEST_PREFIX) {
                     return ScriptEvent::HttpRequest(payload.to_owned());
                 }
@@ -382,6 +387,7 @@ mod tests {
             for event in script.poll() {
                 match event {
                     ScriptEvent::Output(line) => lines.push(line),
+                    ScriptEvent::Warning(line) => lines.push(format!("warning {line}")),
                     ScriptEvent::Form(spec) => lines.push(format!("form {spec}")),
                     ScriptEvent::Breaks(plan) => {
                         lines.push(format!("breaks {}", plan.breaks.len()))
@@ -440,7 +446,8 @@ mod tests {
                 match event {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Stats(..)
+                    ScriptEvent::Warning(..)
+                    | ScriptEvent::Stats(..)
                     | ScriptEvent::Breaks(..)
                     | ScriptEvent::Counters(..)
                     | ScriptEvent::PinRequest(..)
@@ -453,6 +460,13 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("the script never asked for a form");
+    }
+
+    #[test]
+    fn report_warning_arrives_as_a_warning_not_output() {
+        let mut script = start("report_warning('Escape is off')\nprint('after')");
+        let (lines, _) = wait(&mut script, Duration::from_secs(5));
+        assert_eq!(lines, ["warning Escape is off", "after"]);
     }
 
     #[test]

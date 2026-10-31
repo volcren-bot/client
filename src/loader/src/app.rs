@@ -815,8 +815,16 @@ enum Read {
     VarpChanges,
 }
 
+/// How a log line is colored.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tone {
+    Normal,
+    Warning,
+    Error,
+}
+
 struct LogLine {
-    error: bool,
+    tone: Tone,
     text: String,
     /// Index into `Log::tags` of the line's leading `[tag]`.
     tag: Option<usize>,
@@ -839,6 +847,10 @@ struct Log {
 
 impl Log {
     fn push(&mut self, error: bool, text: String) {
+        self.push_tone(if error { Tone::Error } else { Tone::Normal }, text);
+    }
+
+    fn push_tone(&mut self, tone: Tone, text: String) {
         let tag =
             line_tag(&text).map(
                 |name| match self.tags.iter().position(|known| known == name) {
@@ -852,7 +864,7 @@ impl Log {
         if self.filter.is_none() || self.filter == tag {
             self.show(self.lines.len(), &text);
         }
-        self.lines.push(LogLine { error, text, tag });
+        self.lines.push(LogLine { tone, text, tag });
         // dropped a quarter at a time, so the view is rebuilt once every few hundred lines rather than on each
         if self.lines.len() > MAX_LOG_LINES + MAX_LOG_LINES / 4 {
             self.lines.drain(..self.lines.len() - MAX_LOG_LINES);
@@ -895,36 +907,41 @@ impl Log {
         &self,
         font: egui::FontId,
         normal: egui::Color32,
+        warning: egui::Color32,
         error: egui::Color32,
     ) -> egui::text::LayoutJob {
         let mut job = egui::text::LayoutJob {
             text: self.text.clone(),
             ..Default::default()
         };
-        let mut section = |range: std::ops::Range<usize>, is_error: bool| {
+        let mut section = |range: std::ops::Range<usize>, tone: Tone| {
             job.sections.push(egui::text::LayoutSection {
                 leading_space: 0.0,
                 byte_range: egui::text::ByteIndex(range.start)..egui::text::ByteIndex(range.end),
                 format: egui::TextFormat::simple(
                     font.clone(),
-                    if is_error { error } else { normal },
+                    match tone {
+                        Tone::Normal => normal,
+                        Tone::Warning => warning,
+                        Tone::Error => error,
+                    },
                 ),
             });
         };
         let mut start = 0;
-        let mut run: Option<(usize, bool)> = None;
+        let mut run: Option<(usize, Tone)> = None;
         for (i, &index) in self.view.iter().enumerate() {
             let line = &self.lines[index];
-            if let Some((from, was_error)) = run.filter(|&(_, was_error)| was_error != line.error) {
-                section(from..start, was_error);
+            if let Some((from, was)) = run.filter(|&(_, was)| was != line.tone) {
+                section(from..start, was);
                 run = None;
             }
-            run.get_or_insert((start, line.error));
+            run.get_or_insert((start, line.tone));
             // each line but the last is followed by the newline that joins it to the next
             start += line.text.len() + usize::from(i + 1 < self.view.len());
         }
-        if let Some((from, was_error)) = run {
-            section(from..self.text.len(), was_error);
+        if let Some((from, was)) = run {
+            section(from..self.text.len(), was);
         }
         job
     }
@@ -970,7 +987,14 @@ enum LogTab {
     Script,
 }
 
-type LogJobKey = (LogTab, u64, egui::FontId, egui::Color32, egui::Color32);
+type LogJobKey = (
+    LogTab,
+    u64,
+    egui::FontId,
+    egui::Color32,
+    egui::Color32,
+    egui::Color32,
+);
 
 pub struct LoaderApp {
     settings: Settings,
@@ -1590,6 +1614,10 @@ impl LoaderApp {
 
     fn script_info(&mut self, text: impl Into<String>) {
         self.script_log.push(false, text.into());
+    }
+
+    fn script_warning(&mut self, text: impl Into<String>) {
+        self.script_log.push_tone(Tone::Warning, text.into());
     }
 
     fn script_error(&mut self, text: impl Into<String>) {
@@ -3576,6 +3604,7 @@ impl LoaderApp {
             let finished = matches!(event, ScriptEvent::Finished { .. });
             match event {
                 ScriptEvent::Output(line) => self.script_info(line),
+                ScriptEvent::Warning(line) => self.script_warning(line),
                 ScriptEvent::Form(spec) => {
                     self.tab = Tab::Running;
                     self.form_sent = None;
@@ -4788,14 +4817,22 @@ impl LoaderApp {
         let font = egui::TextStyle::Body.resolve(ui.style());
         let normal = ui.visuals().text_color();
         let error = ui.visuals().error_fg_color;
+        let warning = ui.visuals().warn_fg_color;
         // the job is only rebuilt when the shown lines change; egui's own cache then skips the layout too
-        let key = (self.log_tab, log.revision, font.clone(), normal, error);
+        let key = (
+            self.log_tab,
+            log.revision,
+            font.clone(),
+            normal,
+            warning,
+            error,
+        );
         if self
             .log_job
             .as_ref()
             .is_none_or(|(cached, _)| *cached != key)
         {
-            self.log_job = Some((key, log.layout_job(font, normal, error)));
+            self.log_job = Some((key, log.layout_job(font, normal, warning, error)));
         }
         let cached_job = self.log_job.as_ref().map(|(_, job)| job);
         let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -5422,11 +5459,21 @@ mod tests {
     #[test]
     fn log_sections_cover_runs_of_one_color() {
         let mut log = Log::default();
-        for (error, text) in [(false, "a"), (false, "bb"), (true, "c\nd"), (false, "e")] {
-            log.push(error, text.into());
+        for (tone, text) in [
+            (Tone::Normal, "a"),
+            (Tone::Normal, "bb"),
+            (Tone::Error, "c\nd"),
+            (Tone::Warning, "w"),
+            (Tone::Normal, "e"),
+        ] {
+            log.push_tone(tone, text.into());
         }
-        let (normal, error) = (egui::Color32::WHITE, egui::Color32::RED);
-        let job = log.layout_job(egui::FontId::monospace(13.0), normal, error);
+        let (normal, warning, error) = (
+            egui::Color32::WHITE,
+            egui::Color32::YELLOW,
+            egui::Color32::RED,
+        );
+        let job = log.layout_job(egui::FontId::monospace(13.0), normal, warning, error);
         let sections: Vec<_> = job
             .sections
             .iter()
@@ -5439,7 +5486,12 @@ mod tests {
             .collect();
         assert_eq!(
             sections,
-            [("a\nbb\n", normal), ("c\nd\n", error), ("e", normal)]
+            [
+                ("a\nbb\n", normal),
+                ("c\nd\n", error),
+                ("w\n", warning),
+                ("e", normal)
+            ]
         );
     }
 

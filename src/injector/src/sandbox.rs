@@ -829,6 +829,16 @@ pub fn run_with_modules(
             Ok(())
         })?,
     )?;
+    // The loader shows these in its log in the warning color (yellow), for things the script wants noticed that aren't errors.
+    let warn_print = print.clone();
+    globals.set(
+        "report_warning",
+        lua.create_function_mut(move |_, text: mlua::LuaString| {
+            let text = String::from_utf8_lossy(&text.as_bytes()).replace('\u{1e}', "");
+            (warn_print.borrow_mut())(format!("{}{text}", crate::form::WARN_PREFIX));
+            Ok(())
+        })?,
+    )?;
     // The loader sums these between heartbeats. Outside a store run it has nowhere to send them and drops them.
     globals.set(
         "report_stats",
@@ -1421,6 +1431,15 @@ mod tests {
         assert!(plan.sleeps.is_empty());
         assert_eq!(plan.active.unwrap().kind, "break");
         assert!(run_lines("report_breaks({ breaks = 5 })").1.is_err());
+    }
+
+    #[test]
+    fn report_warning_writes_a_warn_line() {
+        let (lines, result) = run_lines("report_warning('careful\u{1e}!')");
+        result.unwrap();
+        assert_eq!(lines[0], format!("{}careful!", crate::form::WARN_PREFIX));
+        assert!(run_lines("report_warning(5)").1.is_ok());
+        assert!(run_lines("report_warning()").1.is_err());
     }
 
     #[test]
