@@ -191,7 +191,9 @@ impl Page {
                 body.rows(ROW_HEIGHT, rows.len(), |mut row| {
                     let (host, builtin) = rows[row.index()];
                     row.col(|ui| {
-                        ui.label(host);
+                        // Too long a host is cut with an ellipsis; hovering shows all of it.
+                        ui.add(egui::Label::new(host).truncate())
+                            .on_hover_text(host);
                     });
                     row.col(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -229,6 +231,8 @@ impl Page {
             .auto_sized()
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                // Without a cap the wrapping text and the button row would stretch the window across the screen.
+                ui.set_max_width(INPUT_WIDTH);
                 ui.label("A host or URL scripts may send requests to. Use *.example.com for every subdomain.");
                 let response = ui.add(egui::TextEdit::singleline(&mut draft.input).hint_text("e.g. api.example.com").desired_width(INPUT_WIDTH));
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -238,14 +242,19 @@ impl Page {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.add_space(6.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Save").clicked() {
-                        decision = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        decision = Some(false);
-                    }
-                });
+                // A fixed height: a bare right-to-left layout would claim all the height left on screen.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        if ui.button("Save").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            decision = Some(false);
+                        }
+                    },
+                );
             });
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             decision = Some(false);

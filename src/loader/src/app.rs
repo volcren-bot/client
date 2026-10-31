@@ -194,10 +194,113 @@ fn sidebar_name(title: &str) -> String {
 /// Window width from which the sidebar is always shown.
 const SIDEBAR_MIN_WINDOW: f32 = 760.0;
 const SIDEBAR_WIDTH: f32 = 190.0;
-/// Window width below which the header drops the wordmark and the account details.
+/// Window width below which the account controls drop under the wordmark.
 const HEADER_COMPACT_WINDOW: f32 = 640.0;
+/// Below this the account controls stack vertically.
+const HEADER_STACK_WINDOW: f32 = 400.0;
+/// Below this the logo and wordmark stack vertically.
+const HEADER_TINY_WINDOW: f32 = 200.0;
 /// Width of the strip that toggles the sidebar on narrow windows.
 const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
+/// Widths of the client list's prefix and status columns when there is room; longer status text scrolls.
+const CLIENT_PREFIX_WIDTH: f32 = 130.0;
+const CLIENT_STATUS_WIDTH: f32 = 160.0;
+
+/// A row of widgets centered horizontally. Their width is only known after they are laid out, so the
+/// previous frame's width is used for the offset (it settles after one repaint).
+fn centered_row(
+    ui: &mut egui::Ui,
+    id: &str,
+    layout: egui::Layout,
+    height: f32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let id = ui.id().with(id);
+    let known: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let available = ui.available_width();
+    let offset = ((available - known) / 2.0).max(0.0);
+    let spacing = ui.spacing().item_spacing.x;
+    let measured = ui
+        .allocate_ui_with_layout(egui::vec2(available, height), layout, |ui| {
+            ui.add_space(offset);
+            add(ui);
+            (ui.min_rect().width() - offset - spacing).max(0.0)
+        })
+        .inner;
+    if (measured - known).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(id, measured));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// One cell of the client list: a column of a set width whose content wraps within it.
+fn client_cell<R>(
+    ui: &mut egui::Ui,
+    width: f32,
+    top: f32,
+    spacing: egui::Vec2,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing = spacing;
+            ui.add_space(top);
+            add(ui)
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+enum ClientAction {
+    Load,
+    Unload,
+    Console,
+}
+
+/// A label in a fixed-width cell. Text that doesn't fit scrolls slowly from right to left, and hovering shows `tip`.
+fn marquee_cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    text: &str,
+    color: egui::Color32,
+    bold: bool,
+    tip: &str,
+) -> egui::Response {
+    let mut font = egui::TextStyle::Body.resolve(ui.style());
+    if bold {
+        font.family = crate::theme::bold_family();
+    }
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, galley.size().y), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter().with_clip_rect(rect);
+        if galley.size().x <= width {
+            painter.galley(rect.left_top(), galley, color);
+        } else {
+            const GAP: f32 = 32.0;
+            const SPEED: f32 = 24.0;
+            let cycle = galley.size().x + GAP;
+            let offset = (ui.input(|i| i.time) as f32 * SPEED) % cycle;
+            painter.galley(
+                rect.left_top() - egui::vec2(offset, 0.0),
+                galley.clone(),
+                color,
+            );
+            painter.galley(
+                rect.left_top() + egui::vec2(cycle - offset, 0.0),
+                galley,
+                color,
+            );
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
+    }
+    response.on_hover_text(tip)
+}
 
 const DEV_TOGGLES: [&str; 23] = [
     "Players",
@@ -1382,27 +1485,44 @@ impl LoaderApp {
         });
     }
 
-    fn account_ui(&mut self, ui: &mut egui::Ui, compact: bool) {
+    /// `stacked`: the buttons sit one above the other, so they all take the width of the widest.
+    fn account_ui(&mut self, ui: &mut egui::Ui, stacked: bool) {
         let ctx = ui.ctx().clone();
+        let button_size = if stacked {
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let width = ["Sign out", "Buy credits"]
+                .iter()
+                .map(|label| {
+                    ui.painter()
+                        .layout_no_wrap((*label).into(), font.clone(), egui::Color32::WHITE)
+                        .size()
+                        .x
+                })
+                .fold(0.0, f32::max)
+                + 2.0 * ui.spacing().button_padding.x;
+            egui::vec2(width, 0.0)
+        } else {
+            egui::Vec2::ZERO
+        };
         match &self.auth {
             Auth::SignedIn(me) => {
                 let (name, balance) = (me.username.clone(), store::balance_label(me));
-                if ui.button("Sign out").clicked() {
+                if ui
+                    .add(egui::Button::new("Sign out").min_size(button_size))
+                    .clicked()
+                {
                     self.sign_out(None);
                     return;
                 }
                 if !self.api.config().site_url.is_empty()
                     && ui
-                        .button(if compact { "Buy" } else { "Buy credits" })
-                        .on_hover_text("Buy credits")
+                        .add(egui::Button::new("Buy credits").min_size(button_size))
                         .clicked()
                 {
                     let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
                 }
                 ui.label(balance);
-                if !compact {
-                    ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
-                }
+                ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
             }
             Auth::SigningIn(cancel) => {
                 if ui.button("Cancel").clicked() {
@@ -2866,9 +2986,11 @@ impl LoaderApp {
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         // Fields take what is left after the label and the Browse button, down to a usable minimum.
-        let field = (ui.available_width() - 190.0).clamp(120.0, 460.0);
+        let field = (ui.available_width() - 190.0).clamp(120.0, 760.0);
         egui::ScrollArea::both().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("settings").num_columns(3).show(ui, |ui| {
+        // A grid cell that isn't in the last column can't grow past its width from the previous frame (40px for a new one),
+        // which is what kept the fields tiny whatever their `desired_width`; `max_col_width` lifts that.
+        egui::Grid::new("settings").num_columns(3).max_col_width(field).show(ui, |ui| {
             ui.label("agent DLL");
             ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(field));
             if ui.button("Browse…").clicked() {
@@ -2913,6 +3035,7 @@ impl LoaderApp {
         });
         ui.add_space(4.0);
 
+        let mut action: Option<(ClientAction, Target)> = None;
         if self.targets.is_empty() {
             if self.busy.is_none() {
                 ui.label(
@@ -2922,161 +3045,340 @@ impl LoaderApp {
         } else {
             self.step_selected_client(&ctx);
             let show_prefix = !cfg!(windows);
-            egui::ScrollArea::vertical()
+            let gap = 16.0;
+            let spacing = ui.spacing().item_spacing;
+            let body = egui::TextStyle::Body.resolve(ui.style()).size;
+            let bold = egui::FontId::new(body, crate::theme::bold_family());
+            let measure = |ui: &egui::Ui, text: &str| {
+                ui.painter()
+                    .layout_no_wrap(text.to_owned(), bold.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            };
+            // every control button is as wide as the widest label, so the columns line up
+            let button_width = ["Reload", "Unload", "Console"]
+                .iter()
+                .map(|label| {
+                    ui.painter()
+                        .layout_no_wrap(
+                            (*label).into(),
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            egui::Color32::WHITE,
+                        )
+                        .size()
+                        .x
+                })
+                .fold(0.0, f32::max)
+                + 2.0 * ui.spacing().button_padding.x;
+            let button_size = egui::vec2(button_width, 0.0);
+            let pid_width = self
+                .targets
+                .iter()
+                .map(|t| measure(ui, &t.client.pid.to_string()))
+                .fold(measure(ui, "PID"), f32::max);
+            let title_width = self
+                .targets
+                .iter()
+                .map(|t| measure(ui, &t.client.title))
+                .fold(measure(ui, "Title"), f32::max);
+            let row_controls_width = 3.0 * button_width + 2.0 * spacing.x;
+            // The columns keep their order; when the window is too narrow the text columns shrink and their text wraps.
+            let mut flex = vec![("Title", title_width)];
+            if show_prefix {
+                flex.push(("Prefix", CLIENT_PREFIX_WIDTH));
+            }
+            flex.push(("Status", CLIENT_STATUS_WIDTH));
+            let columns = flex.len() + 2;
+            let natural: f32 = flex.iter().map(|(_, w)| w).sum();
+            let other = pid_width + gap * (columns - 1) as f32 + 16.0;
+            // First the three buttons stack vertically to make room, then the text columns shrink and wrap.
+            let stack_controls = ui.available_width() - other - row_controls_width < natural;
+            let controls_width = if stack_controls {
+                button_width
+            } else {
+                row_controls_width
+            };
+            let room = ui.available_width() - other - controls_width;
+            let narrow = room < natural;
+            if narrow {
+                let scale = (room / natural).max(0.0);
+                for (_, width) in &mut flex {
+                    *width = (*width * scale).max(48.0);
+                }
+            }
+            let widths: Vec<f32> = flex.iter().map(|(_, w)| *w).collect();
+            egui::ScrollArea::both()
                 .auto_shrink([false, true])
                 .max_height((ui.available_height() - 120.0).max(60.0))
                 .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    egui::Grid::new("clients")
-                        .num_columns(if show_prefix { 4 } else { 3 })
-                        .striped(true)
-                        .min_col_width(60.0)
-                        .spacing(egui::vec2(16.0, 6.0))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new("PID").color(crate::theme::COMMENT));
-                            ui.label(egui::RichText::new("Title").color(crate::theme::COMMENT));
-                            if show_prefix {
-                                ui.label(
-                                    egui::RichText::new("Prefix").color(crate::theme::COMMENT),
-                                );
-                            }
-                            ui.label(egui::RichText::new("Status").color(crate::theme::COMMENT));
-                            ui.end_row();
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        let header = |ui: &mut egui::Ui, width: f32, text: &str| {
+                            client_cell(ui, width, 0.0, spacing, |ui| {
+                                ui.label(egui::RichText::new(text).color(crate::theme::COMMENT));
+                            });
+                        };
+                        header(ui, pid_width, "PID");
+                        for (i, (title, _)) in flex.iter().enumerate() {
+                            header(ui, widths[i], title);
+                        }
+                        header(ui, controls_width, "Controls");
+                    });
+                    ui.add_space(spacing.y);
 
-                            for target in &self.targets {
-                                let client = &target.client;
-                                let enabled = client.foreign_bot.is_none();
-                                // the whole row, gaps included, is the click target; the highlight is painted behind the cells afterwards
-                                let highlight = ui.painter().add(egui::Shape::Noop);
-                                let mut row = egui::Rect::NOTHING;
-                                let mut cell = |ui: &mut egui::Ui, text: egui::RichText| {
-                                    let response = ui.add(egui::Label::new(text).selectable(false));
-                                    row = row.union(response.rect);
-                                    response
+                    for (index, target) in self.targets.iter().enumerate() {
+                        let client = &target.client;
+                        let enabled = client.foreign_bot.is_none();
+                        let is_selected = self.selected.as_ref() == Some(&target.key());
+                        let active = is_selected && enabled;
+                        // the highlight is painted behind the cells once the row's size is known
+                        let background = ui.painter().add(egui::Shape::Noop);
+                        // the client the loader controls is green and bold
+                        let text_color = if active {
+                            crate::theme::GREEN
+                        } else if !enabled {
+                            crate::theme::COMMENT
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        let styled = |text: &str| {
+                            let text = egui::RichText::new(text).color(text_color);
+                            if active {
+                                text.font(bold.clone())
+                            } else {
+                                text
+                            }
+                        };
+                        let (status, color, tip) = if client.foreign_bot.is_some() {
+                            (
+                                "Unsupported".to_string(),
+                                crate::theme::RED,
+                                "Being used by another platform".to_string(),
+                            )
+                        } else if let Some(module) = &client.loaded {
+                            let version = client.version.as_deref().unwrap_or("unknown version");
+                            let (text, color) =
+                                if self.dll_version.as_deref().is_some_and(|v| v != version) {
+                                    (format!("Loaded {version}, outdated"), crate::theme::YELLOW)
+                                } else {
+                                    (format!("Loaded {version}"), crate::theme::GREEN)
                                 };
-                                let is_selected = self.selected.as_ref() == Some(&target.key());
-                                let pid = egui::RichText::new(client.pid.to_string());
-                                cell(
+                            (text.clone(), color, format!("{text}\n{module}"))
+                        } else if !client.is_64bit {
+                            let text = "32-bit, unsupported".to_string();
+                            (text.clone(), crate::theme::RED, text)
+                        } else {
+                            let text = "Not loaded".to_string();
+                            (text.clone(), crate::theme::COMMENT, text)
+                        };
+                        let bold_status = active || !enabled;
+                        let loaded = client.loaded.is_some();
+                        let outdated = client.version != self.dll_version;
+                        let can_load = self.busy.is_none()
+                            && enabled
+                            && !self.settings.dll.is_empty()
+                            && client.is_64bit
+                            && (!loaded || outdated);
+                        let can_unload = self.busy.is_none() && enabled && loaded;
+                        let prefix = target.location.label().unwrap_or_default();
+
+                        // Each cell is measured first so every one can be vertically centered in the (tallest cell's) row height.
+                        let painter = ui.painter().clone();
+                        let normal = egui::TextStyle::Body.resolve(ui.style());
+                        let font = if active { bold.clone() } else { normal.clone() };
+                        let title_galley = painter.layout(
+                            client.title.clone(),
+                            font.clone(),
+                            text_color,
+                            widths[0],
+                        );
+                        let status_index = flex.len() - 1;
+                        let status_font = if bold_status { bold.clone() } else { normal.clone() };
+                        let status_galley = if narrow {
+                            painter.layout(
+                                status.clone(),
+                                status_font,
+                                color,
+                                widths[status_index],
+                            )
+                        } else {
+                            painter.layout_no_wrap(status.clone(), normal.clone(), color)
+                        };
+                        let pid_galley = painter.layout_no_wrap(
+                            client.pid.to_string(),
+                            font.clone(),
+                            text_color,
+                        );
+                        // The prefix never takes more lines than the tallest of the other columns; the rest is cut with an ellipsis.
+                        let prefix_galley = show_prefix.then(|| {
+                            let lines = title_galley.rows.len().max(status_galley.rows.len()).max(1);
+                            let mut job = egui::text::LayoutJob::simple(
+                                prefix.clone(),
+                                font.clone(),
+                                text_color,
+                                widths[1],
+                            );
+                            job.wrap.max_rows = lines;
+                            job.wrap.break_anywhere = true;
+                            painter.layout_job(job)
+                        });
+                        let button_height = ui.spacing().interact_size.y;
+                        let controls_height = if stack_controls {
+                            3.0 * button_height + 2.0 * spacing.y
+                        } else {
+                            button_height
+                        };
+                        let row_height = [
+                            pid_galley.size().y,
+                            title_galley.size().y,
+                            status_galley.size().y,
+                            prefix_galley.as_ref().map_or(0.0, |g| g.size().y),
+                            controls_height,
+                        ]
+                        .into_iter()
+                        .fold(0.0, f32::max);
+                        let pad = |height: f32| (row_height - height) / 2.0;
+
+                        let row = ui
+                            .horizontal_top(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+                                client_cell(ui, pid_width, pad(pid_galley.size().y), spacing, |ui| {
+                                    ui.add(
+                                        egui::Label::new(styled(&client.pid.to_string()))
+                                            .selectable(false),
+                                    );
+                                });
+                                client_cell(ui, widths[0], pad(title_galley.size().y), spacing, |ui| {
+                                    ui.add(egui::Label::new(styled(&client.title)).selectable(false))
+                                        .on_hover_text(&client.exe);
+                                });
+                                if let Some(galley) = prefix_galley {
+                                    client_cell(ui, widths[1], pad(galley.size().y), spacing, |ui| {
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            egui::vec2(widths[1], galley.size().y),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().galley(rect.min, galley, text_color);
+                                        response.on_hover_text(&prefix);
+                                    });
+                                }
+                                client_cell(
                                     ui,
-                                    if is_selected {
-                                        pid.strong().color(crate::theme::GREEN)
-                                    } else {
-                                        pid
+                                    widths[status_index],
+                                    pad(status_galley.size().y),
+                                    spacing,
+                                    |ui| {
+                                        if narrow {
+                                            let text = egui::RichText::new(&status).color(color);
+                                            let text = if bold_status {
+                                                text.font(bold.clone())
+                                            } else {
+                                                text
+                                            };
+                                            ui.add(egui::Label::new(text).selectable(false))
+                                                .on_hover_text(&tip);
+                                        } else {
+                                            marquee_cell(
+                                                ui,
+                                                widths[status_index],
+                                                &status,
+                                                color,
+                                                bold_status,
+                                                &tip,
+                                            );
+                                        }
                                     },
                                 );
-                                cell(ui, egui::RichText::new(&client.title))
-                                    .on_hover_text(&client.exe);
-                                if show_prefix {
-                                    cell(
-                                        ui,
-                                        egui::RichText::new(
-                                            target.location.label().unwrap_or_default(),
-                                        ),
-                                    );
-                                }
-                                if let Some(bot) = &client.foreign_bot {
-                                    cell(
-                                        ui,
-                                        egui::RichText::new(format!("Controlled by {bot}"))
-                                            .color(crate::theme::RED),
-                                    );
-                                } else if let Some(module) = &client.loaded {
-                                    let version =
-                                        client.version.as_deref().unwrap_or("unknown version");
-                                    let (text, color) = if self
-                                        .dll_version
-                                        .as_deref()
-                                        .is_some_and(|v| v != version)
-                                    {
-                                        (
-                                            format!("Loaded {version}, outdated"),
-                                            crate::theme::YELLOW,
-                                        )
-                                    } else {
-                                        (format!("Loaded {version}"), crate::theme::GREEN)
+                                client_cell(ui, controls_width, pad(controls_height), spacing, |ui| {
+                                    let buttons = |ui: &mut egui::Ui| {
+                                        if ui
+                                            .add_enabled(
+                                                can_load,
+                                                egui::Button::new(if loaded {
+                                                    "Reload"
+                                                } else {
+                                                    "Load"
+                                                })
+                                                .min_size(button_size),
+                                            )
+                                            .on_hover_text("Loads the DLL from the settings, unloading another build first.")
+                                            .clicked()
+                                        {
+                                            action = Some((ClientAction::Load, target.clone()));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                can_unload,
+                                                egui::Button::new("Unload").min_size(button_size),
+                                            )
+                                            .clicked()
+                                        {
+                                            action = Some((ClientAction::Unload, target.clone()));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                can_unload,
+                                                egui::Button::new("Console").min_size(button_size),
+                                            )
+                                            .on_hover_text("Opens agent's console window in the client.")
+                                            .clicked()
+                                        {
+                                            action = Some((ClientAction::Console, target.clone()));
+                                        }
                                     };
-                                    cell(ui, egui::RichText::new(text).color(color))
-                                        .on_hover_text(module);
-                                } else if !client.is_64bit {
-                                    cell(
-                                        ui,
-                                        egui::RichText::new("32-bit, unsupported")
-                                            .color(crate::theme::RED),
-                                    );
-                                } else {
-                                    cell(
-                                        ui,
-                                        egui::RichText::new("Not loaded")
-                                            .color(crate::theme::COMMENT),
-                                    );
-                                }
-                                ui.end_row();
-                                let row = row.expand2(egui::vec2(8.0, 3.0));
-                                let hovered = enabled
-                                    && ui.is_rect_visible(row)
-                                    && ui.input(|i| i.pointer.hover_pos()).is_some_and(|pos| {
-                                        row.contains(pos) && ui.clip_rect().contains(pos)
-                                    });
-                                if hovered {
-                                    ui.painter().set(
-                                        highlight,
-                                        egui::Shape::rect_filled(
-                                            row,
-                                            3.0,
-                                            ui.visuals().widgets.hovered.weak_bg_fill,
-                                        ),
-                                    );
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    if ui.input(|i| i.pointer.primary_clicked()) {
-                                        self.selected = Some(target.key());
+                                    if stack_controls {
+                                        ui.vertical(buttons);
+                                    } else {
+                                        ui.horizontal(buttons);
                                     }
-                                }
+                                });
+                            })
+                            .response
+                            .rect
+                            .expand2(egui::vec2(8.0, 2.0));
+                        ui.add_space(spacing.y);
+                        let hovered = enabled
+                            && ui.is_rect_visible(row)
+                            && ui.input(|i| i.pointer.hover_pos()).is_some_and(|pos| {
+                                row.contains(pos) && ui.clip_rect().contains(pos)
+                            });
+                        if hovered {
+                            ui.painter().set(
+                                background,
+                                egui::Shape::rect_filled(
+                                    row,
+                                    3.0,
+                                    ui.visuals().widgets.hovered.weak_bg_fill,
+                                ),
+                            );
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            if ui.input(|i| i.pointer.primary_clicked()) {
+                                self.selected = Some(target.key());
                             }
-                        });
+                        } else if index % 2 == 1 {
+                            ui.painter().set(
+                                background,
+                                egui::Shape::rect_filled(row, 3.0, ui.visuals().faint_bg_color),
+                            );
+                        }
+                    }
                 });
+        }
+        match action {
+            Some((ClientAction::Load, target)) => self.load(&ctx, target),
+            Some((ClientAction::Unload, target)) => self.unload(&ctx, target),
+            Some((ClientAction::Console, target)) => self.console(&ctx, target),
+            None => {}
         }
 
         let selected = self.selected_target();
         let loaded = selected.as_ref().is_some_and(|t| t.client.loaded.is_some());
-        let outdated = selected
-            .as_ref()
-            .is_some_and(|t| t.client.version != self.dll_version);
-        let can_load = self.busy.is_none()
-            && !self.settings.dll.is_empty()
-            && selected.as_ref().is_some_and(|t| t.client.is_64bit)
-            && (!loaded || outdated);
         let can_unload = self.busy.is_none() && loaded;
 
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            let load = if loaded { "Reload" } else { "Load" };
-            if ui
-                .add_enabled(can_load, egui::Button::new(load))
-                .on_hover_text("Loads the DLL from the settings, unloading another build first.")
-                .clicked()
-                && let Some(target) = selected.clone()
-            {
-                self.load(&ctx, target);
-            }
-            if ui
-                .add_enabled(can_unload, egui::Button::new("Unload"))
-                .clicked()
-                && let Some(target) = selected.clone()
-            {
-                self.unload(&ctx, target);
-            }
-            if ui
-                .add_enabled(can_unload, egui::Button::new("Console"))
-                .on_hover_text("Opens agent's console window in the client.")
-                .clicked()
-                && let Some(target) = selected.clone()
-            {
-                self.console(&ctx, target);
-            }
-        });
-
-        ui.add_space(8.0);
-        egui::CollapsingHeader::new("Client options").default_open(false).show(ui, |ui| {
+        ui.heading("Client options");
+        ui.add_space(4.0);
+        ui.vertical(|ui| {
             let mut changed = false;
             egui::Grid::new("client_options").num_columns(2).spacing(egui::vec2(16.0, 6.0)).show(ui, |ui| {
                 ui.label("Mouse cursor");
@@ -4152,11 +4454,16 @@ impl LoaderApp {
     }
 
     fn dev_tools_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Game state")
-            .default_open(true)
-            .show(ui, |ui| self.state_ui(ui));
+        ui.heading("Game state");
+        ui.add_space(4.0);
+        self.state_ui(ui);
+        ui.add_space(12.0);
         ui.separator();
-        // Drop columns as the window narrows, down to a single vertical stack.
+        ui.add_space(12.0);
+        ui.heading("Overlays");
+        ui.add_space(4.0);
+        // The checkboxes are in fixed vertical groups (so their order never jumbles); as the window narrows
+        // the groups stack: fewer next to each other, down to a single one.
         let gap = 24.0;
         let font = egui::TextStyle::Body.resolve(ui.style());
         let widest = DEV_TOGGLES
@@ -4170,24 +4477,36 @@ impl LoaderApp {
             .fold(0.0_f32, f32::max)
             + ui.spacing().icon_width
             + ui.spacing().icon_spacing;
-        let columns = (((ui.available_width() + gap) / (widest + gap)).floor() as usize)
-            .clamp(1, DEV_COLUMNS);
-        egui::Grid::new(("development_toggles", columns))
-            .num_columns(columns)
-            .spacing([gap, 6.0])
-            .show(ui, |ui| {
-                for (index, (label, on)) in DEV_TOGGLES
-                    .iter()
-                    .zip(self.dev_toggles.iter_mut())
-                    .enumerate()
-                {
-                    ui.add_enabled(DEV_LAYERS[index].is_some(), egui::Checkbox::new(on, *label))
-                        .on_disabled_hover_text("Not ported yet.");
-                    if (index + 1) % columns == 0 {
-                        ui.end_row();
-                    }
+        let per_group = DEV_TOGGLES.len().div_ceil(DEV_COLUMNS);
+        let groups: Vec<std::ops::Range<usize>> = (0..DEV_TOGGLES.len())
+            .step_by(per_group)
+            .map(|start| start..(start + per_group).min(DEV_TOGGLES.len()))
+            .collect();
+        let beside = (((ui.available_width() + gap) / (widest + gap)).floor() as usize)
+            .clamp(1, groups.len());
+        for (row, row_groups) in groups.chunks(beside).enumerate() {
+            if row > 0 {
+                ui.add_space(8.0);
+            }
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for group in row_groups {
+                    ui.vertical(|ui| {
+                        ui.set_width(widest);
+                        for index in group.clone() {
+                            ui.add_enabled(
+                                DEV_LAYERS[index].is_some(),
+                                egui::Checkbox::new(
+                                    &mut self.dev_toggles[index],
+                                    DEV_TOGGLES[index],
+                                ),
+                            )
+                            .on_disabled_hover_text("Not ported yet.");
+                        }
+                    });
                 }
             });
+        }
     }
 
     /// How long the script has run: it keeps counting while the script does and stops where the script ended.
@@ -4748,30 +5067,70 @@ impl eframe::App for LoaderApp {
 
         let window = ctx.content_rect();
         let narrow = window.width() < SIDEBAR_MIN_WINDOW;
-        // Below this the header drops the wordmark and the account row its balance and buy button.
-        let compact = window.width() < HEADER_COMPACT_WINDOW;
+        // As the window shrinks the header reflows: the account controls drop under the wordmark, then stack,
+        // and finally the logo and wordmark stack too.
+        let wrap_account = window.width() < HEADER_COMPACT_WINDOW;
+        let stack_account = window.width() < HEADER_STACK_WINDOW;
+        let stack_brand = window.width() < HEADER_TINY_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
             ui.add_space(6.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 32.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg"))
-                        .fit_to_exact_size(egui::vec2(32.0, 32.0));
-                    // The sidebar drawer's toggle on narrow windows is this logo, so it always stays.
-                    ui.add(logo);
-                    if !compact {
-                        ui.label(
-                            egui::RichText::new("VOLCREN")
-                                .font(egui::FontId::new(22.0, crate::theme::bold_family())),
+            let brand = |ui: &mut egui::Ui| {
+                let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg"))
+                    .fit_to_exact_size(egui::vec2(32.0, 32.0));
+                // The sidebar drawer's toggle on narrow windows is this logo, so it always stays.
+                ui.add(logo);
+                ui.label(
+                    egui::RichText::new("VOLCREN")
+                        .font(egui::FontId::new(22.0, crate::theme::bold_family())),
+                );
+            };
+            let brand_ui = |ui: &mut egui::Ui| {
+                if stack_brand {
+                    ui.vertical(brand);
+                } else {
+                    ui.horizontal(brand);
+                }
+            };
+            if !wrap_account {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 32.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        brand_ui(ui);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                            self.account_ui(ui, false)
+                        });
+                    },
+                );
+            } else {
+                ui.vertical(|ui| {
+                    if stack_brand {
+                        ui.vertical_centered(brand);
+                    } else {
+                        centered_row(
+                            ui,
+                            "header_brand",
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            32.0,
+                            brand,
                         );
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                        self.account_ui(ui, compact)
-                    });
-                },
-            );
+                    ui.add_space(4.0);
+                    if stack_account {
+                        ui.vertical_centered(|ui| self.account_ui(ui, true));
+                    } else {
+                        let height = ui.spacing().interact_size.y;
+                        centered_row(
+                            ui,
+                            "header_account",
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            height,
+                            |ui| self.account_ui(ui, false),
+                        );
+                    }
+                });
+            }
             ui.add_space(6.0);
         });
         self.update_banner_ui(&ctx, ui);

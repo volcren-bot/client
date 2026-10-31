@@ -178,10 +178,14 @@ pub fn sidebar_header(ui: &mut egui::Ui, label: &str) {
 
 /// The tree's root row (not clickable): `icon name/` in yellow.
 pub fn sidebar_root(ui: &mut egui::Ui, icon: &str, name: &str) {
-    ui.label(
-        egui::RichText::new(format!("{icon} {name}/"))
-            .size(SIDEBAR_FONT_SIZE)
-            .color(YELLOW),
+    // Not selectable, so hovering it keeps the normal pointer instead of the text cursor.
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(format!("{icon} {name}/"))
+                .size(SIDEBAR_FONT_SIZE)
+                .color(YELLOW),
+        )
+        .selectable(false),
     );
 }
 
@@ -265,8 +269,7 @@ pub fn sidebar_frame() -> egui::Frame {
 pub fn sidebar_handle(ui: &mut egui::Ui, open: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
     let response = response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Toggle the sidebar");
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     ui.painter().rect_filled(
         rect,
         CornerRadius::ZERO,

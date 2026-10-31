@@ -240,55 +240,58 @@ pub fn breaks_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) 
     changed
 }
 
-/// The editor of the sleeps. Returns whether anything changed.
+/// The editor of the sleep: there is only ever one, so its fields are edited in place. Returns whether anything changed.
 pub fn sleeps_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) -> bool {
     use injector::antiban::{Config, Sleep};
     let mut changed = section_bar(ui, &mut config.sleeps_enabled, "sleeps");
+    if config.sleeps.is_empty() {
+        config.sleeps.push(Sleep::default());
+        changed = true;
+    }
     ui.add_enabled_ui(config.sleeps_enabled, |ui| {
-        let mut remove = None;
-        let sleeps = &mut config.sleeps;
-        let count = sleeps.len();
-        list(ui, "sleeps_edit", ["At", "Length", "Randomness", "Log out"], count, |row, i| {
-            let s = &mut sleeps[i];
-            row.col(|ui| {
-                let mut auto = s.time.is_none();
-                if ui
-                    .checkbox(&mut auto, "Auto")
-                    .on_hover_text("The account's usual bedtime")
-                    .changed()
-                {
-                    s.time = if auto { None } else { Some("23:00".into()) };
-                    changed = true;
-                }
-                if let Some(time) = &mut s.time {
-                    let bad = injector::antiban::parse_time(time).is_none();
-                    let mut edit = egui::TextEdit::singleline(time).desired_width(60.0);
-                    if bad {
-                        edit = edit.text_color(egui::Color32::LIGHT_RED);
+        let s = &mut config.sleeps[0];
+        egui::Grid::new("sleeps_edit")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("At");
+                ui.horizontal(|ui| {
+                    let mut auto = s.time.is_none();
+                    if ui
+                        .checkbox(&mut auto, "Auto")
+                        .on_hover_text("The account's usual bedtime")
+                        .changed()
+                    {
+                        s.time = if auto { None } else { Some("23:00".into()) };
+                        changed = true;
                     }
-                    changed |= ui.add(edit).on_hover_text("HH:MM or HH:MM:SS").changed();
-                }
+                    if let Some(time) = &mut s.time {
+                        let bad = injector::antiban::parse_time(time).is_none();
+                        let mut edit = egui::TextEdit::singleline(time).desired_width(60.0);
+                        if bad {
+                            edit = edit.text_color(egui::Color32::LIGHT_RED);
+                        }
+                        changed |= ui.add(edit).on_hover_text("HH:MM or HH:MM:SS").changed();
+                    }
+                });
+                ui.end_row();
+                ui.label("Length");
+                changed |= auto_number(ui, &mut s.length, HOUR_MS, 8.0, 0.1..=24.0, " h");
+                ui.end_row();
+                ui.label("Randomness");
+                changed |= auto_number(ui, &mut s.randomness, 0.01, 0.1, 0.0..=100.0, "%");
+                ui.end_row();
+                ui.label("Log out");
+                changed |= auto_number(ui, &mut s.logout_chance, 0.01, 0.8, 0.0..=100.0, "%");
+                ui.end_row();
             });
-            row.col(|ui| changed |= auto_number(ui, &mut s.length, HOUR_MS, 8.0, 0.1..=24.0, " h"));
-            row.col(|ui| changed |= auto_number(ui, &mut s.randomness, 0.01, 0.1, 0.0..=100.0, "%"));
-            row.col(|ui| changed |= auto_number(ui, &mut s.logout_chance, 0.01, 0.8, 0.0..=100.0, "%"));
-            row.col(|ui| {
-                if ui.button("Remove").clicked() {
-                    remove = Some(i);
-                }
-            });
-        });
-        if let Some(i) = remove {
-            config.sleeps.remove(i);
-            changed = true;
-        }
-        let (add, reset) = footer(ui, "Add sleep", "sleeps");
-        if reset {
+        ui.add_space(8.0);
+        if ui
+            .button("Reset")
+            .on_hover_text("Put the sleeps back to the defaults")
+            .clicked()
+        {
             config.sleeps = Config::default().sleeps;
-            changed = true;
-        }
-        if add {
-            config.sleeps.push(Sleep::default());
             changed = true;
         }
     });

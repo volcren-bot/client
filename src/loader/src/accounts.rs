@@ -26,8 +26,8 @@ const MARGIN: i8 = 16;
 const INPUT_WIDTH: f32 = 300.0;
 /// Height of a list row.
 const ROW_HEIGHT: f32 = 28.0;
-/// Width of the list's last column, which holds the Save and Delete buttons.
-const ACTIONS_WIDTH: f32 = 130.0;
+/// The least width of one of the list's text columns before the buttons stack to make room.
+const MIN_TEXT_WIDTH: f32 = 90.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -368,15 +368,50 @@ impl Accounts {
             deleting,
             ..
         } = self;
+        // The buttons are as wide as the widest label so they line up. When the window is too narrow for the text
+        // columns they stack, which makes the rows taller.
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let button_width = ["Save", "Delete", "Sure?"]
+            .iter()
+            .map(|label| {
+                ui.painter()
+                    .layout_no_wrap((*label).into(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max)
+            + 2.0 * ui.spacing().button_padding.x;
+        let button_size = egui::vec2(button_width, 0.0);
+        let spacing = ui.spacing().item_spacing;
+        let row_actions = 2.0 * button_width + spacing.x;
+        let stacked = ui.available_width() < 3.0 * MIN_TEXT_WIDTH + 4.0 * spacing.x + row_actions;
+        let actions_width = if stacked { button_width } else { row_actions };
+        let row_height = if stacked {
+            ROW_HEIGHT.max(2.0 * ui.spacing().interact_size.y + spacing.y)
+        } else {
+            ROW_HEIGHT
+        };
         // The first three columns share what the buttons leave; the last one fits the buttons.
         egui_extras::TableBuilder::new(ui)
             .striped(true)
             // Cells inherit the page's top down layout otherwise, which leaves the buttons at the top of their row.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(egui_extras::Column::remainder().clip(true))
-            .column(egui_extras::Column::remainder().clip(true))
-            .column(egui_extras::Column::remainder().clip(true))
-            .column(egui_extras::Column::exact(ACTIONS_WIDTH))
+            .column(
+                egui_extras::Column::remainder()
+                    .at_least(MIN_TEXT_WIDTH)
+                    .clip(true),
+            )
+            .column(
+                egui_extras::Column::remainder()
+                    .at_least(MIN_TEXT_WIDTH)
+                    .clip(true),
+            )
+            .column(
+                egui_extras::Column::remainder()
+                    .at_least(MIN_TEXT_WIDTH)
+                    .clip(true),
+            )
+            .column(egui_extras::Column::exact(actions_width))
             .header(ROW_HEIGHT, |mut header| {
                 for head in ["Name", "Account hash", "Bank pin", ""] {
                     header.col(|ui| {
@@ -385,7 +420,7 @@ impl Accounts {
                 }
             })
             .body(|body| {
-                body.rows(ROW_HEIGHT, working.len(), |mut row| {
+                body.rows(row_height, working.len(), |mut row| {
                     let index = row.index();
                     let entry = &working[index];
                     for column in [Column::Name, Column::Hash, Column::Pin] {
@@ -439,16 +474,37 @@ impl Accounts {
                         });
                     }
                     row.col(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let armed = *deleting == Some(index);
-                            if ui.button(if armed { "Sure?" } else { "Delete" }).clicked() {
-                                delete = Some(index);
+                        let armed = *deleting == Some(index);
+                        let changed = entries.get(index) != Some(entry);
+                        let buttons = |ui: &mut egui::Ui| {
+                            let delete_button =
+                                egui::Button::new(if armed { "Sure?" } else { "Delete" })
+                                    .min_size(button_size);
+                            let save_button = egui::Button::new("Save").min_size(button_size);
+                            if stacked {
+                                if ui.add_enabled(changed, save_button).clicked() {
+                                    save = Some(index);
+                                }
+                                if ui.add(delete_button).clicked() {
+                                    delete = Some(index);
+                                }
+                            } else {
+                                if ui.add(delete_button).clicked() {
+                                    delete = Some(index);
+                                }
+                                if ui.add_enabled(changed, save_button).clicked() {
+                                    save = Some(index);
+                                }
                             }
-                            let changed = entries.get(index) != Some(entry);
-                            if ui.add_enabled(changed, egui::Button::new("Save")).clicked() {
-                                save = Some(index);
-                            }
-                        });
+                        };
+                        if stacked {
+                            ui.vertical(buttons);
+                        } else {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                buttons,
+                            );
+                        }
                     });
                 });
             });
@@ -600,7 +656,7 @@ impl Accounts {
 /// A list cell that can be clicked anywhere in its width, not just on its text.
 fn click_cell(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::vec2(ui.available_width(), ui.available_height().max(ROW_HEIGHT)),
         egui::Sense::click(),
     );
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -610,13 +666,13 @@ fn click_cell(ui: &mut egui::Ui, text: &str) -> egui::Response {
         ui.visuals().text_color()
     };
     let font = egui::TextStyle::Body.resolve(ui.style());
-    ui.painter().with_clip_rect(rect).text(
-        rect.left_center(),
-        egui::Align2::LEFT_CENTER,
-        text,
-        font,
-        color,
-    );
+    // Text that doesn't fit is cut with an ellipsis, vertically centered in the (maybe taller) row.
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, rect.width());
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
+    let top_left = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(top_left, galley, color);
     response
 }
 

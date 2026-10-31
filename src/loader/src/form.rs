@@ -4,6 +4,9 @@ use eframe::egui;
 use injector::form::{self as spec_form};
 use serde_json::{Map, Value, json};
 
+/// Narrower than this (in points), a two column form stacks its columns.
+const STACK_BELOW: f32 = 420.0;
+
 pub enum FieldValue {
     Check(bool),
     Number(f64),
@@ -187,12 +190,45 @@ impl Form {
     }
 
     /// The form's fields in `ui`, for a page that hosts the form and its buttons itself.
+    /// With `columns = true` in the spec, everything but the checks goes on the left and the
+    /// checks on the right; a window narrower than `STACK_BELOW` stacks them instead.
     pub fn show_inline(&mut self, ui: &mut egui::Ui) {
-        for field in spec_form::fields(&self.spec) {
-            let usable = spec_form::enabled_by(field)
-                .is_none_or(|id| matches!(self.values.get(id), Some(FieldValue::Check(true))));
-            let value = spec_form::id(field).and_then(|id| self.values.get_mut(id));
-            ui.add_enabled_ui(usable, |ui| Self::field_ui(ui, field, value));
+        let fields = spec_form::fields(&self.spec);
+        let columns = self
+            .spec
+            .get("columns")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !columns {
+            for field in fields {
+                Self::show_field(ui, field, &mut self.values);
+            }
+            return;
         }
+        let (checks, others): (Vec<&Value>, Vec<&Value>) = fields
+            .iter()
+            .partition(|field| spec_form::kind(field) == "check");
+        let values = &mut self.values;
+        if ui.available_width() < STACK_BELOW {
+            for field in others.into_iter().chain(checks) {
+                Self::show_field(ui, field, values);
+            }
+            return;
+        }
+        ui.columns(2, |cols| {
+            for field in others {
+                Self::show_field(&mut cols[0], field, values);
+            }
+            for field in checks {
+                Self::show_field(&mut cols[1], field, values);
+            }
+        });
+    }
+
+    fn show_field(ui: &mut egui::Ui, field: &Value, values: &mut HashMap<String, FieldValue>) {
+        let usable = spec_form::enabled_by(field)
+            .is_none_or(|id| matches!(values.get(id), Some(FieldValue::Check(true))));
+        let value = spec_form::id(field).and_then(|id| values.get_mut(id));
+        ui.add_enabled_ui(usable, |ui| Self::field_ui(ui, field, value));
     }
 }
