@@ -1,10 +1,4 @@
-//! Types the bank PIN on the keypad (interface 213) without the PIN ever reaching a script.
-//!
-//! The sandbox's `bank_pin_enter()` takes no arguments and returns only how it went. The injector reads the logged
-//! in account's name, hashes it (`hash_name`) and asks the loader for the PIN of that hash (`set_lookup`), keeping it
-//! only for the call. Everything that could tell a script which digit is being clicked, the
-//! button lookup, the mouse path and the click, happens here. This is a port of the lib's `bankpin_keypad.luau`
-//! with the helpers it used from the lib (toplevel, chatbox, mouse, keyboard, biometrics) folded in.
+//! Types the bank PIN on the keypad (interface 213) so the PIN never reaches a script; the PIN lookup and clicks all happen here.
 
 // The keypad logic is only reached through `enter`, which needs a Windows client; the tests run it everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -74,9 +68,7 @@ pub fn set_lookup(lookup: Lookup) {
     *LOOKUP.lock().unwrap_or_else(PoisonError::into_inner) = Some(lookup);
 }
 
-/// SHA-256 of the account name as the client normalizes it (trimmed, lowercase, underscores, hyphens and nbsp as spaces), as
-/// lowercase hex. A name typed as "My Name" and the client's own `my_name` hash the same. The loader keys its saved
-/// accounts by this.
+/// SHA-256 of the account name as the client normalizes it, as lowercase hex; the loader keys its saved accounts by this.
 pub fn hash_name(account: &str) -> String {
     use sha2::{Digest, Sha256};
     let clean: String = account
@@ -97,7 +89,7 @@ pub fn hash_name(account: &str) -> String {
         .collect()
 }
 
-fn parse_pin(pin: &str) -> Option<[u8; 4]> {
+pub fn parse_pin(pin: &str) -> Option<[u8; 4]> {
     let digits: Vec<u8> = pin
         .bytes()
         .filter(u8::is_ascii_digit)
@@ -148,8 +140,7 @@ enum Pin {
 /// Enters the logged in account's PIN on the open keypad of client `pid`.
 #[cfg(windows)]
 pub fn enter(pid: u32, pace: &(dyn Pace + Sync)) -> Result<Outcome, String> {
-    // On a thread of its own: one menu read puts hundreds of KB on the stack (a 500 entry reply, copied by value a few
-    // times), and the hover checks start deeper than a script's own `menu()` call, on the main thread's smaller stack.
+    // On a thread of its own: one menu read puts hundreds of KB on the stack, more than the main thread's smaller stack allows.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("bank-pin".into())
@@ -402,9 +393,7 @@ impl Keypad<'_> {
         Ok(lines.join("\n").to_lowercase())
     }
 
-    // The button for each digit. A created child of the button holds the digit; it is hidden while the client shuffles,
-    // and the client also empties the child of the button under the mouse. With the other nine known, that button's
-    // digit is the one left. Fewer than nine known means the keypad is still loading.
+    // The button for each digit; with nine known the tenth button's digit is the one left, and fewer than nine means the keypad is loading.
     fn buttons(&self) -> Step<[Option<Widget>; 10]> {
         let mouse = self.client.mouse();
         let mut found: [Option<Widget>; 10] = Default::default();
@@ -620,8 +609,7 @@ mod tests {
 
     use super::*;
 
-    // A keypad whose buttons sit at fixed places; clicking the button for the asked-for digit moves to the next
-    // position, and a wrong digit says "try again" once the four are in.
+    // A keypad with fixed button places: clicking the asked-for digit moves on, and a wrong digit says "try again" after four.
     struct Fake {
         pin: [u8; 4],
         position: Cell<usize>,
@@ -873,7 +861,7 @@ mod tests {
     #[test]
     fn a_pin_is_four_digits() {
         assert_eq!(parse_pin("0123"), Some([0, 1, 2, 3]));
-        for bad in ["", "123", "12345", "12a4", "١٢٣٤"] {
+        for bad in ["", "123", "12345", "12a4", "١٢٣٤", " 123"] {
             assert_eq!(parse_pin(bad), None, "{bad:?}");
         }
     }

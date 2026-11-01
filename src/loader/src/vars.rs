@@ -7,7 +7,7 @@ use std::{
 
 use injector::{VarcPage, config::VarbitDef};
 
-use crate::log_view::{Filtered, Log, View};
+use crate::log_view::{Filtered, Log, Poller, View};
 
 /// Entries kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
@@ -64,14 +64,12 @@ pub struct Inspector {
     /// The entries `visible` shows, for the type boxes they were picked with (varbit, varp, varc int, varc string).
     shown: Filtered<[bool; 4]>,
     /// The client the log is from; another client starts over.
-    pid: Option<u32>,
+    poller: Poller,
     previous: Option<Vec<i32>>,
     /// Where to read the varc log from; none until the first read, which only skips what happened before the inspector was enabled.
     varc_next: Option<u64>,
     /// Varbits by varp, read from the cache once.
     known: HashMap<u16, Varbits>,
-    reading: bool,
-    next_poll: Option<Instant>,
 }
 
 impl Default for Inspector {
@@ -87,12 +85,10 @@ impl Default for Inspector {
             varc_error: None,
             log: Log::default(),
             shown: Filtered::default(),
-            pid: None,
+            poller: Poller::default(),
             previous: None,
             varc_next: None,
             known: HashMap::new(),
-            reading: false,
-            next_poll: None,
         }
     }
 }
@@ -163,20 +159,16 @@ impl Inspector {
 
     /// Whether a read of `pid` should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
-        self.enabled
-            && (!self.reading || self.pid != Some(pid))
-            && self.next_poll.is_none_or(|at| now >= at)
+        self.poller.due(self.enabled, pid, now)
     }
 
     /// Marks a read started and says what the job needs: the varps to compare with and the varps whose varbits are known.
     pub fn start(&mut self, pid: u32) -> Request {
-        if self.pid != Some(pid) {
-            self.pid = Some(pid);
+        if self.poller.start(pid) {
             self.previous = None;
             self.varc_next = None;
             self.clear();
         }
-        self.reading = true;
         Request {
             previous: self.previous.clone(),
             known: self.known.keys().copied().collect(),
@@ -202,9 +194,7 @@ impl Inspector {
         result: Result<Poll, String>,
         varp_name: impl Fn(usize) -> Option<String>,
     ) {
-        self.reading = false;
-        self.next_poll = Some(now + POLL_EVERY);
-        if self.pid != Some(pid) {
+        if !self.poller.finish(pid, Some(now + POLL_EVERY)) {
             return;
         }
         match result {

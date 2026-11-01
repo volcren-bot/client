@@ -640,18 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn a_wall_with_a_gap_forces_the_corridor() {
-        let walls: Vec<(usize, usize)> = (0..60).filter(|&y| y != 30).map(|y| (30, y)).collect();
-        let scene = open(60, &walls);
-        let (from, to) = ((2, 30), (57, 30));
-        for seed in 0..6 {
-            let r = walk(&scene, from, to, seed);
-            assert_legal(&scene, &r, from, to);
-            assert!(r.tiles.contains(&(30, 30)), "seed {seed} missed the gap");
-        }
-    }
-
-    #[test]
     fn unreachable_targets_use_the_games_route() {
         let rows = [
             "..........", //

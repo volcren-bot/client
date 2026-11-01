@@ -1,9 +1,10 @@
 //! The varc log: the last varcs the client's scripts changed, in a ring in shared memory (`AGENT_VARCS_<pid>`), using the packet log's scheme.
 
+use crate::ring;
 use alloc::{format, string::String, vec::Vec};
 use core::{
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
-    sync::atomic::{fence, AtomicU64, Ordering},
+    sync::atomic::AtomicU64,
 };
 
 pub fn varc_log_memory_name(pid: u32) -> String {
@@ -37,6 +38,12 @@ pub struct Slot {
     old_length: u32,
     new_text: [u8; TEXT_SIZE],
     old_text: [u8; TEXT_SIZE],
+}
+
+impl ring::Slot for Slot {
+    fn commit(&self) -> &AtomicU64 {
+        &self.commit
+    }
 }
 
 #[repr(C)]
@@ -81,14 +88,7 @@ pub struct Change<'a> {
     pub new_length: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Page {
-    pub entries: Vec<Entry>,
-    /// Pass this as `since` to get what comes after.
-    pub next: u64,
-    /// Entries between `since` and `next` that were overwritten (or torn by a writer) before they could be read.
-    pub dropped: u64,
-}
+pub type Page = ring::Page<Entry>;
 
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
@@ -121,47 +121,36 @@ unsafe fn read_text(source: *const [u8; TEXT_SIZE], stored: u8) -> Vec<u8> {
 
 /// Appends a change; `log` must point to an initialised `Log`.
 pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
-    let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
-    let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
-
-    (*slot).commit.store(0, Ordering::Release);
-    fence(Ordering::Release);
-    write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
-    write_volatile(addr_of_mut!((*slot).index), change.index);
-    write_volatile(addr_of_mut!((*slot).kind), change.kind);
-    write_volatile(addr_of_mut!((*slot).old_known), change.old_known as u8);
-    write_volatile(addr_of_mut!((*slot).old_int), change.old_int);
-    write_volatile(addr_of_mut!((*slot).new_int), change.new_int);
-    write_volatile(addr_of_mut!((*slot).old_length), change.old_length);
-    write_volatile(addr_of_mut!((*slot).new_length), change.new_length);
-    let old_stored = write_text(addr_of_mut!((*slot).old_text), change.old_text);
-    let new_stored = write_text(addr_of_mut!((*slot).new_text), change.new_text);
-    write_volatile(addr_of_mut!((*slot).old_stored), old_stored);
-    write_volatile(addr_of_mut!((*slot).new_stored), new_stored);
-    (*slot).commit.store(sequence + 1, Ordering::Release);
+    ring::push(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        |slot| {
+            write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
+            write_volatile(addr_of_mut!((*slot).index), change.index);
+            write_volatile(addr_of_mut!((*slot).kind), change.kind);
+            write_volatile(addr_of_mut!((*slot).old_known), change.old_known as u8);
+            write_volatile(addr_of_mut!((*slot).old_int), change.old_int);
+            write_volatile(addr_of_mut!((*slot).new_int), change.new_int);
+            write_volatile(addr_of_mut!((*slot).old_length), change.old_length);
+            write_volatile(addr_of_mut!((*slot).new_length), change.new_length);
+            let old_stored = write_text(addr_of_mut!((*slot).old_text), change.old_text);
+            let new_stored = write_text(addr_of_mut!((*slot).new_text), change.new_text);
+            write_volatile(addr_of_mut!((*slot).old_stored), old_stored);
+            write_volatile(addr_of_mut!((*slot).new_stored), new_stored);
+        },
+    );
 }
 
 /// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
-    let written = (*log).written.load(Ordering::Acquire);
-    let mut at = if since > written { 0 } else { since };
-    let mut page = Page::default();
-
-    // anything older than the ring holds is gone
-    let oldest = written.saturating_sub(SLOT_COUNT as u64);
-    if at < oldest {
-        page.dropped += oldest - at;
-        at = oldest;
-    }
-
-    while at < written && page.entries.len() < limit {
-        let slot = addr_of!((*log).entries[at as usize % SLOT_COUNT]);
-        let before = (*slot).commit.load(Ordering::Acquire);
-        if before < at + 1 {
-            // claimed but not published yet: stop here, the next read picks it up
-            break;
-        }
-        let entry = (before == at + 1).then(|| Entry {
+    ring::read_since(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        since,
+        limit,
+        |at, slot| Entry {
             sequence: at,
             time_ms: read_volatile(addr_of!((*slot).time_ms)),
             index: read_volatile(addr_of!((*slot).index)),
@@ -179,18 +168,8 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
                 addr_of!((*slot).new_text),
                 read_volatile(addr_of!((*slot).new_stored)),
             ),
-        });
-        fence(Ordering::Acquire);
-        match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
-                page.entries.push(entry)
-            }
-            _ => page.dropped += 1,
-        }
-        at += 1;
-    }
-    page.next = at;
-    page
+        },
+    )
 }
 
 #[cfg(test)]
@@ -234,7 +213,6 @@ mod tests {
         assert_eq!(core::mem::size_of::<Slot>(), 160);
         assert_eq!(core::mem::offset_of!(Log, entries), 64);
         assert_eq!(LOG_SIZE, 64 + SLOT_COUNT * 160);
-        assert_eq!(varc_log_memory_name(32), "AGENT_VARCS_32");
     }
 
     #[test]
@@ -323,39 +301,6 @@ mod tests {
                 ),
                 (200, TEXT_SIZE, b"old".as_slice())
             );
-        }
-    }
-
-    #[test]
-    fn overwritten_entries_are_counted_and_an_old_since_starts_over() {
-        let memory = Memory::new();
-        unsafe {
-            for i in 0..(SLOT_COUNT + 10) {
-                push(memory.0, i as u64, &int(1, 0, i as i32));
-            }
-            let page = read_since(memory.0, 0, 5);
-            assert_eq!(
-                (
-                    page.dropped,
-                    page.entries[0].sequence,
-                    page.entries.len(),
-                    page.next
-                ),
-                (10, 10, 5, 15)
-            );
-            let page = read_since(memory.0, 90_000, 1);
-            assert_eq!((page.dropped, page.entries[0].sequence), (10, 10));
-        }
-    }
-
-    #[test]
-    fn an_unpublished_slot_ends_the_page() {
-        let memory = Memory::new();
-        unsafe {
-            push(memory.0, 0, &int(1, 0, 1));
-            (*memory.0).written.store(2, Ordering::Release);
-            let page = read_since(memory.0, 0, 10);
-            assert_eq!((page.entries.len(), page.next), (1, 1));
         }
     }
 }

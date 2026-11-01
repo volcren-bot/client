@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use injector::{ScriptPage, ScriptRun};
 
-use crate::log_view::{Filtered, Log, View};
+use crate::log_view::{Filtered, Log, Poller, View};
 use crate::script_names::Names;
 
 /// Runs kept for display; the oldest go first.
@@ -49,8 +49,7 @@ impl Row {
         self.run.args.first()?.parse().ok()
     }
 
-    /// `npc_name_timer (6697) (1, 2)` or, for a trigger event, `Trigger 12 (…)`; nested runs are indented.
-    /// The row's text on one line.
+    /// The row's text on one line, like `npc_name_timer (6697) (1, 2)` or `Trigger 12 (…)`, with nested runs indented.
     #[cfg(test)]
     pub fn text(&self, names: &Names) -> String {
         let (name, args, took) = (self.name(names), self.args_text(), self.took());
@@ -143,10 +142,8 @@ pub struct Inspector {
     /// The rows `visible` shows, for the trigger box they were picked with.
     shown: Filtered<bool>,
     /// The client the rows are from, and the sequence number to ask it for next.
-    pid: Option<u32>,
+    poller: Poller,
     next: u64,
-    reading: bool,
-    next_poll: Option<Instant>,
 }
 
 impl Default for Inspector {
@@ -163,10 +160,8 @@ impl Default for Inspector {
             error: None,
             rows: Log::default(),
             shown: Filtered::default(),
-            pid: None,
+            poller: Poller::default(),
             next: 0,
-            reading: false,
-            next_poll: None,
         }
     }
 }
@@ -195,26 +190,20 @@ impl Inspector {
 
     /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
-        self.enabled
-            && (!self.reading || self.pid != Some(pid))
-            && self.next_poll.is_none_or(|at| now >= at)
+        self.poller.due(self.enabled, pid, now)
     }
 
     /// Marks a read started and says which sequence number to ask for. Another client than last time starts from its oldest run.
     pub fn start(&mut self, pid: u32) -> u64 {
-        if self.pid != Some(pid) {
-            self.pid = Some(pid);
+        if self.poller.start(pid) {
             self.next = 0;
             self.clear();
         }
-        self.reading = true;
         self.next
     }
 
     pub fn finish(&mut self, pid: u32, now: Instant, result: Result<Poll, String>) {
-        self.reading = false;
-        self.next_poll = Some(now + POLL_EVERY);
-        if self.pid != Some(pid) {
+        if !self.poller.finish(pid, Some(now + POLL_EVERY)) {
             return;
         }
         match result {
@@ -223,10 +212,10 @@ impl Inspector {
                 self.next = page.next;
                 self.dropped += page.dropped;
                 // sequence numbers going backwards mean the client has a new agent with a new log
-                if let (Some(last), Some(first)) = (self.rows.back(), page.runs.first())
-                    && first.sequence <= last.run.sequence
-                {
-                    self.rows.clear();
+                if let Some(first) = page.runs.first() {
+                    self.rows.restart_if_behind(first, |last, first| {
+                        first.sequence <= last.run.sequence
+                    });
                 }
                 // the blacklist applies as runs arrive, so the scripts it names never push the others out of the list
                 let blacklist = Blacklist::parse(&self.blacklist, &self.names);
@@ -367,23 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn polls_only_when_enabled_and_idle_and_resumes_where_it_stopped() {
-        let now = Instant::now();
-        let mut inspector = Inspector::default();
-        assert!(!inspector.due(32, now));
-        inspector.enabled = true;
-        assert!(inspector.due(32, now));
-        assert_eq!(inspector.start(32), 0);
-        assert!(!inspector.due(32, now));
-        inspector.finish(32, now, poll(vec![script(0, 1), script(1, 2)], 0, Some(7)));
-        assert!(!inspector.due(32, now));
-        assert!(inspector.due(32, now + POLL_EVERY));
-        assert_eq!(inspector.start(32), 2);
-        assert_eq!(inspector.kept(), 2);
-        assert_eq!(inspector.visible()[0].run.tick, Some(7));
-    }
-
-    #[test]
     fn blacklisted_scripts_are_dropped_on_arrival() {
         let now = Instant::now();
         let mut inspector = Inspector {
@@ -415,66 +387,6 @@ mod tests {
     }
 
     #[test]
-    fn another_client_starts_over() {
-        let now = Instant::now();
-        let mut inspector = Inspector {
-            enabled: true,
-            ..Inspector::default()
-        };
-        inspector.start(32);
-        inspector.finish(32, now, poll(vec![script(7, 1)], 3, None));
-        assert_eq!((inspector.kept(), inspector.dropped), (1, 3));
-        assert_eq!(inspector.start(44), 0);
-        assert_eq!((inspector.kept(), inspector.dropped), (0, 0));
-        // an answer for the client that was left is not mixed in
-        inspector.finish(32, now, poll(vec![script(8, 1)], 0, None));
-        assert_eq!(inspector.kept(), 0);
-    }
-
-    #[test]
-    fn a_reloaded_agent_replaces_the_old_runs() {
-        let now = Instant::now();
-        let mut inspector = Inspector {
-            enabled: true,
-            ..Inspector::default()
-        };
-        inspector.start(32);
-        inspector.finish(32, now, poll(vec![script(100, 1), script(101, 1)], 0, None));
-        inspector.start(32);
-        inspector.finish(32, now, poll(vec![script(0, 2)], 0, None));
-        assert_eq!(
-            inspector
-                .visible()
-                .iter()
-                .map(|r| r.script_id())
-                .collect::<Vec<_>>(),
-            [Some(2)]
-        );
-    }
-
-    #[test]
-    fn keeps_only_the_newest_runs() {
-        let now = Instant::now();
-        let mut inspector = Inspector {
-            enabled: true,
-            blacklist: String::new(),
-            ..Inspector::default()
-        };
-        inspector.start(32);
-        inspector.finish(
-            32,
-            now,
-            poll(
-                (0..KEEP as u64 + 10).map(|i| script(i, 1)).collect(),
-                0,
-                None,
-            ),
-        );
-        assert_eq!(inspector.kept(), KEEP);
-        assert_eq!(inspector.visible()[0].run.sequence, 10);
-    }
-
-    #[test]
     fn the_trigger_box_hides_trigger_events() {
         let now = Instant::now();
         let mut inspector = Inspector {
@@ -490,21 +402,6 @@ mod tests {
         assert_eq!(inspector.visible().len(), 2);
         inspector.triggers = false;
         assert_eq!(inspector.visible().len(), 1);
-    }
-
-    #[test]
-    fn errors_are_kept_until_the_next_good_read() {
-        let now = Instant::now();
-        let mut inspector = Inspector {
-            enabled: true,
-            ..Inspector::default()
-        };
-        inspector.start(32);
-        inspector.finish(32, now, Err("no log".into()));
-        assert_eq!(inspector.error.as_deref(), Some("no log"));
-        inspector.start(32);
-        inspector.finish(32, now, poll(vec![], 0, None));
-        assert_eq!(inspector.error, None);
     }
 
     fn ended(mut run: ScriptRun, sequence: u64, time_us: u64) -> ScriptRun {

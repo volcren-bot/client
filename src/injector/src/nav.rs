@@ -339,8 +339,7 @@ fn nearest<'a>(
         .map(|(_, o)| o)
 }
 
-/// The climbs of `locs`, each paired with the nearest loc on the plane it leads to that climbs back.
-/// A way up from the underground's plane 0 with no such loc, a way down from the surface's plane 0 and a portal lead to the nearest loc of the other world at the same spot 100 map squares away.
+/// The climbs of `locs`, each paired with the nearest loc on the plane it leads to that climbs back (or the other world's, 100 squares away).
 pub fn climbs(flags: Flags, locs: &[Climbable]) -> Vec<Climb> {
     let mut out = Vec::new();
     for c in locs {
@@ -509,8 +508,7 @@ const DOOR: u32 = 1 << 30;
 const CLIMB: u32 = 2 << 30;
 const INDEX: u32 = (1 << 30) - 1;
 
-/// Plans from `from` to `to` (planes included) inside `bounds` (x1, y1, x2, y2) on every plane.
-/// The underground is planned together with the surface: `bounds` is a box of the surface's coordinates and holds the underground's copy of it too (its tiles are `UNDERGROUND` further north).
+/// Plans from `from` to `to` inside `bounds` (x1, y1, x2, y2) on every plane, with the underground planned together with the surface.
 pub fn plan(
     flags: Flags,
     bounds: (i32, i32, i32, i32),

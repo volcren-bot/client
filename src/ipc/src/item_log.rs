@@ -1,9 +1,10 @@
 //! The item log: the container slots the client changed, in a ring in shared memory (`AGENT_ITEMS_<pid>`), using the packet log's scheme.
 
-use alloc::{format, string::String, vec::Vec};
+use crate::ring;
+use alloc::{format, string::String};
 use core::{
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
-    sync::atomic::{fence, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 pub fn item_log_memory_name(pid: u32) -> String {
@@ -37,6 +38,12 @@ pub struct Slot {
     new_quantity: i32,
     /// whether the container held the slot before: 0 when the write created the container
     old_known: u8,
+}
+
+impl ring::Slot for Slot {
+    fn commit(&self) -> &AtomicU64 {
+        &self.commit
+    }
 }
 
 #[repr(C)]
@@ -75,14 +82,7 @@ pub struct Entry {
     pub change: Change,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Page {
-    pub entries: Vec<Entry>,
-    /// Pass this as `since` to get what comes after.
-    pub next: u64,
-    /// Entries between `since` and `next` that were overwritten (or torn by a writer) before they could be read.
-    pub dropped: u64,
-}
+pub type Page = ring::Page<Entry>;
 
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
@@ -101,21 +101,22 @@ pub unsafe fn is_compatible(log: *const Log) -> bool {
 
 /// Appends a change; `log` must point to an initialised `Log`.
 pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
-    let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
-    let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
-
-    (*slot).commit.store(0, Ordering::Release);
-    fence(Ordering::Release);
-    write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
-    write_volatile(addr_of_mut!((*slot).tick), change.tick);
-    write_volatile(addr_of_mut!((*slot).container), change.container);
-    write_volatile(addr_of_mut!((*slot).slot), change.slot);
-    write_volatile(addr_of_mut!((*slot).old_item), change.old_item);
-    write_volatile(addr_of_mut!((*slot).old_quantity), change.old_quantity);
-    write_volatile(addr_of_mut!((*slot).new_item), change.new_item);
-    write_volatile(addr_of_mut!((*slot).new_quantity), change.new_quantity);
-    write_volatile(addr_of_mut!((*slot).old_known), change.old_known as u8);
-    (*slot).commit.store(sequence + 1, Ordering::Release);
+    ring::push(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        |slot| {
+            write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
+            write_volatile(addr_of_mut!((*slot).tick), change.tick);
+            write_volatile(addr_of_mut!((*slot).container), change.container);
+            write_volatile(addr_of_mut!((*slot).slot), change.slot);
+            write_volatile(addr_of_mut!((*slot).old_item), change.old_item);
+            write_volatile(addr_of_mut!((*slot).old_quantity), change.old_quantity);
+            write_volatile(addr_of_mut!((*slot).new_item), change.new_item);
+            write_volatile(addr_of_mut!((*slot).new_quantity), change.new_quantity);
+            write_volatile(addr_of_mut!((*slot).old_known), change.old_known as u8);
+        },
+    );
 }
 
 /// The readers waiting for changes, as a bit mask of their slots; `log` must point to an initialised `Log`.
@@ -124,24 +125,13 @@ pub unsafe fn subscribers(log: *const Log) -> u32 {
 }
 
 /// Claims a free subscriber slot (None when full), skipping slots whose event already exists; `log` must be writable.
-pub unsafe fn subscribe(log: *const Log, mut create_event: impl FnMut(u32) -> bool) -> Option<u32> {
-    for slot in 0..SUBSCRIBER_SLOTS {
-        let bit = 1u32 << slot;
-        if (*log).subscribers.load(Ordering::Acquire) & bit != 0 || !create_event(slot) {
-            continue;
-        }
-        if (*log).subscribers.fetch_or(bit, Ordering::AcqRel) & bit == 0 {
-            return Some(slot);
-        }
-    }
-    None
+pub unsafe fn subscribe(log: *const Log, create_event: impl FnMut(u32) -> bool) -> Option<u32> {
+    ring::subscribe(&(*log).subscribers, SUBSCRIBER_SLOTS, create_event)
 }
 
 /// Gives a slot back; `log` must be writable.
 pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
-    (*log)
-        .subscribers
-        .fetch_and(!(1u32 << slot), Ordering::AcqRel);
+    ring::unsubscribe(&(*log).subscribers, slot);
 }
 
 /// The sequence number the next entry will get; `log` must point to an initialised `Log`.
@@ -151,25 +141,13 @@ pub unsafe fn written(log: *const Log) -> u64 {
 
 /// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
-    let written = (*log).written.load(Ordering::Acquire);
-    let mut at = if since > written { 0 } else { since };
-    let mut page = Page::default();
-
-    // anything older than the ring holds is gone
-    let oldest = written.saturating_sub(SLOT_COUNT as u64);
-    if at < oldest {
-        page.dropped += oldest - at;
-        at = oldest;
-    }
-
-    while at < written && page.entries.len() < limit {
-        let slot = addr_of!((*log).entries[at as usize % SLOT_COUNT]);
-        let before = (*slot).commit.load(Ordering::Acquire);
-        if before < at + 1 {
-            // claimed but not published yet: stop here, the next read picks it up
-            break;
-        }
-        let entry = (before == at + 1).then(|| Entry {
+    ring::read_since(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        since,
+        limit,
+        |at, slot| Entry {
             sequence: at,
             time_ms: read_volatile(addr_of!((*slot).time_ms)),
             change: Change {
@@ -182,18 +160,8 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
                 new_item: read_volatile(addr_of!((*slot).new_item)),
                 new_quantity: read_volatile(addr_of!((*slot).new_quantity)),
             },
-        });
-        fence(Ordering::Acquire);
-        match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
-                page.entries.push(entry)
-            }
-            _ => page.dropped += 1,
-        }
-        at += 1;
-    }
-    page.next = at;
-    page
+        },
+    )
 }
 
 #[cfg(test)]
@@ -236,7 +204,6 @@ mod tests {
         assert_eq!(core::mem::size_of::<Slot>(), 48);
         assert_eq!(core::mem::offset_of!(Log, entries), 64);
         assert_eq!(LOG_SIZE, 64 + SLOT_COUNT * 48);
-        assert_eq!(item_log_memory_name(32), "AGENT_ITEMS_32");
     }
 
     #[test]
@@ -273,57 +240,6 @@ mod tests {
                 (page.entries.len(), page.entries[0].sequence, page.next),
                 (1, 2, 3)
             );
-        }
-    }
-
-    #[test]
-    fn overwritten_entries_are_counted_and_an_old_since_starts_over() {
-        let memory = Memory::new();
-        unsafe {
-            for i in 0..(SLOT_COUNT + 10) {
-                push(memory.0, i as u64, &change(i as i32, 1));
-            }
-            let page = read_since(memory.0, 0, 5);
-            assert_eq!(
-                (
-                    page.dropped,
-                    page.entries[0].sequence,
-                    page.entries.len(),
-                    page.next
-                ),
-                (10, 10, 5, 15)
-            );
-            let page = read_since(memory.0, 90_000, 1);
-            assert_eq!((page.dropped, page.entries[0].sequence), (10, 10));
-        }
-    }
-
-    #[test]
-    fn subscriber_slots_are_claimed_and_given_back() {
-        let memory = Memory::new();
-        unsafe {
-            assert_eq!(subscribers(memory.0), 0);
-            assert_eq!(subscribe(memory.0, |_| true), Some(0));
-            // slot 1 has a live event that isn't in the mask (another process's), so it is skipped
-            assert_eq!(subscribe(memory.0, |slot| slot != 1), Some(2));
-            assert_eq!(subscribers(memory.0), 0b101);
-            unsubscribe(memory.0, 0);
-            assert_eq!(subscribers(memory.0), 0b100);
-            for _ in 0..SUBSCRIBER_SLOTS {
-                subscribe(memory.0, |_| true);
-            }
-            assert_eq!(subscribe(memory.0, |_| true), None);
-        }
-    }
-
-    #[test]
-    fn an_unpublished_slot_ends_the_page() {
-        let memory = Memory::new();
-        unsafe {
-            push(memory.0, 0, &change(0, 1));
-            (*memory.0).written.store(2, Ordering::Release);
-            let page = read_since(memory.0, 0, 10);
-            assert_eq!((page.entries.len(), page.next), (1, 1));
         }
     }
 }

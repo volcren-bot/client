@@ -7,6 +7,8 @@ use std::{
 
 use injector::{Item, ItemChange, ItemPage};
 
+use crate::log_view::Poller;
+
 /// Snapshots kept per container; the oldest go first.
 pub const KEEP: usize = 25;
 /// The game value kind that names item containers (`ipc::state::game_val::INV`, which the loader does not link).
@@ -95,9 +97,7 @@ pub struct Inspector {
     container_names: HashMap<i32, String>,
     item_names: HashMap<i32, String>,
     stackable: HashMap<i32, bool>,
-    pid: Option<u32>,
-    reading: bool,
-    next_poll: Option<Instant>,
+    poller: Poller,
 }
 
 impl Inspector {
@@ -157,25 +157,23 @@ impl Inspector {
 
     /// How long until the read that follows a failed one may start; none when no read is waiting for that.
     pub fn retry_in(&self, now: Instant) -> Option<Duration> {
-        self.next_poll.map(|at| at.saturating_duration_since(now))
+        self.poller
+            .next_poll()
+            .map(|at| at.saturating_duration_since(now))
     }
 
     /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
-        self.enabled
-            && (!self.reading || self.pid != Some(pid))
-            && self.next_poll.is_none_or(|at| now >= at)
+        self.poller.due(self.enabled, pid, now)
     }
 
     /// Marks a read started and says what it needs. Another client than last time starts over.
     pub fn start(&mut self, pid: u32) -> Request {
-        if self.pid != Some(pid) {
-            self.pid = Some(pid);
+        if self.poller.start(pid) {
             self.clear();
             self.copy.clear();
             self.next = None;
         }
-        self.reading = true;
         Request {
             since: self.next,
             known_containers: self.container_names.keys().copied().collect(),
@@ -184,9 +182,10 @@ impl Inspector {
     }
 
     pub fn finish(&mut self, pid: u32, now: Instant, result: Result<Poll, String>) {
-        self.reading = false;
-        self.next_poll = result.is_err().then_some(now + RETRY_AFTER_ERROR);
-        if self.pid != Some(pid) {
+        if !self
+            .poller
+            .finish(pid, result.is_err().then_some(now + RETRY_AFTER_ERROR))
+        {
             return;
         }
         match result {

@@ -220,12 +220,14 @@ pub fn sidebar_item<T: PartialEq>(
             ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
         }
         let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap = egui::text::TextWrapping {
-            max_width: rect.width() - 16.0,
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('\u{2026}'),
+        let mut job = egui::text::LayoutJob {
+            wrap: egui::text::TextWrapping {
+                max_width: rect.width() - 16.0,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('\u{2026}'),
+            },
+            ..Default::default()
         };
         for (s, color) in [
             (if last { "└─ " } else { "├─ " }, COMMENT),

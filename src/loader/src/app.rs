@@ -206,8 +206,7 @@ const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
 const CLIENT_PREFIX_WIDTH: f32 = 130.0;
 const CLIENT_STATUS_WIDTH: f32 = 160.0;
 
-/// A row of widgets centered horizontally. Their width is only known after they are laid out, so the
-/// previous frame's width is used for the offset (it settles after one repaint).
+/// A row of widgets centered horizontally, using the previous frame's width for the offset (it settles after one repaint).
 fn centered_row(
     ui: &mut egui::Ui,
     id: &str,
@@ -600,8 +599,7 @@ const KNOWN_VARPS: [(&str, usize); 11] = [
     ("Last home teleport", 892),
 ];
 
-/// A Development inspector's log as a table: a header that stays put, columns the user can resize, rows drawn only while visible.
-/// `columns` are (title, column); the last one should be `remainder`. `row` fills one row's cells, given the row.
+/// A Development inspector's log as a table: a fixed header, resizable columns, and rows drawn only while visible.
 struct LogTable<'a> {
     id: &'a str,
     follow: bool,
@@ -667,8 +665,7 @@ fn narrow(width: f32) -> egui_extras::Column {
         .clip(true)
 }
 
-/// The Names menu of the packet monitor: every packet the table knows by name, searchable, each click cycling it through
-/// show only, hide and off by rewriting the filter text.
+/// The Names menu of the packet monitor: every known packet name, searchable, each click cycling it through show only, hide and off.
 fn packet_names_menu(ui: &mut egui::Ui, monitor: &mut crate::packets::Monitor) {
     use crate::packets::{NameState, UNKNOWN, name_state, with_name};
 
@@ -1012,8 +1009,7 @@ pub struct LoaderApp {
     fold: crate::fold::Folds,
     script: Option<Script>,
     form: Option<crate::form::Form>,
-    /// What the script was last given from `form`: set once it is submitted, after which the form stays on the page and
-    /// the button becomes Update. `None` while the script is still waiting for its settings.
+    /// What the script was last given from `form`; `None` while it still waits for its settings, and after submit the button becomes Update.
     form_sent: Option<serde_json::Value>,
     /// The break and sleep config the running script has.
     antiban_sent: injector::antiban::Config,
@@ -1721,7 +1717,6 @@ impl LoaderApp {
         });
     }
 
-    // The Packet Inspector tab: reads the selected client's packets while Enable is on.
     // Reads the selected client's varps while the var inspector is enabled; the job also looks up the varbits of varps that changed.
     fn poll_vars(&mut self, ctx: &egui::Context) {
         if !self.vars.enabled {
@@ -3016,8 +3011,7 @@ impl LoaderApp {
         // Fields take what is left after the label and the Browse button, down to a usable minimum.
         let field = (ui.available_width() - 190.0).clamp(120.0, 760.0);
         egui::ScrollArea::both().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
-        // A grid cell that isn't in the last column can't grow past its width from the previous frame (40px for a new one),
-        // which is what kept the fields tiny whatever their `desired_width`; `max_col_width` lifts that.
+        // A grid cell not in the last column can't grow past its previous frame's width, which kept the fields tiny; `max_col_width` lifts that.
         egui::Grid::new("settings").num_columns(3).max_col_width(field).show(ui, |ui| {
             ui.label("agent DLL");
             ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(field));
@@ -3663,8 +3657,7 @@ impl LoaderApp {
         }
     }
 
-    /// Sends the script what the user did with its form, and remembers the values for next time. A submitted form stays on
-    /// the page so it can be changed and sent again (`push_form_update`); a cancelled one is dropped.
+    /// Sends the script what the user did with its form and remembers the values; a submitted form stays on the page, a cancelled one is dropped.
     fn answer_form(&mut self, outcome: crate::form::Outcome) {
         let answer = match outcome {
             crate::form::Outcome::Open => return,
@@ -4491,8 +4484,7 @@ impl LoaderApp {
         ui.add_space(12.0);
         ui.heading("Overlays");
         ui.add_space(4.0);
-        // The checkboxes are in fixed vertical groups (so their order never jumbles); as the window narrows
-        // the groups stack: fewer next to each other, down to a single one.
+        // The checkboxes are in fixed vertical groups, and the groups stack as the window narrows, down to a single one.
         let gap = 24.0;
         let font = egui::TextStyle::Body.resolve(ui.style());
         let widest = DEV_TOGGLES
@@ -5104,8 +5096,7 @@ impl eframe::App for LoaderApp {
 
         let window = ctx.content_rect();
         let narrow = window.width() < SIDEBAR_MIN_WINDOW;
-        // As the window shrinks the header reflows: the account controls drop under the wordmark, then stack,
-        // and finally the logo and wordmark stack too.
+        // As the window shrinks the header reflows: the account controls drop under the wordmark, then stack, then the logo and wordmark stack.
         let wrap_account = window.width() < HEADER_COMPACT_WINDOW;
         let stack_account = window.width() < HEADER_STACK_WINDOW;
         let stack_brand = window.width() < HEADER_TINY_WINDOW;

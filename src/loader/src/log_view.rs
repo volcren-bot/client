@@ -4,7 +4,45 @@ use std::{
     cell::{Ref, RefCell},
     collections::VecDeque,
     ops::Index,
+    time::Instant,
 };
+
+/// Which client's log an inspector reads, whether a read is under way, and when the next may start.
+#[derive(Default)]
+pub struct Poller {
+    pid: Option<u32>,
+    reading: bool,
+    next_poll: Option<Instant>,
+}
+
+impl Poller {
+    /// Whether a read of `pid`'s log should start now; `enabled` is the inspector's own switch.
+    pub fn due(&self, enabled: bool, pid: u32, now: Instant) -> bool {
+        enabled
+            && (!self.reading || self.pid != Some(pid))
+            && self.next_poll.is_none_or(|at| now >= at)
+    }
+
+    /// Marks a read of `pid`'s log started. True when it is another client than last time: what was kept starts over.
+    pub fn start(&mut self, pid: u32) -> bool {
+        let other = self.pid != Some(pid);
+        self.pid = Some(pid);
+        self.reading = true;
+        other
+    }
+
+    /// Marks the read over, the next allowed from `next_poll`. False when the answer is for a client that was left.
+    pub fn finish(&mut self, pid: u32, next_poll: Option<Instant>) -> bool {
+        self.reading = false;
+        self.next_poll = next_poll;
+        self.pid == Some(pid)
+    }
+
+    /// When the next read may start, if one is waiting for that.
+    pub fn next_poll(&self) -> Option<Instant> {
+        self.next_poll
+    }
+}
 
 /// Rows numbered from the first ever pushed, so the numbers stay put as the oldest go.
 pub struct Log<T> {
@@ -27,10 +65,6 @@ impl<T> Log<T> {
         self.rows.len()
     }
 
-    pub fn back(&self) -> Option<&T> {
-        self.rows.back()
-    }
-
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.rows.iter()
     }
@@ -47,6 +81,14 @@ impl<T> Log<T> {
     pub fn clear(&mut self) {
         self.first += self.rows.len() as u64;
         self.rows.clear();
+    }
+
+    /// Clears the log when a page starting at `first` is not newer than its newest row (`behind(newest, first)`):
+    /// the client has a new agent with a new log, so what was kept is stale.
+    pub fn restart_if_behind<F>(&mut self, first: &F, behind: impl Fn(&T, &F) -> bool) {
+        if self.rows.back().is_some_and(|last| behind(last, first)) {
+            self.clear();
+        }
     }
 
     /// Drops the oldest rows until at most `keep` are left.
@@ -184,6 +226,44 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn a_page_that_starts_no_later_than_the_log_ends_restarts_it() {
+        let mut log = Log::default();
+        log.extend([1u64, 2, 3]);
+        let behind = |last: &u64, first: &u64| first <= last;
+        log.restart_if_behind(&4, behind);
+        assert_eq!(log.len(), 3);
+        log.restart_if_behind(&3, behind);
+        assert_eq!(log.len(), 0);
+    }
+
+    #[test]
+    fn a_poller_reads_only_when_enabled_and_idle_and_waits_between_reads() {
+        let now = Instant::now();
+        let later = now + std::time::Duration::from_secs(1);
+        let mut poller = Poller::default();
+        assert!(!poller.due(false, 32, now));
+        assert!(poller.due(true, 32, now));
+        assert!(poller.start(32));
+        assert!(!poller.due(true, 32, now));
+        // a read of another client does not wait for this one
+        assert!(poller.due(true, 44, now));
+        assert!(poller.finish(32, Some(later)));
+        assert!(!poller.due(true, 32, now));
+        assert!(poller.due(true, 32, later));
+        assert_eq!(poller.next_poll(), Some(later));
+        assert!(!poller.start(32));
+    }
+
+    #[test]
+    fn another_client_starts_over_and_the_one_left_is_not_heard() {
+        let mut poller = Poller::default();
+        assert!(poller.start(32));
+        assert!(poller.start(44));
+        assert!(!poller.finish(32, None));
+        assert!(poller.finish(44, None));
+    }
 
     fn shown(view: View<'_, i32, bool>) -> Vec<i32> {
         view.iter().copied().collect()

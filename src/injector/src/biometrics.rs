@@ -1,5 +1,4 @@
-//! The per-account biometric profile: a stable pseudo-random byte vector derived from the account name, so an
-//! account always plays the same way (mouse feel, sleep hour, ...). The scripts' lib reads it through `Host`.
+//! The per-account biometric profile: a stable pseudo-random byte vector derived from the account name, read by the lib through `Host`.
 
 const M: u32 = 0x5bd1_e995;
 

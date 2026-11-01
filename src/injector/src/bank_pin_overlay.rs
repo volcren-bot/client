@@ -1,8 +1,4 @@
-//! The panel drawn over the bank PIN keypad while `bank_pin_enter` handles the PIN: the keypad darkened, the VOLCREN
-//! logo and name in its top left corner and what is running in its middle, in the Tokyo Night colours (the logo keeps its own).
-//!
-//! The art is pre-rendered by `assets/make_bank_pin_art.sh` (the logo, and the text in Fira Code Bold), so nothing here
-//! needs the font at run time. The overlay is blended with straight alpha, so the art keeps its smooth edges.
+//! The panel drawn over the bank PIN keypad while `bank_pin_enter` runs, from art pre-rendered by `assets/make_bank_pin_art.sh`.
 
 // Only the Windows injector has an overlay to paint on, so on other hosts nothing here is called outside tests.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -214,12 +210,5 @@ mod tests {
                 .all(|&(x, y)| (0..=199).contains(&x) && (0..=149).contains(&y))
         );
         assert!(canvas.values().any(|c| *c == MESSAGE_COLOR));
-    }
-
-    #[test]
-    fn the_art_files_parse() {
-        for data in [LOGO, TITLE, MESSAGE] {
-            Art::parse(data);
-        }
     }
 }

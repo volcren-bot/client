@@ -1,6 +1,4 @@
-//! The global break and sleep config. The loader owns and edits it and sends it to every script it starts, and again
-//! whenever it changes; the lib's `Antiban` plans its breaks and sleeps from it. A field left out is "Auto": the lib
-//! picks it from the account's biometrics.
+//! The global break and sleep config: the loader owns it and sends it to scripts, and a field left out is "Auto" (picked from biometrics).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -8,8 +6,7 @@ use serde_json::{Value, json};
 /// A line the loader writes to the script's stdin: the config as JSON. Sent before the script starts, and later at any time.
 pub const PREFIX: &str = "\u{1e}ANTIBAN ";
 
-/// A line the loader writes to the script's stdin when the user presses "Skip next" on a queued break or sleep:
-/// `break 2` or `sleep 1`, the kind and the position in the config (counting from 0).
+/// A stdin line from the loader when the user presses "Skip next" on a queued break or sleep, like `break 2` or `sleep 1`.
 pub const SKIP_PREFIX: &str = "\u{1e}SKIP ";
 
 const MINUTE: f64 = 60_000.0;
@@ -82,8 +79,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Whether every number is usable: finite, intervals and lengths above 0, chances and randomness from 0 to 1, and
-    /// sleep times that read as a time of day.
+    /// Whether every number is usable: finite, positive intervals and lengths, chances from 0 to 1, and valid sleep times of day.
     pub fn validate(&self) -> Result<(), String> {
         let fraction = |what: &str, value: Option<f64>| match value {
             Some(v) if !(0.0..=1.0).contains(&v) => Err(format!("{what} must be from 0 to 1")),

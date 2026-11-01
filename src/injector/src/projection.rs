@@ -648,8 +648,7 @@ fn scene_terrain(
     Ok((key, trig))
 }
 
-/// Projects `points` with the client's camera, first moved by `shift` as it follows the player: fine x and y, and the plane the
-/// player will stand on (negative: this one), since the camera rises or sinks with the ground there.
+/// Projects `points` with the client's camera, first moved by `shift` as it follows the player (fine x and y, and the plane they will stand on).
 pub fn project(
     memory: &impl Memory,
     layout: &Layout,

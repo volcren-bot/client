@@ -2,14 +2,7 @@ use super::{model::whole_function, *};
 use iced_x86::{Decoder, DecoderOptions, MemorySize, Register};
 use ipc::packets::{Field, Transform};
 
-// What each server packet carries, read from the client's own code.
-//
-// The packet dispatcher (the function that calls `receive` and jumps through a table indexed by the packet id) has one case
-// per packet, and a case reads its fields by calling the buffer's small read functions in order. Those functions are
-// classified by running them on probe bytes in a tiny interpreter: where the byte at each position ends up in the result
-// says whether it is big or little endian, and what is added or negated. A case's layout is its reads up to its first
-// branch, and it is kept only when the sizes add up to the packet's size (the size table is found by its use). Reads this
-// can't follow (strings, smarts, loops) leave a packet with its size only.
+// What each server packet carries, read from the client's own code by running its packet read functions on probe bytes.
 
 /// The packet sizes, and the fields of each packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,8 +122,7 @@ fn run(
         }
     };
 
-    // The client reads big endian values with a byte order test against this constant (a global that is
-    // 0x03020100 on a little endian machine); it is the only comparison a read function may make.
+    // The client tests byte order against this constant (0x03020100 on little endian), the only comparison a read function may make.
     let mut order_equal = None;
     let mut at = 0;
     for _ in 0..64 {
@@ -567,7 +559,7 @@ pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::offsets::tests::map_image;
+    use crate::client::offsets::tests::for_each_archived_build;
 
     /// The packet table the loader ships, which was read from the Java client: `opcode -> (size, fields)`.
     fn java_table() -> HashMap<usize, (i32, Option<Vec<String>>)> {
@@ -598,28 +590,10 @@ mod tests {
 
     #[test]
     fn reads_packet_layouts_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
         let java = java_table();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let packets = find_packets(&pe).unwrap();
-            let found = find_packet_layouts(&pe, &packets).unwrap_or_else(|error| {
+        for_each_archived_build(|build, pe| {
+            let packets = find_packets(pe).unwrap();
+            let found = find_packet_layouts(pe, &packets).unwrap_or_else(|error| {
                 panic!("packet layouts not found in {}: {error:?}", build.display())
             });
             assert_eq!(found.sizes.len(), 151);
@@ -651,6 +625,6 @@ mod tests {
             }
             println!("{}: {same} same, {only_here} only read here, {only_java} only from Java, differing: {different:?}", build.display());
             assert!(different.is_empty(), "{different:?}");
-        }
+        });
     }
 }

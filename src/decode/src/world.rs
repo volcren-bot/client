@@ -1267,8 +1267,7 @@ mod tests {
         );
     }
 
-    // Records where each read it passes on starts; with `short`, passes only short reads, so every snapshot fails and the
-    // decoders read field by field.
+    // Records where each read it passes on starts; with `short`, passes only short reads so decoders read field by field.
     struct Recording<'a> {
         memory: &'a Fake,
         short: bool,

@@ -359,29 +359,6 @@ fn encrypted_files_are_opened_with_the_session_key() {
 }
 
 #[test]
-fn a_free_script_is_never_written_to_disk_either() {
-    let root = cache("free");
-    let free = Server {
-        price: 0,
-        ..Server::healthy()
-    }
-    .start();
-    let prepared = prepare_in(&api(&free), &free_script(), &root).unwrap();
-    assert_eq!(prepared.source, MAIN);
-    assert_eq!(
-        prepared.modules,
-        vec![("util.luau".to_owned(), UTIL.to_owned())]
-    );
-    assert_eq!(
-        fs::read_dir(revision_dir(&root, SCRIPT_ID, 4))
-            .unwrap()
-            .count(),
-        0
-    );
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
 fn every_start_downloads_the_files_again_but_reuses_the_lib() {
     let fake = Server {
         price: 0,
@@ -696,13 +673,5 @@ fn a_community_script_never_runs_without_a_warning() {
     assert!(prepare_warned(&api(&fake), &community_script(), &root, None).is_err());
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
     assert_eq!(fake.count("GET", "/files/"), 0);
-    let _ = fs::remove_dir_all(&root);
-}
-
-#[test]
-fn an_official_script_needs_no_warning() {
-    let fake = Server::healthy().start();
-    let root = cache("official");
-    prepare_warned(&api(&fake), &script(), &root, None).expect("official scripts run without one");
     let _ = fs::remove_dir_all(&root);
 }

@@ -1,7 +1,4 @@
-//! The Accounts tab: saved game accounts (a label, the hash of the account name, the bank pin), kept encrypted on disk.
-//!
-//! The account name is never stored, only `hash_name` of it, so a script can later recognise the logged in account by hashing its name.
-//! The file is AES-256-GCM sealed with a random key that lives in the OS keyring, so the file alone is useless.
+//! The Accounts tab: saved game accounts (a label, the name hash, the bank pin), kept AES-256-GCM encrypted with a key in the OS keyring.
 
 use std::path::PathBuf;
 
@@ -37,14 +34,13 @@ pub struct Entry {
     pub pin: String,
 }
 
-/// SHA-256 of the account name as the client normalizes it (trimmed, lowercase, underscores and hyphens as spaces), as lowercase hex.
-/// So a name typed as "My Name" and the client's own `my_name` hash the same.
+/// SHA-256 of the account name as the client normalizes it, as lowercase hex, so "My Name" and the client's `my_name` hash the same.
 pub fn hash_name(account: &str) -> String {
     injector::bank_pin::hash_name(account)
 }
 
 pub fn valid_pin(pin: &str) -> bool {
-    pin.len() == PIN_LEN && pin.bytes().all(|b| b.is_ascii_digit())
+    injector::bank_pin::parse_pin(pin).is_some()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -235,8 +231,7 @@ impl Accounts {
         }
     }
 
-    /// The saved PIN of the account with this name hash, for a script's `bank_pin_enter()`; `Err` while the file can't be read.
-    /// Edits that aren't saved yet don't count.
+    /// The saved PIN of the account with this name hash, for `bank_pin_enter()`; `Err` while the file can't be read, and unsaved edits don't count.
     pub fn pin_for(&self, hash: &str) -> Result<Option<String>, String> {
         if let Some(why) = &self.locked {
             return Err(format!("the saved accounts can't be read: {why}"));
@@ -368,8 +363,7 @@ impl Accounts {
             deleting,
             ..
         } = self;
-        // The buttons are as wide as the widest label so they line up. When the window is too narrow for the text
-        // columns they stack, which makes the rows taller.
+        // The buttons are as wide as the widest label so they line up, and stack when the window is too narrow for the text columns.
         let font = egui::TextStyle::Button.resolve(ui.style());
         let button_width = ["Save", "Delete", "Sure?"]
             .iter()
@@ -712,30 +706,6 @@ fn edit_cell(ui: &mut egui::Ui, edit: &mut Editing) -> Option<Option<Editing>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hash_ignores_case_and_surrounding_space() {
-        assert_eq!(hash_name("  Some Name "), hash_name("some name"));
-        assert_ne!(hash_name("some name"), hash_name("some  name"));
-        assert_eq!(
-            hash_name("P 4I N"),
-            hash_name("p_4i_n"),
-            "the client's own form of the name matches"
-        );
-        assert_eq!(hash_name("a-b\u{a0}c"), hash_name("a_b_c"));
-        assert_eq!(
-            hash_name("abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn pin_is_exactly_four_digits() {
-        assert!(valid_pin("0123"));
-        for bad in ["", "123", "12345", "12a4", "١٢٣٤", " 123"] {
-            assert!(!valid_pin(bad), "{bad:?}");
-        }
-    }
 
     #[test]
     fn entries_round_trip_and_the_wrong_key_fails() {

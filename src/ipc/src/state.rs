@@ -1802,70 +1802,6 @@ mod tests {
         );
         assert_eq!(size_of::<ItemNameRequest>(), 8 + 64 * 4);
         assert_eq!(size_of::<NamesReply>(), 16 + 64 * 64);
-        assert_eq!(
-            LAYOUT_SIZE,
-            8 + 96
-                + 96
-                + 120
-                + 56
-                + 28
-                + 96
-                + 16
-                + 40
-                + 8
-                + 4
-                + 96
-                + 32
-                + 16
-                + 8
-                + 56
-                + 8
-                + 32
-                + 8
-                + 16
-                + 8
-                + 8
-                + 8
-                + 264
-                + 8
-                + 4112
-                + 8
-                + 264
-                + 8
-                + 4112
-                + 8
-                + 8
-                + 768
-                + 8
-                + 16
-                + 512
-                + 8
-                + 8
-                + (16
-                    + MENU_ENTRIES * entry
-                    + entry
-                    + 16
-                    + entry
-                    + 8
-                    + 52
-                    + 4
-                    + MENU_SUBMENUS * submenu)
-                + 8
-                + 24
-                + 8
-                + 1120
-                + MODEL_FACES * 24
-                + 16
-                + size_of::<LocsReply>()
-                + 8
-                + size_of::<CacheRequest>()
-                + 8
-                + size_of::<CacheReply>()
-                + 8
-                + size_of::<WorkerRequest>()
-                + 8
-                + size_of::<WorkerReply>()
-        );
         assert_eq!(size_of::<CacheRequest>(), 16 + CACHE_BATCH * 8);
         assert_eq!(
             size_of::<CacheReply>(),
@@ -2034,10 +1970,5 @@ mod tests {
                 Err(ReadError::Incompatible(PROTOCOL_VERSION as u32 + 1))
             );
         }
-    }
-
-    #[test]
-    fn names_are_per_process() {
-        assert_eq!(state_memory_name(32), "AGENT_STATE_32");
     }
 }

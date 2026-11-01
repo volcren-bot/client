@@ -1945,8 +1945,20 @@ mod tests {
         assert_eq!(state_compare.memory_displacement64() as u32, game_state);
     }
 
-    #[test]
-    fn finds_instance_flag_in_archived_builds() {
+    /// The finder's value, printed; a finder that found nothing fails the build it ran on.
+    fn found<T: std::fmt::Debug, E: std::fmt::Debug>(
+        what: &str,
+        build: &std::path::Path,
+        result: Result<T, E>,
+    ) -> T {
+        let value = result
+            .unwrap_or_else(|error| panic!("{what} not found in {}: {error:?}", build.display()));
+        println!("{}: {what} {value:x?}", build.display());
+        value
+    }
+
+    /// Runs `check` on each archived client build in `archive/` (skipped when there is none).
+    pub(super) fn for_each_archived_build(mut check: impl FnMut(&std::path::Path, &Pe)) {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let manifest = if cfg!(windows) && manifest.starts_with('/') {
             format!("Z:{manifest}")
@@ -1966,36 +1978,25 @@ mod tests {
         for build in builds {
             let image = map_image(&std::fs::read(&build).unwrap());
             let pe = Pe::parse(&image).unwrap();
-            let flag = find_instance_flag(&pe).unwrap_or_else(|error| {
-                panic!("instance flag not found in {}: {error:?}", build.display())
-            });
-            println!("{}: instance flag {flag:x}", build.display());
+            check(&build, &pe);
         }
     }
 
     #[test]
+    fn finds_instance_flag_in_archived_builds() {
+        for_each_archived_build(|build, pe| {
+            let flag = find_instance_flag(pe).unwrap_or_else(|error| {
+                panic!("instance flag not found in {}: {error:?}", build.display())
+            });
+            println!("{}: instance flag {flag:x}", build.display());
+        });
+    }
+
+    #[test]
     fn finds_actor_path_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let position = find_actor_position(&pe).unwrap();
-            let path = find_actor_path(&pe, position.x).unwrap_or_else(|error| {
+        for_each_archived_build(|build, pe| {
+            let position = find_actor_position(pe).unwrap();
+            let path = find_actor_path(pe, position.x).unwrap_or_else(|error| {
                 panic!("actor path not found in {}: {error:?}", build.display())
             });
             println!("{}: {path:x?}", build.display());
@@ -2006,31 +2007,13 @@ mod tests {
                 "{}",
                 build.display()
             );
-        }
+        });
     }
 
     #[test]
     fn finds_packets_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let packets = find_packets(&pe).unwrap_or_else(|error| {
+        for_each_archived_build(|build, pe| {
+            let packets = find_packets(pe).unwrap_or_else(|error| {
                 panic!("packets not found in {}: {error:?}", build.display())
             });
             println!("{}: {packets:x?}", build.display());
@@ -2056,31 +2039,13 @@ mod tests {
                 "{}",
                 build.display()
             );
-        }
+        });
     }
 
     #[test]
     fn finds_script_runs_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let runs = find_script_runs(&pe).unwrap_or_else(|error| {
+        for_each_archived_build(|build, pe| {
+            let runs = find_script_runs(pe).unwrap_or_else(|error| {
                 panic!("script runs not found in {}: {error:?}", build.display())
             });
             println!("{}: {runs:x?}", build.display());
@@ -2102,31 +2067,13 @@ mod tests {
                 "{}",
                 build.display()
             );
-        }
+        });
     }
 
     #[test]
     fn finds_varc_setters_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let setters = find_varc_setters(&pe).unwrap_or_else(|error| {
+        for_each_archived_build(|build, pe| {
+            let setters = find_varc_setters(pe).unwrap_or_else(|error| {
                 panic!("varc setters not found in {}: {error:?}", build.display())
             });
             println!("{}: {setters:x?}", build.display());
@@ -2142,129 +2089,65 @@ mod tests {
                     build.display()
                 );
             }
-        }
+        });
     }
 
     #[test]
     fn finds_item_setter_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let containers = find_item_containers(&pe).unwrap_or_else(|error| {
+        for_each_archived_build(|build, pe| {
+            let containers = find_item_containers(pe).unwrap_or_else(|error| {
                 panic!(
                     "item containers not found in {}: {error:?}",
                     build.display()
                 )
             });
-            let setter = find_item_setter(&pe, &containers).unwrap_or_else(|error| {
+            let setter = find_item_setter(pe, &containers).unwrap_or_else(|error| {
                 panic!("item setter not found in {}: {error:?}", build.display())
             });
             println!("{}: item setter {setter:#x}", build.display());
             if build.to_string_lossy().contains("a2636a01") {
                 assert_eq!(setter, 0x30f60, "{}", build.display());
             }
-        }
+        });
     }
 
     #[test]
-    fn finds_login_panel_in_archived_builds() {
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let manifest = if cfg!(windows) && manifest.starts_with('/') {
-            format!("Z:{manifest}")
-        } else {
-            manifest.into()
-        };
-        let archive = std::path::Path::new(&manifest).join("../../archive");
-        let Ok(entries) = std::fs::read_dir(&archive) else {
-            eprintln!("skipped, no {}", archive.display());
-            return;
-        };
-        let mut builds: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "exe"))
-            .collect();
-        builds.sort();
-        for build in builds {
-            let image = map_image(&std::fs::read(&build).unwrap());
-            let pe = Pe::parse(&image).unwrap();
-            let game_state = find_game_state(&pe).expect("game state not found");
-            let panel = find_login_panel(&pe, game_state).unwrap_or_else(|error| {
+    fn finds_every_offset_in_archived_builds() {
+        for_each_archived_build(|build, pe| {
+            let game_state = find_game_state(pe).expect("game state not found");
+            let panel = find_login_panel(pe, game_state).unwrap_or_else(|error| {
                 panic!("login panel not found in {}: {error:?}", build.display())
             });
             println!("{}: {panel:x?}", build.display());
-            let interfaces = find_interfaces(&pe).unwrap_or_else(|error| {
+            let interfaces = find_interfaces(pe).unwrap_or_else(|error| {
                 panic!("interfaces not found in {}: {error:?}", build.display())
             });
             println!("{}: {interfaces:x?}", build.display());
-            let player = find_local_player(&pe).unwrap();
-            println!(
-                "{}: {:x?} {:x?} {:x?} {:x?}",
-                build.display(),
-                find_item_containers(&pe),
-                find_varcs(&pe, player.client),
-                find_run_energy(&pe),
-                find_actor_lists(&pe)
-            );
-            let names = find_actor_names(&pe);
-            println!("{}: {names:x?}", build.display());
-            println!("{}: {:x?}", build.display(), find_component_invalidate(&pe));
-            println!(
-                "{}: sprite {:x?}",
-                build.display(),
-                find_component_sprite(&pe)
-            );
-            println!("{}: {:x?}", build.display(), find_component_fields(&pe));
-            let lookup = find_obj_type_lookup(&pe);
-            println!("{}: {lookup:x?}", build.display());
-            println!(
-                "{}: {:x?}",
-                build.display(),
-                find_projection(&pe, player.client)
-            );
-            let menu = find_menu(&pe);
-            println!("{}: {menu:x?}", build.display());
-            if let Ok(menu) = menu {
-                let click = find_menu_click(&pe, &menu);
-                println!("{}: {click:x?}", build.display());
-                if let Ok(click) = click {
-                    println!(
-                        "{}: menu layout {:x?}",
-                        build.display(),
-                        find_menu_layout(&pe, &click)
-                    );
-                }
-                println!("{}: {:x?}", build.display(), find_selection(&pe, &menu));
-            }
-            let minimap = find_minimap(&pe, player.client).unwrap_or_else(|error| {
+            let player = find_local_player(pe).unwrap();
+            found("item containers", build, find_item_containers(pe));
+            found("varcs", build, find_varcs(pe, player.client));
+            found("run energy", build, find_run_energy(pe));
+            found("actor lists", build, find_actor_lists(pe));
+            let names = found("actor names", build, find_actor_names(pe));
+            found("component invalidate", build, find_component_invalidate(pe));
+            found("component sprite", build, find_component_sprite(pe));
+            found("component fields", build, find_component_fields(pe));
+            let lookup = found("object type lookup", build, find_obj_type_lookup(pe));
+            found("projection", build, find_projection(pe, player.client));
+            let menu = found("menu", build, find_menu(pe));
+            let click = found("menu click", build, find_menu_click(pe, &menu));
+            found("menu layout", build, find_menu_layout(pe, &click));
+            found("selection", build, find_selection(pe, &menu));
+            let minimap = find_minimap(pe, player.client).unwrap_or_else(|error| {
                 panic!("minimap not found in {}: {error:?}", build.display())
             });
             println!("{}: {minimap:x?}", build.display());
-            println!(
-                "{}: destination {:x?}",
-                build.display(),
-                find_destination(&pe, minimap.object)
-            );
-            println!("{}: {:x?}", build.display(), find_ground_items(&pe));
+            found("destination", build, find_destination(pe, minimap.object));
+            found("ground items", build, find_ground_items(pe));
             println!(
                 "{}: {:x?}",
                 build.display(),
-                find_projectiles(&pe).unwrap_or_else(|error| panic!(
+                find_projectiles(pe).unwrap_or_else(|error| panic!(
                     "projectiles not found in {}: {error:?}",
                     build.display()
                 ))
@@ -2272,7 +2155,7 @@ mod tests {
             println!(
                 "{}: {:x?}",
                 build.display(),
-                find_spot_anims(&pe).unwrap_or_else(|error| panic!(
+                find_spot_anims(pe).unwrap_or_else(|error| panic!(
                     "spot animations not found in {}: {error:?}",
                     build.display()
                 ))
@@ -2280,46 +2163,44 @@ mod tests {
             println!(
                 "{}: {:x?}",
                 build.display(),
-                find_chat(&pe).unwrap_or_else(|error| panic!(
+                find_chat(pe).unwrap_or_else(|error| panic!(
                     "chat not found in {}: {error:?}",
                     build.display()
                 ))
             );
-            let camera = find_camera(&pe, player.client).unwrap_or_else(|error| {
+            let camera = find_camera(pe, player.client).unwrap_or_else(|error| {
                 panic!("camera not found in {}: {error:?}", build.display())
             });
             println!("{}: {camera:x?}", build.display());
             assert_eq!(camera.yaw, minimap.angle);
-            let world_select = find_world_select(&pe, player.client).unwrap_or_else(|error| {
+            let world_select = find_world_select(pe, player.client).unwrap_or_else(|error| {
                 panic!("world select not found in {}: {error:?}", build.display())
             });
             println!("{}: {world_select:x?}", build.display());
-            if let Ok(lookup) = lookup {
-                println!(
-                    "{}: {:x?}",
-                    build.display(),
-                    find_game_vals(&pe, player.client, &lookup)
+            found(
+                "game vals",
+                build,
+                find_game_vals(pe, player.client, &lookup),
+            );
+            {
+                found(
+                    "appearance decoder",
+                    build,
+                    find_appearance_decoder(pe, names.player_name, player.player_index),
                 );
-            }
-            if let Ok(names) = names {
-                println!(
-                    "{}: {:x?}",
-                    build.display(),
-                    find_appearance_decoder(&pe, names.player_name, player.player_index)
-                );
-                let model = find_npc_model(&pe, names.npc_definition).unwrap_or_else(|error| {
+                let model = find_npc_model(pe, names.npc_definition).unwrap_or_else(|error| {
                     panic!("NPC model not found in {}: {error:?}", build.display())
                 });
                 println!("{}: {model:x?}", build.display());
-                let vertices = find_model_vertices(&pe, &model).unwrap_or_else(|error| {
+                let vertices = find_model_vertices(pe, &model).unwrap_or_else(|error| {
                     panic!("model vertices not found in {}: {error:?}", build.display())
                 });
                 println!("{}: {vertices:x?}", build.display());
-                let faces = find_model_faces(&pe, &vertices).unwrap_or_else(|error| {
+                let faces = find_model_faces(pe, &vertices).unwrap_or_else(|error| {
                     panic!("model faces not found in {}: {error:?}", build.display())
                 });
                 println!("{}: {faces:x?}", build.display());
-                let orientation = find_actor_orientation(&pe).unwrap_or_else(|error| {
+                let orientation = find_actor_orientation(pe).unwrap_or_else(|error| {
                     panic!(
                         "actor orientation not found in {}: {error:?}",
                         build.display()
@@ -2327,7 +2208,7 @@ mod tests {
                 });
                 println!("{}: {orientation:x?}", build.display());
                 let height =
-                    find_animation_height(&pe, names.npc_definition).unwrap_or_else(|error| {
+                    find_animation_height(pe, names.npc_definition).unwrap_or_else(|error| {
                         panic!(
                             "animation height not found in {}: {error:?}",
                             build.display()
@@ -2335,11 +2216,11 @@ mod tests {
                     });
                 println!("{}: animation height {height:x}", build.display());
             }
-            let scene = find_scene(&pe).unwrap_or_else(|error| {
+            let scene = find_scene(pe).unwrap_or_else(|error| {
                 panic!("scene not found in {}: {error:?}", build.display())
             });
             println!("{}: {scene:x?}", build.display());
-            let collision = find_collision_maps(&pe, &scene).unwrap_or_else(|error| {
+            let collision = find_collision_maps(pe, &scene).unwrap_or_else(|error| {
                 panic!("collision maps not found in {}: {error:?}", build.display())
             });
             assert_eq!(
@@ -2349,29 +2230,25 @@ mod tests {
                     stride: 0x28
                 }
             );
-            let game = find_game_object_layout(&pe, &scene).expect("game object layout");
+            let game = find_game_object_layout(pe, &scene).expect("game object layout");
             println!("{}: {game:x?}", build.display());
             println!(
                 "{}: {:x?}",
                 build.display(),
-                find_loc_configs(&pe, &scene, &game).expect("loc configs")
+                find_loc_configs(pe, &scene, &game).expect("loc configs")
             );
-            let decoration = find_decoration_layout(&pe, &scene).expect("decoration layout");
+            let decoration = find_decoration_layout(pe, &scene).expect("decoration layout");
             println!("{}: {decoration:x?}", build.display());
-            println!(
-                "{}: item pile {:x?}",
-                build.display(),
-                find_item_pile(&pe, &decoration)
-            );
+            found("item pile", build, find_item_pile(pe, &decoration));
             println!(
                 "{}: {:x?}",
                 build.display(),
-                find_loc_names(&pe).expect("loc names")
+                find_loc_names(pe).expect("loc names")
             );
-            let interfaces = find_interfaces(&pe).unwrap();
-            let projection = find_projection(&pe, player.client).unwrap();
+            let interfaces = find_interfaces(pe).unwrap();
+            let projection = find_projection(pe, player.client).unwrap();
             let local =
-                find_local_projection(&pe, player.client, interfaces.canvas, &projection, &scene)
+                find_local_projection(pe, player.client, interfaces.canvas, &projection, &scene)
                     .unwrap_or_else(|error| {
                         panic!(
                             "local projection not found in {}: {error:?}",
@@ -2380,6 +2257,6 @@ mod tests {
                     });
             println!("{}: {local:x?}", build.display());
             {}
-        }
+        });
     }
 }

@@ -189,9 +189,7 @@ impl Form {
         Outcome::Submitted(Value::Object(collect(&self.values)))
     }
 
-    /// The form's fields in `ui`, for a page that hosts the form and its buttons itself.
-    /// With `columns = true` in the spec, everything but the checks goes on the left and the
-    /// checks on the right; a window narrower than `STACK_BELOW` stacks them instead.
+    /// The form's fields in `ui` for a page hosting its own buttons; with `columns = true` the checks go on the right unless narrower than `STACK_BELOW`.
     pub fn show_inline(&mut self, ui: &mut egui::Ui) {
         let fields = spec_form::fields(&self.spec);
         let columns = self

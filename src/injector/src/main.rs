@@ -618,8 +618,7 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         eprintln!("Couldn't read the script from stdin.");
         return std::process::ExitCode::from(2);
     }
-    // The loader says first what it answers: PIN requests (`bank_pin_enter()` asks it for the logged in account's PIN) and
-    // HTTP requests (`http_request()`).
+    // The loader says first what it answers: PIN requests and HTTP requests.
     let (mut loader_has_pins, mut loader_has_http) = (false, false);
     loop {
         match first.trim_end() {
@@ -670,8 +669,7 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                 eprintln!("Couldn't read the script from stdin.");
                 return std::process::ExitCode::from(2);
             }
-            // The form, PIN and HTTP requests share stdin: the script waits on each reply, so they never interleave. The
-            // loader can also push a settings update at any time, so a thread reads stdin and keeps those apart from replies.
+            // Form, PIN and HTTP requests share stdin without interleaving, and a thread reads it to keep settings updates apart from replies.
             let (replies_in, replies) = std::sync::mpsc::channel::<String>();
             std::thread::spawn(move || {
                 let mut line = String::new();

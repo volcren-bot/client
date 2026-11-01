@@ -1,8 +1,5 @@
 #!/bin/sh
-# Regenerates the art the bank PIN panel draws (src/bank_pin_overlay.rs). Needs ImageMagick.
-# Each .bin is a u16 little endian width, a u16 height, then straight alpha RGBA, row by row.
-# The colours are Tokyo Night (blue and foreground); the logo keeps its own.
-# The text is Fira Code Bold from the loader's assets (OFL, see ../../loader/assets/FiraCode-LICENSE.txt).
+# Regenerates the art the bank PIN panel draws (src/bank_pin_overlay.rs); needs ImageMagick.
 set -e
 cd "$(dirname "$0")"
 FONT=../../loader/assets/FiraCodeNerdFontMono-Bold.ttf

@@ -210,9 +210,7 @@ impl Script {
         self.reply(&injector::form::pin_reply_line(&answer), "PIN request")
     }
 
-    /// Makes an `http_request` of the script on a thread of its own, if its host is on the whitelist, and sends the response
-    /// (or why there is none) when it is in. The script waits for it; nothing else uses its input meanwhile. A script that
-    /// ended before the answer is ignored.
+    /// Makes a script's `http_request` on a thread of its own if its host is whitelisted, and sends the response (or why there is none) back.
     pub fn answer_http(&self, payload: &str, whitelist: Whitelist) {
         let stdin = self.stdin.clone();
         let request = injector::http::parse_request(payload);

@@ -1,8 +1,4 @@
-//! The HTTP whitelist: the hosts a script's `http_request` may reach, edited under Settings.
-//!
-//! Entries are hosts, not full URLs: `example.com` matches exactly that host (any scheme, port and path), `*.example.com`
-//! matches its subdomains. The Volcren hosts come from the loader's config and are always allowed; the user's own entries
-//! are kept in the loader's storage and can be added and removed.
+//! The HTTP whitelist: hosts a script's `http_request` may reach (`example.com` exact, `*.example.com` subdomains), edited under Settings.
 
 use eframe::egui;
 use injector::http;

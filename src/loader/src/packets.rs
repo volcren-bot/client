@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use injector::{Packet, PacketPage};
 
 use crate::{
-    log_view::{Filtered, Log, View},
+    log_view::{Filtered, Log, Poller, View},
     packet_defs::{self, Table},
 };
 
@@ -158,10 +158,8 @@ pub struct Monitor {
     /// The rows `visible` shows, for the direction boxes and filter text they were picked with.
     shown: Filtered<(bool, bool, String, bool)>,
     /// The client the packets are from, and the sequence number to ask it for next.
-    pid: Option<u32>,
+    poller: Poller,
     next: u64,
-    reading: bool,
-    next_poll: Option<Instant>,
 }
 
 impl Default for Monitor {
@@ -181,10 +179,8 @@ impl Default for Monitor {
             layouts_retry_at: None,
             packets: Log::default(),
             shown: Filtered::default(),
-            pid: None,
+            poller: Poller::default(),
             next: 0,
-            reading: false,
-            next_poll: None,
         }
     }
 }
@@ -240,27 +236,21 @@ impl Monitor {
 
     /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
-        self.capture
-            && (!self.reading || self.pid != Some(pid))
-            && self.next_poll.is_none_or(|at| now >= at)
+        self.poller.due(self.capture, pid, now)
     }
 
     /// Marks a read started and says which sequence number to ask for. Another client than last time starts from its oldest packet.
     pub fn start(&mut self, pid: u32) -> u64 {
-        if self.pid != Some(pid) {
-            self.pid = Some(pid);
+        if self.poller.start(pid) {
             self.next = 0;
             self.layouts = None;
             self.clear();
         }
-        self.reading = true;
         self.next
     }
 
     pub fn finish(&mut self, pid: u32, now: Instant, result: Result<PacketPage, String>) {
-        self.reading = false;
-        self.next_poll = Some(now + POLL_EVERY);
-        if self.pid != Some(pid) {
+        if !self.poller.finish(pid, Some(now + POLL_EVERY)) {
             return;
         }
         match result {
@@ -269,10 +259,9 @@ impl Monitor {
                 self.next = page.next;
                 self.dropped += page.dropped;
                 // sequence numbers going backwards mean the client has a new agent with a new log
-                if let (Some(last), Some(first)) = (self.packets.back(), page.packets.first())
-                    && first.sequence <= last.sequence
-                {
-                    self.packets.clear();
+                if let Some(first) = page.packets.first() {
+                    self.packets
+                        .restart_if_behind(first, |last, first| first.sequence <= last.sequence);
                 }
                 self.packets.extend(page.packets);
                 self.packets.keep(KEEP);

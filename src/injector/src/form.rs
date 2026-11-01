@@ -6,13 +6,10 @@ pub const SCRIPT_PREFIX: &str = "\u{1e}SCRIPT ";
 pub const MODULES_PREFIX: &str = "\u{1e}MODULES ";
 /// Optional, the first line: the loader answers `PIN_REQUEST_PREFIX` requests, so `bank_pin_enter()` may ask it.
 pub const PINS_PREFIX: &str = "\u{1e}PINS";
-/// A line the injector writes for `bank_pin_enter()`: the hash of the logged in account's name. The loader answers on
-/// the script's stdin with `pin_reply_line`. The PIN goes no further than the injector's own code.
+/// A line the injector writes for `bank_pin_enter()` with the account name hash; the loader answers on stdin with `pin_reply_line`.
 pub const PIN_REQUEST_PREFIX: &str = "\u{1e}PINREQ ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
-/// A line the loader writes to the script's stdin, unprompted, when the user presses Update on the settings: the form's
-/// values, as JSON. Unlike a reply it can arrive at any time, so the injector reads stdin on a thread of its own and keeps
-/// the latest in `push_update` for `take_update` (the script's `form_update()`).
+/// A line the loader writes to stdin when the user presses Update on the settings, with the form's values as JSON.
 pub const UPDATE_PREFIX: &str = "\u{1e}UPDATE ";
 /// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";

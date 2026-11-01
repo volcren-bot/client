@@ -191,10 +191,6 @@ mod tests {
     #[test]
     fn regions_split_a_tile_into_its_region_and_offset() {
         // Lumbridge castle is in region 50, 50 (3222, 3218).
-        assert_eq!(
-            region(3222, 3218),
-            (((3222 >> 6) << 8) | (3218 >> 6), 3222 & 63, 3218 & 63)
-        );
-        assert_eq!(region(3222, 3218).0, (50 << 8) | 50);
+        assert_eq!(region(3222, 3218), ((50 << 8) | 50, 3222 & 63, 3218 & 63));
     }
 }

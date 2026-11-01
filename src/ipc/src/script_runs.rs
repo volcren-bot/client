@@ -1,9 +1,10 @@
 //! The script log: the last scripts the client ran for an event, in a ring in shared memory (`AGENT_SCRIPTS_<pid>`), using the packet log's scheme.
 
+use crate::ring;
 use alloc::{format, string::String, vec::Vec};
 use core::{
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
-    sync::atomic::{fence, AtomicU64, Ordering},
+    sync::atomic::AtomicU64,
 };
 
 pub fn script_runs_memory_name(pid: u32) -> String {
@@ -45,6 +46,12 @@ pub struct Slot {
     values: [i32; ARG_COUNT],
 }
 
+impl ring::Slot for Slot {
+    fn commit(&self) -> &AtomicU64 {
+        &self.commit
+    }
+}
+
 #[repr(C)]
 pub struct Log {
     slots: u32,
@@ -75,14 +82,7 @@ pub struct Entry {
     pub args: Vec<(u8, i32)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Page {
-    pub entries: Vec<Entry>,
-    /// Pass this as `since` to get what comes after.
-    pub next: u64,
-    /// Entries between `since` and `next` that were overwritten (or torn by a writer) before they could be read.
-    pub dropped: u64,
-}
+pub type Page = ring::Page<Entry>;
 
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
@@ -120,47 +120,36 @@ pub unsafe fn push(log: *const Log, time_us: u64, run: &Run) {
         arg_count,
         args,
     } = *run;
-    let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
-    let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
     let stored = args.len().min(ARG_COUNT);
-
-    (*slot).commit.store(0, Ordering::Release);
-    fence(Ordering::Release);
-    write_volatile(addr_of_mut!((*slot).time_us), time_us);
-    write_volatile(addr_of_mut!((*slot).event_type), event_type);
-    write_volatile(addr_of_mut!((*slot).tick), tick.unwrap_or(-1));
-    write_volatile(addr_of_mut!((*slot).phase), phase);
-    write_volatile(addr_of_mut!((*slot).arg_count), arg_count);
-    write_volatile(addr_of_mut!((*slot).depth), depth);
-    write_volatile(addr_of_mut!((*slot).stored), stored as u8);
-    for (i, &(kind, value)) in args[..stored].iter().enumerate() {
-        write_volatile(addr_of_mut!((*slot).kinds[i]), kind);
-        write_volatile(addr_of_mut!((*slot).values[i]), value);
-    }
-    (*slot).commit.store(sequence + 1, Ordering::Release);
+    ring::push(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        |slot| {
+            write_volatile(addr_of_mut!((*slot).time_us), time_us);
+            write_volatile(addr_of_mut!((*slot).event_type), event_type);
+            write_volatile(addr_of_mut!((*slot).tick), tick.unwrap_or(-1));
+            write_volatile(addr_of_mut!((*slot).phase), phase);
+            write_volatile(addr_of_mut!((*slot).arg_count), arg_count);
+            write_volatile(addr_of_mut!((*slot).depth), depth);
+            write_volatile(addr_of_mut!((*slot).stored), stored as u8);
+            for (i, &(kind, value)) in args[..stored].iter().enumerate() {
+                write_volatile(addr_of_mut!((*slot).kinds[i]), kind);
+                write_volatile(addr_of_mut!((*slot).values[i]), value);
+            }
+        },
+    );
 }
 
 /// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
-    let written = (*log).written.load(Ordering::Acquire);
-    let mut at = if since > written { 0 } else { since };
-    let mut page = Page::default();
-
-    // anything older than the ring holds is gone
-    let oldest = written.saturating_sub(SLOT_COUNT as u64);
-    if at < oldest {
-        page.dropped += oldest - at;
-        at = oldest;
-    }
-
-    while at < written && page.entries.len() < limit {
-        let slot = addr_of!((*log).entries[at as usize % SLOT_COUNT]);
-        let before = (*slot).commit.load(Ordering::Acquire);
-        if before < at + 1 {
-            // claimed but not published yet: stop here, the next read picks it up
-            break;
-        }
-        let entry = (before == at + 1).then(|| {
+    ring::read_since(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        since,
+        limit,
+        |at, slot| {
             let stored = (read_volatile(addr_of!((*slot).stored)) as usize).min(ARG_COUNT);
             let args = (0..stored)
                 .map(|i| {
@@ -180,18 +169,8 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
                 depth: read_volatile(addr_of!((*slot).depth)),
                 args,
             }
-        });
-        fence(Ordering::Acquire);
-        match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
-                page.entries.push(entry)
-            }
-            _ => page.dropped += 1,
-        }
-        at += 1;
-    }
-    page.next = at;
-    page
+        },
+    )
 }
 
 #[cfg(test)]
@@ -238,7 +217,6 @@ mod tests {
         assert_eq!(core::mem::size_of::<Slot>(), 64);
         assert_eq!(core::mem::offset_of!(Log, entries), 64);
         assert_eq!(LOG_SIZE, 64 + SLOT_COUNT * 64);
-        assert_eq!(script_runs_memory_name(32), "AGENT_SCRIPTS_32");
     }
 
     #[test]
@@ -322,47 +300,6 @@ mod tests {
             let entry = &read_since(memory.0, 0, 1).entries[0];
             assert_eq!(entry.arg_count, 20);
             assert_eq!(entry.args, args[..ARG_COUNT]);
-        }
-    }
-
-    #[test]
-    fn limit_pages_and_overwritten_entries_are_counted() {
-        let memory = Memory::new();
-        unsafe {
-            for i in 0..(SLOT_COUNT + 10) {
-                push(memory.0, i as u64, &run(phase::START, 76, 0, 0, &[]));
-            }
-            let page = read_since(memory.0, 0, 5);
-            assert_eq!(
-                (
-                    page.dropped,
-                    page.entries[0].sequence,
-                    page.entries.len(),
-                    page.next
-                ),
-                (10, 10, 5, 15)
-            );
-        }
-    }
-
-    #[test]
-    fn a_since_from_a_previous_agent_starts_over() {
-        let memory = Memory::new();
-        unsafe {
-            push(memory.0, 0, &run(phase::START, 76, 0, 0, &[]));
-            let page = read_since(memory.0, 90_000, 10);
-            assert_eq!((page.entries.len(), page.next, page.dropped), (1, 1, 0));
-        }
-    }
-
-    #[test]
-    fn an_unpublished_slot_ends_the_page() {
-        let memory = Memory::new();
-        unsafe {
-            push(memory.0, 0, &run(phase::START, 76, 0, 0, &[]));
-            (*memory.0).written.store(2, Ordering::Release);
-            let page = read_since(memory.0, 0, 10);
-            assert_eq!((page.entries.len(), page.next), (1, 1));
         }
     }
 }

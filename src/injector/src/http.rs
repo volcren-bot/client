@@ -1,9 +1,4 @@
-//! `http_request`: HTTP for scripts, done by the loader.
-//!
-//! A script can't open a socket. `http_request` writes a `REQUEST_PREFIX` line (like `bank_pin_enter` does for the PIN) and
-//! waits for the loader's one line answer. The loader checks the URL against the whitelist the user keeps in its settings,
-//! follows redirects only to whitelisted hosts, and makes the request, so what a script may reach is decided outside the
-//! sandbox.
+//! `http_request`: HTTP for scripts, done by the loader, which checks every URL against the user's whitelist outside the sandbox.
 
 use std::{
     collections::BTreeMap,
@@ -80,8 +75,7 @@ impl Request {
     }
 }
 
-/// The server's answer. Header names are lowercase; a repeated header is joined with ", ". The body is text (invalid UTF-8
-/// becomes U+FFFD).
+/// The server's answer: lowercase header names, repeated headers joined with ", ", and a text body (invalid UTF-8 becomes U+FFFD).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     pub status: u16,

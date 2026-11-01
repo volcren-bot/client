@@ -1,5 +1,6 @@
 //! The packet log: the last packets received and sent, in a lock-free ring in shared memory (`AGENT_PACKETS_<pid>`).
 
+use crate::ring;
 use alloc::{format, string::String, vec::Vec};
 use core::{
     ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
@@ -64,6 +65,12 @@ pub struct Slot {
     direction: u8,
     stored: u8,
     payload: [u8; PAYLOAD_SIZE],
+}
+
+impl ring::Slot for Slot {
+    fn commit(&self) -> &AtomicU64 {
+        &self.commit
+    }
 }
 
 #[repr(C)]
@@ -156,14 +163,7 @@ pub struct Entry {
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Page {
-    pub entries: Vec<Entry>,
-    /// Pass this as `since` to get what comes after.
-    pub next: u64,
-    /// Entries between `since` and `next` that were overwritten (or torn by a writer) before they could be read.
-    pub dropped: u64,
-}
+pub type Page = ring::Page<Entry>;
 
 /// How a field is stored on the wire, as the agent finds it in a read function: `width` bytes, each at a `shifts` position (in bytes) of the value, with `transform` applied to the one at position 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,21 +339,22 @@ pub unsafe fn push(
     length: u32,
     data: &[u8],
 ) {
-    let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
-    let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
     let stored = data.len().min(PAYLOAD_SIZE);
-
-    (*slot).commit.store(0, Ordering::Release);
-    fence(Ordering::Release);
-    write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
-    write_volatile(addr_of_mut!((*slot).length), length);
-    write_volatile(addr_of_mut!((*slot).opcode), opcode);
-    write_volatile(addr_of_mut!((*slot).direction), direction);
-    write_volatile(addr_of_mut!((*slot).stored), stored as u8);
-    for (i, &byte) in data[..stored].iter().enumerate() {
-        write_volatile(addr_of_mut!((*slot).payload[i]), byte);
-    }
-    (*slot).commit.store(sequence + 1, Ordering::Release);
+    ring::push(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        |slot| {
+            write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
+            write_volatile(addr_of_mut!((*slot).length), length);
+            write_volatile(addr_of_mut!((*slot).opcode), opcode);
+            write_volatile(addr_of_mut!((*slot).direction), direction);
+            write_volatile(addr_of_mut!((*slot).stored), stored as u8);
+            for (i, &byte) in data[..stored].iter().enumerate() {
+                write_volatile(addr_of_mut!((*slot).payload[i]), byte);
+            }
+        },
+    );
 }
 
 /// Publishes the player's movement; one writer only (the game thread); `log` must point to an initialised `Log`.
@@ -422,18 +423,14 @@ pub unsafe fn subscribers_for(log: *const Log, direction: u8, opcode: u16) -> u3
 
 /// Claims a free subscriber slot with an empty filter (None when full), skipping slots whose event already exists; `log` must be writable.
 pub unsafe fn subscribe(log: *const Log, mut create_event: impl FnMut(u32) -> bool) -> Option<u32> {
-    for slot in 0..SUBSCRIBER_SLOTS {
-        let bit = 1u32 << slot;
-        if (*log).subscribers.load(Ordering::Acquire) & bit != 0 || !create_event(slot) {
-            continue;
-        }
+    ring::subscribe(&(*log).subscribers, SUBSCRIBER_SLOTS, |slot| {
         // the event is ours alone, so nobody else writes this filter
-        set_filter(log, slot, &[0; FILTER_WORDS]);
-        if (*log).subscribers.fetch_or(bit, Ordering::AcqRel) & bit == 0 {
-            return Some(slot);
+        let created = create_event(slot);
+        if created {
+            set_filter(log, slot, &[0; FILTER_WORDS]);
         }
-    }
-    None
+        created
+    })
 }
 
 /// Replaces the packets the reader holding `slot` is woken for; `log` must be writable.
@@ -445,9 +442,7 @@ pub unsafe fn set_filter(log: *const Log, slot: u32, filter: &Filter) {
 
 /// Gives a slot back; `log` must be writable.
 pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
-    (*log)
-        .subscribers
-        .fetch_and(!(1u32 << slot), Ordering::AcqRel);
+    ring::unsubscribe(&(*log).subscribers, slot);
 }
 
 /// The sequence number the next packet will get; `log` must point to an initialised `Log`.
@@ -457,25 +452,13 @@ pub unsafe fn written(log: *const Log) -> u64 {
 
 /// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
-    let written = (*log).written.load(Ordering::Acquire);
-    let mut at = if since > written { 0 } else { since };
-    let mut page = Page::default();
-
-    // anything older than the ring holds is gone
-    let oldest = written.saturating_sub(SLOT_COUNT as u64);
-    if at < oldest {
-        page.dropped += oldest - at;
-        at = oldest;
-    }
-
-    while at < written && page.entries.len() < limit {
-        let slot = addr_of!((*log).entries[at as usize % SLOT_COUNT]);
-        let before = (*slot).commit.load(Ordering::Acquire);
-        if before < at + 1 {
-            // claimed but not published yet: stop here, the next read picks it up
-            break;
-        }
-        let entry = (before == at + 1).then(|| {
+    ring::read_since(
+        &(*log).written,
+        addr_of!((*log).entries) as *const Slot,
+        SLOT_COUNT,
+        since,
+        limit,
+        |at, slot| {
             let stored = (read_volatile(addr_of!((*slot).stored)) as usize).min(PAYLOAD_SIZE);
             let mut payload = Vec::with_capacity(stored);
             for i in 0..stored {
@@ -489,18 +472,8 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
                 length: read_volatile(addr_of!((*slot).length)),
                 payload,
             }
-        });
-        fence(Ordering::Acquire);
-        match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
-                page.entries.push(entry)
-            }
-            _ => page.dropped += 1,
-        }
-        at += 1;
-    }
-    page.next = at;
-    page
+        },
+    )
 }
 
 #[cfg(test)]
@@ -543,7 +516,6 @@ mod tests {
             LOG_SIZE,
             64 + SLOT_COUNT * 128 + SUBSCRIBER_SLOTS as usize * FILTER_WORDS * 4 + LAYOUT_IDS * 40
         );
-        assert_eq!(packets_memory_name(32), "AGENT_PACKETS_32");
         assert_eq!(packet_wake_event_name(32, 5), "AGENT_PACKETS_WAKE_32_5");
     }
 
@@ -772,43 +744,6 @@ mod tests {
             let entry = &read_since(memory.0, 0, 1).entries[0];
             assert_eq!(entry.length, 200);
             assert_eq!(entry.payload, data[..PAYLOAD_SIZE]);
-        }
-    }
-
-    #[test]
-    fn limit_pages_and_overwritten_entries_are_counted() {
-        let memory = Memory::new();
-        unsafe {
-            for i in 0..(SLOT_COUNT + 10) {
-                push(memory.0, i as u64, direction::RECEIVED, 1, 0, &[]);
-            }
-            let page = read_since(memory.0, 0, 5);
-            assert_eq!(page.dropped, 10);
-            assert_eq!(page.entries[0].sequence, 10);
-            assert_eq!(page.entries.len(), 5);
-            assert_eq!(page.next, 15);
-        }
-    }
-
-    #[test]
-    fn a_since_from_a_previous_agent_starts_over() {
-        let memory = Memory::new();
-        unsafe {
-            push(memory.0, 0, direction::SENT, 75, 0, &[]);
-            let page = read_since(memory.0, 5000, 10);
-            assert_eq!((page.entries.len(), page.next, page.dropped), (1, 1, 0));
-        }
-    }
-
-    #[test]
-    fn an_unpublished_slot_ends_the_page() {
-        let memory = Memory::new();
-        unsafe {
-            push(memory.0, 0, direction::SENT, 75, 0, &[]);
-            // a writer that claimed number 1 but has not published it
-            (*memory.0).written.store(2, Ordering::Release);
-            let page = read_since(memory.0, 0, 10);
-            assert_eq!((page.entries.len(), page.next), (1, 1));
         }
     }
 }

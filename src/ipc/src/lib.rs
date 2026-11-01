@@ -8,6 +8,7 @@ use alloc::{format, string::String};
 pub mod item_log;
 pub mod packets;
 pub mod read;
+pub mod ring;
 pub mod script_runs;
 pub mod state;
 pub mod varc_log;
@@ -246,12 +247,5 @@ mod tests {
         assert_eq!(id, build_id(b"agent"));
         assert_ne!(id, build_id(b"other-dll"));
         assert_eq!(&build_id(b""), b"cbf29ce");
-    }
-
-    #[test]
-    fn names_are_per_process() {
-        assert_eq!(shared_memory_name(32), "AGENT_DATA_32");
-        assert_eq!(frame_event_name(32), "AGENT_FRAME_32");
-        assert_eq!(worker_reply_event_name(32), "AGENT_WORK_DONE_32");
     }
 }

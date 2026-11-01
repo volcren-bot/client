@@ -350,7 +350,6 @@ struct Collision {
     flags: Vec<u32>,
 }
 
-// `scene` cut to `area` (x1, y1, x2, y2, corners included), or whole without one.
 /// The registered item change and packet callbacks and the watchers that wake the script for them.
 #[derive(Default)]
 struct Callbacks {
@@ -520,6 +519,7 @@ fn packet_filter(name: &str, opcodes: &[u16], sent: Option<bool>) -> mlua::Resul
     Ok(filter)
 }
 
+// `scene` cut to `area` (x1, y1, x2, y2, corners included), or whole without one.
 fn collision_cut(
     scene: (i32, i32, i32, Vec<Vec<u32>>),
     area: Option<[i32; 4]>,
@@ -885,12 +885,9 @@ fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
     Ok((file, source))
 }
 
-// `require("@lib/...")` is `require("../lib/...")`, matching the `lib` alias in `.luaurc`.
-fn alias_lib(path: String) -> String {
-    match path.strip_prefix("@lib/") {
-        Some(rest) => format!("../lib/{rest}"),
-        None => path,
-    }
+// `require("@lib/main/walker")` names `main/walker` in the lib root, matching the `lib` alias in the `.luaurc` files.
+fn lib_alias(path: &str) -> Option<&str> {
+    path.strip_prefix("@lib/").filter(|rest| !rest.is_empty())
 }
 
 // What `require("../lib/main/walker")` asks for inside the lib, when the path names a `lib` folder: `main/walker`.
@@ -968,13 +965,22 @@ pub fn run_with_modules(
         None => HashMap::new(),
     };
     let script_chunk = script_path.map(|_| format!("={name}"));
+    // Where `@lib/...` points from any file: the configured lib, else the one beside the script.
+    let lib_root = lib_dir
+        .map(Path::to_path_buf)
+        .or_else(|| script_path.and_then(Path::parent).map(|d| d.join("../lib")));
     let lib_dir = lib_dir.map(Path::to_path_buf);
 
     let loaded = lua.create_table()?;
     globals.set(
         "require",
         lua.create_function(move |lua, path: String| {
-            let path = alias_lib(path);
+            let alias = lib_alias(&path).map(str::to_string);
+            // Embedded lookups and error messages still see the `../lib/...` spelling.
+            let path = match &alias {
+                Some(rest) => format!("../lib/{rest}"),
+                None => path,
+            };
             let relative = path.starts_with("./") || path.starts_with("../");
             let from = lua
                 .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
@@ -985,8 +991,12 @@ pub fn run_with_modules(
                 .filter(|_| relative);
 
             // The script's own `../lib/...` requires read from the configured lib folder; the modules inside it find each other as usual.
-            let found = match (&lib_dir, lib_relative(&path)) {
-                (Some(lib), Some(rest)) if from_script => Some(find_module(lib, rest, &memory)),
+            let found = match (&alias, &lib_root, &lib_dir, lib_relative(&path)) {
+                // `@lib/...` means the same lib root whichever file asks, the script or a lib module.
+                (Some(rest), Some(root), _, _) => Some(find_module(root, rest, &memory)),
+                (_, _, Some(lib), Some(rest)) if from_script => {
+                    Some(find_module(lib, rest, &memory))
+                }
                 _ => dir.map(|dir| find_module(&dir, &path, &memory)),
             };
             let key = match &found {
@@ -2226,6 +2236,29 @@ mod tests {
         assert_eq!(lines, ["true\thost\textra"]);
     }
 
+    #[test]
+    fn lib_modules_require_each_other_through_the_alias() {
+        let dir = scratch(
+            "lib_alias_from_lib",
+            &[
+                ("lib/host.luau", "return { name = 'host' }"),
+                (
+                    "lib/main/deep/walker.luau",
+                    "return { host = require('@lib/host'), same = require('@lib/main/other') }",
+                ),
+                ("lib/main/other.luau", "return { name = 'other' }"),
+            ],
+        );
+        let script = dir.join("scripts/run.luau");
+        let (lines, result) = run_script_at(
+            &script,
+            "local W = require('@lib/main/deep/walker')\n\
+             print(W.host == require('../lib/host'), W.host.name, W.same.name)",
+        );
+        result.unwrap();
+        assert_eq!(lines, ["true\thost\tother"]);
+    }
+
     fn run_script_with_lib(
         path: &Path,
         source: &str,
@@ -2247,10 +2280,11 @@ mod tests {
     }
 
     #[test]
-    fn alias_lib_points_at_the_lib_beside_the_script() {
-        assert_eq!(alias_lib("@lib/main/walker".into()), "../lib/main/walker");
-        assert_eq!(alias_lib("../lib/host".into()), "../lib/host");
-        assert_eq!(alias_lib("@library/host".into()), "@library/host");
+    fn lib_alias_names_the_path_inside_the_lib() {
+        assert_eq!(lib_alias("@lib/main/walker"), Some("main/walker"));
+        assert_eq!(lib_alias("../lib/host"), None);
+        assert_eq!(lib_alias("@library/host"), None);
+        assert_eq!(lib_alias("@lib/"), None);
     }
 
     #[test]
@@ -2713,7 +2747,7 @@ mod tests {
     }
 
     #[test]
-    fn game_state_connection_and_click_need_a_client() {
+    fn client_functions_need_a_client() {
         let (lines, result) = run_lines(
             "local ok_state, err = pcall(game_state)\n\
              print(ok_state, err)\n\
@@ -2723,45 +2757,22 @@ mod tests {
              print(varps())\n\
              local ok, err3 = pcall(click, 1, 2)\n\
              print(ok)\n\
-             print(err3)",
+             print(err3)\n\
+             local ok_rect, err4 = pcall(draw_rect, 100, 100, 200, 200, 255, 0, 0)\n\
+             print(ok_rect, err4)\n\
+             local ok_clear, err5 = pcall(clear_overlay)\n\
+             print(ok_clear, err5)\n\
+             local ok_batch, err6 = pcall(draw_batch, { { kind = 'clear' } })\n\
+             print(ok_batch, err6)",
         );
         let none = "nil\tno client selected";
-        for line in &lines[..2] {
-            assert!(
-                line.starts_with("false") && line.contains("no client selected"),
-                "{lines:?}"
-            );
+        let refused =
+            |line: &String| line.starts_with("false") && line.contains("no client selected");
+        for line in lines[..2].iter().chain(&lines[6..]) {
+            assert!(refused(line), "{lines:?}");
         }
         assert_eq!(lines[2..5], [none, none, "false"]);
         assert!(lines[5].contains("no client selected"), "{lines:?}");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn draw_rect_and_clear_overlay_need_a_client() {
-        let (lines, result) = run_lines(
-            "local ok, err = pcall(draw_rect, 100, 100, 200, 200, 255, 0, 0)\n\
-             print(ok, err)\n\
-             local ok2, err2 = pcall(clear_overlay)\n\
-             print(ok2, err2)",
-        );
-        assert!(lines[0].starts_with("false"), "{lines:?}");
-        assert!(lines[0].contains("no client selected"), "{lines:?}");
-        assert!(lines[1].starts_with("false"), "{lines:?}");
-        assert!(lines[1].contains("no client selected"), "{lines:?}");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn draw_batch_needs_a_client() {
-        let (lines, result) = run_lines(
-            "local ok, err = pcall(draw_batch, { { kind = 'clear' }, { kind = 'rect', x1 = 1, y1 = 1, x2 = 9, y2 = 9, r = 255, g = 0, b = 0 } })\n\
-             print(ok, err)",
-        );
-        assert!(
-            lines[0].starts_with("false") && lines[0].contains("no client selected"),
-            "{lines:?}"
-        );
         assert!(result.is_ok());
     }
 

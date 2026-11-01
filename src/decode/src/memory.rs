@@ -1,7 +1,6 @@
 pub use ipc::read::{Memory, read_string};
 
-/// One object's bytes, copied with a single read so its fields cost no more reads; reads outside the copy, and every read
-/// when the copy failed, go to the memory underneath. Each read is a syscall when reading another process (and in the agent).
+/// One object's bytes copied with a single read so its fields cost no more reads; reads outside the copy go to the memory underneath.
 pub struct Snapshot<'a, M: Memory> {
     memory: &'a M,
     base: u64,

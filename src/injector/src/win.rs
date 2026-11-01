@@ -2627,7 +2627,6 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
     })
 }
 
-// Debug: the words of an NPC's actor, to find fields (see `world::npc_words`).
 // The sizes of the NPCs with `indices`, by index; the ones gone or unreadable are left out.
 pub fn npc_sizes(
     pid: u32,
@@ -2640,8 +2639,7 @@ pub fn npc_sizes(
         .collect())
 }
 
-// The hitsplats in use on the NPCs with `indices`, by index; the ones gone or unreadable are left out. Read straight
-// from the client's memory, not through the agent.
+// The hitsplats in use on the NPCs with `indices`, by index, read straight from the client's memory.
 pub fn npc_hitsplats(
     pid: u32,
     indices: &[i32],
@@ -2668,6 +2666,7 @@ pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, St
         .collect())
 }
 
+// Debug: the words of an NPC's actor, to find fields (see `world::npc_words`).
 pub fn npc_words(
     pid: u32,
     index: i32,
@@ -2748,8 +2747,7 @@ pub fn widget_dump(pid: u32, count: usize) -> Result<Vec<(i32, i32, Vec<i32>)>, 
     Ok(dump)
 }
 
-// Debug: watches `bytes` of the client object for `seconds` and reports each 4-byte word that changed, with its first
-// and last values and how many times it changed, to find fields that only flicker (a queue that is emptied at once).
+// Debug: watches `bytes` of the client object for `seconds` and reports each 4-byte word that changed, to find fields that only flicker.
 pub fn watch_client(pid: u32, seconds: u64, bytes: usize) -> Result<Vec<String>, String> {
     let (layout, memory) = world_reader(pid)?;
     let client = ipc::read::client(&memory, &layout).ok_or("no client")?;
@@ -3271,9 +3269,9 @@ const LOADING_INSET: i32 = 16;
 // The grid (the Grid layer): every tile within `GRID_RADIUS` of the player.
 const GRID_RADIUS: i32 = 32;
 
-// Corners further out than this are behind the camera or otherwise meaningless, so they're not drawn.
 // How thick the outlines and lines of the scene layers are, in pixels.
 const STROKE_WIDTH: i32 = 2;
+// Corners further out than this are behind the camera or otherwise meaningless, so they're not drawn.
 const SCREEN_LIMIT: f32 = 100_000.0;
 const LABEL_SHADOW: Rgba = Rgba {
     r: 0,

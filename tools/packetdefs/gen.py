@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the loader's packet table (src/loader/src/packet_defs.tsv) from the decompiled Java client in standalone/src.
-
-The native client and the Java client speak the same protocol: the Java client's ServerPacket class (`jc`) lists every
-server packet as (opcode, size), and its packet reader (`Client.iy`) reads each packet's fields with the buffer's read
-methods in order. This reads both, so a game update only needs `standalone/tools/build.sh` and then this script:
-
-    python3 -I tools/packetdefs/gen.py standalone/src --exe archive/client-....exe > src/loader/src/packet_defs.tsv
-
-`--exe` also names the build the table is for (the file name without `client-` and `.exe`). `names.tsv` next to this
-script gives packets names (and optionally a name per field): for one build by opcode, or for any build by an identifier the handler touches.
-
-A packet's layout is written only when every read in its handler is a known buffer read, none is conditional, and the
-fixed sizes add up to the packet's size. Anything else is listed with its size and no fields. With `--exe`, the sizes
-are also checked against the size table in the native client (found by its contents), which proves the opcodes match.
-"""
+"""Builds the loader's packet table (src/loader/src/packet_defs.tsv) from the decompiled Java client in standalone/src."""
 import re
 import struct
 import sys
@@ -42,12 +28,7 @@ def methods(source):
 
 
 def classify(params, body):
-    """The wire kind a buffer read method decodes, or None when it isn't a plain one.
-
-    Kinds: u8/i8 with `add` (value - 128), `neg` (-value) or `sub` (128 - value); `u16`/`i16`/`u24`/`i24`/`u32`/`i32`
-    as `be` (big endian), `le`, or `:` and the shift of each wire byte for the odd int orders, `add` on the low byte;
-    `bool`, `ignored` (a payload the client never reads), `str` (0 terminated), `str0` (a 0 byte first), `smart` and `varint`.
-    """
+    """The wire kind a buffer read method decodes, or None when it isn't a plain one."""
     text = re.sub(r"\s+", " ", body)
     reads = len(re.findall(r"\bah\[", text))
     if reads == 0:

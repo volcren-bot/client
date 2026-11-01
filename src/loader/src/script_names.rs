@@ -1,10 +1,4 @@
-//! The names of the client's scripts, for the Script Inspector, fetched on demand.
-//!
-//! The cache has no script names (only a hash of each), so the names are the ones the community gave the scripts:
-//! RuneLite's `cs2-scripts` repository has a file per decompiled script, named `[clientscript,name].cs2` or
-//! `[proc,name].cs2`, whose first line is `// <script id>`. Nothing is bundled: the Script Inspector's Load names button
-//! downloads the repository as one zip and keeps the names in memory. The ids are the cache's, so the names are right for
-//! the build the repository was decompiled from, which is usually the current one.
+//! The names of the client's scripts for the Script Inspector, downloaded on demand from RuneLite's `cs2-scripts` repository.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -218,7 +212,7 @@ mod tests {
         {
             let mut zip = zip::ZipWriter::new(Cursor::new(&mut bytes));
             let options = zip::write::SimpleFileOptions::default();
-            zip.set_comment("404eb7bdeadbeef");
+            zip.set_comment("404eb7bdeadbeef").unwrap();
             for (path, body) in [
                 (
                     "cs2-scripts-master/scripts/[clientscript,npc_name_timer].cs2",

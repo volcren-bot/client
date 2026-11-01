@@ -1,6 +1,4 @@
-//! Makes the HTTP requests of scripts (`http_request`). The injector only asks; every URL is checked here against the whitelist.
-//!
-//! Redirects are followed by hand so each hop is checked too: a whitelisted host can't send a script anywhere else.
+//! Makes the HTTP requests of scripts (`http_request`), checking every URL and every redirect hop against the whitelist.
 
 use std::{
     collections::BTreeMap,
