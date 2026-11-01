@@ -7,6 +7,18 @@ use serde_json::{Map, Value, json};
 /// Narrower than this (in points), a two column form stacks its columns.
 const STACK_BELOW: f32 = 420.0;
 
+/// The gap (in points) between the fields of a form.
+const FIELD_GAP: f32 = 10.0;
+
+/// A dropdown's label sits above it and ends with a colon.
+fn with_colon(label: &str) -> String {
+    if label.ends_with(':') {
+        label.to_owned()
+    } else {
+        format!("{label}:")
+    }
+}
+
 pub enum FieldValue {
     Check(bool),
     Number(f64),
@@ -159,7 +171,10 @@ impl Form {
                 });
             }
             ("choice", Some(FieldValue::Text(selected))) => {
-                egui::ComboBox::from_label(label)
+                if !label.is_empty() {
+                    ui.label(with_colon(label));
+                }
+                egui::ComboBox::from_id_salt(spec_form::id(field).unwrap_or(label))
                     .selected_text(selected.clone())
                     .show_ui(ui, |ui| {
                         for option in spec_form::options(field) {
@@ -192,6 +207,7 @@ impl Form {
 
     /// The form's fields in `ui` for a page hosting its own buttons; with `columns = true` the checks go on the right unless narrower than `STACK_BELOW`.
     pub fn show_inline(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing.y = FIELD_GAP;
         let fields = spec_form::fields(&self.spec);
         let columns = self
             .spec

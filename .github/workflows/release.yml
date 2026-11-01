@@ -9,6 +9,9 @@ on:
 permissions:
     contents: read
 
+env:
+    RUST_VERSION: "1.99.0"
+
 jobs:
     build:
         name: build (${{ matrix.name }})
@@ -35,7 +38,10 @@ jobs:
                           target/release/loader
 
         steps:
+            # Full history: the mtime step below diffs against the commit the cached build came from.
             - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
 
             # YYYY.MM.DD-<7 character commit>, from the commit's UTC date, so every job names the same build the same way.
             - name: Version
@@ -45,18 +51,49 @@ jobs:
               if: matrix.name == 'windows'
               run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
-            - uses: dtolnay/rust-toolchain@stable
-              with:
-                  targets: ${{ matrix.target }}
+            # rustup comes with the runner image. The version is pinned so a new Rust release doesn't invalidate the build cache.
+            - name: Install Rust
+              id: rust
+              run: |
+                  rustup toolchain install "$RUST_VERSION" --profile minimal ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+                  rustup default "$RUST_VERSION"
+                  echo "rustc=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
-            - uses: Swatinem/rust-cache@v2
+            # Dependencies and this repo's own crates. Each run saves a new entry (the key ends in the commit) and starts from the
+            # latest one for the same Cargo.lock, so unchanged crates, including the injector's slow LTO link, are not rebuilt.
+            - name: Cache cargo and target
+              uses: actions/cache@v4
               with:
-                  key: ${{ matrix.name }}
+                  path: |
+                      ~/.cargo/registry
+                      ~/.cargo/git
+                      target
+                  key: build-${{ matrix.name }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+                  restore-keys: |
+                      build-${{ matrix.name }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}-
+
+            # Cargo decides a path crate is stale when a source file is newer than its cached build, and a fresh checkout makes
+            # every file new. Date every tracked file in the past, then touch only the files changed since the cached build.
+            # With no usable baseline, touch everything, which is a normal full build.
+            - name: Restore source mtimes
+              run: |
+                  base=$(cat target/.built-commit 2>/dev/null || true)
+                  if [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null; then
+                      git ls-files -z | xargs -0 touch -c -d '2000-01-01T00:00:00Z'
+                      git diff --name-only -z "$base" HEAD | xargs -0 -r touch -c
+                      echo "Cached build from $base: $(git diff --name-only "$base" HEAD | wc -l) files changed since."
+                  else
+                      git ls-files -z | xargs -0 touch -c
+                      echo "No usable cached build: full rebuild."
+                  fi
 
             # Uses the `release` profile (full LTO, stripped) from the root Cargo.toml. `--no-default-features` leaves out the
             # lib/ the injector can embed: this repo builds alone, and the loader always runs scripts with `--script`, which reads lib/ from disk.
             - name: Build release
               run: ${{ matrix.build }}
+
+            - name: Record the built commit
+              run: mkdir -p target && git rev-parse HEAD > target/.built-commit
 
             - name: Upload binaries
               uses: actions/upload-artifact@v4
@@ -75,6 +112,8 @@ jobs:
             group: publish
             cancel-in-progress: false
         runs-on: ubuntu-latest
+        outputs:
+            version: ${{ steps.version.outputs.version }}
         env:
             SUPABASE_URL: ${{ vars.SUPABASE_URL }}
             SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -86,8 +125,11 @@ jobs:
                   path: dist
 
             - name: Version
+              id: version
               run: |
-                  echo "VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+                  version="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)"
+                  echo "VERSION=$version" >> "$GITHUB_ENV"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
                   echo "API_VERSION=$(grep -m1 'pub const API_VERSION' src/loader/src/api/models.rs | grep -o '[0-9]*;' | tr -d ';')" >> "$GITHUB_ENV"
 
             - name: Package
@@ -107,6 +149,17 @@ jobs:
                   tar -C "$(dirname "$stage")" -czf "out/volcren-linux-$VERSION.tar.gz" volcren
 
                   (cd out && sha256sum * | tee SHA256SUMS)
+
+            # The same files the bucket gets, for the GitHub release job below (which has no access to the Supabase key).
+            - name: Keep packages for the release
+              uses: actions/upload-artifact@v4
+              with:
+                  name: release-packages
+                  path: |
+                      out/volcren-windows-*.zip
+                      out/volcren-linux-*.tar.gz
+                      out/SHA256SUMS
+                  if-no-files-found: error
 
             - name: Upload
               run: |
@@ -143,3 +196,31 @@ jobs:
                   curl -sS --fail "$SUPABASE_URL/storage/v1/object/public/client/latest.json?check=$VERSION" -o out/check.json
                   jq -e --arg version "$VERSION" '.version == $version' out/check.json > /dev/null \
                       || { echo "The published latest.json is not the manifest that was uploaded." >&2; exit 1; }
+
+    # After a successful publish: tag the commit and create a GitHub release with the same packages. Uses only the runner's
+    # `gh` and the job token, and runs apart from `publish` so the Supabase key never sits next to a write token.
+    release:
+        name: tag and release
+        needs: publish
+        if: github.event_name == 'push'
+        permissions:
+            contents: write
+        runs-on: ubuntu-latest
+        env:
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+            VERSION: ${{ needs.publish.outputs.version }}
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: release-packages
+                  path: out
+
+            # Creates the tag at this commit. A re-run of the same commit finds the release already there and leaves it alone.
+            - name: Create release
+              run: |
+                  if gh release view "$VERSION" > /dev/null 2>&1; then
+                      echo "Release $VERSION already exists."
+                      exit 0
+                  fi
+                  gh release create "$VERSION" out/* --target "$GITHUB_SHA" --title "$VERSION" --generate-notes
