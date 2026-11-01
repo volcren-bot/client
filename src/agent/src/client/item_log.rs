@@ -20,7 +20,10 @@ use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
-            Memory::{CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE},
+            Memory::{
+                CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+                MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+            },
             Threading::{GetCurrentProcessId, OpenEventW, SetEvent, EVENT_MODIFY_STATE},
         },
     },
@@ -46,7 +49,14 @@ fn open_log() -> bool {
     }
     let name = CString::new(item_log_memory_name(unsafe { GetCurrentProcessId() })).unwrap();
     unsafe {
-        let Ok(mapping) = CreateFileMappingA(HANDLE::default(), None, PAGE_READWRITE, 0, LOG_SIZE as u32, PCSTR(name.as_ptr() as *const u8)) else {
+        let Ok(mapping) = CreateFileMappingA(
+            HANDLE::default(),
+            None,
+            PAGE_READWRITE,
+            0,
+            LOG_SIZE as u32,
+            PCSTR(name.as_ptr() as *const u8),
+        ) else {
             println!("[Agent]: Cannot create the item log shared memory.\r\n");
             return false;
         };
@@ -81,7 +91,9 @@ fn log(change: &Change) {
     if log.is_null() {
         return;
     }
-    let time_ms = START.get().map_or(0, |start| start.elapsed().as_millis() as u64);
+    let time_ms = START
+        .get()
+        .map_or(0, |start| start.elapsed().as_millis() as u64);
     unsafe {
         ipc::item_log::push(log, time_ms, change);
         wake_readers(log);
@@ -98,7 +110,10 @@ unsafe fn wake_readers(log: *const Log) {
     while mask != 0 {
         let slot = mask.trailing_zeros();
         mask &= mask - 1;
-        let name: Vec<u16> = item_wake_event_name(pid, slot).encode_utf16().chain(std::iter::once(0)).collect();
+        let name: Vec<u16> = item_wake_event_name(pid, slot)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         match OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())) {
             Ok(event) => {
                 let _ = SetEvent(event);
@@ -111,32 +126,62 @@ unsafe fn wake_readers(log: *const Log) {
 
 // The game tick now: the client object's tick counter, which the game thread (where the client changes items) writes.
 fn tick() -> i32 {
-    let Some(&(client, offset)) = TICK.get() else { return NO_TICK };
+    let Some(&(client, offset)) = TICK.get() else {
+        return NO_TICK;
+    };
     let memory = OwnMemory;
-    memory.u64(client).filter(|&client| client != 0).and_then(|client| memory.i32(client + offset as u64)).unwrap_or(NO_TICK)
+    memory
+        .u64(client)
+        .filter(|&client| client != 0)
+        .and_then(|client| memory.i32(client + offset as u64))
+        .unwrap_or(NO_TICK)
 }
 
 unsafe extern "system" fn set_slot(container: i32, slot: i32, item: i32, quantity: i32) {
     let _call = HookCall::enter();
     let detour = SET_SLOT.get().unwrap();
     // what the slot held: None when the client has no such container yet (this write makes it)
-    let old = catch_unwind(AssertUnwindSafe(|| CONTAINERS.get().map(|layout| item_slot(&OwnMemory, layout, container, slot)))).ok().flatten();
+    let old = catch_unwind(AssertUnwindSafe(|| {
+        CONTAINERS
+            .get()
+            .map(|layout| item_slot(&OwnMemory, layout, container, slot))
+    }))
+    .ok()
+    .flatten();
     detour.call(container, slot, item, quantity);
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let Some(old) = old else { return };
-        let empty = Item { slot, id: -1, quantity: 0 };
+        let empty = Item {
+            slot,
+            id: -1,
+            quantity: 0,
+        };
         // a write of what the slot already held is not a change; one that makes the container always is
         if old.is_some_and(|old| old.id == item && old.quantity == quantity) {
             return;
         }
         let known = old.is_some();
         let old = old.unwrap_or(empty);
-        log(&Change { tick: tick(), container, slot, old_known: known, old_item: old.id, old_quantity: old.quantity, new_item: item, new_quantity: quantity });
+        log(&Change {
+            tick: tick(),
+            container,
+            slot,
+            old_known: known,
+            old_item: old.id,
+            old_quantity: old.quantity,
+            new_item: item,
+            new_quantity: quantity,
+        });
     }));
 }
 
 /// `containers` locates the container table; `tick` is the RVA of the client object global and the tick offset in it.
-pub unsafe fn hook(module_base: u64, rule: u32, containers: ItemContainers, tick: Option<(u32, u32)>) {
+pub unsafe fn hook(
+    module_base: u64,
+    rule: u32,
+    containers: ItemContainers,
+    tick: Option<(u32, u32)>,
+) {
     if SET_SLOT.get().is_some() || !open_log() {
         return;
     }

@@ -7,8 +7,9 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW, VkKeyScanW},
         WindowsAndMessaging::{
-            EnumChildWindows, EnumWindows, GetWindowThreadProcessId, IsWindow, PostMessageW, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-            WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+            EnumChildWindows, EnumWindows, GetWindowThreadProcessId, IsWindow, PostMessageW,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
         },
     },
 };
@@ -58,10 +59,18 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
             let start = connection(pid)
                 .filter(|c| c.is_compatible() && c.mouse_x > -1)
                 .map(|c| (c.mouse_x as f64, c.mouse_y as f64));
-            let post_move = |px: i32, py: i32| post(window, WM_MOUSEMOVE, 0, point(px + ox, py + oy));
-            wind_mouse::run_with(start, (*x, *y), options, post_move, |duration| pace.sleep(duration))
+            let post_move =
+                |px: i32, py: i32| post(window, WM_MOUSEMOVE, 0, point(px + ox, py + oy));
+            wind_mouse::run_with(start, (*x, *y), options, post_move, |duration| {
+                pace.sleep(duration)
+            })
         }
-        Input::Click { button, x, y, hold_ms } => {
+        Input::Click {
+            button,
+            x,
+            y,
+            hold_ms,
+        } => {
             let (down, up, held) = button_messages(*button);
             let (ox, oy) = canvas_offset(pid);
             let at = point(x + ox, y + oy);
@@ -82,19 +91,35 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
             let (x, y) = mouse_at(pid)?;
             let mut at = POINT { x, y };
             if unsafe { ClientToScreen(window, &mut at) } == 0 {
-                return Err(format!("ClientToScreen failed: {}", io::Error::last_os_error()));
+                return Err(format!(
+                    "ClientToScreen failed: {}",
+                    io::Error::last_os_error()
+                ));
             }
-            let delta = (-notches.saturating_mul(WHEEL_DELTA)).clamp(i16::MIN as i32, i16::MAX as i32);
-            post(window, WM_MOUSEWHEEL, ((delta as u16 as u32) << 16) as WPARAM, point(at.x, at.y))
+            let delta =
+                (-notches.saturating_mul(WHEEL_DELTA)).clamp(i16::MIN as i32, i16::MAX as i32);
+            post(
+                window,
+                WM_MOUSEWHEEL,
+                ((delta as u16 as u32) << 16) as WPARAM,
+                point(at.x, at.y),
+            )
         }
         Input::Key { key, down } => match modifier(*key) {
             Some(bit) => post(window, input::MODIFIERS_MESSAGE, bit, 0),
             None => {
                 let message = if *down { WM_KEYDOWN } else { WM_KEYUP };
-                post(window, message, *key as WPARAM, key_lparam(*key as u32, *down))
+                post(
+                    window,
+                    message,
+                    *key as WPARAM,
+                    key_lparam(*key as u32, *down),
+                )
             }
         },
-        Input::Type { text, hold_ms } => type_text(window, text, Duration::from_millis(*hold_ms as u64), pace),
+        Input::Type { text, hold_ms } => {
+            type_text(window, text, Duration::from_millis(*hold_ms as u64), pace)
+        }
     }
 }
 
@@ -130,13 +155,24 @@ fn key_lparam(vk: u32, down: bool) -> LPARAM {
     let scancode = unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) } as isize;
     let extended = matches!(vk, 0x21..=0x28 | 0x2c..=0x2e | 0x5b..=0x5d | 0x6f | 0x90) as isize;
     let lparam = 1 | scancode << 16 | extended << 24;
-    if down { lparam } else { lparam | 1 << 30 | 1 << 31 }
+    if down {
+        lparam
+    } else {
+        lparam | 1 << 30 | 1 << 31
+    }
 }
 
 fn post(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Result<(), String> {
-    let wparam = if (input::MOUSE_FIRST..=input::MOUSE_LAST).contains(&message) { wparam | input::SYNTHETIC as WPARAM } else { wparam };
+    let wparam = if (input::MOUSE_FIRST..=input::MOUSE_LAST).contains(&message) {
+        wparam | input::SYNTHETIC as WPARAM
+    } else {
+        wparam
+    };
     if unsafe { PostMessageW(window, message, wparam, lparam) } == 0 {
-        return Err(format!("PostMessageW failed: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "PostMessageW failed: {}",
+            io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -149,7 +185,10 @@ fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Resul
     let keys = text
         .encode_utf16()
         .map(|unit| match unsafe { VkKeyScanW(unit) } {
-            -1 => Err(format!("{:?} can't be typed with this keyboard layout.", char::from_u32(unit as u32).unwrap_or('?'))),
+            -1 => Err(format!(
+                "{:?} can't be typed with this keyboard layout.",
+                char::from_u32(unit as u32).unwrap_or('?')
+            )),
             key => Ok(key as u16),
         })
         .collect::<Result<Vec<u16>, String>>()?;
@@ -161,8 +200,11 @@ fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Resul
         }
         let vk = (key & 0xff) as u32;
         let shift_state = (key >> 8) as usize;
-        let wanted = (if shift_state & 1 != 0 { input::SHIFT } else { 0 })
-            | (if shift_state & 2 != 0 { input::CTRL } else { 0 })
+        let wanted = (if shift_state & 1 != 0 {
+            input::SHIFT
+        } else {
+            0
+        }) | (if shift_state & 2 != 0 { input::CTRL } else { 0 })
             | (if shift_state & 4 != 0 { input::ALT } else { 0 });
         if wanted != held {
             post(window, input::MODIFIERS_MESSAGE, wanted ^ held, 0)?;

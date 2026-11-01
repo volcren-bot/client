@@ -15,7 +15,12 @@ pub fn find_instance_flag(pe: &Pe) -> Result<u32, ScanError> {
         let data = &image[section.rva..section.rva + section.size];
         for (at, _) in data.iter().enumerate().filter(|(_, &byte)| byte == 0xc6) {
             // mov byte ptr [reg + disp32], imm8
-            let Some(&[_, modrm, d0, d1, d2, d3, imm]) = data.get(at..at + 7).map(|w| <&[u8; 7]>::try_from(w).unwrap()) else { continue };
+            let Some(&[_, modrm, d0, d1, d2, d3, imm]) = data
+                .get(at..at + 7)
+                .map(|w| <&[u8; 7]>::try_from(w).unwrap())
+            else {
+                continue;
+            };
             if modrm & 0xf8 != 0x80 || modrm & 7 == 4 || imm > 1 {
                 continue;
             }
@@ -23,9 +28,15 @@ pub fn find_instance_flag(pe: &Pe) -> Result<u32, ScanError> {
             if !(MIN_OFFSET..=MAX_OFFSET).contains(&disp) {
                 continue;
             }
-            let Some((begin, _)) = pe.function_containing((section.rva + at) as u32) else { continue };
+            let Some((begin, _)) = pe.function_containing((section.rva + at) as u32) else {
+                continue;
+            };
             let entry = stores.entry(disp).or_default();
-            if imm == 0 { entry.0.insert(begin) } else { entry.1.insert(begin) };
+            if imm == 0 {
+                entry.0.insert(begin)
+            } else {
+                entry.1.insert(begin)
+            };
         }
     }
 
@@ -33,7 +44,10 @@ pub fn find_instance_flag(pe: &Pe) -> Result<u32, ScanError> {
     for (&disp, (zeros, ones)) in &stores {
         for &zero in zeros {
             for &one in ones {
-                if zero != one && zero.abs_diff(one) <= NEIGHBOURS && shared_calls(pe, zero, one) >= SHARED_CALLS {
+                if zero != one
+                    && zero.abs_diff(one) <= NEIGHBOURS
+                    && shared_calls(pe, zero, one) >= SHARED_CALLS
+                {
                     found.push(disp as u32);
                 }
             }
@@ -43,7 +57,9 @@ pub fn find_instance_flag(pe: &Pe) -> Result<u32, ScanError> {
 }
 
 fn call_targets(pe: &Pe, begin: u32) -> HashSet<u64> {
-    let Some((_, end)) = pe.function_containing(begin) else { return HashSet::new() };
+    let Some((_, end)) = pe.function_containing(begin) else {
+        return HashSet::new();
+    };
     Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
         .into_iter()
         .filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
@@ -52,5 +68,7 @@ fn call_targets(pe: &Pe, begin: u32) -> HashSet<u64> {
 }
 
 fn shared_calls(pe: &Pe, a: u32, b: u32) -> usize {
-    call_targets(pe, a).intersection(&call_targets(pe, b)).count()
+    call_targets(pe, a)
+        .intersection(&call_targets(pe, b))
+        .count()
 }

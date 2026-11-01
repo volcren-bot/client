@@ -1599,7 +1599,11 @@ impl<'a> Shared<'a> {
             }
             data.clear();
             data.reserve(length);
-            core::ptr::copy_nonoverlapping(addr_of!((*reply).data) as *const u8, data.as_mut_ptr(), length);
+            core::ptr::copy_nonoverlapping(
+                addr_of!((*reply).data) as *const u8,
+                data.as_mut_ptr(),
+                length,
+            );
             data.set_len(length);
             fence(Ordering::Acquire);
             (counter.load(Ordering::Relaxed) == before).then_some(status)

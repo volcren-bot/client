@@ -33,7 +33,12 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { speed: 12.0, wind: 6.0, gravity: 9.0, timeout_ms: 10_000 }
+        Self {
+            speed: 12.0,
+            wind: 6.0,
+            gravity: 9.0,
+            timeout_ms: 10_000,
+        }
     }
 }
 
@@ -67,7 +72,9 @@ pub(crate) struct Rng(u64);
 
 impl Rng {
     pub(crate) fn seeded() -> Self {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
         let mut z = nanos ^ (std::process::id() as u64) << 32;
         z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -217,7 +224,8 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
     fn plan(&mut self, from_x: f64, from_y: f64) {
         self.total_dist = (from_x - self.dest_x).hypot(from_y - self.dest_y).max(1.0);
 
-        let move_time = (100.0 + 14.0 * self.total_dist.sqrt() / (self.speed / 10.0)) * self.rng.range(0.78, 1.22);
+        let move_time = (100.0 + 14.0 * self.total_dist.sqrt() / (self.speed / 10.0))
+            * self.rng.range(0.78, 1.22);
         self.gap = self.rng.range(6.0, 9.0);
         let n = (move_time / self.gap).round().max(3.0);
         self.max_step = (self.total_dist / n / 0.80).min(self.total_dist * 0.5);
@@ -236,14 +244,16 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
         self.end_step = (2.0 + sqr(self.rng.random()) * 2.5).min(self.max_step);
 
         self.hesitate_at = 2.0;
-        if self.rng.random() < HESITATE_CHANCE * clamp((self.total_dist - 120.0) / 130.0, 0.0, 1.0) {
+        if self.rng.random() < HESITATE_CHANCE * clamp((self.total_dist - 120.0) / 130.0, 0.0, 1.0)
+        {
             self.hesitate_at = self.rng.range(0.20, 0.75);
         }
 
         self.coasting = self.rng.random() < 0.06 && self.total_dist > 3.0;
         self.overshot = false;
 
-        self.arc_amp = ((0.030 + sqr(self.rng.random()) * 0.130) * self.arc_scale).min(0.45) * self.total_dist;
+        self.arc_amp =
+            ((0.030 + sqr(self.rng.random()) * 0.130) * self.arc_scale).min(0.45) * self.total_dist;
         self.arc_decay = 1.45 * clamp(self.gravity / 12.0, 0.3, 3.0);
         self.arc_skew = 0.50 + sqr(self.rng.random()) * 0.58;
         if self.rng.random() >= 0.5 {
@@ -291,7 +301,8 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
         let dir_y = (self.dest_y - self.y) / remaining;
 
         if self.overshot || self.remaining_dist * self.decel_rate <= self.max_step {
-            let mut move_len = (self.remaining_dist * self.decel_rate * self.rng.range(0.7, 1.3)).max(self.end_step);
+            let mut move_len = (self.remaining_dist * self.decel_rate * self.rng.range(0.7, 1.3))
+                .max(self.end_step);
             if self.coasting && move_len >= self.remaining_dist - 0.5 {
                 move_len = self.remaining_dist + clamp(self.max_step * 0.3, 3.0, 8.0);
                 self.coasting = false;
@@ -302,13 +313,22 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
             self.move_x = dir_x * move_len;
             self.move_y = dir_y * move_len;
         } else {
-            let envelope = smooth_step(clamp(self.progress / 0.012, 0.0, 1.0)).max(self.launch_scale);
+            let envelope =
+                smooth_step(clamp(self.progress / 0.012, 0.0, 1.0)).max(self.launch_scale);
             let cur_step = self.max_step * envelope;
             let mut arc_offset = self.arc_amp
                 * (-self.arc_decay * self.progress).exp()
                 * (self.arc_freq * PI * self.progress.powf(self.arc_skew)).sin();
-            arc_offset *= clamp((self.remaining_dist - self.max_step) / self.max_step, 0.0, 1.0);
-            arc_offset = clamp(arc_offset, -0.5 * self.remaining_dist, 0.5 * self.remaining_dist);
+            arc_offset *= clamp(
+                (self.remaining_dist - self.max_step) / self.max_step,
+                0.0,
+                1.0,
+            );
+            arc_offset = clamp(
+                arc_offset,
+                -0.5 * self.remaining_dist,
+                0.5 * self.remaining_dist,
+            );
             let aim_x = (self.dest_x - dir_y * arc_offset) - self.x;
             let aim_y = (self.dest_y + dir_x * arc_offset) - self.y;
             let aim_len = aim_x.hypot(aim_y).max(1.0);
@@ -322,7 +342,11 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
         if self.rng.random() < SUBSTEP_CHANCE && self.move_x.hypot(self.move_y) > 3.0 {
             let split = self.rng.range(0.35, 0.70);
             let pause = self.gap * self.rng.range(0.3, 0.6);
-            self.teleport(self.x - self.move_x * split, self.y - self.move_y * split, Some(pause))?;
+            self.teleport(
+                self.x - self.move_x * split,
+                self.y - self.move_y * split,
+                Some(pause),
+            )?;
         }
 
         self.teleport(self.x, self.y, None)
@@ -335,8 +359,10 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
         let (start_x, start_y) = (self.x, self.y);
         self.plan(start_x, start_y);
 
-        self.move_y = (self.launch_scale * self.max_step) * (self.dest_y - start_y) / self.total_dist;
-        self.move_x = (self.launch_scale * self.max_step) * (self.dest_x - start_x) / self.total_dist;
+        self.move_y =
+            (self.launch_scale * self.max_step) * (self.dest_y - start_y) / self.total_dist;
+        self.move_x =
+            (self.launch_scale * self.max_step) * (self.dest_x - start_x) / self.total_dist;
         if self.rng.random() < 0.50 {
             self.flick(1.0);
         }
@@ -359,7 +385,9 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
             return Ok(());
         }
 
-        if Instant::now() >= deadline && (self.x - self.dest_x).hypot(self.y - self.dest_y) > self.end_step {
+        if Instant::now() >= deadline
+            && (self.x - self.dest_x).hypot(self.y - self.dest_y) > self.end_step
+        {
             return Err(format!(
                 "wind_mouse timed out after {timeout_ms}ms. Start={},{} Dest={},{} XY={},{}",
                 start_x.round(),
@@ -382,9 +410,18 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
 mod tests {
     use super::*;
 
-    const FAST: Options = Options { speed: 30.0, wind: 6.0, gravity: 9.0, timeout_ms: 10_000 };
+    const FAST: Options = Options {
+        speed: 30.0,
+        wind: 6.0,
+        gravity: 9.0,
+        timeout_ms: 10_000,
+    };
 
-    fn points(start: Option<(f64, f64)>, dest: (i32, i32), options: &Options) -> (Vec<(i32, i32)>, Result<(), String>) {
+    fn points(
+        start: Option<(f64, f64)>,
+        dest: (i32, i32),
+        options: &Options,
+    ) -> (Vec<(i32, i32)>, Result<(), String>) {
         let mut posted = Vec::new();
         let result = run(start, dest, options, |x, y| {
             posted.push((x, y));
@@ -400,7 +437,12 @@ mod tests {
             assert!(result.is_ok(), "{result:?}");
             assert!(posted.len() >= 3, "{posted:?}");
             assert_eq!(posted.last(), Some(&(500, 300)));
-            assert!(posted.iter().all(|&(x, y)| (-200..800).contains(&x) && (-200..600).contains(&y)), "{posted:?}");
+            assert!(
+                posted
+                    .iter()
+                    .all(|&(x, y)| (-200..800).contains(&x) && (-200..600).contains(&y)),
+                "{posted:?}"
+            );
         }
     }
 
@@ -411,21 +453,33 @@ mod tests {
 
     #[test]
     fn already_there_posts_nothing() {
-        assert_eq!(points(Some((40.0, 40.0)), (40, 40), &FAST), (vec![], Ok(())));
+        assert_eq!(
+            points(Some((40.0, 40.0)), (40, 40), &FAST),
+            (vec![], Ok(()))
+        );
     }
 
     #[test]
     fn post_errors_pass_through() {
-        let result = run(Some((0.0, 0.0)), (300, 300), &FAST, |_, _| Err("no window".into()));
+        let result = run(Some((0.0, 0.0)), (300, 300), &FAST, |_, _| {
+            Err("no window".into())
+        });
         assert_eq!(result, Err("no window".into()));
     }
 
     #[test]
     fn times_out_far_from_the_destination() {
-        let slow = Options { speed: 2.0, timeout_ms: 60, ..FAST };
+        let slow = Options {
+            speed: 2.0,
+            timeout_ms: 60,
+            ..FAST
+        };
         let (_, result) = points(Some((0.0, 0.0)), (2000, 0), &slow);
         let error = result.unwrap_err();
-        assert!(error.starts_with("wind_mouse timed out after 60ms. Start=0,0 Dest=2000,0"), "{error}");
+        assert!(
+            error.starts_with("wind_mouse timed out after 60ms. Start=0,0 Dest=2000,0"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -434,7 +488,11 @@ mod tests {
         let (posted, result) = points(Some((0.0, 0.0)), (400, 400), &FAST);
         assert!(result.is_ok());
         let per_point = start.elapsed().as_secs_f64() * 1000.0 / posted.len() as f64;
-        assert!(per_point >= 5.0, "{per_point} ms per point over {} points", posted.len());
+        assert!(
+            per_point >= 5.0,
+            "{per_point} ms per point over {} points",
+            posted.len()
+        );
     }
 
     #[test]

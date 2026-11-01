@@ -29,21 +29,27 @@ fn main() -> std::process::ExitCode {
         }
         match args {
             ["list"] => json(Ok(injector::list_clients())),
-            ["load", pid, dll, cursor @ ..] => match pid.parse() {
-                Ok(pid) => {
-                    // The optional cursor is the `cursor` command's arguments after the pid.
-                    let cursor = match cursor {
-                        [] => Ok(None),
-                        rest => {
-                            let mut args = vec!["cursor", "0"];
-                            args.extend(rest);
-                            injector::Cursor::from_args(&args).transpose().map(|c| c.map(|(_, cursor)| cursor))
-                        }
-                    };
-                    json(cursor.and_then(|cursor| injector::load(pid, Path::new(dll), cursor.as_ref())))
+            ["load", pid, dll, cursor @ ..] => {
+                match pid.parse() {
+                    Ok(pid) => {
+                        // The optional cursor is the `cursor` command's arguments after the pid.
+                        let cursor = match cursor {
+                            [] => Ok(None),
+                            rest => {
+                                let mut args = vec!["cursor", "0"];
+                                args.extend(rest);
+                                injector::Cursor::from_args(&args)
+                                    .transpose()
+                                    .map(|c| c.map(|(_, cursor)| cursor))
+                            }
+                        };
+                        json(cursor.and_then(|cursor| {
+                            injector::load(pid, Path::new(dll), cursor.as_ref())
+                        }))
+                    }
+                    Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
                 }
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
+            }
             ["unload", pid] => match pid.parse() {
                 Ok(pid) => json(injector::unload(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
@@ -68,13 +74,25 @@ fn main() -> std::process::ExitCode {
                 Ok(pid) => match *offset {
                     "off" => json(injector::set_total_xp(pid, None)),
                     "random" => json(injector::game_state(pid).and_then(|state| {
-                        let real: i64 = state.skills.iter().flatten().map(|s| s.xp.max(0) as i64).sum();
-                        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-                        injector::set_total_xp(pid, Some(injector::random_total_xp_offset(real, seed)))
+                        let real: i64 = state
+                            .skills
+                            .iter()
+                            .flatten()
+                            .map(|s| s.xp.max(0) as i64)
+                            .sum();
+                        let seed = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(1, |d| d.as_nanos() as u64);
+                        injector::set_total_xp(
+                            pid,
+                            Some(injector::random_total_xp_offset(real, seed)),
+                        )
                     })),
                     offset => match offset.parse() {
                         Ok(offset) => json(injector::set_total_xp(pid, Some(offset))),
-                        Err(_) => json::<()>(Err(format!("Invalid offset: {offset} (a number, random or off)"))),
+                        Err(_) => json::<()>(Err(format!(
+                            "Invalid offset: {offset} (a number, random or off)"
+                        ))),
                     },
                 },
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
@@ -99,7 +117,12 @@ fn main() -> std::process::ExitCode {
                 (Ok(pid), Ok(id)) => json(injector::enum_def(pid, id)),
                 _ => json::<()>(Err(format!("Invalid enum command: {args:?}"))),
             },
-            ["item-params", pid, ids @ ..] => match (pid.parse(), ids.iter().map(|id| id.parse()).collect::<Result<Vec<i32>, _>>()) {
+            ["item-params", pid, ids @ ..] => match (
+                pid.parse(),
+                ids.iter()
+                    .map(|id| id.parse())
+                    .collect::<Result<Vec<i32>, _>>(),
+            ) {
                 (Ok(pid), Ok(ids)) => json(injector::item_params(pid, &ids)),
                 _ => json::<()>(Err(format!("Invalid item-params command: {args:?}"))),
             },
@@ -115,32 +138,77 @@ fn main() -> std::process::ExitCode {
                 (Ok(pid), Ok(id)) => json(injector::item_container(pid, id)),
                 _ => json::<()>(Err(format!("Invalid container command: {args:?}"))),
             },
-            ["project", pid, coords @ ..] => match (pid.parse(), coords.iter().map(|c| c.parse()).collect::<Result<Vec<i32>, _>>()) {
+            ["project", pid, coords @ ..] => match (
+                pid.parse(),
+                coords
+                    .iter()
+                    .map(|c| c.parse())
+                    .collect::<Result<Vec<i32>, _>>(),
+            ) {
                 (Ok(pid), Ok(c)) if c.len() % 3 == 0 => {
-                    let points: Vec<injector::projection::Point> = c.chunks(3).map(|p| injector::projection::Point::new(p[0], p[1], p[2])).collect();
-                    json(injector::project(pid, &points, injector::projection::Via::Auto))
+                    let points: Vec<injector::projection::Point> = c
+                        .chunks(3)
+                        .map(|p| injector::projection::Point::new(p[0], p[1], p[2]))
+                        .collect();
+                    json(injector::project(
+                        pid,
+                        &points,
+                        injector::projection::Via::Auto,
+                    ))
                 }
-                _ => json::<()>(Err(format!("Invalid project command (x y height ...): {args:?}"))),
+                _ => json::<()>(Err(format!(
+                    "Invalid project command (x y height ...): {args:?}"
+                ))),
             },
-            ["mem", pid, address, count] => match (pid.parse(), u64::from_str_radix(address.trim_start_matches("0x"), 16), count.parse()) {
-                (Ok(pid), Ok(address), Ok(count)) => json(injector::memory_words(pid, address, count)),
-                _ => json::<()>(Err(format!("Invalid mem command (pid hex-address count): {args:?}"))),
+            ["mem", pid, address, count] => match (
+                pid.parse(),
+                u64::from_str_radix(address.trim_start_matches("0x"), 16),
+                count.parse(),
+            ) {
+                (Ok(pid), Ok(address), Ok(count)) => {
+                    json(injector::memory_words(pid, address, count))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid mem command (pid hex-address count): {args:?}"
+                ))),
             },
-            ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => match (pid.parse(), index.parse(), count.parse()) {
-                (Ok(pid), Ok(index), Ok(count)) => json(injector::npc_words(pid, index, count, rest == ["def"])),
-                _ => json::<()>(Err(format!("Invalid npc-words command (pid index count [def]): {args:?}"))),
-            },
-            ["widget-words", pid, group, child, index, count] => match (pid.parse(), group.parse(), child.parse(), index.parse(), count.parse()) {
-                (Ok(pid), Ok(group), Ok(child), Ok(index), Ok(count)) => json(injector::widget_words(pid, group, child, index, count)),
-                _ => json::<()>(Err(format!("Invalid widget-words command (pid group child index|-1 count): {args:?}"))),
+            ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => {
+                match (pid.parse(), index.parse(), count.parse()) {
+                    (Ok(pid), Ok(index), Ok(count)) => {
+                        json(injector::npc_words(pid, index, count, rest == ["def"]))
+                    }
+                    _ => json::<()>(Err(format!(
+                        "Invalid npc-words command (pid index count [def]): {args:?}"
+                    ))),
+                }
+            }
+            ["widget-words", pid, group, child, index, count] => match (
+                pid.parse(),
+                group.parse(),
+                child.parse(),
+                index.parse(),
+                count.parse(),
+            ) {
+                (Ok(pid), Ok(group), Ok(child), Ok(index), Ok(count)) => {
+                    json(injector::widget_words(pid, group, child, index, count))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid widget-words command (pid group child index|-1 count): {args:?}"
+                ))),
             },
             ["widget-dump", pid, count] => match (pid.parse(), count.parse()) {
                 (Ok(pid), Ok(count)) => json(injector::widget_dump(pid, count)),
-                _ => json::<()>(Err(format!("Invalid widget-dump command (pid count): {args:?}"))),
+                _ => json::<()>(Err(format!(
+                    "Invalid widget-dump command (pid count): {args:?}"
+                ))),
             },
             ["watch", pid, seconds, bytes] => match (pid.parse(), seconds.parse(), bytes.parse()) {
-                (Ok(pid), Ok(seconds), Ok(bytes)) => json(injector::watch_client(pid, seconds, bytes)),
-                _ => json::<()>(Err(format!("Invalid watch command (pid seconds bytes): {args:?}"))),
+                (Ok(pid), Ok(seconds), Ok(bytes)) => {
+                    json(injector::watch_client(pid, seconds, bytes))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid watch command (pid seconds bytes): {args:?}"
+                ))),
             },
             ["world-entities", pid] => match pid.parse() {
                 Ok(pid) => json(injector::world_entities(pid)),
@@ -150,10 +218,16 @@ fn main() -> std::process::ExitCode {
                 Ok(pid) => json(injector::world_debug(pid)),
                 _ => json::<()>(Err(format!("Invalid world-debug command: {args:?}"))),
             },
-            ["player-words", pid, index, count] => match (pid.parse(), index.parse(), count.parse()) {
-                (Ok(pid), Ok(index), Ok(count)) => json(injector::player_words(pid, index, count)),
-                _ => json::<()>(Err(format!("Invalid player-words command (pid index count): {args:?}"))),
-            },
+            ["player-words", pid, index, count] => {
+                match (pid.parse(), index.parse(), count.parse()) {
+                    (Ok(pid), Ok(index), Ok(count)) => {
+                        json(injector::player_words(pid, index, count))
+                    }
+                    _ => json::<()>(Err(format!(
+                        "Invalid player-words command (pid index count): {args:?}"
+                    ))),
+                }
+            }
             ["npc-model", pid, index] => match (pid.parse(), index.parse()) {
                 (Ok(pid), Ok(index)) => json(injector::npc_model(pid, index)),
                 _ => json::<()>(Err(format!("Invalid npc-model command: {args:?}"))),
@@ -164,36 +238,99 @@ fn main() -> std::process::ExitCode {
             },
             ["cache-list", pid, index] => match (pid.parse(), index.parse()) {
                 (Ok(pid), Ok(index)) => json(injector::cache_archives(pid, index)),
-                _ => json::<()>(Err(format!("Invalid cache-list command (index [archive]): {args:?}"))),
+                _ => json::<()>(Err(format!(
+                    "Invalid cache-list command (index [archive]): {args:?}"
+                ))),
             },
-            ["cache-list", pid, index, archive] => match (pid.parse(), index.parse(), archive.parse()) {
-                (Ok(pid), Ok(index), Ok(archive)) => json(injector::cache_archive_files(pid, index, archive)),
-                _ => json::<()>(Err(format!("Invalid cache-list command (index [archive]): {args:?}"))),
-            },
-            ["cache-file", pid, index, archive, file, out] => match (pid.parse(), index.parse(), archive.parse(), file.parse()) {
-                (Ok(pid), Ok(index), Ok(archive), Ok(file)) => json(injector::cache_files(pid, index, &[[archive, file]]).and_then(|mut files| {
-                    let data = files.pop().flatten().ok_or_else(|| format!("no file {index}/{archive}/{file}"))?;
-                    std::fs::write(out, &data).map_err(|e| format!("Cannot write {out}: {e}"))?;
-                    Ok(data.len())
-                })),
-                _ => json::<()>(Err(format!("Invalid cache-file command (index archive file out): {args:?}"))),
-            },
-            ["collision", pid, plane, x1, y1, x2, y2] => match (pid.parse(), plane.parse(), x1.parse(), y1.parse(), x2.parse(), y2.parse()) {
-                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => json(injector::collision_area(pid, plane, x1, y1, x2, y2)),
-                _ => json::<()>(Err(format!("Invalid collision command (plane x1 y1 x2 y2): {args:?}"))),
-            },
-            ["path", pid, plane, x1, y1, x2, y2] => match (pid.parse(), plane.parse(), x1.parse(), y1.parse(), x2.parse(), y2.parse()) {
-                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => json(injector::find_path(pid, plane, [x1, y1], [x2, y2], None)),
-                _ => json::<()>(Err(format!("Invalid path command (plane x1 y1 x2 y2): {args:?}"))),
-            },
-            ["route", pid, x1, y1, x2, y2, rest @ ..] => match (pid.parse(), x1.parse(), y1.parse(), x2.parse(), y2.parse(), rest) {
-                // an optional seed asks for a randomized route
-                (Ok(pid), Ok(x1), Ok(y1), Ok(x2), Ok(y2), []) => json(injector::scene_route(pid, [x1, y1], [x2, y2], None)),
-                (Ok(pid), Ok(x1), Ok(y1), Ok(x2), Ok(y2), [seed]) if seed.parse::<u64>().is_ok() => {
-                    let options = injector::scene_graph::Options { seed: seed.parse().unwrap_or_default(), ..Default::default() };
-                    json(injector::scene_route(pid, [x1, y1], [x2, y2], Some(options)))
+            ["cache-list", pid, index, archive] => {
+                match (pid.parse(), index.parse(), archive.parse()) {
+                    (Ok(pid), Ok(index), Ok(archive)) => {
+                        json(injector::cache_archive_files(pid, index, archive))
+                    }
+                    _ => json::<()>(Err(format!(
+                        "Invalid cache-list command (index [archive]): {args:?}"
+                    ))),
                 }
-                _ => json::<()>(Err(format!("Invalid route command (x1 y1 x2 y2 [seed]): {args:?}"))),
+            }
+            ["cache-file", pid, index, archive, file, out] => {
+                match (pid.parse(), index.parse(), archive.parse(), file.parse()) {
+                    (Ok(pid), Ok(index), Ok(archive), Ok(file)) => json(
+                        injector::cache_files(pid, index, &[[archive, file]]).and_then(
+                            |mut files| {
+                                let data = files
+                                    .pop()
+                                    .flatten()
+                                    .ok_or_else(|| format!("no file {index}/{archive}/{file}"))?;
+                                std::fs::write(out, &data)
+                                    .map_err(|e| format!("Cannot write {out}: {e}"))?;
+                                Ok(data.len())
+                            },
+                        ),
+                    ),
+                    _ => json::<()>(Err(format!(
+                        "Invalid cache-file command (index archive file out): {args:?}"
+                    ))),
+                }
+            }
+            ["collision", pid, plane, x1, y1, x2, y2] => match (
+                pid.parse(),
+                plane.parse(),
+                x1.parse(),
+                y1.parse(),
+                x2.parse(),
+                y2.parse(),
+            ) {
+                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => {
+                    json(injector::collision_area(pid, plane, x1, y1, x2, y2))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid collision command (plane x1 y1 x2 y2): {args:?}"
+                ))),
+            },
+            ["path", pid, plane, x1, y1, x2, y2] => match (
+                pid.parse(),
+                plane.parse(),
+                x1.parse(),
+                y1.parse(),
+                x2.parse(),
+                y2.parse(),
+            ) {
+                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => {
+                    json(injector::find_path(pid, plane, [x1, y1], [x2, y2], None))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid path command (plane x1 y1 x2 y2): {args:?}"
+                ))),
+            },
+            ["route", pid, x1, y1, x2, y2, rest @ ..] => match (
+                pid.parse(),
+                x1.parse(),
+                y1.parse(),
+                x2.parse(),
+                y2.parse(),
+                rest,
+            ) {
+                // an optional seed asks for a randomized route
+                (Ok(pid), Ok(x1), Ok(y1), Ok(x2), Ok(y2), []) => {
+                    json(injector::scene_route(pid, [x1, y1], [x2, y2], None))
+                }
+                (Ok(pid), Ok(x1), Ok(y1), Ok(x2), Ok(y2), [seed])
+                    if seed.parse::<u64>().is_ok() =>
+                {
+                    let options = injector::scene_graph::Options {
+                        seed: seed.parse().unwrap_or_default(),
+                        ..Default::default()
+                    };
+                    json(injector::scene_route(
+                        pid,
+                        [x1, y1],
+                        [x2, y2],
+                        Some(options),
+                    ))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid route command (x1 y1 x2 y2 [seed]): {args:?}"
+                ))),
             },
             ["scene-collision", pid] => match pid.parse() {
                 Ok(pid) => json(injector::scene_collision(pid)),
@@ -203,10 +340,16 @@ fn main() -> std::process::ExitCode {
                 Ok(pid) => json(injector::locs(pid, None)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
-            ["loc-model", pid, kind, x, y, id] => match (pid.parse(), kind.parse(), x.parse(), y.parse(), id.parse()) {
-                (Ok(pid), Ok(kind), Ok(x), Ok(y), Ok(id)) => json(injector::loc_model(pid, kind, x, y, id)),
-                _ => json::<()>(Err(format!("Invalid loc-model command (kind scene_x scene_y id): {args:?}"))),
-            },
+            ["loc-model", pid, kind, x, y, id] => {
+                match (pid.parse(), kind.parse(), x.parse(), y.parse(), id.parse()) {
+                    (Ok(pid), Ok(kind), Ok(x), Ok(y), Ok(id)) => {
+                        json(injector::loc_model(pid, kind, x, y, id))
+                    }
+                    _ => json::<()>(Err(format!(
+                        "Invalid loc-model command (kind scene_x scene_y id): {args:?}"
+                    ))),
+                }
+            }
             ["menu", pid] => match pid.parse() {
                 Ok(pid) => json(injector::menu(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
@@ -219,15 +362,31 @@ fn main() -> std::process::ExitCode {
                 Ok(pid) => json(injector::sub_interfaces(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
-            ["game-vals", pid, kind, ids @ ..] => match (pid.parse(), kind.parse(), ids.iter().map(|id| id.parse()).collect::<Result<Vec<i32>, _>>()) {
+            ["game-vals", pid, kind, ids @ ..] => match (
+                pid.parse(),
+                kind.parse(),
+                ids.iter()
+                    .map(|id| id.parse())
+                    .collect::<Result<Vec<i32>, _>>(),
+            ) {
                 (Ok(pid), Ok(kind), Ok(ids)) => json(injector::game_val_names(pid, kind, &ids)),
                 _ => json::<()>(Err(format!("Invalid game-vals command: {args:?}"))),
             },
-            ["item-names", pid, ids @ ..] => match (pid.parse(), ids.iter().map(|id| id.parse()).collect::<Result<Vec<i32>, _>>()) {
+            ["item-names", pid, ids @ ..] => match (
+                pid.parse(),
+                ids.iter()
+                    .map(|id| id.parse())
+                    .collect::<Result<Vec<i32>, _>>(),
+            ) {
                 (Ok(pid), Ok(ids)) => json(injector::item_names(pid, &ids)),
                 _ => json::<()>(Err(format!("Invalid item-names command: {args:?}"))),
             },
-            ["item-stackable", pid, ids @ ..] => match (pid.parse(), ids.iter().map(|id| id.parse()).collect::<Result<Vec<i32>, _>>()) {
+            ["item-stackable", pid, ids @ ..] => match (
+                pid.parse(),
+                ids.iter()
+                    .map(|id| id.parse())
+                    .collect::<Result<Vec<i32>, _>>(),
+            ) {
                 (Ok(pid), Ok(ids)) => json(injector::item_stackable(pid, &ids)),
                 _ => json::<()>(Err(format!("Invalid item-stackable command: {args:?}"))),
             },
@@ -257,25 +416,44 @@ fn main() -> std::process::ExitCode {
             },
             ["packets", pid, since] => match (pid.parse(), since.parse()) {
                 (Ok(pid), Ok(since)) => json(injector::packets(pid, since, PACKETS_PER_READ)),
-                _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
+                _ => json::<()>(Err(format!(
+                    "Invalid pid or sequence number: {pid} {since}"
+                ))),
             },
             ["packet-layouts", pid] => match pid.parse() {
                 Ok(pid) => json(injector::packet_layouts(pid)),
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
             ["scripts", pid, since] => match (pid.parse(), since.parse()) {
-                (Ok(pid), Ok(since)) => json(injector::script_runs(pid, since, SCRIPT_RUNS_PER_READ)),
-                _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
+                (Ok(pid), Ok(since)) => {
+                    json(injector::script_runs(pid, since, SCRIPT_RUNS_PER_READ))
+                }
+                _ => json::<()>(Err(format!(
+                    "Invalid pid or sequence number: {pid} {since}"
+                ))),
             },
             ["varc-changes", pid, since] => match (pid.parse(), since.parse()) {
-                (Ok(pid), Ok(since)) => json(injector::varc_changes(pid, since, VARC_CHANGES_PER_READ)),
-                _ => json::<()>(Err(format!("Invalid pid or sequence number: {pid} {since}"))),
-            },
-            ["item-changes", pid, since, rest @ ..] => match (pid.parse(), since.parse(), rest.first().map_or(Ok(0u64), |wait| wait.parse())) {
-                (Ok(pid), Ok(since), Ok(wait)) => {
-                    json(injector::item_changes_wait(pid, since, ITEM_CHANGES_PER_READ, std::time::Duration::from_millis(wait.min(ITEM_CHANGES_MAX_WAIT_MS))))
+                (Ok(pid), Ok(since)) => {
+                    json(injector::varc_changes(pid, since, VARC_CHANGES_PER_READ))
                 }
-                _ => json::<()>(Err(format!("Invalid pid, sequence number or wait: {args:?}"))),
+                _ => json::<()>(Err(format!(
+                    "Invalid pid or sequence number: {pid} {since}"
+                ))),
+            },
+            ["item-changes", pid, since, rest @ ..] => match (
+                pid.parse(),
+                since.parse(),
+                rest.first().map_or(Ok(0u64), |wait| wait.parse()),
+            ) {
+                (Ok(pid), Ok(since), Ok(wait)) => json(injector::item_changes_wait(
+                    pid,
+                    since,
+                    ITEM_CHANGES_PER_READ,
+                    std::time::Duration::from_millis(wait.min(ITEM_CHANGES_MAX_WAIT_MS)),
+                )),
+                _ => json::<()>(Err(format!(
+                    "Invalid pid, sequence number or wait: {args:?}"
+                ))),
             },
             ["chat", pid] => match pid.parse() {
                 Ok(pid) => json(injector::chat_messages(pid)),
@@ -294,7 +472,9 @@ fn main() -> std::process::ExitCode {
                 Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
             },
             ["children", pid, group, child] => match (pid.parse(), group.parse(), child.parse()) {
-                (Ok(pid), Ok(group), Ok(child)) => json(injector::widget_children(pid, group, child)),
+                (Ok(pid), Ok(group), Ok(child)) => {
+                    json(injector::widget_children(pid, group, child))
+                }
                 _ => json::<()>(Err(format!("Invalid children command: {args:?}"))),
             },
             ["world-select", pid] => match pid.parse() {
@@ -344,14 +524,28 @@ fn main() -> std::process::ExitCode {
     }
 
     if args.is_empty() {
-        eprintln!("Usage: injector list | load <pid> <dll> [<style> <r> <g> <b> <size>] | unload <pid> | status <pid> | state <pid> | console <pid>");
-        eprintln!("       injector widget <pid> <group> <child> | children <pid> <group> <child> | interfaces <pid> | screenshot <pid> <file.bmp>");
-        eprintln!("       injector varp <pid> <id> | varps <pid> | varbit <pid> <id> | enum <pid> <id> | item-params <pid> <ids...> | name <pid> <display name>");
-        eprintln!("       injector container <pid> <id> | containers <pid> | widget-tree <pid> | widget-words <pid> <group> <child> <index|-1> <count> | widget-dump <pid> <count> | item-names <pid> <id>... | item-stackable <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | scripts <pid> <since> | varc-changes <pid> <since> | item-changes <pid> <since> [wait ms] (u64 max: only the position) | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>");
-        eprintln!("       injector move <pid> <x> <y> | click <pid> left|right|middle <x> <y> | type <pid> <text> [hold ms]");
-        eprintln!("       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up");
+        eprintln!(
+            "Usage: injector list | load <pid> <dll> [<style> <r> <g> <b> <size>] | unload <pid> | status <pid> | state <pid> | console <pid>"
+        );
+        eprintln!(
+            "       injector widget <pid> <group> <child> | children <pid> <group> <child> | interfaces <pid> | screenshot <pid> <file.bmp>"
+        );
+        eprintln!(
+            "       injector varp <pid> <id> | varps <pid> | varbit <pid> <id> | enum <pid> <id> | item-params <pid> <ids...> | name <pid> <display name>"
+        );
+        eprintln!(
+            "       injector container <pid> <id> | containers <pid> | widget-tree <pid> | widget-words <pid> <group> <child> <index|-1> <count> | widget-dump <pid> <count> | item-names <pid> <id>... | item-stackable <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | scripts <pid> <since> | varc-changes <pid> <since> | item-changes <pid> <since> [wait ms] (u64 max: only the position) | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>"
+        );
+        eprintln!(
+            "       injector move <pid> <x> <y> | click <pid> left|right|middle <x> <y> | type <pid> <text> [hold ms]"
+        );
+        eprintln!(
+            "       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up"
+        );
         eprintln!("       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms>");
-        eprintln!("       injector overlay <pid> rect <x1> <y1> <x2> <y2> <r> <g> <b> <a> | overlay <pid> clear");
+        eprintln!(
+            "       injector overlay <pid> rect <x1> <y1> <x2> <y2> <r> <g> <b> <a> | overlay <pid> clear"
+        );
         eprintln!("       injector serve | run [--script <path> [--lib <dir>]] [pid]");
         return std::process::ExitCode::from(2);
     }
@@ -402,7 +596,9 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
     if let Some(pid) = pid {
         match injector::connection(pid) {
             None => {
-                eprintln!("The agent isn't loaded in client {pid}. Load it first (`injector load <pid> <dll>`).");
+                eprintln!(
+                    "The agent isn't loaded in client {pid}. Load it first (`injector load <pid> <dll>`)."
+                );
                 return std::process::ExitCode::FAILURE;
             }
             Some(conn) => {
@@ -413,8 +609,8 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             }
         }
     }
-    use std::io::BufRead;
     use injector::form::{self, SCRIPT_PREFIX};
+    use std::io::BufRead;
 
     let mut input = std::io::BufReader::new(std::io::stdin());
     let mut first = String::new();
@@ -430,7 +626,9 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             form::PINS_PREFIX => loader_has_pins = true,
             injector::http::CAPABILITY_PREFIX => loader_has_http = true,
             line if line.starts_with(injector::antiban::PREFIX) => {
-                if let Some(config) = injector::antiban::parse(&line[injector::antiban::PREFIX.len()..]) {
+                if let Some(config) =
+                    injector::antiban::parse(&line[injector::antiban::PREFIX.len()..])
+                {
                     injector::antiban::set(config);
                 }
             }
@@ -444,7 +642,10 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
     }
     // The script's other files can come first, so they never touch the disk.
     let mut modules = std::collections::HashMap::new();
-    if let Some(len) = first.strip_prefix(form::MODULES_PREFIX).map(|len| len.trim().parse::<usize>()) {
+    if let Some(len) = first
+        .strip_prefix(form::MODULES_PREFIX)
+        .map(|len| len.trim().parse::<usize>())
+    {
         let files = len.ok().and_then(|len| {
             let mut bytes = vec![0u8; len];
             input.read_exact(&mut bytes).ok()?;
@@ -459,7 +660,10 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             }
         }
     }
-    let (source, handler) = match first.strip_prefix(SCRIPT_PREFIX).map(|len| len.trim().parse::<usize>()) {
+    let (source, handler) = match first
+        .strip_prefix(SCRIPT_PREFIX)
+        .map(|len| len.trim().parse::<usize>())
+    {
         Some(Ok(len)) => {
             let mut bytes = vec![0u8; len];
             if input.read_exact(&mut bytes).is_err() {
@@ -480,7 +684,8 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                         if let Some(config) = injector::antiban::parse(payload) {
                             injector::antiban::set(config);
                         }
-                    } else if let Some(payload) = line.strip_prefix(injector::antiban::SKIP_PREFIX) {
+                    } else if let Some(payload) = line.strip_prefix(injector::antiban::SKIP_PREFIX)
+                    {
                         if let Some(skip) = injector::antiban::parse_skip(payload) {
                             injector::antiban::push_skip(skip);
                         }
@@ -494,10 +699,14 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                 }
             });
             let input = std::sync::Arc::new(std::sync::Mutex::new(replies));
-            let ask = move |input: &std::sync::Mutex<std::sync::mpsc::Receiver<String>>, request: String| -> Result<String, String> {
+            let ask = move |input: &std::sync::Mutex<std::sync::mpsc::Receiver<String>>,
+                            request: String|
+                  -> Result<String, String> {
                 {
                     let mut out = std::io::stdout().lock();
-                    write!(out, "{request}{}", form::ENTRY_END).and_then(|()| out.flush()).map_err(|e| e.to_string())?;
+                    write!(out, "{request}{}", form::ENTRY_END)
+                        .and_then(|()| out.flush())
+                        .map_err(|e| e.to_string())?;
                 }
                 input
                     .lock()
@@ -507,13 +716,21 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             };
             if loader_has_pins {
                 let input = input.clone();
-                injector::bank_pin::set_lookup(Box::new(move |hash| form::parse_pin_reply(&ask(&input, form::pin_request_line(hash))?)));
+                injector::bank_pin::set_lookup(Box::new(move |hash| {
+                    form::parse_pin_reply(&ask(&input, form::pin_request_line(hash))?)
+                }));
             }
             if loader_has_http {
                 let input = input.clone();
-                injector::http::set_handler(Box::new(move |request| injector::http::parse_reply(&ask(&input, injector::http::request_line(request))?)));
+                injector::http::set_handler(Box::new(move |request| {
+                    injector::http::parse_reply(&ask(
+                        &input,
+                        injector::http::request_line(request),
+                    )?)
+                }));
             }
-            let handler: form::FormHandler = Box::new(move |spec| form::parse_reply(&ask(&input, form::request_line(spec))?));
+            let handler: form::FormHandler =
+                Box::new(move |spec| form::parse_reply(&ask(&input, form::request_line(spec))?));
             (String::from_utf8_lossy(&bytes).into_owned(), Some(handler))
         }
         _ => {
@@ -527,12 +744,27 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
     };
 
     let stdout = std::io::stdout();
-    let name = script_path.as_deref().and_then(std::path::Path::file_name).map_or_else(|| "script.luau".into(), |n| n.to_string_lossy().into_owned());
-    let result = injector::sandbox::run_with_modules(&name, &source, pid, move |line| {
-        let mut out = stdout.lock();
-        let _ = write!(out, "{line}{}", form::ENTRY_END);
-        let _ = out.flush();
-    }, handler, script_path.as_deref(), lib_dir.as_deref(), modules);
+    let name = script_path
+        .as_deref()
+        .and_then(std::path::Path::file_name)
+        .map_or_else(
+            || "script.luau".into(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+    let result = injector::sandbox::run_with_modules(
+        &name,
+        &source,
+        pid,
+        move |line| {
+            let mut out = stdout.lock();
+            let _ = write!(out, "{line}{}", form::ENTRY_END);
+            let _ = out.flush();
+        },
+        handler,
+        script_path.as_deref(),
+        lib_dir.as_deref(),
+        modules,
+    );
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {

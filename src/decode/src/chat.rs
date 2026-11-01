@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use ipc::state::{ChatLayout, Layout};
+use serde::{Deserialize, Serialize};
 
 use crate::memory::{Memory, read_string};
 
@@ -28,10 +28,20 @@ pub struct ChatMessage {
 
 fn stamp(memory: &impl Memory, address: u64) -> String {
     let text = read_string(memory, address).unwrap_or_default();
-    text.trim().trim_start_matches('[').trim_end_matches(']').to_owned()
+    text.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned()
 }
 
-fn message(memory: &impl Memory, c: &ChatLayout, uid: i32, m: u64, cycle: i32, now: i64) -> Option<ChatMessage> {
+fn message(
+    memory: &impl Memory,
+    c: &ChatLayout,
+    uid: i32,
+    m: u64,
+    cycle: i32,
+    now: i64,
+) -> Option<ChatMessage> {
     let added = memory.i32(m + c.message_cycle as u64)?;
     let age = (cycle.wrapping_sub(added) as i64).max(0) * CYCLE_MS;
     Some(ChatMessage {
@@ -91,7 +101,10 @@ mod tests {
         memory.put(data, text.as_bytes());
         memory.put_u64(address, data);
         memory.put_u64(address + 8, text.len() as u64);
-        memory.put_u64(address + 16, 0x8000_0000_0000_0000 | (text.len() as u64 + 1));
+        memory.put_u64(
+            address + 16,
+            0x8000_0000_0000_0000 | (text.len() as u64 + 1),
+        );
     }
 
     #[test]
@@ -108,7 +121,11 @@ mod tests {
             time_local: 0x10,
             reserved: 0,
         };
-        let layout = Layout { module_base: 0x10_0000, chat, ..Layout::default() };
+        let layout = Layout {
+            module_base: 0x10_0000,
+            chat,
+            ..Layout::default()
+        };
         let mut m = Fake::default();
         let table = 0x10_1000;
         m.put_i32(0x10_2000, 1000);
@@ -118,13 +135,19 @@ mod tests {
         m.put_u64(0x50_0000, 0x60_0000);
         m.put_u64(0x50_0008, 0);
         m.put_u64(0x50_0010, 0x6f_0000);
-        let nodes = [(0x60_0000u64, 4, 0x70_0000u64, 0x60_1000u64), (0x60_1000, 2, 0x71_0000, 0)];
+        let nodes = [
+            (0x60_0000u64, 4, 0x70_0000u64, 0x60_1000u64),
+            (0x60_1000, 2, 0x71_0000, 0),
+        ];
         for (node, uid, message, next) in nodes {
             m.put_i32(node, uid);
             m.put_u64(node + NODE_VALUE, message);
             m.put_u64(node + NODE_NEXT, next);
         }
-        for (message, kind, cycle, name, text) in [(0x70_0000u64, 2, 950, "Player", "hi"), (0x71_0000, 0, 900, "", "Welcome to the game.")] {
+        for (message, kind, cycle, name, text) in [
+            (0x70_0000u64, 2, 950, "Player", "hi"),
+            (0x71_0000, 0, 900, "", "Welcome to the game."),
+        ] {
             m.put_i32(message + 0x8, cycle);
             m.put_i32(message + 0x40, kind);
             m.put_short_string(message + 0x48, name);
@@ -142,7 +165,18 @@ mod tests {
         assert_eq!(found.iter().map(|m| m.uid).collect::<Vec<_>>(), vec![2, 4]);
         assert_eq!(found[0].text, "Welcome to the game.");
         assert_eq!((found[0].age, found[0].time), (2000, 998_000));
-        assert_eq!((found[1].kind, found[1].name.as_str(), found[1].text.as_str(), found[1].age), (2, "Player", "hi", 1000));
-        assert_eq!((found[1].time_utc.as_str(), found[1].time_local.as_str()), ("12:21", "13:21"));
+        assert_eq!(
+            (
+                found[1].kind,
+                found[1].name.as_str(),
+                found[1].text.as_str(),
+                found[1].age
+            ),
+            (2, "Player", "hi", 1000)
+        );
+        assert_eq!(
+            (found[1].time_utc.as_str(), found[1].time_local.as_str()),
+            ("12:21", "13:21")
+        );
     }
 }

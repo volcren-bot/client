@@ -64,7 +64,9 @@ impl<J> Pace for Task<'_, J> {
         let (state, _) = self
             .shared
             .changed
-            .wait_timeout_while(state, duration, |s| !s.closed && s.generation == self.generation)
+            .wait_timeout_while(state, duration, |s| {
+                !s.closed && s.generation == self.generation
+            })
             .unwrap_or_else(PoisonError::into_inner);
         !state.closed && state.generation == self.generation
     }
@@ -84,14 +86,24 @@ impl<J: Send + 'static> Worker<J> {
         release: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let shared = Arc::new(Shared {
-            state: Mutex::new(State { queue: VecDeque::new(), busy: false, generation: 0, closed: false, error: None }),
+            state: Mutex::new(State {
+                queue: VecDeque::new(),
+                busy: false,
+                generation: 0,
+                closed: false,
+                error: None,
+            }),
             changed: Condvar::new(),
         });
         let thread = thread::spawn({
             let shared = shared.clone();
             move || work(&shared, run)
         });
-        Self { shared, release: Box::new(release), thread: Mutex::new(Some(thread)) }
+        Self {
+            shared,
+            release: Box::new(release),
+            thread: Mutex::new(Some(thread)),
+        }
     }
 }
 
@@ -111,7 +123,12 @@ impl<J> Worker<J> {
         state.generation += 1;
         state.queue.clear();
         self.shared.changed.notify_all();
-        drop(self.shared.changed.wait_while(state, |s| s.busy).unwrap_or_else(PoisonError::into_inner));
+        drop(
+            self.shared
+                .changed
+                .wait_while(state, |s| s.busy)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         (self.release)();
     }
 
@@ -122,7 +139,12 @@ impl<J> Worker<J> {
 
     pub fn wait(&self) {
         let state = self.shared.lock();
-        drop(self.shared.changed.wait_while(state, |s| s.busy || !s.queue.is_empty()).unwrap_or_else(PoisonError::into_inner));
+        drop(
+            self.shared
+                .changed
+                .wait_while(state, |s| s.busy || !s.queue.is_empty())
+                .unwrap_or_else(PoisonError::into_inner),
+        );
     }
 
     // The error of the last job that failed, once.
@@ -137,7 +159,11 @@ impl<J> Worker<J> {
             state.queue.clear();
             self.shared.changed.notify_all();
         }
-        let thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let thread = self
+            .thread
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some(thread) = thread {
             let _ = thread.join();
             (self.release)();
@@ -154,16 +180,25 @@ impl<J> Drop for Worker<J> {
 fn work<J>(shared: &Shared<J>, run: impl Fn(&J, &dyn Pace) -> Result<(), String>) {
     let mut state = shared.lock();
     loop {
-        state = shared.changed.wait_while(state, |s| s.queue.is_empty() && !s.closed).unwrap_or_else(PoisonError::into_inner);
+        state = shared
+            .changed
+            .wait_while(state, |s| s.queue.is_empty() && !s.closed)
+            .unwrap_or_else(PoisonError::into_inner);
         if state.closed {
             return;
         }
-        let Some(job) = state.queue.pop_front() else { continue };
+        let Some(job) = state.queue.pop_front() else {
+            continue;
+        };
         state.busy = true;
-        let task = Task { shared, generation: state.generation };
+        let task = Task {
+            shared,
+            generation: state.generation,
+        };
         drop(state);
 
-        let result = catch_unwind(AssertUnwindSafe(|| run(&job, &task))).unwrap_or_else(|_| Err("input job panicked".into()));
+        let result = catch_unwind(AssertUnwindSafe(|| run(&job, &task)))
+            .unwrap_or_else(|_| Err("input job panicked".into()));
 
         state = shared.lock();
         state.busy = false;
@@ -186,13 +221,16 @@ mod tests {
     #[test]
     fn runs_jobs_in_order() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let worker = Worker::new({
-            let seen = seen.clone();
-            move |job: &u32, _| {
-                seen.lock().unwrap().push(*job);
-                Ok(())
-            }
-        }, || {});
+        let worker = Worker::new(
+            {
+                let seen = seen.clone();
+                move |job: &u32, _| {
+                    seen.lock().unwrap().push(*job);
+                    Ok(())
+                }
+            },
+            || {},
+        );
         for i in 0..5 {
             worker.push(i).unwrap();
         }
@@ -205,16 +243,19 @@ mod tests {
     fn cancel_interrupts_a_sleep_and_drops_the_queue() {
         let ran = Arc::new(AtomicU32::new(0));
         let cleaned = Arc::new(AtomicU32::new(0));
-        let worker = Worker::new({
-            let (ran, cleaned) = (ran.clone(), cleaned.clone());
-            move |_: &u32, pace| {
-                ran.fetch_add(1, Ordering::SeqCst);
-                // Like a click: the button goes down, the hold is cut short, the button still goes up.
-                pace.sleep(Duration::from_secs(10));
-                cleaned.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        }, || {});
+        let worker = Worker::new(
+            {
+                let (ran, cleaned) = (ran.clone(), cleaned.clone());
+                move |_: &u32, pace| {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    // Like a click: the button goes down, the hold is cut short, the button still goes up.
+                    pace.sleep(Duration::from_secs(10));
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+            || {},
+        );
         worker.push(0).unwrap();
         worker.push(1).unwrap();
         while ran.load(Ordering::SeqCst) == 0 {
@@ -224,7 +265,10 @@ mod tests {
         let start = Instant::now();
         worker.cancel();
         assert!(start.elapsed() < Duration::from_secs(2));
-        assert_eq!((ran.load(Ordering::SeqCst), cleaned.load(Ordering::SeqCst)), (1, 1));
+        assert_eq!(
+            (ran.load(Ordering::SeqCst), cleaned.load(Ordering::SeqCst)),
+            (1, 1)
+        );
         assert!(!worker.busy());
 
         // The worker takes new jobs after a cancel.

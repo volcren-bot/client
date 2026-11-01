@@ -9,7 +9,10 @@ use std::{
 };
 
 use ipc::{
-    packets::{direction, packet_wake_event_name, packets_memory_name, Log, Movement, LOG_SIZE, NO_TICK, PAYLOAD_SIZE},
+    packets::{
+        direction, packet_wake_event_name, packets_memory_name, Log, Movement, LOG_SIZE, NO_TICK,
+        PAYLOAD_SIZE,
+    },
     read::{client, Memory},
     state::part,
 };
@@ -19,7 +22,10 @@ use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
-            Memory::{CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE},
+            Memory::{
+                CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+                MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+            },
             Threading::{GetCurrentProcessId, OpenEventW, SetEvent, EVENT_MODIFY_STATE},
         },
     },
@@ -53,7 +59,14 @@ fn open_log() -> bool {
     }
     let name = CString::new(packets_memory_name(unsafe { GetCurrentProcessId() })).unwrap();
     unsafe {
-        let Ok(mapping) = CreateFileMappingA(HANDLE::default(), None, PAGE_READWRITE, 0, LOG_SIZE as u32, PCSTR(name.as_ptr() as *const u8)) else {
+        let Ok(mapping) = CreateFileMappingA(
+            HANDLE::default(),
+            None,
+            PAGE_READWRITE,
+            0,
+            LOG_SIZE as u32,
+            PCSTR(name.as_ptr() as *const u8),
+        ) else {
             println!("[Agent]: Cannot create the packet log shared memory.\r\n");
             return false;
         };
@@ -88,7 +101,9 @@ fn log(direction: u8, opcode: u16, length: u32, payload: &[u8]) {
     if log.is_null() {
         return;
     }
-    let time_ms = START.get().map_or(0, |start| start.elapsed().as_millis() as u64);
+    let time_ms = START
+        .get()
+        .map_or(0, |start| start.elapsed().as_millis() as u64);
     unsafe {
         ipc::packets::push(log, time_ms, direction, opcode, length, payload);
         wake_readers(log, direction, opcode);
@@ -105,7 +120,10 @@ unsafe fn wake_readers(log: *const Log, direction: u8, opcode: u16) {
     while mask != 0 {
         let slot = mask.trailing_zeros();
         mask &= mask - 1;
-        let name: Vec<u16> = packet_wake_event_name(pid, slot).encode_utf16().chain(std::iter::once(0)).collect();
+        let name: Vec<u16> = packet_wake_event_name(pid, slot)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         match OpenEventW(EVENT_MODIFY_STATE, false, PCWSTR(name.as_ptr())) {
             Ok(event) => {
                 let _ = SetEvent(event);
@@ -129,7 +147,9 @@ fn read_payload(memory: &OwnMemory, data: u64, length: u64, skip: u64) -> Vec<u8
 // Called before each packet is taken off the queue, so the previous one (Player Info too) has been handled: notes when the player's server tile changes.
 fn observe_player() -> Option<()> {
     let log = LOG.load(Ordering::Acquire);
-    let layout = LAYOUT.get().filter(|layout| layout.has(part::TICK_COUNT | part::PATH))?;
+    let layout = LAYOUT
+        .get()
+        .filter(|layout| layout.has(part::TICK_COUNT | part::PATH))?;
     if log.is_null() {
         return None;
     }
@@ -140,8 +160,24 @@ fn observe_player() -> Option<()> {
     let mut last = MOVEMENT.lock().ok()?;
     let next = match *last {
         Some(seen) if (seen.x, seen.y, seen.plane) == (tile.x, tile.y, plane) => return Some(()),
-        Some(seen) => Movement { x: tile.x, y: tile.y, plane, moved_tick: tick, from_x: seen.x, from_y: seen.y, from_plane: seen.plane },
-        None => Movement { x: tile.x, y: tile.y, plane, moved_tick: NO_TICK, from_x: tile.x, from_y: tile.y, from_plane: plane },
+        Some(seen) => Movement {
+            x: tile.x,
+            y: tile.y,
+            plane,
+            moved_tick: tick,
+            from_x: seen.x,
+            from_y: seen.y,
+            from_plane: seen.plane,
+        },
+        None => Movement {
+            x: tile.x,
+            y: tile.y,
+            plane,
+            moved_tick: NO_TICK,
+            from_x: tile.x,
+            from_y: tile.y,
+            from_plane: plane,
+        },
     };
     *last = Some(next);
     unsafe { ipc::packets::set_movement(log, &next) };
@@ -158,7 +194,12 @@ fn record_received(out: u64, rule: &Packets) -> Option<()> {
     if size > MAX_PAYLOAD {
         return None;
     }
-    log(direction::RECEIVED, opcode as u16, size as u32, &read_payload(&memory, data, size, 0));
+    log(
+        direction::RECEIVED,
+        opcode as u16,
+        size as u32,
+        &read_payload(&memory, data, size, 0),
+    );
     Some(())
 }
 
@@ -172,7 +213,12 @@ fn record_sent(packet: u64, rule: &Packets) -> Option<()> {
     if written == 0 || written > MAX_PAYLOAD {
         return None;
     }
-    log(direction::SENT, kind as u16, (written - 1) as u32, &read_payload(&memory, data, written, 1));
+    log(
+        direction::SENT,
+        kind as u16,
+        (written - 1) as u32,
+        &read_payload(&memory, data, written, 1),
+    );
     Some(())
 }
 
@@ -187,7 +233,11 @@ unsafe extern "system" fn received(connection: *mut c_void, out: *mut u8) -> u8 
     got
 }
 
-unsafe extern "system" fn sent(connection: *mut c_void, result: *mut c_void, packet: *const u8) -> *mut c_void {
+unsafe extern "system" fn sent(
+    connection: *mut c_void,
+    result: *mut c_void,
+    packet: *const u8,
+) -> *mut c_void {
     let _call = HookCall::enter();
     let (detour, rule) = SEND.get().unwrap();
     if !packet.is_null() {
@@ -201,12 +251,21 @@ pub unsafe fn hook(module_base: u64, rule: Packets, layouts: Option<&PacketLayou
         return;
     }
     if let Some(layouts) = layouts {
-        let published: Vec<_> = layouts.sizes.iter().copied().zip(layouts.layouts.iter().cloned()).collect();
+        let published: Vec<_> = layouts
+            .sizes
+            .iter()
+            .copied()
+            .zip(layouts.layouts.iter().cloned())
+            .collect();
         ipc::packets::publish_layouts(LOG.load(Ordering::Acquire), &published);
     }
-    let receive: Receive = std::mem::transmute((module_base + rule.receive as u64) as *const c_void);
+    let receive: Receive =
+        std::mem::transmute((module_base + rule.receive as u64) as *const c_void);
     let send: Send = std::mem::transmute((module_base + rule.send as u64) as *const c_void);
-    match (GenericDetour::new(receive, received), GenericDetour::new(send, sent)) {
+    match (
+        GenericDetour::new(receive, received),
+        GenericDetour::new(send, sent),
+    ) {
         (Ok(receive), Ok(send)) => {
             let _ = (RECEIVE.set((receive, rule)), SEND.set((send, rule)));
         }
@@ -217,9 +276,16 @@ pub unsafe fn hook(module_base: u64, rule: Packets, layouts: Option<&PacketLayou
             return;
         }
     }
-    match (RECEIVE.get().unwrap().0.enable(), SEND.get().unwrap().0.enable()) {
+    match (
+        RECEIVE.get().unwrap().0.enable(),
+        SEND.get().unwrap().0.enable(),
+    ) {
         (Ok(()), Ok(())) => println!("[Agent]: Packet log hooked.\r\n"),
-        (receive, send) => println!("[Agent]: Failed to enable the packet hooks: {:?} {:?}.\r\n", receive.err(), send.err()),
+        (receive, send) => println!(
+            "[Agent]: Failed to enable the packet hooks: {:?} {:?}.\r\n",
+            receive.err(),
+            send.err()
+        ),
     }
 }
 
@@ -248,7 +314,9 @@ pub unsafe fn unhook() {
         if detour.is_enabled() {
             match detour.disable() {
                 Ok(()) => println!("[Agent]: Packet log unhooked.\r\n"),
-                Err(error) => println!("[Agent]: Failed to disable the packet send hook: {error}.\r\n"),
+                Err(error) => {
+                    println!("[Agent]: Failed to disable the packet send hook: {error}.\r\n")
+                }
             }
         }
     }

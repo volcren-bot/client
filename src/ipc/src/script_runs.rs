@@ -87,12 +87,16 @@ pub struct Page {
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(addr_of_mut!((*log).slot_size), core::mem::size_of::<Slot>() as u32);
+    write_volatile(
+        addr_of_mut!((*log).slot_size),
+        core::mem::size_of::<Slot>() as u32,
+    );
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32 && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
+        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
 }
 
 /// What to log about a script: the event it runs for and where it is.
@@ -108,7 +112,14 @@ pub struct Run<'a> {
 
 /// Appends an entry; `log` must point to an initialised `Log`.
 pub unsafe fn push(log: *const Log, time_us: u64, run: &Run) {
-    let Run { phase, event_type, tick, depth, arg_count, args } = *run;
+    let Run {
+        phase,
+        event_type,
+        tick,
+        depth,
+        arg_count,
+        args,
+    } = *run;
     let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
     let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
     let stored = args.len().min(ARG_COUNT);
@@ -151,7 +162,14 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
         }
         let entry = (before == at + 1).then(|| {
             let stored = (read_volatile(addr_of!((*slot).stored)) as usize).min(ARG_COUNT);
-            let args = (0..stored).map(|i| (read_volatile(addr_of!((*slot).kinds[i])), read_volatile(addr_of!((*slot).values[i])))).collect();
+            let args = (0..stored)
+                .map(|i| {
+                    (
+                        read_volatile(addr_of!((*slot).kinds[i])),
+                        read_volatile(addr_of!((*slot).values[i])),
+                    )
+                })
+                .collect();
             Entry {
                 sequence: at,
                 time_us: read_volatile(addr_of!((*slot).time_us)),
@@ -165,7 +183,9 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
         });
         fence(Ordering::Acquire);
         match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => page.entries.push(entry),
+            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
+                page.entries.push(entry)
+            }
             _ => page.dropped += 1,
         }
         at += 1;
@@ -196,8 +216,21 @@ mod tests {
         }
     }
 
-    fn run<'a>(phase: u8, event_type: i32, depth: u8, arg_count: u16, args: &'a [(u8, i32)]) -> Run<'a> {
-        Run { phase, event_type, tick: Some(100), depth, arg_count, args }
+    fn run<'a>(
+        phase: u8,
+        event_type: i32,
+        depth: u8,
+        arg_count: u16,
+        args: &'a [(u8, i32)],
+    ) -> Run<'a> {
+        Run {
+            phase,
+            event_type,
+            tick: Some(100),
+            depth,
+            arg_count,
+            args,
+        }
     }
 
     #[test]
@@ -213,20 +246,70 @@ mod tests {
         let memory = Memory::new();
         unsafe {
             assert!(is_compatible(memory.0));
-            push(memory.0, 10, &run(phase::START, 76, 0, 3, &[(arg_kind::INT, 6697), (arg_kind::STRING, 0), (arg_kind::INT, -1)]));
-            push(memory.0, 25, &run(phase::END, 76, 0, 3, &[(arg_kind::INT, 6697)]));
+            push(
+                memory.0,
+                10,
+                &run(
+                    phase::START,
+                    76,
+                    0,
+                    3,
+                    &[
+                        (arg_kind::INT, 6697),
+                        (arg_kind::STRING, 0),
+                        (arg_kind::INT, -1),
+                    ],
+                ),
+            );
+            push(
+                memory.0,
+                25,
+                &run(phase::END, 76, 0, 3, &[(arg_kind::INT, 6697)]),
+            );
             let page = read_since(memory.0, 0, 10);
             assert_eq!((page.next, page.dropped), (2, 0));
             assert_eq!(
                 page.entries[0],
-                Entry { sequence: 0, time_us: 10, event_type: 76, tick: Some(100), phase: phase::START, arg_count: 3, depth: 0, args: alloc::vec![(1, 6697), (2, 0), (1, -1)] }
+                Entry {
+                    sequence: 0,
+                    time_us: 10,
+                    event_type: 76,
+                    tick: Some(100),
+                    phase: phase::START,
+                    arg_count: 3,
+                    depth: 0,
+                    args: alloc::vec![(1, 6697), (2, 0), (1, -1)]
+                }
             );
-            assert_eq!((page.entries[1].phase, page.entries[1].time_us, page.entries[1].args.len()), (phase::END, 25, 1));
+            assert_eq!(
+                (
+                    page.entries[1].phase,
+                    page.entries[1].time_us,
+                    page.entries[1].args.len()
+                ),
+                (phase::END, 25, 1)
+            );
 
             // reading on from `next` returns only what is new
-            push(memory.0, 30, &Run { tick: None, ..run(phase::START, 12, 1, 1, &[(arg_kind::INT, 5)]) });
+            push(
+                memory.0,
+                30,
+                &Run {
+                    tick: None,
+                    ..run(phase::START, 12, 1, 1, &[(arg_kind::INT, 5)])
+                },
+            );
             let page = read_since(memory.0, page.next, 10);
-            assert_eq!((page.entries.len(), page.entries[0].sequence, page.entries[0].tick, page.entries[0].depth, page.next), (1, 2, None, 1, 3));
+            assert_eq!(
+                (
+                    page.entries.len(),
+                    page.entries[0].sequence,
+                    page.entries[0].tick,
+                    page.entries[0].depth,
+                    page.next
+                ),
+                (1, 2, None, 1, 3)
+            );
         }
     }
 
@@ -250,7 +333,15 @@ mod tests {
                 push(memory.0, i as u64, &run(phase::START, 76, 0, 0, &[]));
             }
             let page = read_since(memory.0, 0, 5);
-            assert_eq!((page.dropped, page.entries[0].sequence, page.entries.len(), page.next), (10, 10, 5, 15));
+            assert_eq!(
+                (
+                    page.dropped,
+                    page.entries[0].sequence,
+                    page.entries.len(),
+                    page.next
+                ),
+                (10, 10, 5, 15)
+            );
         }
     }
 

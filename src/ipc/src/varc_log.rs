@@ -93,12 +93,16 @@ pub struct Page {
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(addr_of_mut!((*log).slot_size), core::mem::size_of::<Slot>() as u32);
+    write_volatile(
+        addr_of_mut!((*log).slot_size),
+        core::mem::size_of::<Slot>() as u32,
+    );
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32 && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
+        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
 }
 
 unsafe fn write_text(target: *mut [u8; TEXT_SIZE], text: &[u8]) -> u8 {
@@ -110,7 +114,9 @@ unsafe fn write_text(target: *mut [u8; TEXT_SIZE], text: &[u8]) -> u8 {
 }
 
 unsafe fn read_text(source: *const [u8; TEXT_SIZE], stored: u8) -> Vec<u8> {
-    (0..(stored as usize).min(TEXT_SIZE)).map(|i| read_volatile(addr_of!((*source)[i]))).collect()
+    (0..(stored as usize).min(TEXT_SIZE))
+        .map(|i| read_volatile(addr_of!((*source)[i])))
+        .collect()
 }
 
 /// Appends a change; `log` must point to an initialised `Log`.
@@ -165,12 +171,20 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
             new_int: read_volatile(addr_of!((*slot).new_int)),
             old_length: read_volatile(addr_of!((*slot).old_length)),
             new_length: read_volatile(addr_of!((*slot).new_length)),
-            old_text: read_text(addr_of!((*slot).old_text), read_volatile(addr_of!((*slot).old_stored))),
-            new_text: read_text(addr_of!((*slot).new_text), read_volatile(addr_of!((*slot).new_stored))),
+            old_text: read_text(
+                addr_of!((*slot).old_text),
+                read_volatile(addr_of!((*slot).old_stored)),
+            ),
+            new_text: read_text(
+                addr_of!((*slot).new_text),
+                read_volatile(addr_of!((*slot).new_stored)),
+            ),
         });
         fence(Ordering::Acquire);
         match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => page.entries.push(entry),
+            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
+                page.entries.push(entry)
+            }
             _ => page.dropped += 1,
         }
         at += 1;
@@ -202,7 +216,17 @@ mod tests {
     }
 
     fn int(index: i32, old: i32, new: i32) -> Change<'static> {
-        Change { index, kind: kind::INT, old_known: true, old_int: old, new_int: new, old_text: &[], old_length: 0, new_text: &[], new_length: 0 }
+        Change {
+            index,
+            kind: kind::INT,
+            old_known: true,
+            old_int: old,
+            new_int: new,
+            old_text: &[],
+            old_length: 0,
+            new_text: &[],
+            new_length: 0,
+        }
     }
 
     #[test]
@@ -219,18 +243,54 @@ mod tests {
         unsafe {
             assert!(is_compatible(memory.0));
             push(memory.0, 10, &int(5, 0, 7));
-            push(memory.0, 11, &Change { index: 6, kind: kind::STRING, old_known: false, old_int: 0, new_int: 0, old_text: &[], old_length: 0, new_text: b"hello", new_length: 5 });
+            push(
+                memory.0,
+                11,
+                &Change {
+                    index: 6,
+                    kind: kind::STRING,
+                    old_known: false,
+                    old_int: 0,
+                    new_int: 0,
+                    old_text: &[],
+                    old_length: 0,
+                    new_text: b"hello",
+                    new_length: 5,
+                },
+            );
             let page = read_since(memory.0, 0, 10);
             assert_eq!((page.next, page.dropped), (2, 0));
             let first = &page.entries[0];
-            assert_eq!((first.sequence, first.time_ms, first.index, first.kind, first.old_known, first.old_int, first.new_int), (0, 10, 5, kind::INT, true, 0, 7));
+            assert_eq!(
+                (
+                    first.sequence,
+                    first.time_ms,
+                    first.index,
+                    first.kind,
+                    first.old_known,
+                    first.old_int,
+                    first.new_int
+                ),
+                (0, 10, 5, kind::INT, true, 0, 7)
+            );
             let second = &page.entries[1];
-            assert_eq!((second.kind, second.old_known, second.new_text.as_slice(), second.new_length), (kind::STRING, false, b"hello".as_slice(), 5));
+            assert_eq!(
+                (
+                    second.kind,
+                    second.old_known,
+                    second.new_text.as_slice(),
+                    second.new_length
+                ),
+                (kind::STRING, false, b"hello".as_slice(), 5)
+            );
 
             // reading on from `next` returns only what is new
             push(memory.0, 12, &int(5, 7, 8));
             let page = read_since(memory.0, page.next, 10);
-            assert_eq!((page.entries.len(), page.entries[0].sequence, page.next), (1, 2, 3));
+            assert_eq!(
+                (page.entries.len(), page.entries[0].sequence, page.next),
+                (1, 2, 3)
+            );
         }
     }
 
@@ -239,9 +299,30 @@ mod tests {
         let memory = Memory::new();
         let text = [b'x'; 200];
         unsafe {
-            push(memory.0, 0, &Change { index: 1, kind: kind::STRING, old_known: true, old_int: 0, new_int: 0, old_text: b"old", old_length: 3, new_text: &text, new_length: 200 });
+            push(
+                memory.0,
+                0,
+                &Change {
+                    index: 1,
+                    kind: kind::STRING,
+                    old_known: true,
+                    old_int: 0,
+                    new_int: 0,
+                    old_text: b"old",
+                    old_length: 3,
+                    new_text: &text,
+                    new_length: 200,
+                },
+            );
             let entry = &read_since(memory.0, 0, 1).entries[0];
-            assert_eq!((entry.new_length, entry.new_text.len(), entry.old_text.as_slice()), (200, TEXT_SIZE, b"old".as_slice()));
+            assert_eq!(
+                (
+                    entry.new_length,
+                    entry.new_text.len(),
+                    entry.old_text.as_slice()
+                ),
+                (200, TEXT_SIZE, b"old".as_slice())
+            );
         }
     }
 
@@ -253,7 +334,15 @@ mod tests {
                 push(memory.0, i as u64, &int(1, 0, i as i32));
             }
             let page = read_since(memory.0, 0, 5);
-            assert_eq!((page.dropped, page.entries[0].sequence, page.entries.len(), page.next), (10, 10, 5, 15));
+            assert_eq!(
+                (
+                    page.dropped,
+                    page.entries[0].sequence,
+                    page.entries.len(),
+                    page.next
+                ),
+                (10, 10, 5, 15)
+            );
             let page = read_since(memory.0, 90_000, 1);
             assert_eq!((page.dropped, page.entries[0].sequence), (10, 10));
         }

@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_INDEX: u32 = 2;

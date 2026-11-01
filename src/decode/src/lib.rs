@@ -36,7 +36,10 @@ pub struct ServerTile {
 
 impl Position {
     pub fn chunk(&self) -> Chunk {
-        Chunk { x: self.x >> 6, y: self.y >> 6 }
+        Chunk {
+            x: self.x >> 6,
+            y: self.y >> 6,
+        }
     }
 }
 

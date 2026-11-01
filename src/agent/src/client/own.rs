@@ -18,7 +18,13 @@ impl Memory for OwnMemory {
     fn read(&self, address: u64, buffer: &mut [u8]) -> bool {
         let mut read = 0;
         let ok = unsafe {
-            ReadProcessMemory(GetCurrentProcess(), address as *const c_void, buffer.as_mut_ptr().cast(), buffer.len(), Some(&mut read))
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                address as *const c_void,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                Some(&mut read),
+            )
         };
         ok.is_ok() && read == buffer.len()
     }
@@ -26,7 +32,13 @@ impl Memory for OwnMemory {
     fn write(&self, address: u64, bytes: &[u8]) -> bool {
         let mut written = 0;
         let ok = unsafe {
-            WriteProcessMemory(GetCurrentProcess(), address as *const c_void, bytes.as_ptr().cast(), bytes.len(), Some(&mut written))
+            WriteProcessMemory(
+                GetCurrentProcess(),
+                address as *const c_void,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                Some(&mut written),
+            )
         };
         ok.is_ok() && written == bytes.len()
     }

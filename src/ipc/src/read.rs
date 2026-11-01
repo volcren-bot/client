@@ -124,7 +124,11 @@ impl Table {
             return None;
         }
         let end = memory.u64(buckets + count * 8)?;
-        Some(Self { buckets, count, end })
+        Some(Self {
+            buckets,
+            count,
+            end,
+        })
     }
 
     pub fn get(&self, memory: &impl Memory, key: i32) -> Option<u64> {
@@ -153,12 +157,19 @@ impl Table {
 
 /// Every (key, value) in a table `table_get` reads, in no order.
 pub fn table_entries(memory: &impl Memory, table: u64) -> Vec<(i32, u64)> {
-    let (Some(buckets), Some(count)) = (memory.ptr(table + TABLE_BUCKETS), memory.i32(table + TABLE_COUNT)) else { return Vec::new() };
+    let (Some(buckets), Some(count)) = (
+        memory.ptr(table + TABLE_BUCKETS),
+        memory.i32(table + TABLE_COUNT),
+    ) else {
+        return Vec::new();
+    };
     let count = count as u32 as u64;
     if count == 0 || count > 1 << 16 {
         return Vec::new();
     }
-    let Some(end) = memory.u64(buckets + count * 8) else { return Vec::new() };
+    let Some(end) = memory.u64(buckets + count * 8) else {
+        return Vec::new();
+    };
     let mut seen = alloc::collections::BTreeSet::new();
     let mut entries = Vec::new();
     for bucket in 0..count {

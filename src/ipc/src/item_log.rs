@@ -87,12 +87,16 @@ pub struct Page {
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(addr_of_mut!((*log).slot_size), core::mem::size_of::<Slot>() as u32);
+    write_volatile(
+        addr_of_mut!((*log).slot_size),
+        core::mem::size_of::<Slot>() as u32,
+    );
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32 && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
+        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
 }
 
 /// Appends a change; `log` must point to an initialised `Log`.
@@ -135,7 +139,9 @@ pub unsafe fn subscribe(log: *const Log, mut create_event: impl FnMut(u32) -> bo
 
 /// Gives a slot back; `log` must be writable.
 pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
-    (*log).subscribers.fetch_and(!(1u32 << slot), Ordering::AcqRel);
+    (*log)
+        .subscribers
+        .fetch_and(!(1u32 << slot), Ordering::AcqRel);
 }
 
 /// The sequence number the next entry will get; `log` must point to an initialised `Log`.
@@ -179,7 +185,9 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
         });
         fence(Ordering::Acquire);
         match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => page.entries.push(entry),
+            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
+                page.entries.push(entry)
+            }
             _ => page.dropped += 1,
         }
         at += 1;
@@ -211,7 +219,16 @@ mod tests {
     }
 
     fn change(slot: i32, new_item: i32) -> Change {
-        Change { tick: 100, container: 93, slot, old_known: true, old_item: -1, old_quantity: 0, new_item, new_quantity: 1 }
+        Change {
+            tick: 100,
+            container: 93,
+            slot,
+            old_known: true,
+            old_item: -1,
+            old_quantity: 0,
+            new_item,
+            new_quantity: 1,
+        }
     }
 
     #[test]
@@ -228,17 +245,34 @@ mod tests {
         unsafe {
             assert!(is_compatible(memory.0));
             push(memory.0, 10, &change(0, 995));
-            push(memory.0, 11, &Change { old_known: false, ..change(1, 1511) });
+            push(
+                memory.0,
+                11,
+                &Change {
+                    old_known: false,
+                    ..change(1, 1511)
+                },
+            );
             let page = read_since(memory.0, 0, 10);
             assert_eq!((page.next, page.dropped), (2, 0));
-            assert_eq!(page.entries[0], Entry { sequence: 0, time_ms: 10, change: change(0, 995) });
+            assert_eq!(
+                page.entries[0],
+                Entry {
+                    sequence: 0,
+                    time_ms: 10,
+                    change: change(0, 995)
+                }
+            );
             assert!(!page.entries[1].change.old_known);
             assert_eq!(written(memory.0), 2);
 
             // reading on from `next` returns only what is new
             push(memory.0, 12, &change(2, 590));
             let page = read_since(memory.0, page.next, 10);
-            assert_eq!((page.entries.len(), page.entries[0].sequence, page.next), (1, 2, 3));
+            assert_eq!(
+                (page.entries.len(), page.entries[0].sequence, page.next),
+                (1, 2, 3)
+            );
         }
     }
 
@@ -250,7 +284,15 @@ mod tests {
                 push(memory.0, i as u64, &change(i as i32, 1));
             }
             let page = read_since(memory.0, 0, 5);
-            assert_eq!((page.dropped, page.entries[0].sequence, page.entries.len(), page.next), (10, 10, 5, 15));
+            assert_eq!(
+                (
+                    page.dropped,
+                    page.entries[0].sequence,
+                    page.entries.len(),
+                    page.next
+                ),
+                (10, 10, 5, 15)
+            );
             let page = read_since(memory.0, 90_000, 1);
             assert_eq!((page.dropped, page.entries[0].sequence), (10, 10));
         }

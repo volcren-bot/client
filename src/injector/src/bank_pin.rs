@@ -16,7 +16,10 @@ use std::{
 
 #[cfg(windows)]
 use crate::async_input::Pace;
-use crate::{Input, MouseButton, SubInterface, Widget, wind_mouse::{self, Rng}};
+use crate::{
+    Input, MouseButton, SubInterface, Widget,
+    wind_mouse::{self, Rng},
+};
 
 const GROUP: i32 = 213;
 const PROMPT: u16 = 10;
@@ -24,7 +27,12 @@ const BUTTONS: [u16; 10] = [16, 18, 20, 22, 24, 26, 28, 30, 32, 34];
 const ORDINALS: [&str; 4] = ["FIRST", "SECOND", "THIRD", "FOURTH"];
 
 // Where each root interface keeps its modal, crm and floater sub-interfaces (the lib's `Toplevel.SLOTS`).
-const SLOTS: [(i32, [i32; 3]); 4] = [(161, [16, 17, 18]), (164, [16, 17, 18]), (165, [14, 15, 41]), (548, [41, 42, 43])];
+const SLOTS: [(i32, [i32; 3]); 4] = [
+    (161, [16, 17, 18]),
+    (164, [16, 17, 18]),
+    (165, [14, 15, 41]),
+    (548, [41, 42, 43]),
+];
 
 // The chatbox's own interfaces (the lib's `Chatbox`): the modal slot of group 162, and the level up display wherever it is.
 const CHATBOX_GROUP: i32 = 162;
@@ -43,7 +51,12 @@ const PIN_LEN: usize = 4;
 const VK_SPACE: u8 = 0x20;
 
 // The lib's mouse defaults.
-const MOUSE: wind_mouse::Options = wind_mouse::Options { speed: 14.0, wind: 5.0, gravity: 10.0, timeout_ms: 15000 };
+const MOUSE: wind_mouse::Options = wind_mouse::Options {
+    speed: 14.0,
+    wind: 5.0,
+    gravity: 10.0,
+    timeout_ms: 15000,
+};
 const CLICK_HOLD_MS: (f64, f64) = (40.0, 220.0);
 const KEY_HOLD_MS: (f64, f64) = (30.0, 60.0);
 // Between digits: usually around a second, never under 0.3 s or over 1.8 s.
@@ -66,12 +79,30 @@ pub fn set_lookup(lookup: Lookup) {
 /// accounts by this.
 pub fn hash_name(account: &str) -> String {
     use sha2::{Digest, Sha256};
-    let clean: String = account.trim().to_lowercase().chars().map(|c| if matches!(c, '_' | '-' | '\u{a0}') { ' ' } else { c }).collect();
-    Sha256::digest(clean.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+    let clean: String = account
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if matches!(c, '_' | '-' | '\u{a0}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    Sha256::digest(clean.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn parse_pin(pin: &str) -> Option<[u8; 4]> {
-    let digits: Vec<u8> = pin.bytes().filter(u8::is_ascii_digit).map(|b| b - b'0').collect();
+    let digits: Vec<u8> = pin
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
     <[u8; 4]>::try_from(digits).ok().filter(|_| pin.len() == 4)
 }
 
@@ -135,8 +166,12 @@ fn enter_here(pid: u32, pace: &dyn Pace) -> Result<Outcome, String> {
     let client = Live { pid, pace };
     run(&client, &mut || {
         let mut lookup = LOOKUP.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(lookup) = lookup.as_mut() else { return Ok(Pin::None) };
-        let Some(name) = client.player_name()? else { return Ok(Pin::Unavailable) };
+        let Some(lookup) = lookup.as_mut() else {
+            return Ok(Pin::None);
+        };
+        let Some(name) = client.player_name()? else {
+            return Ok(Pin::Unavailable);
+        };
         Ok(match lookup(&hash_name(&name)) {
             Ok(Some(pin)) => parse_pin(&pin).map_or(Pin::Unavailable, Pin::Found),
             Ok(None) => Pin::None,
@@ -145,8 +180,14 @@ fn enter_here(pid: u32, pace: &dyn Pace) -> Result<Outcome, String> {
     })
 }
 
-fn run(client: &dyn Client, pin: &mut dyn FnMut() -> Result<Pin, String>) -> Result<Outcome, String> {
-    let mut keypad = Keypad { client, rng: Rng::seeded() };
+fn run(
+    client: &dyn Client,
+    pin: &mut dyn FnMut() -> Result<Pin, String>,
+) -> Result<Outcome, String> {
+    let mut keypad = Keypad {
+        client,
+        rng: Rng::seeded(),
+    };
     match keypad.enter(pin) {
         Ok(outcome) => Ok(outcome),
         // A cancelled run posts nothing more; to the script it is a keypad that wasn't entered.
@@ -197,7 +238,9 @@ impl Client for Live<'_> {
         Ok(crate::game_state(self.pid)?.player_name)
     }
     fn mouse(&self) -> Option<(i32, i32)> {
-        crate::connection(self.pid).filter(|conn| conn.mouse_x >= 0).map(|conn| (conn.mouse_x, conn.mouse_y))
+        crate::connection(self.pid)
+            .filter(|conn| conn.mouse_x >= 0)
+            .map(|conn| (conn.mouse_x, conn.mouse_y))
     }
     fn hovered(&self) -> Result<Option<i32>, String> {
         Ok(crate::menu(self.pid)?.first().map(|entry| entry.id))
@@ -218,8 +261,15 @@ impl Client for Live<'_> {
         let mut child = 0;
         while let Ok(Some(part)) = crate::widget(self.pid, GROUP as u16, child) {
             if !part.hidden && part.width > 0 && part.height > 0 {
-                let [x1, y1, x2, y2] = [part.x, part.y, part.x + part.width - 1, part.y + part.height - 1];
-                area = Some(area.map_or([x1, y1, x2, y2], |a| [a[0].min(x1), a[1].min(y1), a[2].max(x2), a[3].max(y2)]));
+                let [x1, y1, x2, y2] = [
+                    part.x,
+                    part.y,
+                    part.x + part.width - 1,
+                    part.y + part.height - 1,
+                ];
+                area = Some(area.map_or([x1, y1, x2, y2], |a| {
+                    [a[0].min(x1), a[1].min(y1), a[2].max(x2), a[3].max(y2)]
+                }));
             }
             child += 1;
         }
@@ -249,7 +299,11 @@ struct Keypad<'a> {
 
 impl Keypad<'_> {
     fn sleep(&self, ms: u64) -> Step<()> {
-        if self.client.sleep(Duration::from_millis(ms)) { Ok(()) } else { Err(Stop::Cancelled) }
+        if self.client.sleep(Duration::from_millis(ms)) {
+            Ok(())
+        } else {
+            Err(Stop::Cancelled)
+        }
     }
 
     // A pause that is usually near `lo` and rarely near `hi` (the lib's `Random.left`).
@@ -285,7 +339,11 @@ impl Keypad<'_> {
         (lo + size / 2 + offset).clamp(lo, lo + (size - 1).max(0))
     }
 
-    fn wait_until(&mut self, timeout_ms: u64, mut check: impl FnMut(&mut Self) -> Step<bool>) -> Step<bool> {
+    fn wait_until(
+        &mut self,
+        timeout_ms: u64,
+        mut check: impl FnMut(&mut Self) -> Step<bool>,
+    ) -> Step<bool> {
         let mut waited = 0;
         loop {
             if check(self)? {
@@ -300,22 +358,39 @@ impl Keypad<'_> {
     }
 
     fn is_open(&self) -> Step<bool> {
-        let Some(root) = self.client.root_interface()? else { return Ok(false) };
-        let Some((_, slots)) = SLOTS.iter().find(|(known, _)| *known == root) else { return Ok(false) };
-        let Some(open) = self.client.sub_interfaces()? else { return Ok(false) };
-        Ok(open.iter().any(|s| s.group == GROUP && s.parent_group == root && slots.contains(&s.parent_child)))
+        let Some(root) = self.client.root_interface()? else {
+            return Ok(false);
+        };
+        let Some((_, slots)) = SLOTS.iter().find(|(known, _)| *known == root) else {
+            return Ok(false);
+        };
+        let Some(open) = self.client.sub_interfaces()? else {
+            return Ok(false);
+        };
+        Ok(open
+            .iter()
+            .any(|s| s.group == GROUP && s.parent_group == root && slots.contains(&s.parent_child)))
     }
 
     // Every visible line of the chatbox's interfaces, lowercased.
     fn chat(&self) -> Step<String> {
-        let Some(open) = self.client.sub_interfaces()? else { return Ok(String::new()) };
+        let Some(open) = self.client.sub_interfaces()? else {
+            return Ok(String::new());
+        };
         let mut lines: Vec<String> = Vec::new();
-        for s in open.iter().filter(|s| (s.parent_group == CHATBOX_GROUP && s.parent_child == CHATBOX_MODAL) || s.group == LEVELUP_DISPLAY) {
+        for s in open.iter().filter(|s| {
+            (s.parent_group == CHATBOX_GROUP && s.parent_child == CHATBOX_MODAL)
+                || s.group == LEVELUP_DISPLAY
+        }) {
             let mut child = 0;
             while let Some(w) = self.client.widget(s.group as u16, child)? {
                 if !w.hidden {
                     lines.extend(w.text.filter(|t| !t.is_empty()));
-                    for created in self.client.children(s.group as u16, child)?.unwrap_or_default() {
+                    for created in self
+                        .client
+                        .children(s.group as u16, child)?
+                        .unwrap_or_default()
+                    {
                         if !created.hidden {
                             lines.extend(created.text.filter(|t| !t.is_empty()));
                         }
@@ -335,10 +410,25 @@ impl Keypad<'_> {
         let mut found: [Option<Widget>; 10] = Default::default();
         let mut hovered = None;
         for child in BUTTONS {
-            let Some(button) = self.client.widget(GROUP as u16, child)?.filter(|b| !b.hidden) else { continue };
-            let under_mouse = mouse.is_some_and(|(x, y)| x >= button.x && y >= button.y && x < button.x + button.width && y < button.y + button.height);
+            let Some(button) = self
+                .client
+                .widget(GROUP as u16, child)?
+                .filter(|b| !b.hidden)
+            else {
+                continue;
+            };
+            let under_mouse = mouse.is_some_and(|(x, y)| {
+                x >= button.x
+                    && y >= button.y
+                    && x < button.x + button.width
+                    && y < button.y + button.height
+            });
             let mut digit = None;
-            for created in self.client.children(GROUP as u16, button.child as u16)?.unwrap_or_default() {
+            for created in self
+                .client
+                .children(GROUP as u16, button.child as u16)?
+                .unwrap_or_default()
+            {
                 if let Some([d @ b'0'..=b'9']) = created.text.as_deref().map(str::as_bytes) {
                     digit = Some((usize::from(d - b'0'), !created.hidden));
                     break;
@@ -366,8 +456,13 @@ impl Keypad<'_> {
     // Which digit of the PIN the prompt asks for, 1 to 4, or 0 when it asks for none.
     fn digit_index(&self) -> Step<usize> {
         let prompt = self.client.widget(GROUP as u16, PROMPT)?;
-        let Some(text) = prompt.filter(|p| !p.hidden).and_then(|p| p.text) else { return Ok(0) };
-        Ok(ORDINALS.iter().position(|ordinal| text.contains(ordinal)).map_or(0, |i| i + 1))
+        let Some(text) = prompt.filter(|p| !p.hidden).and_then(|p| p.text) else {
+            return Ok(0);
+        };
+        Ok(ORDINALS
+            .iter()
+            .position(|ordinal| text.contains(ordinal))
+            .map_or(0, |i| i + 1))
     }
 
     fn wait_loaded(&mut self, timeout_ms: u64) -> Step<bool> {
@@ -390,16 +485,31 @@ impl Keypad<'_> {
         if !self.is_open()? {
             return Ok(false);
         }
-        let Some(button) = self.buttons()?[usize::from(digit)].take() else { return Ok(false) };
-        let (x, y) = (self.around_center(button.x, button.width), self.around_center(button.y, button.height));
-        self.client.send(&Input::WindMouse { x, y, options: MOUSE })?;
+        let Some(button) = self.buttons()?[usize::from(digit)].take() else {
+            return Ok(false);
+        };
+        let (x, y) = (
+            self.around_center(button.x, button.width),
+            self.around_center(button.y, button.height),
+        );
+        self.client.send(&Input::WindMouse {
+            x,
+            y,
+            options: MOUSE,
+        })?;
         if !self.hovering(&button)? {
             return Ok(false);
         }
         let hold_ms = self.left(CLICK_HOLD_MS);
-        self.client.send(&Input::Button { button: MouseButton::Left, down: true })?;
+        self.client.send(&Input::Button {
+            button: MouseButton::Left,
+            down: true,
+        })?;
         self.sleep(hold_ms)?;
-        self.client.send(&Input::Button { button: MouseButton::Left, down: false })?;
+        self.client.send(&Input::Button {
+            button: MouseButton::Left,
+            down: false,
+        })?;
         Ok(true)
     }
 
@@ -420,22 +530,34 @@ impl Keypad<'_> {
                 let pause = self.around(DIGIT_PAUSE_MEAN_MS, DIGIT_PAUSE_SPREAD_MS, DIGIT_PAUSE_MS);
                 self.sleep(pause)?;
             }
-            self.wait_until(DIGIT_TIMEOUT_MS, |this| Ok(this.digit_index()? != index && !this.is_loading()?))?;
+            self.wait_until(DIGIT_TIMEOUT_MS, |this| {
+                Ok(this.digit_index()? != index && !this.is_loading()?)
+            })?;
         }
         Ok(true)
     }
 
     fn press_space(&mut self) -> Step<()> {
         let hold_ms = self.left(KEY_HOLD_MS);
-        self.client.send(&Input::Key { key: VK_SPACE, down: true })?;
+        self.client.send(&Input::Key {
+            key: VK_SPACE,
+            down: true,
+        })?;
         self.sleep(hold_ms)?;
-        self.client.send(&Input::Key { key: VK_SPACE, down: false })?;
+        self.client.send(&Input::Key {
+            key: VK_SPACE,
+            down: false,
+        })?;
         Ok(())
     }
 
     fn failed(&self) -> Step<bool> {
         let text = self.chat()?;
-        Ok(["try again", "forgotten your pin", "pin incorrectly several"].iter().any(|needle| text.contains(needle)))
+        Ok(
+            ["try again", "forgotten your pin", "pin incorrectly several"]
+                .iter()
+                .any(|needle| text.contains(needle)),
+        )
     }
 
     fn enter(&mut self, pin: &mut dyn FnMut() -> Result<Pin, String>) -> Step<Outcome> {
@@ -471,8 +593,12 @@ impl Keypad<'_> {
                     return Ok(Outcome::Failed);
                 }
             } else if text.contains("forgotten your pin") {
-                self.wait_until(FORGOTTEN_TIMEOUT_MS, |this| Ok(!this.chat()?.contains("forgotten your pin")))?;
-            } else if self.wait_until(UNLOCK_TIMEOUT_MS, |this| Ok(!this.is_open()? && !this.failed()?))? {
+                self.wait_until(FORGOTTEN_TIMEOUT_MS, |this| {
+                    Ok(!this.chat()?.contains("forgotten your pin"))
+                })?;
+            } else if self.wait_until(UNLOCK_TIMEOUT_MS, |this| {
+                Ok(!this.is_open()? && !this.failed()?)
+            })? {
                 return Ok(Outcome::Entered);
             }
 
@@ -480,7 +606,11 @@ impl Keypad<'_> {
                 return Ok(Outcome::Entered);
             }
         }
-        Ok(if wrong { Outcome::Wrong } else { Outcome::Failed })
+        Ok(if wrong {
+            Outcome::Wrong
+        } else {
+            Outcome::Failed
+        })
     }
 }
 
@@ -505,7 +635,16 @@ mod tests {
 
     impl Fake {
         fn new(pin: [u8; 4]) -> Self {
-            Self { pin, position: Cell::new(0), mouse: Cell::new((0, 0)), clicks: RefCell::default(), covers: RefCell::default(), message: RefCell::new(""), open: Cell::new(true), wrong: Cell::new(0) }
+            Self {
+                pin,
+                position: Cell::new(0),
+                mouse: Cell::new((0, 0)),
+                clicks: RefCell::default(),
+                covers: RefCell::default(),
+                message: RefCell::new(""),
+                open: Cell::new(true),
+                wrong: Cell::new(0),
+            }
         }
 
         // Button `slot` shows the digit `(slot * 3 + 1) % 10`, laid out in a row of 40 wide boxes.
@@ -515,11 +654,32 @@ mod tests {
 
         fn slot_under_mouse(&self) -> Option<usize> {
             let (x, y) = self.mouse.get();
-            (0..10).find(|slot| x >= *slot as i32 * 50 && x < *slot as i32 * 50 + 40 && (0..40).contains(&y))
+            (0..10).find(|slot| {
+                x >= *slot as i32 * 50 && x < *slot as i32 * 50 + 40 && (0..40).contains(&y)
+            })
         }
 
         fn text(text: &str) -> Widget {
-            Widget { id: 0, group: 0, child: 0, kind: 4, x: 0, y: 0, width: 0, height: 0, parent: 0, sprite: 0, index: -1, hidden: false, text: Some(text.into()), text_color: -1, scroll_x: 0, scroll_y: 0, scroll_width: 0, scroll_height: 0 }
+            Widget {
+                id: 0,
+                group: 0,
+                child: 0,
+                kind: 4,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                parent: 0,
+                sprite: 0,
+                index: -1,
+                hidden: false,
+                text: Some(text.into()),
+                text_color: -1,
+                scroll_x: 0,
+                scroll_y: 0,
+                scroll_width: 0,
+                scroll_height: 0,
+            }
         }
     }
 
@@ -537,7 +697,15 @@ mod tests {
                 prompt.hidden = self.position.get() >= 4;
                 return Ok(Some(prompt));
             }
-            Ok(BUTTONS.iter().position(|b| *b == child).map(|slot| Widget { id: 1000 + slot as i32, child: i32::from(child), x: slot as i32 * 50, y: 0, width: 40, height: 40, ..Self::text("") }))
+            Ok(BUTTONS.iter().position(|b| *b == child).map(|slot| Widget {
+                id: 1000 + slot as i32,
+                child: i32::from(child),
+                x: slot as i32 * 50,
+                y: 0,
+                width: 40,
+                height: 40,
+                ..Self::text("")
+            }))
         }
         fn children(&self, group: u16, child: u16) -> Result<Option<Vec<Widget>>, String> {
             if i32::from(group) != GROUP {
@@ -555,9 +723,19 @@ mod tests {
             }))
         }
         fn sub_interfaces(&self) -> Result<Option<Vec<SubInterface>>, String> {
-            let mut open = vec![SubInterface { group: CHATBOX_GROUP + 1, parent: 0, parent_group: CHATBOX_GROUP, parent_child: CHATBOX_MODAL }];
+            let mut open = vec![SubInterface {
+                group: CHATBOX_GROUP + 1,
+                parent: 0,
+                parent_group: CHATBOX_GROUP,
+                parent_child: CHATBOX_MODAL,
+            }];
             if self.open.get() {
-                open.push(SubInterface { group: GROUP, parent: 0, parent_group: 161, parent_child: 16 });
+                open.push(SubInterface {
+                    group: GROUP,
+                    parent: 0,
+                    parent_group: 161,
+                    parent_child: 16,
+                });
             }
             Ok(Some(open))
         }
@@ -577,7 +755,10 @@ mod tests {
             match *input {
                 Input::WindMouse { x, y, .. } => self.mouse.set((x, y)),
                 Input::Button { down: true, .. } => {
-                    let digit = self.slot_under_mouse().map(Self::digit_at).ok_or("clicked nothing")?;
+                    let digit = self
+                        .slot_under_mouse()
+                        .map(Self::digit_at)
+                        .ok_or("clicked nothing")?;
                     self.clicks.borrow_mut().push(digit);
                     let position = self.position.get();
                     if digit == self.pin[position] {
@@ -591,7 +772,10 @@ mod tests {
                         self.open.set(!self.message.borrow().is_empty());
                     }
                 }
-                Input::Key { key: VK_SPACE, down: true } => {
+                Input::Key {
+                    key: VK_SPACE,
+                    down: true,
+                } => {
                     *self.message.borrow_mut() = "";
                     self.position.set(0);
                     self.open.set(true);
@@ -611,7 +795,10 @@ mod tests {
     #[test]
     fn clicks_the_digits_of_the_pin_in_order() {
         let fake = Fake::new([4, 7, 0, 3]);
-        assert_eq!(run(&fake, &mut || Ok(Pin::Found([4, 7, 0, 3]))), Ok(Outcome::Entered));
+        assert_eq!(
+            run(&fake, &mut || Ok(Pin::Found([4, 7, 0, 3]))),
+            Ok(Outcome::Entered)
+        );
         assert_eq!(*fake.clicks.borrow(), [4, 7, 0, 3]);
     }
 
@@ -620,12 +807,18 @@ mod tests {
         let fake = Fake::new([4, 7, 0, 3]);
         assert_eq!(run(&fake, &mut || Ok(Pin::None)), Ok(Outcome::NoPin));
         assert!(fake.covers.borrow().is_empty());
-        assert_eq!(run(&fake, &mut || Ok(Pin::Found([4, 7, 0, 3]))), Ok(Outcome::Entered));
+        assert_eq!(
+            run(&fake, &mut || Ok(Pin::Found([4, 7, 0, 3]))),
+            Ok(Outcome::Entered)
+        );
         assert_eq!(*fake.covers.borrow(), [true, false]);
 
         // also when it gives up
         let fake = Fake::new([4, 7, 0, 3]);
-        assert_eq!(run(&fake, &mut || Ok(Pin::Found([1, 1, 1, 1]))), Ok(Outcome::Wrong));
+        assert_eq!(
+            run(&fake, &mut || Ok(Pin::Found([1, 1, 1, 1]))),
+            Ok(Outcome::Wrong)
+        );
         assert_eq!(*fake.covers.borrow(), [true, false]);
     }
 
@@ -633,30 +826,47 @@ mod tests {
     fn needs_a_pin_and_an_open_keypad() {
         let fake = Fake::new([4, 7, 0, 3]);
         assert_eq!(run(&fake, &mut || Ok(Pin::None)), Ok(Outcome::NoPin));
-        assert_eq!(run(&fake, &mut || Ok(Pin::Unavailable)), Ok(Outcome::Unavailable));
+        assert_eq!(
+            run(&fake, &mut || Ok(Pin::Unavailable)),
+            Ok(Outcome::Unavailable)
+        );
         // a closed keypad isn't worth asking the loader about
         fake.open.set(false);
-        assert_eq!(run(&fake, &mut || panic!("asked for a PIN")), Ok(Outcome::Closed));
+        assert_eq!(
+            run(&fake, &mut || panic!("asked for a PIN")),
+            Ok(Outcome::Closed)
+        );
         assert!(fake.clicks.borrow().is_empty());
     }
 
     #[test]
     fn a_wrong_pin_is_retried_then_reported() {
         let fake = Fake::new([4, 7, 0, 3]);
-        assert_eq!(run(&fake, &mut || Ok(Pin::Found([1, 1, 1, 1]))), Ok(Outcome::Wrong));
+        assert_eq!(
+            run(&fake, &mut || Ok(Pin::Found([1, 1, 1, 1]))),
+            Ok(Outcome::Wrong)
+        );
         assert_eq!(fake.clicks.borrow().len(), 4 * ATTEMPTS);
     }
 
     #[test]
     fn pauses_between_digits_are_around_a_second_within_bounds() {
         let fake = Fake::new([0; 4]);
-        let mut keypad = Keypad { client: &fake, rng: Rng::seeded() };
-        let pauses: Vec<u64> = (0..4000).map(|_| keypad.around(DIGIT_PAUSE_MEAN_MS, DIGIT_PAUSE_SPREAD_MS, DIGIT_PAUSE_MS)).collect();
+        let mut keypad = Keypad {
+            client: &fake,
+            rng: Rng::seeded(),
+        };
+        let pauses: Vec<u64> = (0..4000)
+            .map(|_| keypad.around(DIGIT_PAUSE_MEAN_MS, DIGIT_PAUSE_SPREAD_MS, DIGIT_PAUSE_MS))
+            .collect();
         assert!(pauses.iter().all(|&ms| (300..=1800).contains(&ms)));
         let mean = pauses.iter().sum::<u64>() as f64 / pauses.len() as f64;
         assert!((950.0..1050.0).contains(&mean), "mean {mean}");
         // most of them within a spread of the mean
-        let near = pauses.iter().filter(|&&ms| (700..=1300).contains(&ms)).count();
+        let near = pauses
+            .iter()
+            .filter(|&&ms| (700..=1300).contains(&ms))
+            .count();
         assert!(near > pauses.len() * 6 / 10, "{near} near");
     }
 
@@ -675,6 +885,9 @@ mod tests {
         assert_eq!(hash_name("p_4i_n"), hash_name("p 4i n"));
         assert_eq!(hash_name("a-b\u{a0}c"), hash_name("a_b_c"));
         assert_ne!(hash_name("some name"), hash_name("some  name"));
-        assert_eq!(hash_name("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hash_name("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

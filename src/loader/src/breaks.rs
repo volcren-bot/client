@@ -167,7 +167,13 @@ fn footer(ui: &mut egui::Ui, add: &str, what: &str) -> (bool, bool) {
 }
 
 /// A striped list with `heads` for columns and a last one for the buttons.
-fn list(ui: &mut egui::Ui, id: &str, heads: [&str; 4], rows: usize, mut row: impl FnMut(&mut egui_extras::TableRow, usize)) {
+fn list(
+    ui: &mut egui::Ui,
+    id: &str,
+    heads: [&str; 4],
+    rows: usize,
+    mut row: impl FnMut(&mut egui_extras::TableRow, usize),
+) {
     // Up to `VISIBLE_ROWS` rows show, the rest scroll; the list always takes that much room so the panel keeps its height.
     let body = VISIBLE_ROWS as f32 * (ROW_HEIGHT + ui.spacing().item_spacing.y);
     egui_extras::TableBuilder::new(ui)
@@ -206,18 +212,30 @@ pub fn breaks_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) 
         let mut remove = None;
         let breaks = &mut config.breaks;
         let count = breaks.len();
-        list(ui, "breaks_edit", ["Every", "Length", "Randomness", "Log out"], count, |row, i| {
-            let b = &mut breaks[i];
-            row.col(|ui| changed |= number(ui, &mut b.interval, MINUTE_MS, 1.0..=1440.0, " min"));
-            row.col(|ui| changed |= number(ui, &mut b.length, MINUTE_MS, 1.0..=1440.0, " min"));
-            row.col(|ui| changed |= auto_number(ui, &mut b.randomness, 0.01, 0.33, 0.0..=100.0, "%"));
-            row.col(|ui| changed |= auto_number(ui, &mut b.logout_chance, 0.01, 0.05, 0.0..=100.0, "%"));
-            row.col(|ui| {
-                if ui.button("Remove").clicked() {
-                    remove = Some(i);
-                }
-            });
-        });
+        list(
+            ui,
+            "breaks_edit",
+            ["Every", "Length", "Randomness", "Log out"],
+            count,
+            |row, i| {
+                let b = &mut breaks[i];
+                row.col(|ui| {
+                    changed |= number(ui, &mut b.interval, MINUTE_MS, 1.0..=1440.0, " min")
+                });
+                row.col(|ui| changed |= number(ui, &mut b.length, MINUTE_MS, 1.0..=1440.0, " min"));
+                row.col(|ui| {
+                    changed |= auto_number(ui, &mut b.randomness, 0.01, 0.33, 0.0..=100.0, "%")
+                });
+                row.col(|ui| {
+                    changed |= auto_number(ui, &mut b.logout_chance, 0.01, 0.05, 0.0..=100.0, "%")
+                });
+                row.col(|ui| {
+                    if ui.button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            },
+        );
         if let Some(i) = remove {
             config.breaks.remove(i);
             changed = true;

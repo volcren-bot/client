@@ -1,3 +1,8 @@
+use ipc::{
+    build_id, cursor_style, frame_event_name, initial_cursor_name, offsets_state, overlay_mode,
+    shared_memory_name, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, OVERLAY_SLOTS,
+    PROTOCOL_VERSION, VERSION_LEN,
+};
 use std::{
     ffi::CString,
     mem::size_of,
@@ -11,16 +16,12 @@ use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::LibraryLoader::GetModuleFileNameW,
-        System::Threading::{CreateEventW, SetEvent},
         System::Memory::{
             CreateFileMappingA, MapViewOfFile, OpenFileMappingA, UnmapViewOfFile,
             FILE_MAP_ALL_ACCESS, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
         },
+        System::Threading::{CreateEventW, SetEvent},
     },
-};
-use ipc::{
-    build_id, cursor_style, frame_event_name, initial_cursor_name, offsets_state, overlay_mode, shared_memory_name, Header, IMAGE_DATA_SIZE, OVERLAY_SLOTS, PROTOCOL_VERSION,
-    INITIAL_CURSOR_SIZE, VERSION_LEN,
 };
 
 use super::main::MODULE;
@@ -68,7 +69,8 @@ fn mapping_name(pid: u32) -> CString {
 unsafe fn initial_cursor(pid: u32) -> (u8, [u8; 3], u8) {
     let default = (cursor_style::CROSS, [255, 0, 0], 20);
     let name = CString::new(initial_cursor_name(pid)).unwrap();
-    let Ok(hmap) = OpenFileMappingA(FILE_MAP_READ.0, false, PCSTR(name.as_ptr() as *const u8)) else {
+    let Ok(hmap) = OpenFileMappingA(FILE_MAP_READ.0, false, PCSTR(name.as_ptr() as *const u8))
+    else {
         return default;
     };
     let view = MapViewOfFile(hmap, FILE_MAP_READ, 0, 0, INITIAL_CURSOR_SIZE);
@@ -128,13 +130,20 @@ impl MemoryManager {
             frame_serial: 0,
         };
 
-        let event_name: Vec<u16> = frame_event_name(pid).encode_utf16().chain(std::iter::once(0)).collect();
+        let event_name: Vec<u16> = frame_event_name(pid)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let frame_event = CreateEventW(None, false, false, PCWSTR(event_name.as_ptr())).unwrap_or_else(|error| {
             println!("[Agent]: Cannot create the frame event ({error}); overlays fall back to polling.\r\n");
             HANDLE::default()
         });
 
-        Self { ptr, hmap, frame_event }
+        Self {
+            ptr,
+            hmap,
+            frame_event,
+        }
     }
 
     pub unsafe fn open_map(pid: u32, time: u64) -> Self {
@@ -173,7 +182,11 @@ impl MemoryManager {
             "[Agent]: Simba and the client are using different builds of the agent. Load this build into the client with loader, or restart the client.\r\n"
         );
 
-        Self { ptr, hmap, frame_event: HANDLE::default() }
+        Self {
+            ptr,
+            hmap,
+            frame_event: HANDLE::default(),
+        }
     }
 
     pub unsafe fn mark_closed(&self) {
@@ -286,7 +299,14 @@ impl MemoryManager {
         ((*self.ptr).header.width, (*self.ptr).header.height)
     }
 
-    pub unsafe fn set_viewport(&self, offset_x: i32, offset_y: i32, width: i32, height: i32, window_height: i32) {
+    pub unsafe fn set_viewport(
+        &self,
+        offset_x: i32,
+        offset_y: i32,
+        width: i32,
+        height: i32,
+        window_height: i32,
+    ) {
         (*self.ptr).header.width = width;
         (*self.ptr).header.height = height;
         (*self.ptr).header.offset_x = offset_x;
@@ -300,9 +320,11 @@ pub static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
 pub fn client_header(pid: u32) -> Option<Header> {
     let name = mapping_name(pid);
     unsafe {
-        let hmap = OpenFileMappingA(FILE_MAP_READ.0, false, PCSTR(name.as_ptr() as *const u8)).ok()?;
+        let hmap =
+            OpenFileMappingA(FILE_MAP_READ.0, false, PCSTR(name.as_ptr() as *const u8)).ok()?;
         let view = MapViewOfFile(hmap, FILE_MAP_READ, 0, 0, size_of::<Header>());
-        let header = (!view.Value.is_null()).then(|| (view.Value as *const Header).read_unaligned());
+        let header =
+            (!view.Value.is_null()).then(|| (view.Value as *const Header).read_unaligned());
         if !view.Value.is_null() {
             let _ = UnmapViewOfFile(view);
         }

@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use ipc::{
     read::{self, Memory},
     state::{
-        cache_kind, cache_status, CacheReply, CacheRequest, CACHE_BATCH,
-        CACHE_DATA_SIZE, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM,
+        cache_kind, cache_status, CacheReply, CacheRequest, CACHE_BATCH, CACHE_DATA_SIZE,
+        CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM,
     },
 };
+use std::sync::Arc;
 
 use super::{
     items::{game_vals, release, Reader, BUFFER_DATA, BUFFER_LENGTH},

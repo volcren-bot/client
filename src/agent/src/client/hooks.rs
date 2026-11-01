@@ -31,8 +31,8 @@ use windows::{
             WindowsAndMessaging::{
                 CallWindowProcW, GetClientRect, GetWindowLongPtrW, IsWindowVisible,
                 SetWindowLongPtrW, ShowWindow, GWLP_WNDPROC, SW_HIDE, SW_SHOWNORMAL, WM_CHAR,
-                WM_IME_NOTIFY, WM_IME_SETCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-                WM_MOUSEMOVE, WNDPROC,
+                WM_IME_NOTIFY, WM_IME_SETCONTEXT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_MOUSEMOVE,
+                WNDPROC,
             },
         },
     },
@@ -43,24 +43,38 @@ use super::graphics::{
     restore_state,
 };
 use super::offsets::{
-    find_actor_path, find_actor_position, find_game_state, find_local_player, find_login_panel, find_skills, find_tick_count,
-    find_varps, find_interfaces, find_item_containers, find_item_setter, find_varcs, find_run_energy, find_actor_lists, find_actor_names,
-    find_appearance_decoder, find_chat, find_component_fields, find_component_invalidate, find_component_sprite, find_game_vals, find_destination, find_spot_anims, find_packets, find_packet_layouts, find_script_runs, find_varc_setters, find_ground_items, find_item_pile, find_projectiles, find_menu, find_menu_click, find_menu_layout, find_menu_open, find_selection, find_actor_orientation, find_decoration_layout, find_game_object_layout, find_loc_configs, find_loc_names, find_scene, find_collision_maps, find_instance_flag, find_animation_height, find_model_faces, find_model_vertices, find_camera, find_minimap, find_npc_model, find_obj_type_lookup, find_projection, find_local_projection,
-    find_world_select, Pe, ScanError, World,
+    find_actor_lists, find_actor_names, find_actor_orientation, find_actor_path,
+    find_actor_position, find_animation_height, find_appearance_decoder, find_camera, find_chat,
+    find_collision_maps, find_component_fields, find_component_invalidate, find_component_sprite,
+    find_decoration_layout, find_destination, find_game_object_layout, find_game_state,
+    find_game_vals, find_ground_items, find_instance_flag, find_interfaces, find_item_containers,
+    find_item_pile, find_item_setter, find_loc_configs, find_loc_names, find_local_player,
+    find_local_projection, find_login_panel, find_menu, find_menu_click, find_menu_layout,
+    find_menu_open, find_minimap, find_model_faces, find_model_vertices, find_npc_model,
+    find_obj_type_lookup, find_packet_layouts, find_packets, find_projectiles, find_projection,
+    find_run_energy, find_scene, find_script_runs, find_selection, find_skills, find_spot_anims,
+    find_tick_count, find_varc_setters, find_varcs, find_varps, find_world_select, Pe, ScanError,
+    World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
-use ipc::{cursor_style, overlay_mode};
-use ipc::state::{
-    part, CameraLayout, ChatLayout, CollisionLayout, PathLayout, SpotAnimLayout, GroundItemsLayout, InterfaceLayout, Layout, LoginLayout, MinimapLayout, PlayerLayout, ProjectileLayout, ProjectionLayout, SceneLoaderLayout, SkillsLayout, WorldLayout, WorldSelectLayout,
-};
 use super::unload::HookCall;
 use crate::shared::{
     memory::{MemoryManager, MEMORY_MANAGER},
     sync::event_listener,
-    windows::{WI_CACHE, WI_CONSOLE, WI_DETACH, WI_GAME_VALS, WI_LOCS, WI_MENU, WI_MODEL, WI_PROJECT, WI_ITEM_NAMES, WI_MODIFIERS, WI_NAME, WI_TOTAL_XP},
+    windows::{
+        WI_CACHE, WI_CONSOLE, WI_DETACH, WI_GAME_VALS, WI_ITEM_NAMES, WI_LOCS, WI_MENU, WI_MODEL,
+        WI_MODIFIERS, WI_NAME, WI_PROJECT, WI_TOTAL_XP,
+    },
 };
+use ipc::state::{
+    part, CameraLayout, ChatLayout, CollisionLayout, GroundItemsLayout, InterfaceLayout, Layout,
+    LoginLayout, MinimapLayout, PathLayout, PlayerLayout, ProjectileLayout, ProjectionLayout,
+    SceneLoaderLayout, SkillsLayout, SpotAnimLayout, WorldLayout, WorldSelectLayout,
+};
+use ipc::{cursor_style, overlay_mode};
 
-static KEYBOARD_MODIFIERS: LazyLock<Mutex<(bool, bool, bool)>> = LazyLock::new(|| Mutex::new((false, false, false)));
+static KEYBOARD_MODIFIERS: LazyLock<Mutex<(bool, bool, bool)>> =
+    LazyLock::new(|| Mutex::new((false, false, false)));
 static LAST_CHAR: LazyLock<Mutex<i32>> = LazyLock::new(|| Mutex::new(0));
 
 pub unsafe fn open_client_console() {
@@ -172,7 +186,11 @@ fn filter_mouse(msg: u32, wparam: WPARAM) -> Option<WPARAM> {
         return Some(wparam);
     }
     static START: OnceLock<std::time::Instant> = OnceLock::new();
-    let now = START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1;
+    let now = START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+        + 1;
     if wparam.0 as u64 & SYNTHETIC != 0 {
         LAST_SYNTHETIC_MOUSE.store(now, Ordering::Relaxed);
         return Some(WPARAM((wparam.0 as u64 & !SYNTHETIC) as usize));
@@ -405,7 +423,12 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
         let dest = mem_manager
             .capture_enabled()
             .then(|| mem_manager.image_ptr());
-        (mem_manager.get_mouse_position(), dest, overlay, mem_manager.cursor())
+        (
+            mem_manager.get_mouse_position(),
+            dest,
+            overlay,
+            mem_manager.cursor(),
+        )
     };
 
     if load_opengl_extensions() {
@@ -421,7 +444,15 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
         if cursor != cursor_style::OFF && mouse.0 > -1 && mouse.1 > -1 {
             let (mouse_x, mouse_y) = (mouse.0 - offset_x, mouse.1 - offset_y_top_down);
             if mouse_x > -1 && mouse_y > -1 && mouse_x < width && mouse_y < height {
-                draw_cursor(mouse_x, mouse_y, width, height, cursor, cursor_color, cursor_size);
+                draw_cursor(
+                    mouse_x,
+                    mouse_y,
+                    width,
+                    height,
+                    cursor,
+                    cursor_color,
+                    cursor_size,
+                );
             }
         }
     }
@@ -432,7 +463,10 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
     let presented = original.call(hdc);
     // after the swap, so a reader woken by it paints the overlay for the next frame from what this one showed
     if let Some(memory) = MEMORY_MANAGER.get() {
-        memory.lock().unwrap_or_else(|e| e.into_inner()).frame_presented();
+        memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .frame_presented();
     }
     presented
 }
@@ -463,7 +497,10 @@ unsafe fn hook_wgl_swap_buffers() {
 
 pub unsafe fn unhook_wgl_swap_buffers() {
     if let Some(memory) = MEMORY_MANAGER.get() {
-        memory.lock().unwrap_or_else(|e| e.into_inner()).clear_overlay();
+        memory
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear_overlay();
     }
 
     let Some(detour) = ORIGINAL_WGL_SWAPBUFFERS.get() else {
@@ -547,7 +584,11 @@ unsafe fn find_offsets() {
     // not printed whole: it holds all 151 packets
     let packet_layouts = packets.and_then(|p| match find_packet_layouts(pe, &p) {
         Ok(layouts) => {
-            println!("[Agent]: Packet layouts found: {} of {} packets.\r\n", layouts.layouts.iter().filter(|l| l.is_some()).count(), layouts.layouts.len());
+            println!(
+                "[Agent]: Packet layouts found: {} of {} packets.\r\n",
+                layouts.layouts.iter().filter(|l| l.is_some()).count(),
+                layouts.layouts.len()
+            );
             Some(layouts)
         }
         Err(error) => {
@@ -558,15 +599,22 @@ unsafe fn find_offsets() {
     let script_runs = found("Script runs", find_script_runs(pe));
     let varc_setters = found("Varc setters", find_varc_setters(pe));
     let containers = find_item_containers(pe);
-    let item_setter = containers.ok().and_then(|c| found("Item setter", find_item_setter(pe, &c)).map(|rule| (rule, c)));
+    let item_setter = containers
+        .ok()
+        .and_then(|c| found("Item setter", find_item_setter(pe, &c)).map(|rule| (rule, c)));
     let camera = player.and_then(|p| found("Camera", find_camera(pe, p.client)));
     let projection = player.and_then(|p| found("Projection", find_projection(pe, p.client)));
     let scene = projection.and_then(|_| found("Scene", find_scene(pe)));
     let collision = scene.and_then(|s| found("Collision maps", find_collision_maps(pe, &s)));
     let instance_flag = found("Instance flag", find_instance_flag(pe));
-    let local_projection = player.zip(interfaces).zip(projection.zip(scene)).and_then(|((p, i), (projection, scene))| {
-        found("Local projection", find_local_projection(pe, p.client, i.canvas, &projection, &scene))
-    });
+    let local_projection = player.zip(interfaces).zip(projection.zip(scene)).and_then(
+        |((p, i), (projection, scene))| {
+            found(
+                "Local projection",
+                find_local_projection(pe, p.client, i.canvas, &projection, &scene),
+            )
+        },
+    );
     let world = player.zip(actor).and_then(|(player, actor)| {
         let world = (|| {
             Ok::<_, (&str, ScanError)>(World {
@@ -593,7 +641,11 @@ unsafe fn find_offsets() {
 
     let module_base = module.0 as u64;
     let client = player.map_or(0, |p| p.client);
-    let mut layout = Layout { module_base, client, ..Layout::default() };
+    let mut layout = Layout {
+        module_base,
+        client,
+        ..Layout::default()
+    };
     if let Some(offset) = game_state.filter(|_| player.is_some()) {
         layout.found |= part::GAME_STATE;
         layout.game_state = offset;
@@ -615,7 +667,12 @@ unsafe fn find_offsets() {
     }
     if let Some(s) = skills {
         layout.found |= part::SKILLS;
-        layout.skills = SkillsLayout { levels: s.levels, real_levels: s.real_levels, xp: s.xp, count: s.count };
+        layout.skills = SkillsLayout {
+            levels: s.levels,
+            real_levels: s.real_levels,
+            xp: s.xp,
+            count: s.count,
+        };
     }
     if let Some(rva) = varps {
         layout.found |= part::VARPS;
@@ -623,7 +680,13 @@ unsafe fn find_offsets() {
     }
     if let Some(l) = login {
         layout.found |= part::LOGIN;
-        layout.login = LoginLayout { screen: l.screen, panel_x: l.panel_x, box_x: l.box_x, center_x: l.center_x, y: l.y };
+        layout.login = LoginLayout {
+            screen: l.screen,
+            panel_x: l.panel_x,
+            box_x: l.box_x,
+            center_x: l.center_x,
+            y: l.y,
+        };
     }
     if let Some(w) = world_select {
         layout.found |= part::WORLD_SELECT;
@@ -646,14 +709,23 @@ unsafe fn find_offsets() {
     }
     if let Some(m) = minimap {
         layout.found |= part::MINIMAP;
-        layout.minimap = MinimapLayout { object: m.object, zoom: m.zoom, destination: destination.unwrap_or(0) };
+        layout.minimap = MinimapLayout {
+            object: m.object,
+            zoom: m.zoom,
+            destination: destination.unwrap_or(0),
+        };
         if destination.is_some() {
             layout.found |= part::DESTINATION;
         }
     }
     if let Some(g) = ground_items {
         layout.found |= part::GROUND_ITEMS;
-        layout.ground_items = GroundItemsLayout { items: g.items, level: g.level, node_item: g.node_item, id: g.id };
+        layout.ground_items = GroundItemsLayout {
+            items: g.items,
+            level: g.level,
+            node_item: g.node_item,
+            id: g.id,
+        };
     }
     if let Some(c) = chat {
         layout.found |= part::CHAT;
@@ -671,9 +743,17 @@ unsafe fn find_offsets() {
         };
     }
     // The minimap rule finds the focal point; both rules find the yaw, so they must agree.
-    if let (Some(c), Some(m)) = (camera, minimap.filter(|m| camera.is_some_and(|c| c.yaw == m.angle))) {
+    if let (Some(c), Some(m)) = (
+        camera,
+        minimap.filter(|m| camera.is_some_and(|c| c.yaw == m.angle)),
+    ) {
         layout.found |= part::CAMERA;
-        layout.camera = CameraLayout { position: c.position, pitch: c.pitch, yaw: c.yaw, focal: m.focal_x };
+        layout.camera = CameraLayout {
+            position: c.position,
+            pitch: c.pitch,
+            yaw: c.yaw,
+            focal: m.focal_x,
+        };
     }
     if let Some(i) = interfaces.filter(|_| player.is_some()) {
         let c = i.component;
@@ -704,7 +784,11 @@ unsafe fn find_offsets() {
             reserved: 0,
         };
     }
-    if let (Some(l), Some(p), Some(s)) = (local_projection.filter(|_| layout.has(part::CAMERA | part::INTERFACES)), projection, scene) {
+    if let (Some(l), Some(p), Some(s)) = (
+        local_projection.filter(|_| layout.has(part::CAMERA | part::INTERFACES)),
+        projection,
+        scene,
+    ) {
         layout.found |= part::PROJECTION;
         layout.projection = ProjectionLayout {
             top_world_view: p.top_world_view,
@@ -734,7 +818,10 @@ unsafe fn find_offsets() {
         };
         if let Some(c) = collision {
             layout.found |= part::COLLISION;
-            layout.collision = CollisionLayout { maps: c.maps, stride: c.stride };
+            layout.collision = CollisionLayout {
+                maps: c.maps,
+                stride: c.stride,
+            };
         }
     }
     // read through the world view, so it needs the world's client and actor layout
@@ -784,11 +871,18 @@ unsafe fn find_offsets() {
     // read on the local player, like its position
     if let Some(p) = path.filter(|_| layout.has(part::PLAYER)) {
         layout.found |= part::PATH;
-        layout.path = PathLayout { x: p.x, y: p.y, length: p.length, reserved: 0 };
+        layout.path = PathLayout {
+            x: p.x,
+            y: p.y,
+            length: p.length,
+            reserved: 0,
+        };
     }
     if let Some(flag) = instance_flag {
         layout.found |= part::SCENE_LOADER;
-        layout.scene_loader = SceneLoaderLayout { instance_flag: flag };
+        layout.scene_loader = SceneLoaderLayout {
+            instance_flag: flag,
+        };
     }
     if let Some(w) = world {
         layout.found |= part::WORLD;
@@ -829,7 +923,10 @@ unsafe fn find_offsets() {
     }
     let _ = super::own::LAYOUT.set(layout);
     if let Some(w) = world {
-        if let Some(decoder) = found("Appearance decoder", find_appearance_decoder(pe, w.names.player_name, w.player.player_index)) {
+        if let Some(decoder) = found(
+            "Appearance decoder",
+            find_appearance_decoder(pe, w.names.player_name, w.player.player_index),
+        ) {
             super::name::hook_decoder(module_base, decoder);
         }
     }
@@ -842,17 +939,28 @@ unsafe fn find_offsets() {
         super::packets::hook(module_base, rule, packet_layouts.as_ref());
     }
     if let Some(rule) = script_runs {
-        super::script_runs::hook(module_base, rule, player.zip(tick_count).map(|(p, offset)| (p.client, offset)));
+        super::script_runs::hook(
+            module_base,
+            rule,
+            player.zip(tick_count).map(|(p, offset)| (p.client, offset)),
+        );
     }
     if let Some(rule) = varc_setters {
         super::varc_log::hook(module_base, rule);
     }
     if let Some((rule, containers)) = item_setter {
-        super::item_log::hook(module_base, rule, containers, player.zip(tick_count).map(|(p, offset)| (p.client, offset)));
+        super::item_log::hook(
+            module_base,
+            rule,
+            containers,
+            player.zip(tick_count).map(|(p, offset)| (p.client, offset)),
+        );
     }
     if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(pe)) {
         super::items::set_lookup(module_base, rule);
-        if let Some(game_vals) = player.and_then(|p| found("Game vals", find_game_vals(pe, p.client, &rule))) {
+        if let Some(game_vals) =
+            player.and_then(|p| found("Game vals", find_game_vals(pe, p.client, &rule)))
+        {
             super::items::set_game_vals(module_base, game_vals);
         }
     }
@@ -894,16 +1002,35 @@ unsafe fn find_offsets() {
             super::menu::set_selection(selection);
         }
     }
-    if let Some(rule) = world.and_then(|w| found("NPC model", find_npc_model(pe, w.names.npc_definition))) {
+    if let Some(rule) =
+        world.and_then(|w| found("NPC model", find_npc_model(pe, w.names.npc_definition)))
+    {
         let vertices = found("Model vertices", find_model_vertices(pe, &rule));
         let orientation = found("Actor orientation", find_actor_orientation(pe));
-        let height = world.and_then(|w| found("Animation height", find_animation_height(pe, w.names.npc_definition)));
+        let height = world.and_then(|w| {
+            found(
+                "Animation height",
+                find_animation_height(pe, w.names.npc_definition),
+            )
+        });
         let faces = vertices.and_then(|v| found("Model faces", find_model_faces(pe, &v)));
-        if let (Some(vertices), Some(faces), Some(orientation), Some(height)) = (vertices, faces, orientation, height) {
-            super::model::set_npc_model(module_base, image, rule, vertices, faces, orientation, height);
+        if let (Some(vertices), Some(faces), Some(orientation), Some(height)) =
+            (vertices, faces, orientation, height)
+        {
+            super::model::set_npc_model(
+                module_base,
+                image,
+                rule,
+                vertices,
+                faces,
+                orientation,
+                height,
+            );
         }
     }
-    set_found(layout.has(part::GAME_STATE | part::TICK_COUNT | part::PLAYER | part::SKILLS | part::VARPS));
+    set_found(
+        layout.has(part::GAME_STATE | part::TICK_COUNT | part::PLAYER | part::SKILLS | part::VARPS),
+    );
 }
 
 //enable...

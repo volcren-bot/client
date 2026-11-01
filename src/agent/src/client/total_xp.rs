@@ -4,11 +4,11 @@ use std::sync::{
     OnceLock,
 };
 
-use retour::GenericDetour;
 use ipc::{
     read::{self, short_string, Memory},
     state::{part, total_xp_status, Layout, TotalXpStatus},
 };
+use retour::GenericDetour;
 
 use super::{
     offsets::ComponentInvalidate,
@@ -47,7 +47,9 @@ fn find_number(text: &[u8], number: &[u8]) -> Option<usize> {
     (0..=text.len().checked_sub(number.len())?).find(|&at| {
         text[at..at + number.len()] == *number
             && (at == 0 || !part_of_number(text[at - 1]))
-            && text.get(at + number.len()).is_none_or(|&b| !part_of_number(b))
+            && text
+                .get(at + number.len())
+                .is_none_or(|&b| !part_of_number(b))
     })
 }
 
@@ -66,7 +68,10 @@ fn real_total(memory: &impl Memory, layout: &Layout) -> Option<i64> {
         return None;
     }
     let client = read::client(memory, layout)?;
-    let xp = memory.i32s(client + layout.skills.xp as u64, layout.skills.count as usize)?;
+    let xp = memory.i32s(
+        client + layout.skills.xp as u64,
+        layout.skills.count as usize,
+    )?;
     Some(xp.iter().map(|&x| x.max(0) as i64).sum())
 }
 
@@ -76,7 +81,9 @@ fn swap(memory: &impl Memory, text: u64, from: i64, to: i64) -> bool {
         return false;
     }
     if string[23] & 0x80 == 0 {
-        let Some(len) = 23usize.checked_sub(string[23] as usize) else { return false };
+        let Some(len) = 23usize.checked_sub(string[23] as usize) else {
+            return false;
+        };
         let new = replace_total(&string[..len], from, to).and_then(|new| short_string(&new));
         return new.is_some_and(|new| memory.write(text, &new));
     }
@@ -90,7 +97,8 @@ fn swap(memory: &impl Memory, text: u64, from: i64, to: i64) -> bool {
     if !memory.read(data, &mut bytes) {
         return false;
     }
-    find_number(&bytes, from_text.as_bytes()).is_some_and(|at| memory.write(data + at as u64, to_text.as_bytes()))
+    find_number(&bytes, from_text.as_bytes())
+        .is_some_and(|at| memory.write(data + at as u64, to_text.as_bytes()))
 }
 
 pub unsafe fn hook(module_base: u64, rule: ComponentInvalidate) {
@@ -108,7 +116,9 @@ pub unsafe fn hook(module_base: u64, rule: ComponentInvalidate) {
     let _ = HOOK.set((detour, rule));
     match HOOK.get().unwrap().0.enable() {
         Ok(()) => println!("[Agent]: Component invalidation hooked.\r\n"),
-        Err(error) => println!("[Agent]: Failed to enable the component invalidation hook: {error}.\r\n"),
+        Err(error) => {
+            println!("[Agent]: Failed to enable the component invalidation hook: {error}.\r\n")
+        }
     }
 }
 
@@ -121,11 +131,15 @@ pub unsafe fn rehook() {
 }
 
 pub unsafe fn unhook() {
-    let Some((detour, _)) = HOOK.get() else { return };
+    let Some((detour, _)) = HOOK.get() else {
+        return;
+    };
     if detour.is_enabled() {
         match detour.disable() {
             Ok(()) => println!("[Agent]: Component invalidation unhooked.\r\n"),
-            Err(error) => println!("[Agent]: Failed to disable the component invalidation hook: {error}.\r\n"),
+            Err(error) => {
+                println!("[Agent]: Failed to disable the component invalidation hook: {error}.\r\n")
+            }
         }
     }
 }
@@ -138,7 +152,10 @@ unsafe extern "system" fn invalidated(client: u64, holder: u64) -> usize {
     if ENABLED.load(Ordering::Acquire) {
         let memory = OwnMemory;
         let offset = OFFSET.load(Ordering::Relaxed);
-        if let (Some(layout), Some(component)) = (LAYOUT.get(), memory.ptr(holder + rule.holder_component as u64)) {
+        if let (Some(layout), Some(component)) = (
+            LAYOUT.get(),
+            memory.ptr(holder + rule.holder_component as u64),
+        ) {
             if let Some(total) = real_total(&memory, layout) {
                 swap(&memory, component + rule.text as u64, total, total + offset);
             }
@@ -156,37 +173,69 @@ fn report(shared: ipc::state::Shared<'_>, sequence: u32, status: i32) {
 }
 
 pub fn on_request() {
-    let (Some(layout), Some(mapping)) = (LAYOUT.get(), shared()) else { return };
+    let (Some(layout), Some(mapping)) = (LAYOUT.get(), shared()) else {
+        return;
+    };
     let shared = mapping.shared();
-    let Some((sequence, request)) = shared.read_total_xp_request() else { return };
+    let Some((sequence, request)) = shared.read_total_xp_request() else {
+        return;
+    };
     if on_other_thread() {
         report(shared, sequence, total_xp_status::OTHER_THREAD);
         return;
     }
     let Some((detour, rule)) = HOOK.get().filter(|(detour, _)| detour.is_enabled()) else {
-        let status = if request.enabled == 0 { total_xp_status::OFF } else { total_xp_status::NOT_FOUND };
+        let status = if request.enabled == 0 {
+            total_xp_status::OFF
+        } else {
+            total_xp_status::NOT_FOUND
+        };
         report(shared, sequence, status);
         return;
     };
 
-    let shown = if ENABLED.load(Ordering::Relaxed) { OFFSET.load(Ordering::Relaxed) } else { 0 };
-    let wanted = if request.enabled != 0 { request.offset } else { 0 };
+    let shown = if ENABLED.load(Ordering::Relaxed) {
+        OFFSET.load(Ordering::Relaxed)
+    } else {
+        0
+    };
+    let wanted = if request.enabled != 0 {
+        request.offset
+    } else {
+        0
+    };
     OFFSET.store(wanted, Ordering::Relaxed);
     ENABLED.store(wanted != 0, Ordering::Release);
 
     let memory = OwnMemory;
-    let counter = read::client(&memory, layout).filter(|_| layout.has(part::INTERFACES)).and_then(|client| {
-        Some((client, read::component(&memory, &layout.interfaces, client, XP_COUNTER)?))
-    });
+    let counter = read::client(&memory, layout)
+        .filter(|_| layout.has(part::INTERFACES))
+        .and_then(|client| {
+            Some((
+                client,
+                read::component(&memory, &layout.interfaces, client, XP_COUNTER)?,
+            ))
+        });
     if let (Some(total), Some((client, component))) = (real_total(&memory, layout), counter) {
         let slot = rule.holder_component as usize / 8;
-        if swap(&memory, component + rule.text as u64, total + shown, total + wanted) && rule.holder_component % 8 == 0 && slot < 4 {
+        if swap(
+            &memory,
+            component + rule.text as u64,
+            total + shown,
+            total + wanted,
+        ) && rule.holder_component % 8 == 0
+            && slot < 4
+        {
             let mut holder = [0u64; 4];
             holder[slot] = component;
             unsafe { detour.call(client, holder.as_ptr() as u64) };
         }
     }
-    let status = if wanted != 0 { total_xp_status::ON } else { total_xp_status::OFF };
+    let status = if wanted != 0 {
+        total_xp_status::ON
+    } else {
+        total_xp_status::OFF
+    };
     report(shared, sequence, status);
 }
 
@@ -206,14 +255,25 @@ mod tests {
 
     #[test]
     fn replaces_the_whole_number_only() {
-        assert_eq!(replace_total(b"6,019,725", 6_019_725, 7_123_456).unwrap(), b"7,123,456");
         assert_eq!(
-            replace_total(b"Total XP: <col=ffffff>6,019,725</col>", 6_019_725, 7_123_456).unwrap(),
+            replace_total(b"6,019,725", 6_019_725, 7_123_456).unwrap(),
+            b"7,123,456"
+        );
+        assert_eq!(
+            replace_total(
+                b"Total XP: <col=ffffff>6,019,725</col>",
+                6_019_725,
+                7_123_456
+            )
+            .unwrap(),
             b"Total XP: <col=ffffff>7,123,456</col>"
         );
         assert_eq!(replace_total(b"16,019,725", 6_019_725, 7_123_456), None);
         assert_eq!(replace_total(b"6,019,7250", 6_019_725, 7_123_456), None);
         assert_eq!(replace_total(b"Attack", 6_019_725, 7_123_456), None);
-        assert_eq!(replace_total(b"999,999", 999_999, 1_000_001).unwrap(), b"1,000,001");
+        assert_eq!(
+            replace_total(b"999,999", 999_999, 1_000_001).unwrap(),
+            b"1,000,001"
+        );
     }
 }

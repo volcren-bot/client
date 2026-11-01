@@ -1,8 +1,8 @@
 // The collision map the client keeps for the loaded scene (Java's `CollisionMap`), with instances, opened doors and spawned locs; edge ring 0xFFFFFF.
 
 use ipc::{
-    read::{local_player, Memory},
-    state::{array, collision_map, part, Layout},
+    read::{Memory, local_player},
+    state::{Layout, array, collision_map, part},
 };
 
 const MAX_SIZE: i32 = 256;
@@ -24,13 +24,19 @@ impl SceneCollision {
     pub fn flags(&self, x: i32, y: i32) -> Option<u32> {
         let border = collision_map::BORDER as i32;
         let (mx, my) = (x - self.base_x + border, y - self.base_y + border);
-        ((0..self.width).contains(&mx) && (0..self.height).contains(&my)).then(|| self.flags[(mx * self.height + my) as usize])
+        ((0..self.width).contains(&mx) && (0..self.height).contains(&my))
+            .then(|| self.flags[(mx * self.height + my) as usize])
     }
 
     // The world tiles the map covers, edge ring included: (x1, y1, x2, y2).
     pub fn bounds(&self) -> (i32, i32, i32, i32) {
         let border = collision_map::BORDER as i32;
-        (self.base_x - border, self.base_y - border, self.base_x - border + self.width - 1, self.base_y - border + self.height - 1)
+        (
+            self.base_x - border,
+            self.base_y - border,
+            self.base_x - border + self.width - 1,
+            self.base_y - border + self.height - 1,
+        )
     }
 }
 
@@ -40,9 +46,17 @@ pub fn read(memory: &impl Memory, layout: &Layout) -> Option<SceneCollision> {
 }
 
 /// Every plane's collision map (the loaded scene has four), with the player's plane first in the tuple.
-pub fn read_all(memory: &impl Memory, layout: &Layout) -> Option<(i32, Vec<Option<SceneCollision>>)> {
+pub fn read_all(
+    memory: &impl Memory,
+    layout: &Layout,
+) -> Option<(i32, Vec<Option<SceneCollision>>)> {
     let (plane, maps) = maps(memory, layout)?;
-    Some((plane, (0..maps.count.min(PLANES)).map(|p| maps.read(memory, p)).collect()))
+    Some((
+        plane,
+        (0..maps.count.min(PLANES))
+            .map(|p| maps.read(memory, p))
+            .collect(),
+    ))
 }
 
 const PLANES: i32 = 4;
@@ -69,7 +83,16 @@ fn maps(memory: &impl Memory, layout: &Layout) -> Option<(i32, Maps)> {
     let begin = memory.ptr(scene + c.maps as u64)?;
     let end = memory.ptr(scene + c.maps as u64 + 8)?;
     let count = (end.checked_sub(begin)? / c.stride.max(1) as u64).min(MAX_MAPS) as i32;
-    Some((plane, Maps { begin, count, stride: c.stride as u64, base_x, base_y }))
+    Some((
+        plane,
+        Maps {
+            begin,
+            count,
+            stride: c.stride as u64,
+            base_x,
+            base_y,
+        },
+    ))
 }
 
 impl Maps {
@@ -97,7 +120,14 @@ impl Maps {
             let values = memory.i32s(memory.ptr(column + array::DATA as u64)?, height as usize)?;
             flags.extend(values.into_iter().map(|v| v as u32));
         }
-        Some(SceneCollision { base_x: self.base_x, base_y: self.base_y, plane, width, height, flags })
+        Some(SceneCollision {
+            base_x: self.base_x,
+            base_y: self.base_y,
+            plane,
+            width,
+            height,
+            flags,
+        })
     }
 }
 
@@ -111,10 +141,21 @@ pub fn from_rows(base_x: i32, base_y: i32, rows: &[&str]) -> SceneCollision {
         let y = inner_h - 1 - row as i32;
         for (x, ch) in line.chars().enumerate() {
             let x = x as i32;
-            flags[((x + 1) * height + y + 1) as usize] = if ch == '#' { crate::collision::flag::OBJECT } else { 0 };
+            flags[((x + 1) * height + y + 1) as usize] = if ch == '#' {
+                crate::collision::flag::OBJECT
+            } else {
+                0
+            };
         }
     }
-    SceneCollision { base_x, base_y, plane: 0, width, height, flags }
+    SceneCollision {
+        base_x,
+        base_y,
+        plane: 0,
+        width,
+        height,
+        flags,
+    }
 }
 
 #[cfg(test)]
@@ -135,9 +176,23 @@ mod tests {
             found: part::COLLISION | part::PROJECTION | part::PLAYER,
             module_base: 0x100,
             client: 0x10,
-            player: PlayerLayout { world_views: 0x20, world_view_id: 0x70, player_index: 0x74, players: 0x40, base_x: 0x80, local_x: 0 },
-            projection: ProjectionLayout { plane: 0x60, scene: 0x10, ..Default::default() },
-            collision: CollisionLayout { maps: 0x2f8, stride: 0x28 },
+            player: PlayerLayout {
+                world_views: 0x20,
+                world_view_id: 0x70,
+                player_index: 0x74,
+                players: 0x40,
+                base_x: 0x80,
+                local_x: 0,
+            },
+            projection: ProjectionLayout {
+                plane: 0x60,
+                scene: 0x10,
+                ..Default::default()
+            },
+            collision: CollisionLayout {
+                maps: 0x2f8,
+                stride: 0x28,
+            },
             ..Default::default()
         };
 

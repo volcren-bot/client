@@ -7,10 +7,10 @@ use alloc::{format, string::String};
 
 pub mod item_log;
 pub mod packets;
-pub mod script_runs;
-pub mod varc_log;
 pub mod read;
+pub mod script_runs;
 pub mod state;
+pub mod varc_log;
 
 pub const PROTOCOL_VERSION: u8 = 56;
 

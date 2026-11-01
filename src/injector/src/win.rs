@@ -1,23 +1,27 @@
 use std::{
-    ffi::c_void,
     collections::{HashMap, hash_map::DefaultHasher},
-    fs, io,
+    ffi::c_void,
+    fs,
     hash::{Hash, Hasher},
+    io,
     iter::once,
     mem::{size_of, transmute},
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
-    ptr::{copy_nonoverlapping, null, null_mut, write_bytes, NonNull},
+    ptr::{NonNull, copy_nonoverlapping, null, null_mut, write_bytes},
+    sync::{
+        Arc, LazyLock, Mutex, OnceLock,
+        atomic::{Ordering, fence},
+    },
     thread::sleep,
-    sync::{Arc, LazyLock, Mutex, OnceLock, atomic::{Ordering, fence}},
     time::{Duration, Instant},
 };
 
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND, INVALID_HANDLE_VALUE,
-            LPARAM, POINT, WAIT_ABANDONED, WAIT_OBJECT_0,
+            CloseHandle, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND,
+            INVALID_HANDLE_VALUE, LPARAM, POINT, WAIT_ABANDONED, WAIT_OBJECT_0,
         },
         Graphics::Gdi::ClientToScreen,
         System::{
@@ -30,15 +34,16 @@ use windows_sys::{
             },
             LibraryLoader::{GetModuleHandleW, GetProcAddress},
             Memory::{
-                FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-                CreateFileMappingW, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile, VirtualAllocEx,
-                VirtualFreeEx,
+                CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RELEASE,
+                MEM_RESERVE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW,
+                PAGE_READWRITE, UnmapViewOfFile, VirtualAllocEx, VirtualFreeEx,
             },
             Threading::{
-                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE, ReleaseMutex, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
-                PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-                PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
-                QueryFullProcessImageNameW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, IsWow64Process,
+                OpenEventW, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
+                PROCESS_VM_READ, PROCESS_VM_WRITE, QueryFullProcessImageNameW, ReleaseMutex,
+                SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
             },
         },
         UI::WindowsAndMessaging::{
@@ -50,29 +55,37 @@ use windows_sys::{
 };
 
 use ipc::{
-    HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, overlay_mode, overlay_offset, shared_memory_name,
-    frame_event_name, initial_cursor_name, unload_event_name, work_event_name, worker_mutex_name, worker_reply_event_name,
-    packets::{self as packet_log, direction, packets_memory_name, Log, LOG_SIZE},
-    script_runs::{self as script_log, arg_kind, phase as script_runs_phase, script_runs_memory_name},
-    varc_log::{self, varc_log_memory_name},
+    HEADER_SIZE, Header, IMAGE_DATA_SIZE, INITIAL_CURSOR_SIZE, Incompatible, frame_event_name,
+    initial_cursor_name,
     item_log::{self, item_log_memory_name, item_wake_event_name},
+    overlay_mode, overlay_offset,
+    packets::{self as packet_log, LOG_SIZE, Log, direction, packets_memory_name},
     read::short_string_text,
-    state::{
-        item_name_status, loc_status, menu_status, model_status, model_target, project_status, cache_kind, cache_status, CacheReply, CacheRequest, GameValRequest, ItemNameRequest, LocsReply, ModelRequest, NamesReply, worker_kind, worker_status, WorkerRequest, ProjectRequest, CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, ITEM_NAME_BATCH, PROJECT_BATCH,
-        LAYOUT_SIZE, Layout, LayoutMemory, LayoutView, ReadError, Shared, TotalXpRequest, game_state::LOGGED_IN, name_status, part, state_memory_name,
-        total_xp_status,
+    script_runs::{
+        self as script_log, arg_kind, phase as script_runs_phase, script_runs_memory_name,
     },
+    shared_memory_name,
+    state::{
+        CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, CacheReply, CacheRequest,
+        GameValRequest, ITEM_NAME_BATCH, ItemNameRequest, LAYOUT_SIZE, Layout, LayoutMemory,
+        LayoutView, LocsReply, ModelRequest, NamesReply, PROJECT_BATCH, ProjectRequest, ReadError,
+        Shared, TotalXpRequest, WorkerRequest, cache_kind, cache_status, game_state::LOGGED_IN,
+        item_name_status, loc_status, menu_status, model_status, model_target, name_status, part,
+        project_status, state_memory_name, total_xp_status, worker_kind, worker_status,
+    },
+    unload_event_name,
+    varc_log::{self, varc_log_memory_name},
+    work_event_name, worker_mutex_name, worker_reply_event_name,
 };
 
 use crate::{
-    worker,
-    CONNECT_TIMEOUT, Client, Connection, DisplayName, GameState, TotalXp, LoadReport, MODULE_PREFIX, Overlay, Rgba,
-    UNLOAD_TIMEOUT, Widget, dll_version,
+    CONNECT_TIMEOUT, Client, Connection, DisplayName, GameState, LoadReport, MODULE_PREFIX,
+    Overlay, Position, Rgba, TotalXp, UNLOAD_TIMEOUT, Widget, dll_version,
     projection::{self, Failure, Terrain, Via},
-    widgets::{Memory, SubInterface},
     state,
+    widgets::{Memory, SubInterface},
+    worker,
     world::{self, Item, Npc, Player},
-    Position,
     world_select::WorldSelect,
 };
 
@@ -114,13 +127,17 @@ struct Module {
 fn modules(pid: u32) -> Result<Vec<Module>, String> {
     let mut attempts = 0;
     let snapshot = loop {
-        let handle = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
+        let handle =
+            unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) };
         if let Some(handle) = Handle::new(handle) {
             break handle;
         }
         attempts += 1;
         if unsafe { GetLastError() } != ERROR_BAD_LENGTH || attempts == 5 {
-            return Err(format!("Couldn't list the modules of {pid}: {}", io::Error::last_os_error()));
+            return Err(format!(
+                "Couldn't list the modules of {pid}: {}",
+                io::Error::last_os_error()
+            ));
         }
         sleep(Duration::from_millis(50));
     };
@@ -153,7 +170,8 @@ fn foreign_bot(modules: &[Module]) -> Option<&'static str> {
     let taken = modules.iter().any(|m| {
         let name = m.name.to_ascii_lowercase();
         let path = m.path.to_ascii_lowercase().replace('/', "\\");
-        (name.starts_with("dc_") && name.ends_with(".dll")) || (name.ends_with(".exe") && path.contains("\\.dc\\"))
+        (name.starts_with("dc_") && name.ends_with(".dll"))
+            || (name.ends_with(".exe") && path.contains("\\.dc\\"))
     });
     taken.then_some("Detuks")
 }
@@ -162,11 +180,16 @@ fn process_name(pid: u32) -> Option<String> {
     let process = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })?;
     let mut buffer = [0u16; 1024];
     let mut len = buffer.len() as u32;
-    if unsafe { QueryFullProcessImageNameW(process.0, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len) } == 0 {
+    if unsafe {
+        QueryFullProcessImageNameW(process.0, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len)
+    } == 0
+    {
         return None;
     }
     let path = String::from_utf16_lossy(&buffer[..len as usize]);
-    Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned())
+    Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
 }
 
 fn is_64bit(process: HANDLE) -> bool {
@@ -207,14 +230,17 @@ pub fn list_clients() -> Vec<Client> {
     windows
         .into_iter()
         .map(|(pid, title)| {
-            let process = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
+            let process =
+                Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) });
             let modules = modules(pid).ok();
             Client {
                 pid,
                 exe: process_name(pid).unwrap_or_default(),
                 title,
                 is_64bit: process.is_some_and(|p| is_64bit(p.0)),
-                loaded: modules.as_deref().and_then(|m| agent_module(m).map(|m| m.path.clone())),
+                loaded: modules
+                    .as_deref()
+                    .and_then(|m| agent_module(m).map(|m| m.path.clone())),
                 version: connection(pid).map(|c| c.version),
                 foreign_bot: modules.as_deref().and_then(foreign_bot).map(String::from),
             }
@@ -222,7 +248,9 @@ pub fn list_clients() -> Vec<Client> {
         .collect()
 }
 
-fn remote_load_library(remote_kernel32: usize) -> Result<unsafe extern "system" fn(*mut c_void) -> u32, String> {
+fn remote_load_library(
+    remote_kernel32: usize,
+) -> Result<unsafe extern "system" fn(*mut c_void) -> u32, String> {
     let local_kernel32 = unsafe { GetModuleHandleW(w!("kernel32.dll")) };
     let function = unsafe { GetProcAddress(local_kernel32, s!("LoadLibraryW")) }
         .ok_or("LoadLibraryW not found in kernel32.dll")?;
@@ -251,8 +279,14 @@ fn versioned_copy(dll: &Path, bytes: &[u8], version: &str) -> Result<PathBuf, St
 }
 
 fn remove_old_copies(dll: &Path) {
-    let (Some(dir), Some(name)) = (dll.parent(), dll.file_name()) else { return };
-    let Some(stem) = name.to_str().and_then(|n| n.rsplit_once('-')).map(|(stem, _)| format!("{stem}-")) else {
+    let (Some(dir), Some(name)) = (dll.parent(), dll.file_name()) else {
+        return;
+    };
+    let Some(stem) = name
+        .to_str()
+        .and_then(|n| n.rsplit_once('-'))
+        .map(|(stem, _)| format!("{stem}-"))
+    else {
         return;
     };
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -267,7 +301,14 @@ fn remove_old_copies(dll: &Path) {
 fn seed_cursor(pid: u32, cursor: &crate::Cursor) -> Option<Handle> {
     let name = wide(initial_cursor_name(pid));
     let mapping = Handle::new(unsafe {
-        CreateFileMappingW(INVALID_HANDLE_VALUE, null(), PAGE_READWRITE, 0, INITIAL_CURSOR_SIZE as u32, name.as_ptr())
+        CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            null(),
+            PAGE_READWRITE,
+            0,
+            INITIAL_CURSOR_SIZE as u32,
+            name.as_ptr(),
+        )
     })?;
     let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_WRITE, 0, 0, INITIAL_CURSOR_SIZE) };
     if view.Value.is_null() {
@@ -288,7 +329,11 @@ pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<Load
     let bytes = fs::read(&dll).map_err(|e| format!("Cannot read {}: {e}", dll.display()))?;
     let version = dll_version(&bytes);
     let dll = versioned_copy(&dll, &bytes, &version)?;
-    let dll_name = dll.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+    let dll_name = dll
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
 
     let process = Handle::new(unsafe {
         OpenProcess(
@@ -301,17 +346,28 @@ pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<Load
             pid,
         )
     })
-    .ok_or_else(|| format!("Couldn't open process {pid}: {}", io::Error::last_os_error()))?;
+    .ok_or_else(|| {
+        format!(
+            "Couldn't open process {pid}: {}",
+            io::Error::last_os_error()
+        )
+    })?;
 
     if !is_64bit(process.0) {
         return Err("Only 64-bit clients are supported.".into());
     }
 
-    let is_loaded = |modules: &[Module]| modules.iter().any(|m| m.name.to_ascii_lowercase() == dll_name);
+    let is_loaded = |modules: &[Module]| {
+        modules
+            .iter()
+            .any(|m| m.name.to_ascii_lowercase() == dll_name)
+    };
 
     let mut before = modules(pid)?;
     if let Some(bot) = foreign_bot(&before) {
-        return Err(format!("Client {pid} is already controlled by {bot}, refusing to inject it."));
+        return Err(format!(
+            "Client {pid} is already controlled by {bot}, refusing to inject it."
+        ));
     }
     let mut replaced = None;
     if agent_module(&before).is_some() {
@@ -320,9 +376,15 @@ pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<Load
             if let Some(cursor) = cursor {
                 let _ = set_cursor(pid, cursor);
             }
-            return Ok(LoadReport { already_loaded: true, replaced: None, connection: current });
+            return Ok(LoadReport {
+                already_loaded: true,
+                replaced: None,
+                connection: current,
+            });
         }
-        let old = current.map(|c| c.version).unwrap_or_else(|| "unknown".into());
+        let old = current
+            .map(|c| c.version)
+            .unwrap_or_else(|| "unknown".into());
         unload(pid).map_err(|e| format!("Cannot replace agent {old}: {e}"))?;
         replaced = Some(old);
         before = modules(pid)?;
@@ -338,20 +400,40 @@ pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<Load
 
     let path = wide(&dll);
     let size = path.len() * size_of::<u16>();
-    let remote = unsafe { VirtualAllocEx(process.0, null(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
+    let remote = unsafe {
+        VirtualAllocEx(
+            process.0,
+            null(),
+            size,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
     if remote.is_null() {
-        return Err(format!("VirtualAllocEx failed: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "VirtualAllocEx failed: {}",
+            io::Error::last_os_error()
+        ));
     }
     let free = || unsafe { VirtualFreeEx(process.0, remote, 0, MEM_RELEASE) };
 
-    if unsafe { WriteProcessMemory(process.0, remote, path.as_ptr().cast(), size, null_mut()) } == 0 {
+    if unsafe { WriteProcessMemory(process.0, remote, path.as_ptr().cast(), size, null_mut()) } == 0
+    {
         let error = io::Error::last_os_error();
         free();
         return Err(format!("WriteProcessMemory failed: {error}"));
     }
 
     let Some(thread) = Handle::new(unsafe {
-        CreateRemoteThread(process.0, null(), 0, Some(load_library), remote, 0, null_mut())
+        CreateRemoteThread(
+            process.0,
+            null(),
+            0,
+            Some(load_library),
+            remote,
+            0,
+            null_mut(),
+        )
     }) else {
         let error = io::Error::last_os_error();
         free();
@@ -402,7 +484,8 @@ fn wait_for_connection(pid: u32, version: &str, timeout: Duration) -> Option<Con
     let start = Instant::now();
     let mut latest = None;
     loop {
-        let written = |c: &Connection| c.protocol != 0 && (c.version == version || !c.is_compatible());
+        let written =
+            |c: &Connection| c.protocol != 0 && (c.version == version || !c.is_compatible());
         if let Some(connection) = connection(pid).filter(written) {
             if connection.offsets_found.is_some() || !connection.is_compatible() {
                 return Some(connection);
@@ -449,7 +532,13 @@ impl Memory for ProcessMemory {
     fn read(&self, address: u64, buffer: &mut [u8]) -> bool {
         let mut read = 0;
         let ok = unsafe {
-            ReadProcessMemory(self.0.0, address as *const c_void, buffer.as_mut_ptr().cast(), buffer.len(), &mut read)
+            ReadProcessMemory(
+                self.0.0,
+                address as *const c_void,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut read,
+            )
         };
         ok != 0 && read == buffer.len()
     }
@@ -457,7 +546,13 @@ impl Memory for ProcessMemory {
     fn write(&self, address: u64, bytes: &[u8]) -> bool {
         let mut written = 0;
         let ok = unsafe {
-            WriteProcessMemory(self.0.0, address as *const c_void, bytes.as_ptr().cast(), bytes.len(), &mut written)
+            WriteProcessMemory(
+                self.0.0,
+                address as *const c_void,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                &mut written,
+            )
         };
         ok != 0 && written == bytes.len()
     }
@@ -526,14 +621,25 @@ fn session(pid: u32) -> Result<Arc<Session>, String> {
     let view = StateView::open(pid, true)?;
     let process = Handle::new(unsafe { OpenProcess(PROCESS_VM_READ, 0, pid) })
         .ok_or_else(|| format!("Cannot open client {pid} to read it"))?;
-    let session = Arc::new(Session { process: Arc::new(process), view, born: Instant::now(), work: OnceLock::new(), slot: OnceLock::new(), reply: OnceLock::new(), frame: OnceLock::new() });
+    let session = Arc::new(Session {
+        process: Arc::new(process),
+        view,
+        born: Instant::now(),
+        work: OnceLock::new(),
+        slot: OnceLock::new(),
+        reply: OnceLock::new(),
+        frame: OnceLock::new(),
+    });
     sessions.push((pid, session.clone()));
     Ok(session)
 }
 
 /// Drops `pid`'s session, for after something went wrong or the agent was loaded or unloaded.
 fn forget(pid: u32) {
-    SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| *p != pid);
+    SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(p, _)| *p != pid);
 }
 
 /// A client's shared state block mapped into this process, unmapped on drop; its handles borrow it.
@@ -546,15 +652,26 @@ struct StateView {
 
 impl StateView {
     fn open(pid: u32, writable: bool) -> Result<Self, String> {
-        let access = if writable { FILE_MAP_READ | FILE_MAP_WRITE } else { FILE_MAP_READ };
+        let access = if writable {
+            FILE_MAP_READ | FILE_MAP_WRITE
+        } else {
+            FILE_MAP_READ
+        };
         let name = wide(state_memory_name(pid));
         let mapping = Handle::new(unsafe { OpenFileMappingW(access, 0, name.as_ptr()) })
-            .ok_or_else(|| format!("No game state in client {pid}: agent isn't loaded or is too old"))?;
+            .ok_or_else(|| {
+                format!("No game state in client {pid}: agent isn't loaded or is too old")
+            })?;
         let view = unsafe { MapViewOfFile(mapping.0, access, 0, 0, LAYOUT_SIZE) };
         let Some(block) = NonNull::new(view.Value.cast::<LayoutMemory>()) else {
             return Err(format!("Cannot map the game state of client {pid}"));
         };
-        Ok(Self { view, block, writable, _mapping: mapping })
+        Ok(Self {
+            view,
+            block,
+            writable,
+            _mapping: mapping,
+        })
     }
 
     /// For views opened writable.
@@ -626,12 +743,20 @@ pub fn set_display_name(pid: u32, name: &str) -> Result<DisplayName, String> {
 pub fn set_total_xp(pid: u32, offset: Option<i64>) -> Result<TotalXp, String> {
     let (layout, memory) = reader(pid, part::SKILLS, "the skills")?;
     let real = state::total_xp(&memory, &layout);
-    let request = TotalXpRequest { enabled: offset.is_some_and(|o| o != 0) as u32, offset: offset.unwrap_or(0), ..Default::default() };
+    let request = TotalXpRequest {
+        enabled: offset.is_some_and(|o| o != 0) as u32,
+        offset: offset.unwrap_or(0),
+        ..Default::default()
+    };
     let status = ask(
         pid,
         ipc::input::TOTAL_XP_MESSAGE,
         |shared| shared.write_total_xp_request(&request),
-        |shared| shared.read_total_xp_status(100).map(|s| (s.sequence, s.status)),
+        |shared| {
+            shared
+                .read_total_xp_status(100)
+                .map(|s| (s.sequence, s.status))
+        },
     )?;
     match status {
         total_xp_status::ON => Ok(TotalXp::Fake { offset: request.offset, real }),
@@ -643,19 +768,38 @@ pub fn set_total_xp(pid: u32, offset: Option<i64>) -> Result<TotalXp, String> {
 }
 
 pub fn item_names(pid: u32, ids: &[i32]) -> Result<Vec<Option<String>>, String> {
-    names(pid, ids, ipc::input::ITEM_NAMES_MESSAGE, |shared, batch| {
-        let mut request = ItemNameRequest { count: batch.len() as u32, ..Default::default() };
-        request.ids[..batch.len()].copy_from_slice(batch);
-        shared.write_item_name_request(&request)
-    }, |shared| shared.read_item_name_status(100))
+    names(
+        pid,
+        ids,
+        ipc::input::ITEM_NAMES_MESSAGE,
+        |shared, batch| {
+            let mut request = ItemNameRequest {
+                count: batch.len() as u32,
+                ..Default::default()
+            };
+            request.ids[..batch.len()].copy_from_slice(batch);
+            shared.write_item_name_request(&request)
+        },
+        |shared| shared.read_item_name_status(100),
+    )
 }
 
 pub fn game_val_names(pid: u32, kind: u32, ids: &[i32]) -> Result<Vec<Option<String>>, String> {
-    names(pid, ids, ipc::input::GAME_VALS_MESSAGE, |shared, batch| {
-        let mut request = GameValRequest { kind, count: batch.len() as u32, ..Default::default() };
-        request.ids[..batch.len()].copy_from_slice(batch);
-        shared.write_game_val_request(&request)
-    }, |shared| shared.read_game_val_status(100))
+    names(
+        pid,
+        ids,
+        ipc::input::GAME_VALS_MESSAGE,
+        |shared, batch| {
+            let mut request = GameValRequest {
+                kind,
+                count: batch.len() as u32,
+                ..Default::default()
+            };
+            request.ids[..batch.len()].copy_from_slice(batch);
+            shared.write_game_val_request(&request)
+        },
+        |shared| shared.read_game_val_status(100),
+    )
 }
 
 fn names(
@@ -668,7 +812,12 @@ fn names(
     reader(pid, 0, "")?;
     let mut names = Vec::with_capacity(ids.len());
     for batch in ids.chunks(ITEM_NAME_BATCH) {
-        let status = ask(pid, message, |shared| write(shared, batch), |shared| read(shared).map(|s| (s.sequence, s)))?;
+        let status = ask(
+            pid,
+            message,
+            |shared| write(shared, batch),
+            |shared| read(shared).map(|s| (s.sequence, s)),
+        )?;
         match status.status {
             item_name_status::OK => names.extend((0..status.count as usize).map(|i| {
                 status.name(i).filter(|name| !name.is_empty()).map(|name| String::from_utf8_lossy(name).replace('\u{a0}', " "))
@@ -684,11 +833,21 @@ fn names(
 
 static TERRAIN: Mutex<Option<(u32, Terrain)>> = Mutex::new(None);
 
-fn project_locally(pid: u32, points: &[projection::Point], shift: Option<[i32; 3]>, clip: bool) -> Result<Vec<[f32; 2]>, Failure> {
+fn project_locally(
+    pid: u32,
+    points: &[projection::Point],
+    shift: Option<[i32; 3]>,
+    clip: bool,
+) -> Result<Vec<[f32; 2]>, Failure> {
     let (layout, memory) = reader(pid, 0, "").map_err(Failure::Unavailable)?;
     let mut cache = TERRAIN.lock().unwrap_or_else(|e| e.into_inner());
-    let mut terrain = cache.take().filter(|(p, _)| *p == pid).map(|(_, terrain)| terrain);
-    let result = projection::project(&memory, &layout, &mut terrain, points, shift, clip, || decorations(pid));
+    let mut terrain = cache
+        .take()
+        .filter(|(p, _)| *p == pid)
+        .map(|(_, terrain)| terrain);
+    let result = projection::project(&memory, &layout, &mut terrain, points, shift, clip, || {
+        decorations(pid)
+    });
     *cache = terrain.map(|terrain| (pid, terrain));
     result
 }
@@ -697,7 +856,9 @@ pub fn project(pid: u32, points: &[projection::Point], via: Via) -> Result<Vec<[
     if via != Via::Client {
         match project_locally(pid, points, None, false) {
             Ok(screen) => return Ok(screen),
-            Err(Failure::Unavailable(why)) if via == Via::Local => return Err(format!("local projection: {why}")),
+            Err(Failure::Unavailable(why)) if via == Via::Local => {
+                return Err(format!("local projection: {why}"));
+            }
             Err(Failure::Unavailable(_)) => {}
         }
     }
@@ -714,7 +875,11 @@ pub fn project_clipped(pid: u32, points: &[projection::Point]) -> Result<Vec<[f3
 }
 
 // `project` with the camera moved by `shift` first (fine x, y and the plane it ends on, negative for this one); only the local projection can move the camera.
-pub fn project_moved(pid: u32, points: &[projection::Point], shift: [i32; 3]) -> Result<Vec<[f32; 2]>, String> {
+pub fn project_moved(
+    pid: u32,
+    points: &[projection::Point],
+    shift: [i32; 3],
+) -> Result<Vec<[f32; 2]>, String> {
     match project_locally(pid, points, Some(shift), false) {
         Ok(screen) => Ok(screen),
         Err(Failure::Unavailable(why)) => Err(format!("local projection: {why}")),
@@ -722,11 +887,18 @@ pub fn project_moved(pid: u32, points: &[projection::Point], shift: [i32; 3]) ->
 }
 
 fn decorations(pid: u32) -> Vec<projection::Decoration> {
-    let Ok(reply) = locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE) else { return Vec::new() };
+    let Ok(reply) = locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE) else {
+        return Vec::new();
+    };
     reply.locs[..(reply.count as usize).min(reply.locs.len())]
         .iter()
         .filter(|l| l.kind == projection::GROUND_DECORATION && l.decoration_height != 0)
-        .map(|l| ((reply.plane, l.x as i32, l.y as i32), l.decoration_height as i32))
+        .map(|l| {
+            (
+                (reply.plane, l.x as i32, l.y as i32),
+                l.decoration_height as i32,
+            )
+        })
         .collect()
 }
 
@@ -734,7 +906,10 @@ fn project_in_client(pid: u32, points: &[[i32; 3]]) -> Result<Vec<[f32; 2]>, Str
     reader(pid, 0, "")?;
     let mut screen = Vec::with_capacity(points.len());
     for batch in points.chunks(PROJECT_BATCH) {
-        let mut request = ProjectRequest { count: batch.len() as u32, ..Default::default() };
+        let mut request = ProjectRequest {
+            count: batch.len() as u32,
+            ..Default::default()
+        };
         request.points[..batch.len()].copy_from_slice(batch);
         let reply = ask(
             pid,
@@ -745,8 +920,12 @@ fn project_in_client(pid: u32, points: &[[i32; 3]]) -> Result<Vec<[f32; 2]>, Str
         match reply.status {
             project_status::OK => screen.extend_from_slice(&reply.points[..reply.count as usize]),
             project_status::NOT_IN_GAME => return Err("not logged in".into()),
-            project_status::NOT_FOUND => return Err("agent didn't find the client's projection".into()),
-            project_status::OTHER_THREAD => return Err("the client runs its game on another thread than its window's".into()),
+            project_status::NOT_FOUND => {
+                return Err("agent didn't find the client's projection".into());
+            }
+            project_status::OTHER_THREAD => {
+                return Err("the client runs its game on another thread than its window's".into());
+            }
             project_status::TOO_MANY => return Err("too many points in one request".into()),
             other => return Err(format!("unknown projection status {other}")),
         }
@@ -767,7 +946,8 @@ fn model(pid: u32, request: ModelRequest) -> Result<Option<crate::EntityModel>, 
             bounding_box: reply.bounding_box != 0,
             orientation: reply.orientation,
             vertex_count: reply.vertex_count,
-            corners: reply.corners[..(reply.corner_count as usize).min(reply.corners.len())].to_vec(),
+            corners: reply.corners[..(reply.corner_count as usize).min(reply.corners.len())]
+                .to_vec(),
             hull: reply.hull[..(reply.hull_count as usize).min(reply.hull.len())].to_vec(),
             face_count: reply.face_count,
             faces: reply.faces[..(reply.face_count as usize).min(reply.faces.len())].to_vec(),
@@ -775,21 +955,53 @@ fn model(pid: u32, request: ModelRequest) -> Result<Option<crate::EntityModel>, 
         model_status::NO_NPC | model_status::NO_MODEL => Ok(None),
         model_status::NOT_IN_GAME => Err("not logged in".into()),
         model_status::NOT_FOUND => Err("agent didn't find the client's models".into()),
-        model_status::OTHER_THREAD => Err("the client runs its game on another thread than its window's".into()),
+        model_status::OTHER_THREAD => {
+            Err("the client runs its game on another thread than its window's".into())
+        }
         other => Err(format!("unknown model status {other}")),
     }
 }
 
 pub fn npc_model(pid: u32, npc_index: i32) -> Result<Option<crate::EntityModel>, String> {
-    model(pid, ModelRequest { index: npc_index, target: model_target::NPC, ..Default::default() })
+    model(
+        pid,
+        ModelRequest {
+            index: npc_index,
+            target: model_target::NPC,
+            ..Default::default()
+        },
+    )
 }
 
 pub fn player_model(pid: u32, player_index: i32) -> Result<Option<crate::EntityModel>, String> {
-    model(pid, ModelRequest { index: player_index, target: model_target::PLAYER, ..Default::default() })
+    model(
+        pid,
+        ModelRequest {
+            index: player_index,
+            target: model_target::PLAYER,
+            ..Default::default()
+        },
+    )
 }
 
-pub fn loc_model(pid: u32, kind: u8, scene_x: i32, scene_y: i32, id: i32) -> Result<Option<crate::EntityModel>, String> {
-    model(pid, ModelRequest { target: model_target::LOC, loc_kind: kind as u32, loc_x: scene_x, loc_y: scene_y, loc_id: id, ..Default::default() })
+pub fn loc_model(
+    pid: u32,
+    kind: u8,
+    scene_x: i32,
+    scene_y: i32,
+    id: i32,
+) -> Result<Option<crate::EntityModel>, String> {
+    model(
+        pid,
+        ModelRequest {
+            target: model_target::LOC,
+            loc_kind: kind as u32,
+            loc_x: scene_x,
+            loc_y: scene_y,
+            loc_id: id,
+            ..Default::default()
+        },
+    )
 }
 
 // `request` is an `ipc::state::locs_request` value.
@@ -801,14 +1013,18 @@ fn locs_reply(pid: u32, request: i32) -> Result<Box<LocsReply>, String> {
         |shared| shared.write_locs_request(request),
         |shared| {
             let mut reply: Box<LocsReply> = unsafe { Box::new_zeroed().assume_init() };
-            shared.read_locs_reply_into(&mut reply, 100).then_some((reply.sequence, reply))
+            shared
+                .read_locs_reply_into(&mut reply, 100)
+                .then_some((reply.sequence, reply))
         },
     )?;
     match reply.status {
         loc_status::OK => {}
         loc_status::NOT_IN_GAME => return Err("not logged in".into()),
         loc_status::NOT_FOUND => return Err("agent didn't find the client's scene".into()),
-        loc_status::OTHER_THREAD => return Err("the client runs its game on another thread than its window's".into()),
+        loc_status::OTHER_THREAD => {
+            return Err("the client runs its game on another thread than its window's".into());
+        }
         other => return Err(format!("unknown locs status {other}")),
     }
     Ok(reply)
@@ -822,7 +1038,11 @@ type TickCache<T> = Mutex<Option<(u32, Instant, T)>>;
 static LOCS_CACHE: TickCache<Arc<LocsReply>> = Mutex::new(None);
 static GROUND_ITEMS_CACHE: TickCache<Arc<Vec<crate::GroundItem>>> = Mutex::new(None);
 
-fn cached<T: Clone>(cache: &TickCache<T>, pid: u32, fetch: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn cached<T: Clone>(
+    cache: &TickCache<T>,
+    pid: u32,
+    fetch: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((cached, at, value)) = cache.as_ref()
         && *cached == pid
@@ -836,7 +1056,9 @@ fn cached<T: Clone>(cache: &TickCache<T>, pid: u32, fetch: impl FnOnce() -> Resu
 }
 
 fn cached_locs_reply(pid: u32) -> Result<Arc<LocsReply>, String> {
-    cached(&LOCS_CACHE, pid, || locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE).map(Arc::from))
+    cached(&LOCS_CACHE, pid, || {
+        locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE).map(Arc::from)
+    })
 }
 
 /// The locs of the loaded scene on `plane` (the player's when `None`).
@@ -852,13 +1074,18 @@ pub fn locs(pid: u32, plane: Option<i32>) -> Result<Vec<crate::Loc>, String> {
 /// The clickable locs of the loaded scene on every plane: what doors and ladders are.
 pub fn clickable_locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
     use ipc::state::locs_request::*;
-    Ok(decode_locs_reply(&*locs_reply(pid, ALL_PLANES | CLICKABLE_ONLY)?))
+    Ok(decode_locs_reply(&*locs_reply(
+        pid,
+        ALL_PLANES | CLICKABLE_ONLY,
+    )?))
 }
 
 fn decode_locs_reply(reply: &LocsReply) -> Vec<crate::Loc> {
     use ipc::state::{LOC_CLICKABLE, LOC_PLANE_MASK, LOC_PLANE_SHIFT};
-    let names: Vec<String> =
-        reply.names[..(reply.name_count as usize).min(reply.names.len())].iter().map(|n| String::from_utf8_lossy(ipc::state::text(n)).replace('\u{a0}', " ")).collect();
+    let names: Vec<String> = reply.names[..(reply.name_count as usize).min(reply.names.len())]
+        .iter()
+        .map(|n| String::from_utf8_lossy(ipc::state::text(n)).replace('\u{a0}', " "))
+        .collect();
     let known = |v: u8| (v != 0xff).then_some(v);
     reply.locs[..(reply.count as usize).min(reply.locs.len())]
         .iter()
@@ -887,46 +1114,92 @@ fn cache_request(pid: u32, request: &CacheRequest) -> Result<Box<CacheReply>, St
         |shared| shared.write_cache_request(request),
         |shared| {
             let mut reply: Box<CacheReply> = unsafe { Box::new_zeroed().assume_init() };
-            shared.read_cache_reply_into(&mut reply, 100).then_some((reply.sequence, reply))
+            shared
+                .read_cache_reply_into(&mut reply, 100)
+                .then_some((reply.sequence, reply))
         },
     )?;
     match reply.status {
         cache_status::OK => Ok(reply),
         cache_status::NOT_FOUND => Err("agent didn't find the client's cache reader".into()),
         cache_status::NO_INDEX => Err(format!("the client has no cache index {}", request.index)),
-        cache_status::NO_ARCHIVE => Err(format!("cache index {} has no archive {}", request.index, request.archive)),
-        cache_status::OTHER_THREAD => Err("the client runs its game on another thread than its window's".into()),
+        cache_status::NO_ARCHIVE => Err(format!(
+            "cache index {} has no archive {}",
+            request.index, request.archive
+        )),
+        cache_status::OTHER_THREAD => {
+            Err("the client runs its game on another thread than its window's".into())
+        }
         cache_status::TOO_MANY => Err("too many files in one request".into()),
         other => Err(format!("unknown cache status {other}")),
     }
 }
 
-fn cache_ids(pid: u32, kind: u32, index: u32, archive: i32) -> Result<crate::cache::CacheIds, String> {
+fn cache_ids(
+    pid: u32,
+    kind: u32,
+    index: u32,
+    archive: i32,
+) -> Result<crate::cache::CacheIds, String> {
     reader(pid, 0, "")?;
-    let reply = cache_request(pid, &CacheRequest { kind, index, archive, ..Default::default() })?;
-    let ids = reply.data[..reply.used as usize].as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect();
-    Ok(crate::cache::CacheIds { ids, fingerprint: reply.fingerprint })
+    let reply = cache_request(
+        pid,
+        &CacheRequest {
+            kind,
+            index,
+            archive,
+            ..Default::default()
+        },
+    )?;
+    let ids = reply.data[..reply.used as usize]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
+        .collect();
+    Ok(crate::cache::CacheIds {
+        ids,
+        fingerprint: reply.fingerprint,
+    })
 }
 
 pub fn cache_archives(pid: u32, index: u32) -> Result<crate::cache::CacheIds, String> {
     cache_ids(pid, cache_kind::ARCHIVES, index, 0)
 }
 
-pub fn cache_archive_files(pid: u32, index: u32, archive: i32) -> Result<crate::cache::CacheIds, String> {
+pub fn cache_archive_files(
+    pid: u32,
+    index: u32,
+    archive: i32,
+) -> Result<crate::cache::CacheIds, String> {
     cache_ids(pid, cache_kind::ARCHIVE_FILES, index, archive)
 }
 
-pub fn cache_files(pid: u32, index: u32, files: &[[i32; 2]]) -> Result<Vec<Option<Vec<u8>>>, String> {
+pub fn cache_files(
+    pid: u32,
+    index: u32,
+    files: &[[i32; 2]],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
     cache_files_batched(pid, index, files, CACHE_BATCH)
 }
 
-fn cache_files_batched(pid: u32, index: u32, files: &[[i32; 2]], batch: usize) -> Result<Vec<Option<Vec<u8>>>, String> {
+fn cache_files_batched(
+    pid: u32,
+    index: u32,
+    files: &[[i32; 2]],
+    batch: usize,
+) -> Result<Vec<Option<Vec<u8>>>, String> {
     reader(pid, 0, "")?;
     let mut out: Vec<Option<Vec<u8>>> = vec![None; files.len()];
     let mut next = 0;
     while next < files.len() {
         let batch = &files[next..(next + batch.clamp(1, CACHE_BATCH)).min(files.len())];
-        let mut request = CacheRequest { kind: cache_kind::FILES, index, count: batch.len() as u32, ..Default::default() };
+        let mut request = CacheRequest {
+            kind: cache_kind::FILES,
+            index,
+            count: batch.len() as u32,
+            ..Default::default()
+        };
         request.files[..batch.len()].copy_from_slice(batch);
         let reply = cache_request(pid, &request)?;
         let mut done = 0;
@@ -936,14 +1209,19 @@ fn cache_files_batched(pid: u32, index: u32, files: &[[i32; 2]], batch: usize) -
                 CACHE_FILE_MISSING => {}
                 length => {
                     let start = file.offset as usize;
-                    out[next + i] = reply.data.get(start..start + length as usize).map(<[u8]>::to_vec);
+                    out[next + i] = reply
+                        .data
+                        .get(start..start + length as usize)
+                        .map(<[u8]>::to_vec);
                 }
             }
             done = i + 1;
         }
         if done == 0 {
             let [archive, file] = batch[0];
-            return Err(format!("cache file {index}/{archive}/{file} is too big to be sent"));
+            return Err(format!(
+                "cache file {index}/{archive}/{file} is too big to be sent"
+            ));
         }
         next += done;
     }
@@ -956,17 +1234,29 @@ fn config_files(pid: u32, archive: i32, ids: &[i32]) -> Result<Vec<Option<Vec<u8
 }
 
 pub fn enum_def(pid: u32, id: i32) -> Result<Option<crate::config::EnumDef>, String> {
-    let Some(data) = config_files(pid, crate::config::ENUM_ARCHIVE, &[id])?.pop().flatten() else { return Ok(None) };
-    crate::config::decode_enum(&data).map(Some).ok_or_else(|| format!("enum {id} has an opcode this reader doesn't know"))
+    let Some(data) = config_files(pid, crate::config::ENUM_ARCHIVE, &[id])?
+        .pop()
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    crate::config::decode_enum(&data)
+        .map(Some)
+        .ok_or_else(|| format!("enum {id} has an opcode this reader doesn't know"))
 }
 
-pub fn item_params(pid: u32, ids: &[i32]) -> Result<Vec<Option<std::collections::BTreeMap<u32, crate::config::Value>>>, String> {
+pub fn item_params(
+    pid: u32,
+    ids: &[i32],
+) -> Result<Vec<Option<std::collections::BTreeMap<u32, crate::config::Value>>>, String> {
     let files = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?;
     ids.iter()
         .zip(files)
         .map(|(id, data)| match data {
             None => Ok(None),
-            Some(data) => crate::config::decode_obj_params(&data).map(Some).ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
+            Some(data) => crate::config::decode_obj_params(&data)
+                .map(Some)
+                .ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
         })
         .collect()
 }
@@ -978,39 +1268,80 @@ pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String
         .zip(files)
         .map(|(id, data)| match data {
             None => Ok(None),
-            Some(data) => crate::config::decode_obj(&data).map(|def| Some(def.stackable)).ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
+            Some(data) => crate::config::decode_obj(&data)
+                .map(|def| Some(def.stackable))
+                .ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
         })
         .collect()
 }
 
 // Every varbit stored in `varp`: (id, definition, gameval name), by lowest bit.
-pub fn varbits_of(pid: u32, varp: u16) -> Result<Vec<(i32, crate::config::VarbitDef, Option<String>)>, String> {
-    let ids: Vec<i32> = cache_archive_files(pid, crate::cache::CONFIG_INDEX, crate::config::VARBIT_ARCHIVE)?.ids.iter().map(|&id| id as i32).collect();
+pub fn varbits_of(
+    pid: u32,
+    varp: u16,
+) -> Result<Vec<(i32, crate::config::VarbitDef, Option<String>)>, String> {
+    let ids: Vec<i32> = cache_archive_files(
+        pid,
+        crate::cache::CONFIG_INDEX,
+        crate::config::VARBIT_ARCHIVE,
+    )?
+    .ids
+    .iter()
+    .map(|&id| id as i32)
+    .collect();
     let mut found = Vec::new();
-    for (&id, data) in ids.iter().zip(config_files(pid, crate::config::VARBIT_ARCHIVE, &ids)?) {
-        if let Some(def) = data.as_deref().and_then(crate::config::decode_varbit).filter(|d| d.varp == varp) {
+    for (&id, data) in ids
+        .iter()
+        .zip(config_files(pid, crate::config::VARBIT_ARCHIVE, &ids)?)
+    {
+        if let Some(def) = data
+            .as_deref()
+            .and_then(crate::config::decode_varbit)
+            .filter(|d| d.varp == varp)
+        {
             found.push((id, def));
         }
     }
     found.sort_by_key(|(_, d)| d.lsb);
-    let names = game_val_names(pid, ipc::state::game_val::VARBIT, &found.iter().map(|(id, _)| *id).collect::<Vec<_>>())?;
-    Ok(found.into_iter().zip(names).map(|((id, def), name)| (id, def, name)).collect())
+    let names = game_val_names(
+        pid,
+        ipc::state::game_val::VARBIT,
+        &found.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    )?;
+    Ok(found
+        .into_iter()
+        .zip(names)
+        .map(|((id, def), name)| (id, def, name))
+        .collect())
 }
 
 // Varbit definitions only change with game updates, so they're read from the cache once per process.
-type VarbitCache = (u32, std::collections::HashMap<i32, Option<crate::config::VarbitDef>>);
+type VarbitCache = (
+    u32,
+    std::collections::HashMap<i32, Option<crate::config::VarbitDef>>,
+);
 static VARBITS: Mutex<Option<VarbitCache>> = Mutex::new(None);
 
 pub fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>, String> {
     {
         let cached = VARBITS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(def) = cached.as_ref().filter(|(p, _)| *p == pid).and_then(|(_, defs)| defs.get(&id)) {
+        if let Some(def) = cached
+            .as_ref()
+            .filter(|(p, _)| *p == pid)
+            .and_then(|(_, defs)| defs.get(&id))
+        {
             return Ok(*def);
         }
     }
-    let def = match config_files(pid, crate::config::VARBIT_ARCHIVE, &[id])?.pop().flatten() {
+    let def = match config_files(pid, crate::config::VARBIT_ARCHIVE, &[id])?
+        .pop()
+        .flatten()
+    {
         None => None,
-        Some(data) => Some(crate::config::decode_varbit(&data).ok_or_else(|| format!("varbit {id} has an opcode this reader doesn't know"))?),
+        Some(data) => Some(
+            crate::config::decode_varbit(&data)
+                .ok_or_else(|| format!("varbit {id} has an opcode this reader doesn't know"))?,
+        ),
     };
     let mut cached = VARBITS.lock().unwrap_or_else(|e| e.into_inner());
     if cached.as_ref().is_none_or(|(p, _)| *p != pid) {
@@ -1023,11 +1354,16 @@ pub fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>,
 }
 
 pub fn varbit(pid: u32, id: i32) -> Result<Option<i32>, String> {
-    let Some(def) = varbit_def(pid, id)? else { return Err(format!("the cache has no varbit {id}")) };
+    let Some(def) = varbit_def(pid, id)? else {
+        return Err(format!("the cache has no varbit {id}"));
+    };
     Ok(varp_value(pid, def.varp as usize)?.map(|varp| def.value(varp)))
 }
 
-type LocTexts = (u32, std::collections::HashMap<u32, Option<(crate::collision::LocDef, crate::collision::LocText)>>);
+type LocTexts = (
+    u32,
+    std::collections::HashMap<u32, Option<(crate::collision::LocDef, crate::collision::LocText)>>,
+);
 // Loc definitions only change with game updates, so each is read from the cache once per process.
 static LOC_TEXTS: Mutex<Option<LocTexts>> = Mutex::new(None);
 
@@ -1041,8 +1377,14 @@ fn read_loc_texts(pid: u32, ids: &[u32]) -> Result<(), String> {
     ids.dedup();
     let missing: Vec<u32> = {
         let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-        let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
-        ids.iter().copied().filter(|id| !known.is_some_and(|defs| defs.contains_key(id))).collect()
+        let known = cached
+            .as_ref()
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, defs)| defs);
+        ids.iter()
+            .copied()
+            .filter(|id| !known.is_some_and(|defs| defs.contains_key(id)))
+            .collect()
     };
     if missing.is_empty() {
         return Ok(());
@@ -1068,8 +1410,14 @@ fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, Sh
     let lookup = |ids: &[u32]| -> Result<Vec<Option<ShownLoc>>, String> {
         read_loc_texts(pid, ids)?;
         let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-        let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
-        Ok(ids.iter().map(|id| known.and_then(|defs| defs.get(id)).cloned().flatten()).collect())
+        let known = cached
+            .as_ref()
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, defs)| defs);
+        Ok(ids
+            .iter()
+            .map(|id| known.and_then(|defs| defs.get(id)).cloned().flatten())
+            .collect())
     };
     let mut shown = std::collections::HashMap::new();
     let mut transformed: Vec<(u32, u32)> = Vec::new();
@@ -1101,7 +1449,11 @@ fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, Sh
 }
 
 /// The placements the cache has inside `area` (`[x1, y1, x2, y2]`, both corners included) on `plane_wanted` (all when `None`), with their world tile.
-fn cache_placements(pid: u32, area: [i32; 4], plane_wanted: Option<i32>) -> Result<Vec<(crate::collision::Placement, i32, i32)>, String> {
+fn cache_placements(
+    pid: u32,
+    area: [i32; 4],
+    plane_wanted: Option<i32>,
+) -> Result<Vec<(crate::collision::Placement, i32, i32)>, String> {
     use crate::{cache::*, collision::*};
     let [x1, y1, x2, y2] = area;
     if x1 > x2 || y1 > y2 || x1 < 0 || y1 < 0 {
@@ -1109,7 +1461,9 @@ fn cache_placements(pid: u32, area: [i32; 4], plane_wanted: Option<i32>) -> Resu
     }
     let squares = ((x2 >> 6) - (x1 >> 6) + 1) * ((y2 >> 6) - (y1 >> 6) + 1);
     if squares > CACHE_LOCS_MAX_SQUARES {
-        return Err(format!("the area covers {squares} map squares, at most {CACHE_LOCS_MAX_SQUARES}"));
+        return Err(format!(
+            "the area covers {squares} map squares, at most {CACHE_LOCS_MAX_SQUARES}"
+        ));
     }
     let mut regions = Vec::new();
     for rx in (x1 >> 6)..=(x2 >> 6) {
@@ -1117,14 +1471,26 @@ fn cache_placements(pid: u32, area: [i32; 4], plane_wanted: Option<i32>) -> Resu
             regions.push((rx, ry));
         }
     }
-    let files: Vec<[i32; 2]> = regions.iter().map(|&(rx, ry)| [region_id(rx, ry) as i32, 1]).collect();
+    let files: Vec<[i32; 2]> = regions
+        .iter()
+        .map(|&(rx, ry)| [region_id(rx, ry) as i32, 1])
+        .collect();
     let mut found = Vec::new();
-    for (data, &(rx, ry)) in cache_files(pid, MAPS_INDEX, &files)?.into_iter().zip(&regions) {
+    for (data, &(rx, ry)) in cache_files(pid, MAPS_INDEX, &files)?
+        .into_iter()
+        .zip(&regions)
+    {
         let Some(data) = data else { continue };
-        let placements = decode_locs(&data).ok_or_else(|| format!("map square {}'s locs don't decode", region_id(rx, ry)))?;
+        let placements = decode_locs(&data)
+            .ok_or_else(|| format!("map square {}'s locs don't decode", region_id(rx, ry)))?;
         for p in placements {
             let (x, y, plane) = (rx * 64 + p.x as i32, ry * 64 + p.y as i32, p.plane as i32);
-            if x >= x1 && x <= x2 && y >= y1 && y <= y2 && plane_wanted.is_none_or(|want| want == plane) {
+            if x >= x1
+                && x <= x2
+                && y >= y1
+                && y <= y2
+                && plane_wanted.is_none_or(|want| want == plane)
+            {
                 found.push((p, x, y));
             }
         }
@@ -1133,26 +1499,53 @@ fn cache_placements(pid: u32, area: [i32; 4], plane_wanted: Option<i32>) -> Resu
 }
 
 /// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
-pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> Result<Vec<crate::CacheLoc>, String> {
+pub fn cache_locs(
+    pid: u32,
+    area: [i32; 4],
+    filter: &crate::CacheLocFilter,
+) -> Result<Vec<crate::CacheLoc>, String> {
     let found = cache_placements(pid, area, filter.plane)?;
     let ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
     read_loc_texts(pid, &ids)?;
 
-    let lower = |list: &Option<Vec<String>>| list.as_ref().map(|l| l.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>());
+    let lower = |list: &Option<Vec<String>>| {
+        list.as_ref()
+            .map(|l| l.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>())
+    };
     let (names, actions) = (lower(&filter.names), lower(&filter.actions));
     let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
+    let known = cached
+        .as_ref()
+        .filter(|(p, _)| *p == pid)
+        .map(|(_, defs)| defs);
     let mut out = Vec::new();
     for (p, x, y) in found {
-        let Some((def, text)) = known.and_then(|defs| defs.get(&p.id)).and_then(|d| d.as_ref()) else { continue };
+        let Some((def, text)) = known
+            .and_then(|defs| defs.get(&p.id))
+            .and_then(|d| d.as_ref())
+        else {
+            continue;
+        };
         let name = text.name.to_lowercase();
-        if names.as_ref().is_some_and(|names| !names.iter().any(|n| name.contains(n.as_str()))) {
+        if names
+            .as_ref()
+            .is_some_and(|names| !names.iter().any(|n| name.contains(n.as_str())))
+        {
             continue;
         }
-        if actions.as_ref().is_some_and(|wanted| !text.actions.iter().any(|a| wanted.contains(&a.to_lowercase()))) {
+        if actions.as_ref().is_some_and(|wanted| {
+            !text
+                .actions
+                .iter()
+                .any(|a| wanted.contains(&a.to_lowercase()))
+        }) {
             continue;
         }
-        let (size_x, size_y) = if p.rotation & 1 == 1 { (def.size_y, def.size_x) } else { (def.size_x, def.size_y) };
+        let (size_x, size_y) = if p.rotation & 1 == 1 {
+            (def.size_y, def.size_x)
+        } else {
+            (def.size_x, def.size_y)
+        };
         out.push(crate::CacheLoc {
             id: p.id as i32,
             name: text.name.clone(),
@@ -1163,7 +1556,12 @@ pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> R
             size_y,
             shape: p.shape,
             rotation: p.rotation,
-            actions: text.actions.iter().filter(|a| !a.is_empty()).cloned().collect(),
+            actions: text
+                .actions
+                .iter()
+                .filter(|a| !a.is_empty())
+                .cloned()
+                .collect(),
         });
     }
     out.sort_by_key(|l| (l.plane, l.x, l.y, l.id));
@@ -1171,18 +1569,38 @@ pub fn cache_locs(pid: u32, area: [i32; 4], filter: &crate::CacheLocFilter) -> R
 }
 
 // The climbables the cache places inside `area` on every plane, but where `loaded` (the live scene has them, in their current state): ladders, caves and trapdoors that can be far from the scene (their transforms aren't resolved).
-fn cache_climbables(pid: u32, area: [i32; 4], request: &crate::nav::Request, flags: crate::nav::Flags, loaded: &dyn Fn(i32, i32) -> bool) -> Result<Vec<crate::nav::Climbable>, String> {
-    let found: Vec<_> = cache_placements(pid, area, None)?.into_iter().filter(|&(_, x, y)| !loaded(x, y)).collect();
+fn cache_climbables(
+    pid: u32,
+    area: [i32; 4],
+    request: &crate::nav::Request,
+    flags: crate::nav::Flags,
+    loaded: &dyn Fn(i32, i32) -> bool,
+) -> Result<Vec<crate::nav::Climbable>, String> {
+    let found: Vec<_> = cache_placements(pid, area, None)?
+        .into_iter()
+        .filter(|&(_, x, y)| !loaded(x, y))
+        .collect();
     let ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
     read_loc_texts(pid, &ids)?;
     let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    let known = cached.as_ref().filter(|(p, _)| *p == pid).map(|(_, defs)| defs);
-    let lookup = |id: i32| known.and_then(|defs| defs.get(&(id as u32))).and_then(|d| d.as_ref());
+    let known = cached
+        .as_ref()
+        .filter(|(p, _)| *p == pid)
+        .map(|(_, defs)| defs);
+    let lookup = |id: i32| {
+        known
+            .and_then(|defs| defs.get(&(id as u32)))
+            .and_then(|d| d.as_ref())
+    };
     let locs: Vec<crate::Loc> = found
         .iter()
         .filter_map(|&(p, x, y)| {
             let (def, _) = lookup(p.id as i32)?;
-            let (size_x, size_y) = if p.rotation & 1 == 1 { (def.size_y, def.size_x) } else { (def.size_x, def.size_y) };
+            let (size_x, size_y) = if p.rotation & 1 == 1 {
+                (def.size_y, def.size_x)
+            } else {
+                (def.size_x, def.size_y)
+            };
             // the tag's type: walls, wall decorations, game objects, ground decorations
             let kind = match p.shape {
                 0..=3 => 0,
@@ -1190,24 +1608,51 @@ fn cache_climbables(pid: u32, area: [i32; 4], request: &crate::nav::Request, fla
                 9..=21 => 2,
                 _ => 3,
             };
-            Some(crate::Loc { id: p.id as i32, name: None, kind, x, y, plane: p.plane as i32, scene_x: 0, scene_y: 0, size_x, size_y, shape: Some(p.shape), rotation: Some(p.rotation), clickable: true })
+            Some(crate::Loc {
+                id: p.id as i32,
+                name: None,
+                kind,
+                x,
+                y,
+                plane: p.plane as i32,
+                scene_x: 0,
+                scene_y: 0,
+                size_x,
+                size_y,
+                shape: Some(p.shape),
+                rotation: Some(p.rotation),
+                clickable: true,
+            })
         })
         .collect();
     Ok(crate::nav::scene_locs(flags, &locs, &lookup, request).1)
 }
 
-pub fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::WorldCollision, String> {
+pub fn world_collision(
+    pid: u32,
+    regions: &[u32],
+) -> Result<crate::collision::WorldCollision, String> {
     use crate::{cache::*, collision::*};
-    let files: Vec<[i32; 2]> = regions.iter().flat_map(|&r| [[r as i32, 0], [r as i32, 1]]).collect();
+    let files: Vec<[i32; 2]> = regions
+        .iter()
+        .flat_map(|&r| [[r as i32, 0], [r as i32, 1]])
+        .collect();
     let data = cache_files(pid, MAPS_INDEX, &files)?;
     let mut squares = Vec::new();
     for (pair, &region) in data.as_chunks::<2>().0.iter().zip(regions) {
-        let (Some(terrain), Some(locs)) = (&pair[0], &pair[1]) else { continue };
-        let settings = decode_terrain(terrain).ok_or_else(|| format!("map square {region}'s terrain doesn't decode"))?;
-        let locs = decode_locs(locs).ok_or_else(|| format!("map square {region}'s locs don't decode"))?;
+        let (Some(terrain), Some(locs)) = (&pair[0], &pair[1]) else {
+            continue;
+        };
+        let settings = decode_terrain(terrain)
+            .ok_or_else(|| format!("map square {region}'s terrain doesn't decode"))?;
+        let locs =
+            decode_locs(locs).ok_or_else(|| format!("map square {region}'s locs don't decode"))?;
         squares.push((region, settings, locs));
     }
-    let mut ids: Vec<u32> = squares.iter().flat_map(|(_, _, locs)| locs.iter().map(|l| l.id)).collect();
+    let mut ids: Vec<u32> = squares
+        .iter()
+        .flat_map(|(_, _, locs)| locs.iter().map(|l| l.id))
+        .collect();
     ids.sort_unstable();
     ids.dedup();
     let files: Vec<[i32; 2]> = ids.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
@@ -1234,12 +1679,20 @@ type WorldMovement = Arc<crate::collision::WorldCollision<crate::collision::Move
 static WORLD: Mutex<Option<(u64, u32, WorldMovement)>> = Mutex::new(None);
 
 fn world_cache_dir() -> std::path::PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("injector")
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("injector")
 }
 
 pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
     use crate::{cache::*, collision::*};
-    if let Some((_, _, world)) = WORLD.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|(_, p, _)| *p == pid) {
+    if let Some((_, _, world)) = WORLD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(_, p, _)| *p == pid)
+    {
         return Ok(world.clone());
     }
     let maps = cache_archives(pid, MAPS_INDEX)?;
@@ -1252,18 +1705,33 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
         return Ok(world);
     }
     let path = world_cache_dir().join(format!("collision-{key:016x}.bin"));
-    if let Some(world) = std::fs::read(&path).ok().and_then(|bytes| WorldCollision::from_bytes(&bytes, key)) {
+    if let Some(world) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| WorldCollision::from_bytes(&bytes, key))
+    {
         let world = std::sync::Arc::new(world);
         *cached = Some((key, pid, world.clone()));
         return Ok(world);
     }
 
     let started = Instant::now();
-    eprintln!("building world collision from the client's cache ({} map squares, {} loc definitions)", maps.ids.len(), loc_ids.ids.len());
-    let files: Vec<[i32; 2]> = loc_ids.ids.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
+    eprintln!(
+        "building world collision from the client's cache ({} map squares, {} loc definitions)",
+        maps.ids.len(),
+        loc_ids.ids.len()
+    );
+    let files: Vec<[i32; 2]> = loc_ids
+        .ids
+        .iter()
+        .map(|&id| [LOC_ARCHIVE, id as i32])
+        .collect();
     let mut defs = vec![None; loc_ids.ids.iter().max().map_or(0, |&m| m as usize + 1)];
     let mut undecoded = Vec::new();
-    for (&id, data) in loc_ids.ids.iter().zip(cache_files(pid, CONFIG_INDEX, &files)?) {
+    for (&id, data) in loc_ids
+        .ids
+        .iter()
+        .zip(cache_files(pid, CONFIG_INDEX, &files)?)
+    {
         match data.as_deref().map(decode_loc) {
             Some(Some(def)) => defs[id as usize] = Some(def),
             Some(None) => undecoded.push(id),
@@ -1271,7 +1739,11 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
         }
     }
     if !undecoded.is_empty() {
-        eprintln!("{} loc definitions didn't decode (left out): {:?}", undecoded.len(), &undecoded[..undecoded.len().min(20)]);
+        eprintln!(
+            "{} loc definitions didn't decode (left out): {:?}",
+            undecoded.len(),
+            &undecoded[..undecoded.len().min(20)]
+        );
     }
     let def = |id: u32| defs.get(id as usize).copied().flatten();
 
@@ -1280,7 +1752,10 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
         world.add_square(region);
     }
     for (done, regions) in maps.ids.chunks(WORLD_SQUARE_BATCH).enumerate() {
-        let files: Vec<[i32; 2]> = regions.iter().flat_map(|&r| [[r as i32, 0], [r as i32, 1]]).collect();
+        let files: Vec<[i32; 2]> = regions
+            .iter()
+            .flat_map(|&r| [[r as i32, 0], [r as i32, 1]])
+            .collect();
         let data = cache_files_batched(pid, MAPS_INDEX, &files, files.len())?;
         for (pair, &region) in data.as_chunks::<2>().0.iter().zip(regions) {
             let Some(settings) = pair[0].as_deref().and_then(decode_terrain) else {
@@ -1288,35 +1763,68 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
                 world.remove_square(region);
                 continue;
             };
-            let locs = pair[1].as_deref().map_or(Some(Vec::new()), decode_locs).unwrap_or_else(|| {
-                eprintln!("map square {region}'s locs don't decode");
-                Vec::new()
-            });
+            let locs = pair[1]
+                .as_deref()
+                .map_or(Some(Vec::new()), decode_locs)
+                .unwrap_or_else(|| {
+                    eprintln!("map square {region}'s locs don't decode");
+                    Vec::new()
+                });
             world.add_terrain_and_locs(region, &settings, &locs, &def);
         }
         if done % 20 == 0 {
-            eprintln!("  {}/{} map squares", (done + 1) * WORLD_SQUARE_BATCH, maps.ids.len());
+            eprintln!(
+                "  {}/{} map squares",
+                (done + 1) * WORLD_SQUARE_BATCH,
+                maps.ids.len()
+            );
         }
     }
     world.shrink();
     let bytes = world.to_bytes(key);
-    if let Err(e) = std::fs::create_dir_all(world_cache_dir()).and_then(|()| std::fs::write(&path, &bytes)) {
-        eprintln!("couldn't keep the world collision in {}: {e}", path.display());
+    if let Err(e) =
+        std::fs::create_dir_all(world_cache_dir()).and_then(|()| std::fs::write(&path, &bytes))
+    {
+        eprintln!(
+            "couldn't keep the world collision in {}: {e}",
+            path.display()
+        );
     }
-    eprintln!("world collision built in {:.1} s ({} KB on disk)", started.elapsed().as_secs_f32(), bytes.len() / 1024);
+    eprintln!(
+        "world collision built in {:.1} s ({} KB on disk)",
+        started.elapsed().as_secs_f32(),
+        bytes.len() / 1024
+    );
     let world = std::sync::Arc::new(world);
     *cached = Some((key, pid, world.clone()));
     Ok(world)
 }
 
 /// `max_tiles` caps how many tiles the search looks at (default `PATH_MAX_TILES`): a target that can't be reached would otherwise search every tile that can.
-pub fn find_path(pid: u32, plane: i32, from: [i32; 2], to: [i32; 2], max_tiles: Option<usize>) -> Result<Vec<[i32; 2]>, String> {
+pub fn find_path(
+    pid: u32,
+    plane: i32,
+    from: [i32; 2],
+    to: [i32; 2],
+    max_tiles: Option<usize>,
+) -> Result<Vec<[i32; 2]>, String> {
     use crate::pathfinding::{self, PathError};
     let world = world_movement(pid)?;
-    match pathfinding::find_path(&world, plane, (from[0], from[1]), (to[0], to[1]), max_tiles.unwrap_or(PATH_MAX_TILES).min(PATH_MAX_TILES)) {
+    match pathfinding::find_path(
+        &world,
+        plane,
+        (from[0], from[1]),
+        (to[0], to[1]),
+        max_tiles.unwrap_or(PATH_MAX_TILES).min(PATH_MAX_TILES),
+    ) {
         Ok(path) => Ok(path.into_iter().map(|(x, y)| [x, y]).collect()),
-        Err(PathError::Blocked((x, y))) => Err(format!("{x}, {y} (plane {plane}) can't be stood on")),
-        Err(PathError::NoPath) => Err(format!("no walking path from {}, {} to {}, {} on plane {plane}", from[0], from[1], to[0], to[1])),
+        Err(PathError::Blocked((x, y))) => {
+            Err(format!("{x}, {y} (plane {plane}) can't be stood on"))
+        }
+        Err(PathError::NoPath) => Err(format!(
+            "no walking path from {}, {} to {}, {} on plane {plane}",
+            from[0], from[1], to[0], to[1]
+        )),
         Err(PathError::TooFar(n)) => Err(format!("no walking path found within {n} tiles")),
     }
 }
@@ -1324,28 +1832,49 @@ pub fn find_path(pid: u32, plane: i32, from: [i32; 2], to: [i32; 2], max_tiles: 
 const PATH_MAX_TILES: usize = 4_000_000;
 
 // The cache's decoded collision of the map squares a route past the scene needs, plus the scenes seen lately (newest first) as a better guess than the cache.
-static SEEN_SCENES: Mutex<Vec<Arc<crate::scene_collision::SceneCollision>>> = Mutex::new(Vec::new());
+static SEEN_SCENES: Mutex<Vec<Arc<crate::scene_collision::SceneCollision>>> =
+    Mutex::new(Vec::new());
 const SEEN_SCENES_KEPT: usize = 4;
 
-static REGION_FLAGS: Mutex<Vec<(u32, Arc<crate::collision::WorldCollision>)>> = Mutex::new(Vec::new());
+static REGION_FLAGS: Mutex<Vec<(u32, Arc<crate::collision::WorldCollision>)>> =
+    Mutex::new(Vec::new());
 
-fn cache_regions(pid: u32, (x1, y1, x2, y2): (i32, i32, i32, i32)) -> Result<Vec<(u32, Arc<crate::collision::WorldCollision>)>, String> {
-    use crate::collision::{region_id, REGION_SIZE};
+fn cache_regions(
+    pid: u32,
+    (x1, y1, x2, y2): (i32, i32, i32, i32),
+) -> Result<Vec<(u32, Arc<crate::collision::WorldCollision>)>, String> {
+    use crate::collision::{REGION_SIZE, region_id};
     let wanted: Vec<u32> = (x1.div_euclid(REGION_SIZE)..=x2.div_euclid(REGION_SIZE))
-        .flat_map(|rx| (y1.div_euclid(REGION_SIZE)..=y2.div_euclid(REGION_SIZE)).map(move |ry| region_id(rx, ry)))
+        .flat_map(|rx| {
+            (y1.div_euclid(REGION_SIZE)..=y2.div_euclid(REGION_SIZE))
+                .map(move |ry| region_id(rx, ry))
+        })
         .collect();
     let mut cached = REGION_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
-    let missing: Vec<u32> = wanted.iter().copied().filter(|r| !cached.iter().any(|(c, _)| c == r)).collect();
+    let missing: Vec<u32> = wanted
+        .iter()
+        .copied()
+        .filter(|r| !cached.iter().any(|(c, _)| c == r))
+        .collect();
     if !missing.is_empty() {
         let world = Arc::new(world_collision(pid, &missing)?);
         cached.extend(missing.into_iter().map(|r| (r, world.clone())));
     }
-    Ok(cached.iter().filter(|(r, _)| wanted.contains(r)).cloned().collect())
+    Ok(cached
+        .iter()
+        .filter(|(r, _)| wanted.contains(r))
+        .cloned()
+        .collect())
 }
 
 // The route the game walks for a click on `to` over the client's collision map; with `options` it is randomized over a lattice (see `scene_graph`).
-pub fn scene_route(pid: u32, from: [i32; 2], to: [i32; 2], options: Option<crate::scene_graph::Options>) -> Result<crate::pathfinding::Route, String> {
-    use crate::collision::{region_id, REGION_SIZE};
+pub fn scene_route(
+    pid: u32,
+    from: [i32; 2],
+    to: [i32; 2],
+    options: Option<crate::scene_graph::Options>,
+) -> Result<crate::pathfinding::Route, String> {
+    use crate::collision::{REGION_SIZE, region_id};
     // a tile of the scene's edge ring is all ones
     const RING: u32 = 0xFF_FFFF;
     // the largest box a lattice is built over
@@ -1357,9 +1886,13 @@ pub fn scene_route(pid: u32, from: [i32; 2], to: [i32; 2], options: Option<crate
     if state::current(&memory, &layout) != Some(LOGGED_IN) {
         return Err("not logged in".into());
     }
-    let scene = crate::scene_collision::read(&memory, &layout).ok_or("the scene's collision map can't be read")?;
+    let scene = crate::scene_collision::read(&memory, &layout)
+        .ok_or("the scene's collision map can't be read")?;
     if scene.flags(from[0], from[1]).is_none() {
-        return Err(format!("{}, {} isn't in the loaded scene", from[0], from[1]));
+        return Err(format!(
+            "{}, {} isn't in the loaded scene",
+            from[0], from[1]
+        ));
     }
     let (from, to) = ((from[0], from[1]), (to[0], to[1]));
     let seen: Vec<Arc<crate::scene_collision::SceneCollision>> = if options.is_some() {
@@ -1367,7 +1900,11 @@ pub fn scene_route(pid: u32, from: [i32; 2], to: [i32; 2], options: Option<crate
         seen.retain(|s| (s.base_x, s.base_y, s.plane) != (scene.base_x, scene.base_y, scene.plane));
         seen.insert(0, Arc::new(scene.clone()));
         seen.truncate(SEEN_SCENES_KEPT);
-        seen.iter().skip(1).filter(|s| s.plane == scene.plane).cloned().collect()
+        seen.iter()
+            .skip(1)
+            .filter(|s| s.plane == scene.plane)
+            .cloned()
+            .collect()
     } else {
         Vec::new()
     };
@@ -1379,35 +1916,69 @@ pub fn scene_route(pid: u32, from: [i32; 2], to: [i32; 2], options: Option<crate
             let bounds = if scene.flags(to.0, to.1).is_some_and(|f| f != RING) {
                 (x1, y1, x2, y2)
             } else {
-                let (x1, y1, x2, y2) = (x1.min(to.0 - 12), y1.min(to.1 - 12), x2.max(to.0 + 12), y2.max(to.1 + 12));
+                let (x1, y1, x2, y2) = (
+                    x1.min(to.0 - 12),
+                    y1.min(to.1 - 12),
+                    x2.max(to.0 + 12),
+                    y2.max(to.1 + 12),
+                );
                 let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
-                (square(x1), square(y1), square(x2) + REGION_SIZE - 1, square(y2) + REGION_SIZE - 1)
+                (
+                    square(x1),
+                    square(y1),
+                    square(x2) + REGION_SIZE - 1,
+                    square(y2) + REGION_SIZE - 1,
+                )
             };
             if bounds.2 - bounds.0 >= MAX_WINDOW || bounds.3 - bounds.1 >= MAX_WINDOW {
-                return Err(format!("{}, {} is too far from {}, {} for a route", to.0, to.1, from.0, from.1));
+                return Err(format!(
+                    "{}, {} is too far from {}, {} for a route",
+                    to.0, to.1, from.0, from.1
+                ));
             }
             let regions = cache_regions(pid, bounds)?;
             let plane = scene.plane;
             // The client's own tiles first (this scene's, then recent ones) where complete: a scene's outermost tiles miss the ground beyond.
             let live = |s: &crate::scene_collision::SceneCollision, x: i32, y: i32| {
-                let inner = |v: i32, base: i32| (base + SCENE_EDGE..base + SCENE_SIZE - SCENE_EDGE).contains(&v);
-                (inner(x, s.base_x) && inner(y, s.base_y)).then(|| s.flags(x, y)).flatten().filter(|&f| f != RING)
+                let inner = |v: i32, base: i32| {
+                    (base + SCENE_EDGE..base + SCENE_SIZE - SCENE_EDGE).contains(&v)
+                };
+                (inner(x, s.base_x) && inner(y, s.base_y))
+                    .then(|| s.flags(x, y))
+                    .flatten()
+                    .filter(|&f| f != RING)
             };
             let flags = |x: i32, y: i32| {
-                live(&scene, x, y).or_else(|| seen.iter().find_map(|s| live(s, x, y))).or_else(|| {
-                    let region = region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
-                    regions.iter().find(|(r, _)| *r == region).and_then(|(_, world)| world.flags(plane, x, y))
-                })
+                live(&scene, x, y)
+                    .or_else(|| seen.iter().find_map(|s| live(s, x, y)))
+                    .or_else(|| {
+                        let region =
+                            region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
+                        regions
+                            .iter()
+                            .find(|(r, _)| *r == region)
+                            .and_then(|(_, world)| world.flags(plane, x, y))
+                    })
             };
             crate::scene_graph::route(&flags, bounds, from, to, &options)
         }
     };
-    route.ok_or_else(|| format!("no route from {}, {} to {}, {} or near it", from.0, from.1, to.0, to.1))
+    route.ok_or_else(|| {
+        format!(
+            "no route from {}, {} to {}, {} or near it",
+            from.0, from.1, to.0, to.1
+        )
+    })
 }
 
-pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, request: &crate::nav::Request) -> Result<crate::nav::NavPlan, String> {
+pub fn nav_plan(
+    pid: u32,
+    from: crate::nav::Point,
+    to: crate::nav::Point,
+    request: &crate::nav::Request,
+) -> Result<crate::nav::NavPlan, String> {
     use crate::{
-        collision::{flag, REGION_SIZE},
+        collision::{REGION_SIZE, flag},
         nav::{NavAction, NavPlan, NavTile, UNDERGROUND},
     };
     // the largest box planned over in one go (at most 8 map squares wide: `cache_placements` reads 64 at most), a scene's size, and how many of its outermost tiles the cache knows better
@@ -1420,23 +1991,48 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
     if state::current(&memory, &layout) != Some(LOGGED_IN) {
         return Err("not logged in".into());
     }
-    let (_, live) = crate::scene_collision::read_all(&memory, &layout).ok_or("the scene's collision maps can't be read")?;
-    let scene = live.iter().flatten().next().ok_or("the scene has no collision maps")?;
+    let (_, live) = crate::scene_collision::read_all(&memory, &layout)
+        .ok_or("the scene's collision maps can't be read")?;
+    let scene = live
+        .iter()
+        .flatten()
+        .next()
+        .ok_or("the scene has no collision maps")?;
     let (base_x, base_y) = (scene.base_x, scene.base_y);
     let instance = in_instance(pid).unwrap_or(true);
-    let in_scene = |x: i32, y: i32, edge: i32| (base_x + edge..base_x + SCENE_SIZE - edge).contains(&x) && (base_y + edge..base_y + SCENE_SIZE - edge).contains(&y);
+    let in_scene = |x: i32, y: i32, edge: i32| {
+        (base_x + edge..base_x + SCENE_SIZE - edge).contains(&x)
+            && (base_y + edge..base_y + SCENE_SIZE - edge).contains(&y)
+    };
     if !in_scene(from.0, from.1, 0) {
         return Err(format!("{}, {} isn't in the loaded scene", from.0, from.1));
     }
 
     // the surface and the underground are planned over one box of the surface's coordinates: the scene's, with the goal's tile folded onto it
-    let shift = if base_y >= UNDERGROUND { UNDERGROUND } else { 0 };
+    let shift = if base_y >= UNDERGROUND {
+        UNDERGROUND
+    } else {
+        0
+    };
     let goal_across = !instance && (to.1 >= UNDERGROUND) != (shift != 0);
     let folded = |y: i32| if y >= UNDERGROUND { y - UNDERGROUND } else { y };
     // the box: the scene, grown to the goal when the cache can fill the rest, else to a stop along the world path
-    let scene_box = (base_x, base_y - shift, base_x + SCENE_SIZE - 1, base_y - shift + SCENE_SIZE - 1);
-    let grown = |(x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)| (x1.min(x - MARGIN), y1.min(y - MARGIN), x2.max(x + MARGIN), y2.max(y + MARGIN));
-    let fits = |(x1, y1, x2, y2): (i32, i32, i32, i32)| x2 - x1 < MAX_WINDOW && y2 - y1 < MAX_WINDOW;
+    let scene_box = (
+        base_x,
+        base_y - shift,
+        base_x + SCENE_SIZE - 1,
+        base_y - shift + SCENE_SIZE - 1,
+    );
+    let grown = |(x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)| {
+        (
+            x1.min(x - MARGIN),
+            y1.min(y - MARGIN),
+            x2.max(x + MARGIN),
+            y2.max(y + MARGIN),
+        )
+    };
+    let fits =
+        |(x1, y1, x2, y2): (i32, i32, i32, i32)| x2 - x1 < MAX_WINDOW && y2 - y1 < MAX_WINDOW;
     let mut goal = to;
     let mut bounds = scene_box;
     if (goal_across || !in_scene(to.0, to.1, 0)) && !instance {
@@ -1444,8 +2040,20 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
             bounds = grown(scene_box, (to.0, folded(to.1)));
         } else if from.2 == to.2 && !goal_across {
             let world = world_movement(pid)?;
-            let path = crate::pathfinding::find_path_with(&world, to.2, (from.0, from.1), (to.0, to.1), PATH_MAX_TILES, true).unwrap_or_default();
-            if let Some(&(x, y)) = path.iter().rev().find(|&&(x, y)| fits(grown(scene_box, (x, y - shift)))) {
+            let path = crate::pathfinding::find_path_with(
+                &world,
+                to.2,
+                (from.0, from.1),
+                (to.0, to.1),
+                PATH_MAX_TILES,
+                true,
+            )
+            .unwrap_or_default();
+            if let Some(&(x, y)) = path
+                .iter()
+                .rev()
+                .find(|&&(x, y)| fits(grown(scene_box, (x, y - shift))))
+            {
                 goal = (x, y, to.2);
                 bounds = grown(scene_box, (x, y - shift));
             }
@@ -1464,18 +2072,33 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
             Vec::new()
         } else {
             let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
-            let squares = |north: i32| cache_regions(pid, (square(bounds.0), square(bounds.1 + north), square(bounds.2) + REGION_SIZE - 1, square(bounds.3 + north) + REGION_SIZE - 1));
+            let squares = |north: i32| {
+                cache_regions(
+                    pid,
+                    (
+                        square(bounds.0),
+                        square(bounds.1 + north),
+                        square(bounds.2) + REGION_SIZE - 1,
+                        square(bounds.3 + north) + REGION_SIZE - 1,
+                    ),
+                )
+            };
             let mut regions = squares(shift)?;
             if across {
                 regions.extend(squares(UNDERGROUND - shift)?);
             }
             regions
         };
-        let region_of = |x: i32, y: i32| crate::collision::region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
+        let region_of = |x: i32, y: i32| {
+            crate::collision::region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE))
+        };
         // the cache's tiles where the scene's aren't trusted (or there are none), its closed doors open
         let cache = |x: i32, y: i32, plane: i32| {
             let region = region_of(x, y);
-            let flags = regions.iter().find(|(r, _)| *r == region).and_then(|(_, world)| world.flags(plane, x, y))?;
+            let flags = regions
+                .iter()
+                .find(|(r, _)| *r == region)
+                .and_then(|(_, world)| world.flags(plane, x, y))?;
             Some(flags & !flag::door_blocks(flags) & !flag::DOORS)
         };
         let edge = if regions.is_empty() { 0 } else { SCENE_EDGE };
@@ -1484,21 +2107,46 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
             if in_scene(x, y, edge) {
                 return scene.and_then(|s| s.flags(x, y));
             }
-            cache(x, y, plane).or_else(|| scene.and_then(|s| s.flags(x, y)).filter(|_| in_scene(x, y, 0)))
+            cache(x, y, plane).or_else(|| {
+                scene
+                    .and_then(|s| s.flags(x, y))
+                    .filter(|_| in_scene(x, y, 0))
+            })
         };
         let (doors, mut climbables) = crate::nav::scene_locs(&flags, &locs, &lookup, request);
         if across && !instance {
             for north in [shift, UNDERGROUND - shift] {
-                let area = [bounds.0.max(0), (bounds.1 + north).max(0), bounds.2, bounds.3 + north];
+                let area = [
+                    bounds.0.max(0),
+                    (bounds.1 + north).max(0),
+                    bounds.2,
+                    bounds.3 + north,
+                ];
                 let loaded = |x: i32, y: i32| north == shift && in_scene(x, y, 0);
                 climbables.extend(cache_climbables(pid, area, request, &flags, &loaded)?);
             }
         }
         let climbs = crate::nav::climbs(&flags, &climbables);
-        eprintln!("DBG attempt across={across} regions={} climbables={} climbs={} doors={}", regions.len(), climbables.len(), climbs.len(), doors.len());
-        Ok(crate::nav::plan(&flags, bounds, &doors, &climbs, from, goal, &request.options))
+        eprintln!(
+            "DBG attempt across={across} regions={} climbables={} climbs={} doors={}",
+            regions.len(),
+            climbables.len(),
+            climbs.len(),
+            doors.len()
+        );
+        Ok(crate::nav::plan(
+            &flags,
+            bounds,
+            &doors,
+            &climbs,
+            from,
+            goal,
+            &request.options,
+        ))
     };
-    eprintln!("DBG nav bounds={bounds:?} scene_box={scene_box:?} goal={goal:?} to={to:?} shift={shift} goal_across={goal_across} instance={instance}");
+    eprintln!(
+        "DBG nav bounds={bounds:?} scene_box={scene_box:?} goal={goal:?} to={to:?} shift={shift} goal_across={goal_across} instance={instance}"
+    );
     let mut plan = attempt(goal_across)?;
     // short of the goal: the way may be through the other world (a dungeon's exit, then another's entrance)
     if !goal_across && !instance && goal == to && plan.as_ref().is_none_or(|p| !p.reached) {
@@ -1507,20 +2155,52 @@ pub fn nav_plan(pid: u32, from: crate::nav::Point, to: crate::nav::Point, reques
             (_, first) => first,
         };
     }
-    let plan = plan.ok_or_else(|| format!("no way from {}, {} (plane {}) toward {}, {} (plane {})", from.0, from.1, from.2, to.0, to.1, to.2))?;
+    let plan = plan.ok_or_else(|| {
+        format!(
+            "no way from {}, {} (plane {}) toward {}, {} (plane {})",
+            from.0, from.1, from.2, to.0, to.1, to.2
+        )
+    })?;
 
     let tile = |(x, y, plane): crate::nav::Point| NavTile { x, y, plane };
     let actions = plan
         .actions
         .into_iter()
         .map(|a| match a.what {
-            crate::nav::Use::Door(loc) => NavAction { at: a.at + 1, kind: "door", to_plane: loc.plane, loc },
+            crate::nav::Use::Door(loc) => NavAction {
+                at: a.at + 1,
+                kind: "door",
+                to_plane: loc.plane,
+                loc,
+            },
             // opening a trapdoor leaves you where you are: like a door, the walk plans again after it
-            crate::nav::Use::Climb(loc, _) if request.door_options.iter().any(|o| o.eq_ignore_ascii_case(&loc.option)) => NavAction { at: a.at + 1, kind: "door", to_plane: loc.plane, loc },
-            crate::nav::Use::Climb(loc, to_plane) => NavAction { at: a.at + 1, kind: "climb", loc, to_plane },
+            crate::nav::Use::Climb(loc, _)
+                if request
+                    .door_options
+                    .iter()
+                    .any(|o| o.eq_ignore_ascii_case(&loc.option)) =>
+            {
+                NavAction {
+                    at: a.at + 1,
+                    kind: "door",
+                    to_plane: loc.plane,
+                    loc,
+                }
+            }
+            crate::nav::Use::Climb(loc, to_plane) => NavAction {
+                at: a.at + 1,
+                kind: "climb",
+                loc,
+                to_plane,
+            },
         })
         .collect();
-    Ok(NavPlan { tiles: plan.tiles.into_iter().map(tile).collect(), actions, reached: plan.reached && goal == to, goal: tile(goal) })
+    Ok(NavPlan {
+        tiles: plan.tiles.into_iter().map(tile).collect(),
+        actions,
+        reached: plan.reached && goal == to,
+        goal: tile(goal),
+    })
 }
 
 // The client's collision flags of the scene: `flags[x][y]` is world tile (x1 + x, y1 + y), edge ring included.
@@ -1528,15 +2208,25 @@ pub type SceneCollision = (i32, i32, i32, Vec<Vec<u32>>);
 
 pub fn scene_collision(pid: u32) -> Result<SceneCollision, String> {
     let (layout, memory) = reader(pid, part::COLLISION, "the scene's collision maps")?;
-    let scene = crate::scene_collision::read(&memory, &layout).ok_or("the scene's collision map can't be read")?;
+    let scene = crate::scene_collision::read(&memory, &layout)
+        .ok_or("the scene's collision map can't be read")?;
     let (x1, y1, x2, y2) = scene.bounds();
-    let flags = (x1..=x2).map(|x| (y1..=y2).map(|y| scene.flags(x, y).unwrap_or(u32::MAX)).collect()).collect();
+    let flags = (x1..=x2)
+        .map(|x| {
+            (y1..=y2)
+                .map(|y| scene.flags(x, y).unwrap_or(u32::MAX))
+                .collect()
+        })
+        .collect();
     Ok((x1, y1, scene.plane, flags))
 }
 
 pub fn player_plane(pid: u32) -> Result<i32, String> {
     let (layout, memory) = reader(pid, part::PROJECTION, "the scene")?;
-    state::game_state(&memory, &layout).position.and_then(|p| p.plane).ok_or_else(|| "not logged in".into())
+    state::game_state(&memory, &layout)
+        .position
+        .and_then(|p| p.plane)
+        .ok_or_else(|| "not logged in".into())
 }
 
 /// The tile the server last put the local player on; `None` when not logged in.
@@ -1547,16 +2237,25 @@ pub fn server_tile(pid: u32) -> Result<Option<crate::ServerTile>, String> {
 
 pub fn map_regions(pid: u32) -> Result<Vec<[i32; 2]>, String> {
     let (layout, memory) = reader(pid, part::PLAYER, "the scene")?;
-    ipc::read::map_regions(&memory, &layout).ok_or_else(|| "the scene's map squares can't be found".into())
+    ipc::read::map_regions(&memory, &layout)
+        .ok_or_else(|| "the scene's map squares can't be found".into())
 }
 
 pub fn in_instance(pid: u32) -> Result<bool, String> {
     let (layout, memory) = reader(pid, part::PLAYER | part::SCENE_LOADER, "the scene loader")?;
-    ipc::read::in_instance(&memory, &layout).ok_or_else(|| "the client's instance flag can't be read".into())
+    ipc::read::in_instance(&memory, &layout)
+        .ok_or_else(|| "the client's instance flag can't be read".into())
 }
 
-pub fn collision_area(pid: u32, plane: i32, x1: i32, y1: i32, x2: i32, y2: i32) -> Result<Vec<Vec<Option<u32>>>, String> {
-    use crate::collision::{region_id, REGION_SIZE};
+pub fn collision_area(
+    pid: u32,
+    plane: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Result<Vec<Vec<Option<u32>>>, String> {
+    use crate::collision::{REGION_SIZE, region_id};
     let mut regions = Vec::new();
     for rx in (x1 / REGION_SIZE - 1)..=(x2 / REGION_SIZE + 1) {
         for ry in (y1 / REGION_SIZE - 1)..=(y2 / REGION_SIZE + 1) {
@@ -1566,7 +2265,9 @@ pub fn collision_area(pid: u32, plane: i32, x1: i32, y1: i32, x2: i32, y2: i32) 
         }
     }
     let world = world_collision(pid, &regions)?;
-    Ok((x1..=x2).map(|x| (y1..=y2).map(|y| world.flags(plane, x, y)).collect()).collect())
+    Ok((x1..=x2)
+        .map(|x| (y1..=y2).map(|y| world.flags(plane, x, y)).collect())
+        .collect())
 }
 
 fn menu_entry(e: &ipc::state::MenuEntryInfo) -> crate::MenuEntry {
@@ -1595,14 +2296,19 @@ fn menu_reply(pid: u32) -> Result<ipc::state::MenuReply, String> {
     match reply.status {
         menu_status::OK => Ok(reply),
         menu_status::NOT_FOUND => Err("agent didn't find the client's menu".into()),
-        menu_status::OTHER_THREAD => Err("the client runs its game on another thread than its window's".into()),
+        menu_status::OTHER_THREAD => {
+            Err("the client runs its game on another thread than its window's".into())
+        }
         other => Err(format!("unknown menu status {other}")),
     }
 }
 
 pub fn menu(pid: u32) -> Result<Vec<crate::MenuEntry>, String> {
     let reply = menu_reply(pid)?;
-    Ok(reply.entries[..reply.count as usize].iter().map(menu_entry).collect())
+    Ok(reply.entries[..reply.count as usize]
+        .iter()
+        .map(menu_entry)
+        .collect())
 }
 
 /// Whether the client's choose-option menu is open (the agent reads the flag from the menu object).
@@ -1634,12 +2340,20 @@ pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
             let s = sub.geometry;
             crate::MenuSubmenu {
                 row: sub.row + 1,
-                entries: sub.entries[..(sub.count as usize).min(sub.entries.len())].iter().map(menu_entry).collect(),
+                entries: sub.entries[..(sub.count as usize).min(sub.entries.len())]
+                    .iter()
+                    .map(menu_entry)
+                    .collect(),
                 x: s.x,
                 y: s.y,
                 width: s.width,
                 height: s.height,
-                rows: crate::MenuRect { x: s.rows_x, y: s.rows_y, width: s.rows_width, height: s.rows_height },
+                rows: crate::MenuRect {
+                    x: s.rows_x,
+                    y: s.rows_y,
+                    width: s.rows_width,
+                    height: s.rows_height,
+                },
                 header_height: s.header_height,
                 row_height: s.row_height,
                 scroll: s.scroll,
@@ -1652,7 +2366,12 @@ pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
         y: g.y,
         width: g.width,
         height: g.height,
-        rows: crate::MenuRect { x: g.rows_x, y: g.rows_y, width: g.rows_width, height: g.rows_height },
+        rows: crate::MenuRect {
+            x: g.rows_x,
+            y: g.rows_y,
+            width: g.rows_width,
+            height: g.rows_height,
+        },
         header_height: g.header_height,
         row_height: g.row_height,
         scroll: g.scroll,
@@ -1663,7 +2382,12 @@ pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
 
 pub fn menu_click(pid: u32) -> Result<Option<crate::MenuClick>, String> {
     let reply = menu_reply(pid)?;
-    Ok((reply.has_click != 0).then(|| crate::MenuClick { entry: menu_entry(&reply.clicked), x: reply.click_x, y: reply.click_y, age: reply.click_age }))
+    Ok((reply.has_click != 0).then(|| crate::MenuClick {
+        entry: menu_entry(&reply.clicked),
+        x: reply.click_x,
+        y: reply.click_y,
+        age: reply.click_age,
+    }))
 }
 
 pub fn selected_widget(pid: u32) -> Result<Option<crate::SelectedWidget>, String> {
@@ -1708,11 +2432,16 @@ pub fn widget(pid: u32, group: u16, child: u16) -> Result<Option<Widget>, String
 /// Every open interface with all of its components and their dynamic children, read straight from the client's memory.
 pub fn widget_tree(pid: u32) -> Result<decode::widgets::WidgetTree, String> {
     let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
-    worker::widget_tree(&memory, &layout).ok_or_else(|| format!("Cannot read the interfaces of client {pid} (not logged in?)"))
+    worker::widget_tree(&memory, &layout)
+        .ok_or_else(|| format!("Cannot read the interfaces of client {pid} (not logged in?)"))
 }
 
 pub fn widget_children(pid: u32, group: u16, child: u16) -> Result<Option<Vec<Widget>>, String> {
-    if let Some(children) = ask_worker(pid, worker_kind::WIDGET_CHILDREN, [group as i32, child as i32, 0, 0]) {
+    if let Some(children) = ask_worker(
+        pid,
+        worker_kind::WIDGET_CHILDREN,
+        [group as i32, child as i32, 0, 0],
+    ) {
         return Ok(children);
     }
     let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
@@ -1734,7 +2463,8 @@ pub fn item_container(pid: u32, id: i32) -> Result<Option<Vec<Item>>, String> {
 /// Every item container the client holds, by id. Read from the client's memory directly: it is for the inspector, not for scripts.
 pub fn item_containers(pid: u32) -> Result<Vec<(i32, Vec<Item>)>, String> {
     let (layout, memory) = world_reader(pid)?;
-    worker::item_containers(&memory, &layout).ok_or_else(|| format!("Cannot read the item containers of client {pid}"))
+    worker::item_containers(&memory, &layout)
+        .ok_or_else(|| format!("Cannot read the item containers of client {pid}"))
 }
 
 pub fn varc(pid: u32, id: i32) -> Result<Option<i32>, String> {
@@ -1746,8 +2476,14 @@ pub fn varc(pid: u32, id: i32) -> Result<Option<i32>, String> {
 }
 
 pub fn chat_messages(pid: u32) -> Result<Vec<crate::ChatMessage>, String> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
-    let messages = match ask_worker(pid, worker_kind::CHAT, [now as i32, (now >> 32) as i32, 0, 0]) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let messages = match ask_worker(
+        pid,
+        worker_kind::CHAT,
+        [now as i32, (now >> 32) as i32, 0, 0],
+    ) {
         Some(messages) => messages,
         None => {
             let (layout, memory) = reader(pid, part::CHAT, "the chat history")?;
@@ -1764,7 +2500,8 @@ pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
     let mut items = match ask_worker(pid, worker_kind::GROUND_ITEMS, [0; 4]) {
         Some(items) => items,
         None => {
-            let (layout, memory) = reader(pid, worker::GROUND_ITEM_PARTS, "where ground items are")?;
+            let (layout, memory) =
+                reader(pid, worker::GROUND_ITEM_PARTS, "where ground items are")?;
             worker::ground_items(&memory, &layout)
         }
     };
@@ -1772,12 +2509,21 @@ pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
     ids.sort_unstable();
     ids.dedup();
     let mut known = ITEM_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let missing: Vec<i32> = ids.iter().copied().filter(|id| !known.contains_key(id)).collect();
+    let missing: Vec<i32> = ids
+        .iter()
+        .copied()
+        .filter(|id| !known.contains_key(id))
+        .collect();
     if !missing.is_empty() {
         drop(known);
         let found = item_names(pid, &missing)?;
         known = ITEM_NAMES.lock().unwrap_or_else(|e| e.into_inner());
-        known.extend(missing.into_iter().zip(found).filter_map(|(id, name)| Some((id, name?))));
+        known.extend(
+            missing
+                .into_iter()
+                .zip(found)
+                .filter_map(|(id, name)| Some((id, name?))),
+        );
     }
     for item in &mut items {
         item.name = known.get(&item.id).cloned();
@@ -1812,7 +2558,8 @@ impl Drop for SlotGuard {
 // Asks the agent's worker to read inside the client in one request; `None` when it can't answer, and the caller reads the memory itself.
 fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4]) -> Option<T> {
     // VOLCREN_NO_WORKER forces the injector's own reads, to compare the two paths.
-    static NO_WORKER: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VOLCREN_NO_WORKER").is_some());
+    static NO_WORKER: LazyLock<bool> =
+        LazyLock::new(|| std::env::var_os("VOLCREN_NO_WORKER").is_some());
     if *NO_WORKER {
         return None;
     }
@@ -1841,13 +2588,20 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
         .as_ref()?;
     let wait = WORKER_TIMEOUT.as_millis() as u32;
     // An abandoned mutex (its owner died with it) is ours all the same; the slot is rewritten below.
-    if !matches!(unsafe { WaitForSingleObject(mutex.0, wait) }, WAIT_OBJECT_0 | WAIT_ABANDONED) {
+    if !matches!(
+        unsafe { WaitForSingleObject(mutex.0, wait) },
+        WAIT_OBJECT_0 | WAIT_ABANDONED
+    ) {
         return None;
     }
     let _slot = SlotGuard(mutex.0);
 
     let shared = session.view.shared();
-    let sequence = shared.write_worker_request(&WorkerRequest { kind, args, reserved: 0 });
+    let sequence = shared.write_worker_request(&WorkerRequest {
+        kind,
+        args,
+        reserved: 0,
+    });
     if unsafe { SetEvent(event.0) } == 0 {
         return None;
     }
@@ -1875,16 +2629,28 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
 
 // Debug: the words of an NPC's actor, to find fields (see `world::npc_words`).
 // The sizes of the NPCs with `indices`, by index; the ones gone or unreadable are left out.
-pub fn npc_sizes(pid: u32, indices: &[i32]) -> Result<std::collections::BTreeMap<i32, i32>, String> {
+pub fn npc_sizes(
+    pid: u32,
+    indices: &[i32],
+) -> Result<std::collections::BTreeMap<i32, i32>, String> {
     let (layout, memory) = world_reader(pid)?;
-    Ok(indices.iter().filter_map(|&i| Some((i, world::npc_size(&memory, &layout.world, i)?))).collect())
+    Ok(indices
+        .iter()
+        .filter_map(|&i| Some((i, world::npc_size(&memory, &layout.world, i)?)))
+        .collect())
 }
 
 // The hitsplats in use on the NPCs with `indices`, by index; the ones gone or unreadable are left out. Read straight
 // from the client's memory, not through the agent.
-pub fn npc_hitsplats(pid: u32, indices: &[i32]) -> Result<std::collections::BTreeMap<i32, Vec<world::Hitsplat>>, String> {
+pub fn npc_hitsplats(
+    pid: u32,
+    indices: &[i32],
+) -> Result<std::collections::BTreeMap<i32, Vec<world::Hitsplat>>, String> {
     let (layout, memory) = world_reader(pid)?;
-    Ok(indices.iter().filter_map(|&i| Some((i, world::npc_hitsplats(&memory, &layout.world, i)?))).collect())
+    Ok(indices
+        .iter()
+        .filter_map(|&i| Some((i, world::npc_hitsplats(&memory, &layout.world, i)?)))
+        .collect())
 }
 
 // Debug: `count` 4-byte words of the client's memory at `address`, to follow pointers found with `npc_words`.
@@ -1894,23 +2660,46 @@ pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, St
     if !memory.read(address, &mut bytes) {
         return Err(format!("can't read {count} words at {address:#x}"));
     }
-    Ok(bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect())
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| i32::from_le_bytes(*c))
+        .collect())
 }
 
-pub fn npc_words(pid: u32, index: i32, count: usize, definition: bool) -> Result<(u64, Vec<i32>), String> {
+pub fn npc_words(
+    pid: u32,
+    index: i32,
+    count: usize,
+    definition: bool,
+) -> Result<(u64, Vec<i32>), String> {
     let (layout, memory) = world_reader(pid)?;
-    world::npc_words(&memory, &layout.world, index, count, definition).ok_or_else(|| format!("no NPC {index} in the scene"))
+    world::npc_words(&memory, &layout.world, index, count, definition)
+        .ok_or_else(|| format!("no NPC {index} in the scene"))
 }
 
 // Debug: the first `count` 4-byte words of a component (or of its dynamic child `index`, when that is not -1), with its address.
-pub fn widget_words(pid: u32, group: u16, child: u16, index: i32, count: usize) -> Result<(u64, Vec<i32>), String> {
+pub fn widget_words(
+    pid: u32,
+    group: u16,
+    child: u16,
+    index: i32,
+    count: usize,
+) -> Result<(u64, Vec<i32>), String> {
     let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
     let layout = &layout.interfaces;
-    let client = memory.ptr(layout.module_base + layout.client as u64).ok_or("no client")?;
-    let mut component = ipc::read::component(&memory, layout, client, (group as i32) << 16 | child as i32).ok_or_else(|| format!("no component {group}.{child}"))?;
+    let client = memory
+        .ptr(layout.module_base + layout.client as u64)
+        .ok_or("no client")?;
+    let mut component =
+        ipc::read::component(&memory, layout, client, (group as i32) << 16 | child as i32)
+            .ok_or_else(|| format!("no component {group}.{child}"))?;
     if index >= 0 {
         use ipc::state::interfaces::{CHILDREN_DATA, ENTRY_COMPONENT, ENTRY_SIZE};
-        let entries = memory.ptr(component + layout.children as u64 + CHILDREN_DATA as u64).ok_or("no dynamic children")?;
+        let entries = memory
+            .ptr(component + layout.children as u64 + CHILDREN_DATA as u64)
+            .ok_or("no dynamic children")?;
         component = memory
             .ptr(entries + index as u64 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
             .ok_or_else(|| format!("{group}.{child} has no dynamic child {index}"))?;
@@ -1919,18 +2708,41 @@ pub fn widget_words(pid: u32, group: u16, child: u16, index: i32, count: usize) 
     if !memory.read(component, &mut bytes) {
         return Err(format!("can't read the component at {component:#x}"));
     }
-    Ok((component, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()))
+    Ok((
+        component,
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect(),
+    ))
 }
 
 // Debug: the first `count` words of every component of the open interfaces and of their dynamic children, by component id and index.
 pub fn widget_dump(pid: u32, count: usize) -> Result<Vec<(i32, i32, Vec<i32>)>, String> {
     let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
-    let (root, _) = decode::state::root_interface(&memory, &layout, decode::state::current(&memory, &layout)).map(|root| (root, 1.0f32)).ok_or("no root interface")?;
+    let (root, _) =
+        decode::state::root_interface(&memory, &layout, decode::state::current(&memory, &layout))
+            .map(|root| (root, 1.0f32))
+            .ok_or("no root interface")?;
     let mut dump = Vec::new();
-    for (id, index, address) in decode::widgets::component_addresses(&memory, &layout.interfaces, root).ok_or("can't list the components")? {
+    for (id, index, address) in
+        decode::widgets::component_addresses(&memory, &layout.interfaces, root)
+            .ok_or("can't list the components")?
+    {
         let mut bytes = vec![0u8; count * 4];
         if memory.read(address, &mut bytes) {
-            dump.push((id, index, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()));
+            dump.push((
+                id,
+                index,
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| i32::from_le_bytes(*c))
+                    .collect(),
+            ));
         }
     }
     Ok(dump)
@@ -1964,7 +2776,10 @@ pub fn watch_client(pid: u32, seconds: u64, bytes: usize) -> Result<Vec<String>,
         }
         std::mem::swap(&mut last, &mut now);
     }
-    Ok(changes.into_iter().map(|(i, (first, last, n))| format!("+{i:#x} first {first} last {last} changes {n}")).collect())
+    Ok(changes
+        .into_iter()
+        .map(|(i, (first, last, n))| format!("+{i:#x} first {first} last {last} changes {n}"))
+        .collect())
 }
 
 pub fn world_entities(pid: u32) -> Result<Vec<world::WorldEntity>, String> {
@@ -1979,7 +2794,8 @@ pub fn world_debug(pid: u32) -> Result<Vec<String>, String> {
 
 pub fn player_words(pid: u32, index: i32, count: usize) -> Result<(u64, Vec<i32>), String> {
     let (layout, memory) = world_reader(pid)?;
-    world::player_words(&memory, &layout.world, index, count).ok_or_else(|| format!("no player {index} in the scene"))
+    world::player_words(&memory, &layout.world, index, count)
+        .ok_or_else(|| format!("no player {index} in the scene"))
 }
 
 pub fn players(pid: u32) -> Result<Vec<Player>, String> {
@@ -2036,7 +2852,9 @@ fn with_packet_log<T>(pid: u32, read: impl FnOnce(*const Log) -> T) -> Result<T,
 /// The packets the client logged from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
 pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, String> {
     // SAFETY: `with_packet_log` hands over a mapped, compatible log.
-    let page = with_packet_log(pid, |log| unsafe { packet_log::read_since(log, since, limit) })?;
+    let page = with_packet_log(pid, |log| unsafe {
+        packet_log::read_since(log, since, limit)
+    })?;
     Ok(crate::PacketPage {
         next: page.next,
         dropped: page.dropped,
@@ -2049,7 +2867,11 @@ pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, 
                 sent: entry.direction == direction::SENT,
                 opcode: entry.opcode,
                 length: entry.length,
-                payload: entry.payload.iter().map(|byte| format!("{byte:02x}")).collect(),
+                payload: entry
+                    .payload
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
             })
             .collect(),
     })
@@ -2062,7 +2884,13 @@ pub fn packet_layouts(pid: u32) -> Result<Option<Vec<crate::PacketLayout>>, Stri
     Ok(layouts.map(|layouts| {
         layouts
             .into_iter()
-            .map(|layout| crate::PacketLayout { opcode: layout.opcode, size: layout.size, fields: layout.fields.map(|fields| fields.iter().map(|field| field.spelling()).collect()) })
+            .map(|layout| crate::PacketLayout {
+                opcode: layout.opcode,
+                size: layout.size,
+                fields: layout
+                    .fields
+                    .map(|fields| fields.iter().map(|field| field.spelling()).collect()),
+            })
             .collect()
     }))
 }
@@ -2073,7 +2901,11 @@ pub fn movement(pid: u32) -> Result<Option<crate::Movement>, String> {
     let Some(seen) = with_packet_log(pid, |log| unsafe { packet_log::movement(log) })? else {
         return Ok(None);
     };
-    let (layout, memory) = reader(pid, part::PLAYER | part::PATH | part::TICK_COUNT, "the player's path and the tick counter")?;
+    let (layout, memory) = reader(
+        pid,
+        part::PLAYER | part::PATH | part::TICK_COUNT,
+        "the player's path and the tick counter",
+    )?;
     // the hook keeps the last tile it saw after a logout
     if state::server_tile(&memory, &layout).is_none() {
         return Ok(None);
@@ -2114,15 +2946,20 @@ impl PacketWatcher {
         let name = wide(packets_memory_name(pid));
         let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) })
             .ok_or_else(|| format!("No packet log in client {pid}: the agent isn't loaded, is too old, or didn't find the packet functions"))?;
-        let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, LOG_SIZE) };
+        let view =
+            unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, LOG_SIZE) };
         if view.Value.is_null() {
-            return Err(format!("Cannot map the packet log of client {pid}: restart the client and load a matching agent"));
+            return Err(format!(
+                "Cannot map the packet log of client {pid}: restart the client and load a matching agent"
+            ));
         }
         let log = view.Value as *const Log;
         // SAFETY: the mapping is LOG_SIZE bytes, writable, and stays mapped until the watcher is dropped.
         if !unsafe { packet_log::is_compatible(log) } {
             unsafe { UnmapViewOfFile(view) };
-            return Err(format!("The packet log of client {pid} has another layout: restart the client and load a matching agent"));
+            return Err(format!(
+                "The packet log of client {pid} has another layout: restart the client and load a matching agent"
+            ));
         }
         // as in `ItemWatcher::new`: a slot is ours once its event is new and the mask bit is ours
         let mut event = None;
@@ -2142,10 +2979,19 @@ impl PacketWatcher {
         };
         let (Some(slot), Some(event)) = (slot, event) else {
             unsafe { UnmapViewOfFile(view) };
-            return Err(format!("Too many readers are waiting for packets in client {pid}"));
+            return Err(format!(
+                "Too many readers are waiting for packets in client {pid}"
+            ));
         };
         let next = unsafe { packet_log::written(log) };
-        Ok(Self { mapping, view, event, slot, filter: [0; packet_log::FILTER_WORDS], next })
+        Ok(Self {
+            mapping,
+            view,
+            event,
+            slot,
+            filter: [0; packet_log::FILTER_WORDS],
+            next,
+        })
     }
 
     fn log(&self) -> *const Log {
@@ -2176,7 +3022,8 @@ impl PacketWatcher {
         // SAFETY: as in `pending`, and the log was checked compatible when the watcher was made.
         let mut page = unsafe { packet_log::read_since(self.log(), self.next, limit) };
         self.next = page.next;
-        page.entries.retain(|entry| packet_log::filter_has(&self.filter, entry.direction, entry.opcode));
+        page.entries
+            .retain(|entry| packet_log::filter_has(&self.filter, entry.direction, entry.opcode));
         page
     }
 }
@@ -2193,11 +3040,21 @@ impl Drop for PacketWatcher {
 }
 
 /// Waits up to `timeout` for either watcher's agent to log something for it; true when one did (or something is already waiting to be read).
-pub fn wait_watchers(items: Option<&ItemWatcher>, packets: Option<&PacketWatcher>, timeout: Duration) -> bool {
-    if items.is_some_and(|items| items.pending()) || packets.is_some_and(|packets| packets.pending()) {
+pub fn wait_watchers(
+    items: Option<&ItemWatcher>,
+    packets: Option<&PacketWatcher>,
+    timeout: Duration,
+) -> bool {
+    if items.is_some_and(|items| items.pending())
+        || packets.is_some_and(|packets| packets.pending())
+    {
         return true;
     }
-    let events: Vec<HANDLE> = items.map(|items| items.event.0).into_iter().chain(packets.map(|packets| packets.event.0)).collect();
+    let events: Vec<HANDLE> = items
+        .map(|items| items.event.0)
+        .into_iter()
+        .chain(packets.map(|packets| packets.event.0))
+        .collect();
     if events.is_empty() {
         sleep(timeout);
         return false;
@@ -2225,12 +3082,15 @@ fn read_layout(pid: u32, session: &Session) -> Result<Layout, String> {
                 ipc::PROTOCOL_VERSION
             ))
         }
-        Err(ReadError::Busy) => Err(format!("The game state layout of client {pid} kept changing while reading it")),
+        Err(ReadError::Busy) => Err(format!(
+            "The game state layout of client {pid} kept changing while reading it"
+        )),
     }
 }
 
 pub fn screenshot(pid: u32, path: &Path) -> Result<(i32, i32), String> {
-    let connection = connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
+    let connection =
+        connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
     if connection.protocol != ipc::PROTOCOL_VERSION {
         return Err(format!(
             "Client {pid} runs agent protocol {}, this is {}: reload agent",
@@ -2284,7 +3144,8 @@ pub fn screenshot(pid: u32, path: &Path) -> Result<(i32, i32), String> {
 }
 
 pub fn set_cursor(pid: u32, cursor: &crate::Cursor) -> Result<(), String> {
-    let connection = connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
+    let connection =
+        connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
     if connection.protocol != ipc::PROTOCOL_VERSION {
         return Err(format!(
             "Client {pid} runs agent protocol {}, this is {}: restart the client and load a matching agent",
@@ -2301,9 +3162,12 @@ pub fn set_cursor(pid: u32, cursor: &crate::Cursor) -> Result<(), String> {
     }
     let base = view.Value as *mut u8;
     unsafe {
-        base.add(core::mem::offset_of!(Header, cursor_color)).copy_from_nonoverlapping(cursor.color.as_ptr(), 3);
-        base.add(core::mem::offset_of!(Header, cursor_size)).write_volatile(cursor.size);
-        base.add(core::mem::offset_of!(Header, cursor_style)).write_volatile(cursor.style.value());
+        base.add(core::mem::offset_of!(Header, cursor_color))
+            .copy_from_nonoverlapping(cursor.color.as_ptr(), 3);
+        base.add(core::mem::offset_of!(Header, cursor_size))
+            .write_volatile(cursor.size);
+        base.add(core::mem::offset_of!(Header, cursor_style))
+            .write_volatile(cursor.style.value());
         UnmapViewOfFile(view);
     }
     Ok(())
@@ -2315,39 +3179,85 @@ pub fn draw(pid: u32, overlay: &Overlay) -> Result<(), String> {
 
 // Paints every shape in order as one overlay update the agent never sees half drawn; an empty batch changes nothing.
 pub fn draw_batch(pid: u32, overlays: &[Overlay]) -> Result<(), String> {
-    let Some(last) = overlays.last() else { return Ok(()) };
-    let mode = if matches!(last, Overlay::Clear) { overlay_mode::OFF } else { overlay_mode::ON_SERIAL };
+    let Some(last) = overlays.last() else {
+        return Ok(());
+    };
+    let mode = if matches!(last, Overlay::Clear) {
+        overlay_mode::OFF
+    } else {
+        overlay_mode::ON_SERIAL
+    };
     let clears = matches!(overlays.first(), Some(Overlay::Clear));
-    with_overlay(pid, mode, !clears, None, |overlay_ptr, width, height| unsafe {
-        for overlay in overlays {
-            match *overlay {
-                Overlay::Clear => write_bytes(overlay_ptr, 0, width as usize * height as usize * 4),
-                Overlay::Rect { x1, y1, x2, y2, color } => draw_rect(overlay_ptr, width, height, [x1, y1, x2, y2], color),
-                Overlay::Line { x1, y1, x2, y2, color } => draw_line(overlay_ptr, width, height, [x1, y1, x2, y2], color),
+    with_overlay(
+        pid,
+        mode,
+        !clears,
+        None,
+        |overlay_ptr, width, height| unsafe {
+            for overlay in overlays {
+                match *overlay {
+                    Overlay::Clear => {
+                        write_bytes(overlay_ptr, 0, width as usize * height as usize * 4)
+                    }
+                    Overlay::Rect {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                    } => draw_rect(overlay_ptr, width, height, [x1, y1, x2, y2], color),
+                    Overlay::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                    } => draw_line(overlay_ptr, width, height, [x1, y1, x2, y2], color),
+                }
             }
-        }
-    })
+        },
+    )
 }
 
 /// Paints through `put(x, y, color)` onto the overlay, over what is drawn on it already, as one update.
-pub(crate) fn paint_overlay(pid: u32, paint: impl FnOnce(&mut dyn FnMut(i32, i32, Rgba))) -> Result<(), String> {
-    with_overlay(pid, overlay_mode::ON_SERIAL, true, None, |buf, width, height| {
-        paint(&mut |x, y, color| unsafe { put_pixel(buf, width, height, x, y, color) })
-    })
+pub(crate) fn paint_overlay(
+    pid: u32,
+    paint: impl FnOnce(&mut dyn FnMut(i32, i32, Rgba)),
+) -> Result<(), String> {
+    with_overlay(
+        pid,
+        overlay_mode::ON_SERIAL,
+        true,
+        None,
+        |buf, width, height| {
+            paint(&mut |x, y, color| unsafe { put_pixel(buf, width, height, x, y, color) })
+        },
+    )
 }
 
 pub fn draw_lines(pid: u32, lines: &[[i32; 4]], color: Rgba) -> Result<(), String> {
-    with_overlay(pid, overlay_mode::ON_SERIAL, true, None, |overlay_ptr, width, height| {
-        for &[x1, y1, x2, y2] in lines {
-            unsafe { draw_line(overlay_ptr, width, height, [x1, y1, x2, y2], color) };
-        }
-    })
+    with_overlay(
+        pid,
+        overlay_mode::ON_SERIAL,
+        true,
+        None,
+        |overlay_ptr, width, height| {
+            for &[x1, y1, x2, y2] in lines {
+                unsafe { draw_line(overlay_ptr, width, height, [x1, y1, x2, y2], color) };
+            }
+        },
+    )
 }
 
 // Scene tiles: devtools overlays on the ground. `scene_tiles` clears the overlay, then draws the layers named as the loader's checkboxes.
 const TILE_SIZE: i32 = 128;
 const TILE_HALF: i32 = TILE_SIZE / 2;
-const TILE_CORNERS: [[i32; 2]; 4] = [[-TILE_HALF, -TILE_HALF], [TILE_HALF, -TILE_HALF], [TILE_HALF, TILE_HALF], [-TILE_HALF, TILE_HALF]];
+const TILE_CORNERS: [[i32; 2]; 4] = [
+    [-TILE_HALF, -TILE_HALF],
+    [TILE_HALF, -TILE_HALF],
+    [TILE_HALF, TILE_HALF],
+    [-TILE_HALF, TILE_HALF],
+];
 const SCENE_TILES: i32 = 104;
 // RuneLite's `Constants.CHUNK_SIZE` and the map square size.
 const CHUNK_TILES: i32 = 8;
@@ -2365,8 +3275,18 @@ const GRID_RADIUS: i32 = 32;
 // How thick the outlines and lines of the scene layers are, in pixels.
 const STROKE_WIDTH: i32 = 2;
 const SCREEN_LIMIT: f32 = 100_000.0;
-const LABEL_SHADOW: Rgba = Rgba { r: 0, g: 0, b: 0, a: 255 };
-const TEXT_COLOR: Rgba = Rgba { r: 255, g: 255, b: 255, a: 255 };
+const LABEL_SHADOW: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 255,
+};
+const TEXT_COLOR: Rgba = Rgba {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
 // The p12 glyphs are drawn at twice their size.
 const LABEL_SCALE: i32 = 2;
 // Used for an actor whose model height can't be read; labels sit this far above, like the client's NPC overlay.
@@ -2401,32 +3321,132 @@ const LAYERS: [&str; 22] = [
 ];
 
 // RuneLite's devtools colours.
-const PLAYER_TILE_COLOR: Rgba = Rgba { r: 41, g: 98, b: 255, a: 255 };
-const LOCAL_PLAYER_TILE_COLOR: Rgba = Rgba { r: 0, g: 184, b: 212, a: 255 };
-const NPC_TILE_COLOR: Rgba = Rgba { r: 255, g: 255, b: 0, a: 255 };
+const PLAYER_TILE_COLOR: Rgba = Rgba {
+    r: 41,
+    g: 98,
+    b: 255,
+    a: 255,
+};
+const LOCAL_PLAYER_TILE_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 184,
+    b: 212,
+    a: 255,
+};
+const NPC_TILE_COLOR: Rgba = Rgba {
+    r: 255,
+    g: 255,
+    b: 0,
+    a: 255,
+};
 // RuneLite draws world entities in blue.
-const WORLD_ENTITY_COLOR: Rgba = Rgba { r: 0, g: 0, b: 255, a: 255 };
-const INTERACTING_COLOR: Rgba = Rgba { r: 0, g: 255, b: 255, a: 255 };
+const WORLD_ENTITY_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 255,
+    a: 255,
+};
+const INTERACTING_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 255,
+    b: 255,
+    a: 255,
+};
 // The interacting arrows are drawn this many pixels below the actors' middles, and their heads at twice RuneLite's size.
 const INTERACTING_SHIFT: f32 = 16.0;
 const ARROW_SCALE: f32 = 2.0;
-const OBJECT_TILE_COLOR: Rgba = Rgba { r: 0, g: 255, b: 0, a: 255 };
-const GROUND_ITEM_COLOR: Rgba = Rgba { r: 221, g: 44, b: 0, a: 255 };
-const GROUND_OBJECT_COLOR: Rgba = Rgba { r: 170, g: 0, b: 255, a: 255 };
-const WALL_COLOR: Rgba = Rgba { r: 158, g: 158, b: 158, a: 255 };
-const DECORATION_COLOR: Rgba = Rgba { r: 98, g: 0, b: 234, a: 255 };
-const TILE_FLAG_COLOR: Rgba = Rgba { r: 221, g: 44, b: 0, a: 255 };
-const CHUNK_COLOR: Rgba = Rgba { r: 0, g: 0, b: 255, a: 255 };
+const OBJECT_TILE_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 255,
+    b: 0,
+    a: 255,
+};
+const GROUND_ITEM_COLOR: Rgba = Rgba {
+    r: 221,
+    g: 44,
+    b: 0,
+    a: 255,
+};
+const GROUND_OBJECT_COLOR: Rgba = Rgba {
+    r: 170,
+    g: 0,
+    b: 255,
+    a: 255,
+};
+const WALL_COLOR: Rgba = Rgba {
+    r: 158,
+    g: 158,
+    b: 158,
+    a: 255,
+};
+const DECORATION_COLOR: Rgba = Rgba {
+    r: 98,
+    g: 0,
+    b: 234,
+    a: 255,
+};
+const TILE_FLAG_COLOR: Rgba = Rgba {
+    r: 221,
+    g: 44,
+    b: 0,
+    a: 255,
+};
+const CHUNK_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 255,
+    a: 255,
+};
 // RuneLite labels projectiles in red; the line to where each one lands is a dimmer red.
-const PROJECTILE_COLOR: Rgba = Rgba { r: 255, g: 0, b: 0, a: 255 };
-const PROJECTILE_PATH_COLOR: Rgba = Rgba { r: 255, g: 0, b: 0, a: 140 };
+const PROJECTILE_COLOR: Rgba = Rgba {
+    r: 255,
+    g: 0,
+    b: 0,
+    a: 255,
+};
+const PROJECTILE_PATH_COLOR: Rgba = Rgba {
+    r: 255,
+    g: 0,
+    b: 0,
+    a: 140,
+};
 // RuneLite outlines spot animations' tiles in magenta and labels them in white.
-const SPOT_ANIM_COLOR: Rgba = Rgba { r: 255, g: 0, b: 255, a: 255 };
-const MAP_SQUARE_COLOR: Rgba = Rgba { r: 0, g: 255, b: 0, a: 255 };
-const LOCAL_VALID_MOVEMENT_COLOR: Rgba = Rgba { r: 141, g: 220, b: 26, a: 255 };
-const LINE_OF_SIGHT_COLOR: Rgba = Rgba { r: 204, g: 42, b: 219, a: 255 };
-const HOVER_COLOR: Rgba = Rgba { r: 0, g: 200, b: 83, a: 255 };
-const GRID_COLOR: Rgba = Rgba { r: 255, g: 255, b: 255, a: 90 };
+const SPOT_ANIM_COLOR: Rgba = Rgba {
+    r: 255,
+    g: 0,
+    b: 255,
+    a: 255,
+};
+const MAP_SQUARE_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 255,
+    b: 0,
+    a: 255,
+};
+const LOCAL_VALID_MOVEMENT_COLOR: Rgba = Rgba {
+    r: 141,
+    g: 220,
+    b: 26,
+    a: 255,
+};
+const LINE_OF_SIGHT_COLOR: Rgba = Rgba {
+    r: 204,
+    g: 42,
+    b: 219,
+    a: 255,
+};
+const HOVER_COLOR: Rgba = Rgba {
+    r: 0,
+    g: 200,
+    b: 83,
+    a: 255,
+};
+const GRID_COLOR: Rgba = Rgba {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 90,
+};
 
 // The label font is decoded once and kept, since it doesn't change while the cache revision does not.
 static LABEL_FONT: Mutex<Option<Arc<crate::font::Font>>> = Mutex::new(None);
@@ -2442,7 +3462,10 @@ fn label_font(pid: u32) -> Result<Arc<crate::font::Font>, String> {
             .flatten()
             .ok_or_else(|| format!("the client has no p12_full in index {index}"))
     };
-    let font = Arc::new(crate::font::Font::decode(&archive(crate::font::FONTS_INDEX)?, &archive(crate::font::SPRITES_INDEX)?)?);
+    let font = Arc::new(crate::font::Font::decode(
+        &archive(crate::font::FONTS_INDEX)?,
+        &archive(crate::font::SPRITES_INDEX)?,
+    )?);
     *cached = Some(font.clone());
     Ok(font)
 }
@@ -2474,7 +3497,18 @@ fn widget_layer(layer: &str) -> Option<(i32, i32, i32, i32, Rgba)> {
     let (x, y, width, height) = (number()?, number()?, number()?, number()?);
     let hex = parts.next().filter(|hex| hex.len() == 6)?;
     let value = u32::from_str_radix(hex, 16).ok()?;
-    parts.next().is_none().then_some((x, y, width, height, Rgba { r: (value >> 16) as u8, g: (value >> 8) as u8, b: value as u8, a: 255 }))
+    parts.next().is_none().then_some((
+        x,
+        y,
+        width,
+        height,
+        Rgba {
+            r: (value >> 16) as u8,
+            g: (value >> 8) as u8,
+            b: value as u8,
+            a: 255,
+        },
+    ))
 }
 
 // A line through the points, or around them when `closed`; a `marker` outline counts towards the `scene_tiles` result.
@@ -2515,7 +3549,12 @@ impl Plan {
 
     fn path(&mut self, points: &[projection::Point], color: Rgba, closed: bool, marker: bool) {
         let points = points.iter().map(|&p| self.point(p)).collect();
-        self.paths.push(Stroke { points, color, closed, marker });
+        self.paths.push(Stroke {
+            points,
+            color,
+            closed,
+            marker,
+        });
     }
 
     fn arrow(&mut self, from: projection::Point, to: projection::Point, color: Rgba) {
@@ -2525,7 +3564,11 @@ impl Plan {
 
     fn label(&mut self, anchor: projection::Point, text: String, color: Rgba) {
         let anchor = self.point(anchor);
-        self.labels.push(Label { anchor, text, color });
+        self.labels.push(Label {
+            anchor,
+            text,
+            color,
+        });
     }
 
     fn text(&mut self, x: i32, y: i32, text: String, color: Rgba) {
@@ -2541,8 +3584,16 @@ impl Plan {
 
 // The corners of a `size_x` by `size_y` footprint from tile `(tx, ty)` in scene coordinates; far corners lie on the tiles beyond, so they name it.
 fn footprint(tx: i32, ty: i32, size_x: i32, size_y: i32) -> [projection::Point; 4] {
-    let (x, y, w, h) = (tx * TILE_SIZE, ty * TILE_SIZE, size_x * TILE_SIZE, size_y * TILE_SIZE);
-    let corner = |x, y, tile| projection::Point { tile: Some(tile), ..projection::Point::new(x, y, 0) };
+    let (x, y, w, h) = (
+        tx * TILE_SIZE,
+        ty * TILE_SIZE,
+        size_x * TILE_SIZE,
+        size_y * TILE_SIZE,
+    );
+    let corner = |x, y, tile| projection::Point {
+        tile: Some(tile),
+        ..projection::Point::new(x, y, 0)
+    };
     [
         corner(x, y, [tx, ty]),
         corner(x + w, y, [tx + size_x - 1, ty]),
@@ -2562,7 +3613,10 @@ fn tile_centre([tx, ty]: [i32; 2]) -> projection::Point {
 
 // A point on the scene's grid lines, which names no tile: the ground is the tile beyond it, as the client draws it.
 fn boundary(tx: i32, ty: i32) -> projection::Point {
-    projection::Point { heightmap: true, ..projection::Point::new(tx * TILE_SIZE, ty * TILE_SIZE, 0) }
+    projection::Point {
+        heightmap: true,
+        ..projection::Point::new(tx * TILE_SIZE, ty * TILE_SIZE, 0)
+    }
 }
 
 fn in_scene([tx, ty]: [i32; 2]) -> bool {
@@ -2571,23 +3625,44 @@ fn in_scene([tx, ty]: [i32; 2]) -> bool {
 
 // The world coordinates of the scene's tile (0, 0), from the player's position.
 fn scene_origin(position: &Position) -> (i32, i32) {
-    (position.x - (position.local_x >> 7), position.y - (position.local_y >> 7))
+    (
+        position.x - (position.local_x >> 7),
+        position.y - (position.local_y >> 7),
+    )
 }
 
 // An actor's outline on its tile with its label above the model; `height` is -1 when unknown.
 fn actor_marker(plan: &mut Plan, local: (i32, i32), height: i32, label: String, color: Rgba) {
     let (local_x, local_y) = local;
-    let height = if height > 0 { height } else { NPC_LABEL_DEFAULT_HEIGHT };
+    let height = if height > 0 {
+        height
+    } else {
+        NPC_LABEL_DEFAULT_HEIGHT
+    };
     let tile = Some([local_x >> 7, local_y >> 7]);
     // Heights point down in projection coordinates, so lifting a point is a negative offset.
     let lift = height + NPC_LABEL_OFFSET;
-    let corners = TILE_CORNERS.map(|[dx, dy]| projection::Point { tile, ..projection::Point::new(local_x + dx, local_y + dy, 0) });
+    let corners = TILE_CORNERS.map(|[dx, dy]| projection::Point {
+        tile,
+        ..projection::Point::new(local_x + dx, local_y + dy, 0)
+    });
     plan.path(&corners, color, true, true);
-    plan.label(projection::Point::new(local_x, local_y, -lift), label, color);
+    plan.label(
+        projection::Point::new(local_x, local_y, -lift),
+        label,
+        color,
+    );
 }
 
 fn npc_label(npc: &Npc) -> String {
-    format!("{} (ID:{}) (A: {}) (P: {}) (G: {})", crate::strip_tags(&npc.name), npc.id, npc.animation, npc.pose, npc.graphic)
+    format!(
+        "{} (ID:{}) (A: {}) (P: {}) (G: {})",
+        crate::strip_tags(&npc.name),
+        npc.id,
+        npc.animation,
+        npc.pose,
+        npc.graphic
+    )
 }
 
 // Like RuneLite's projectile overlay, plus the cycles left until it lands (or until it leaves, while it waits).
@@ -2601,7 +3676,10 @@ fn projectile_label(p: &crate::Projectile) -> String {
 
 // Like RuneLite's player overlay: the name, then the animation, pose and graphic.
 fn player_label(player: &Player) -> String {
-    format!("{} (A: {}) (P: {}) (G: {})", player.name, player.animation, player.pose, player.graphic)
+    format!(
+        "{} (A: {}) (P: {}) (G: {})",
+        player.name, player.animation, player.pose, player.graphic
+    )
 }
 
 // A game object's footprint, and its label at the ground (RuneLite draws game objects at zOffset 0).
@@ -2609,7 +3687,11 @@ fn loc_marker(plan: &mut Plan, loc: &ipc::state::LocInfo, color: Rgba) {
     let (tx, ty) = (loc.x as i32, loc.y as i32);
     let (sx, sy) = (loc.size_x.max(1) as i32, loc.size_y.max(1) as i32);
     plan.path(&footprint(tx, ty, sx, sy), color, true, true);
-    let centre = projection::Point::new(tx * TILE_SIZE + sx * TILE_HALF, ty * TILE_SIZE + sy * TILE_HALF, 0);
+    let centre = projection::Point::new(
+        tx * TILE_SIZE + sx * TILE_HALF,
+        ty * TILE_SIZE + sy * TILE_HALF,
+        0,
+    );
     plan.label(centre, format!("ID: {}", loc.id), color);
 }
 
@@ -2662,7 +3744,9 @@ fn cursor_canvas(pid: u32) -> Option<[f32; 2]> {
     let hwnd = client_window(pid)?;
     let mut cursor = POINT { x: 0, y: 0 };
     let mut origin = POINT { x: 0, y: 0 };
-    if unsafe { GetCursorPos(&mut cursor) } == 0 || unsafe { ClientToScreen(hwnd, &mut origin) } == 0 {
+    if unsafe { GetCursorPos(&mut cursor) } == 0
+        || unsafe { ClientToScreen(hwnd, &mut origin) } == 0
+    {
         return None;
     }
     Some([(cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32])
@@ -2672,25 +3756,35 @@ fn cursor_canvas(pid: u32) -> Option<[f32; 2]> {
 type HoveredTile = ([i32; 2], [f32; 2]);
 
 fn hovered_tile(pid: u32, centre: [i32; 2]) -> Result<Option<HoveredTile>, String> {
-    let Some(cursor) = cursor_canvas(pid) else { return Ok(None) };
+    let Some(cursor) = cursor_canvas(pid) else {
+        return Ok(None);
+    };
     let [cx, cy] = centre;
     let tiles: Vec<[i32; 2]> = (cx - HOVER_RANGE..=cx + HOVER_RANGE)
         .flat_map(|tx| (cy - HOVER_RANGE..=cy + HOVER_RANGE).map(move |ty| [tx, ty]))
         .filter(|&tile| in_scene(tile))
         .collect();
-    let points: Vec<projection::Point> = tiles.iter().flat_map(|&tile| tile_corners(tile)).collect();
+    let points: Vec<projection::Point> =
+        tiles.iter().flat_map(|&tile| tile_corners(tile)).collect();
     if points.is_empty() {
         return Ok(None);
     }
     let screen = project(pid, &points, Via::Auto)?;
-    Ok(tiles.iter().zip(screen.as_chunks::<4>().0.iter()).find(|(_, corners)| inside(*corners, cursor)).map(|(&tile, _)| (tile, cursor)))
+    Ok(tiles
+        .iter()
+        .zip(screen.as_chunks::<4>().0.iter())
+        .find(|(_, corners)| inside(*corners, cursor))
+        .map(|(&tile, _)| (tile, cursor)))
 }
 
 // Runs `read` on the scene's terrain (its tile settings), reusing the terrain that projection keeps.
 fn with_terrain<T>(pid: u32, read: impl FnOnce(&Terrain) -> T) -> Result<T, String> {
     let (layout, memory) = reader(pid, 0, "")?;
     let mut cache = TERRAIN.lock().unwrap_or_else(|e| e.into_inner());
-    let mut terrain = cache.take().filter(|(p, _)| *p == pid).map(|(_, terrain)| terrain);
+    let mut terrain = cache
+        .take()
+        .filter(|(p, _)| *p == pid)
+        .map(|(_, terrain)| terrain);
     let result = projection::ensure_terrain(&memory, &layout, &mut terrain, || decorations(pid));
     let value = match (result, terrain.as_ref()) {
         (Ok(_), Some(terrain)) => Ok(read(terrain)),
@@ -2739,7 +3833,9 @@ fn next_frame(pid: u32, after: u32, timeout: Duration) -> Result<Option<u32>, St
         }
         match event {
             Some(event) => {
-                unsafe { WaitForSingleObject(event.0, left.min(FRAME_SLICE).as_millis().max(1) as u32) };
+                unsafe {
+                    WaitForSingleObject(event.0, left.min(FRAME_SLICE).as_millis().max(1) as u32)
+                };
             }
             None => sleep(left.min(Duration::from_millis(1))),
         }
@@ -2747,29 +3843,52 @@ fn next_frame(pid: u32, after: u32, timeout: Duration) -> Result<Option<u32>, St
 }
 
 /// Draws `layers` once client `pid` has presented a frame after `after`; returns that frame, or `None` if none came within `FRAME_WAIT`.
-pub fn scene_tiles_next_frame(pid: u32, layers: &[&str], after: u32) -> Result<Option<u32>, String> {
-    let Some(frame) = next_frame(pid, after, FRAME_WAIT)? else { return Ok(None) };
+pub fn scene_tiles_next_frame(
+    pid: u32,
+    layers: &[&str],
+    after: u32,
+) -> Result<Option<u32>, String> {
+    let Some(frame) = next_frame(pid, after, FRAME_WAIT)? else {
+        return Ok(None);
+    };
     scene_tiles(pid, layers)?;
     Ok(Some(frame))
 }
 
 // Draws the layers named in `layers` (see `LAYERS`); returns how many tile outlines were drawn in full on the canvas.
 pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
-    if let Some(unknown) = layers.iter().find(|layer| !LAYERS.contains(layer) && widget_layer(layer).is_none()) {
+    if let Some(unknown) = layers
+        .iter()
+        .find(|layer| !LAYERS.contains(layer) && widget_layer(layer).is_none())
+    {
         return Err(format!("unknown tile layer {unknown:?}"));
     }
     let on = |name: &str| layers.contains(&name);
     let font = label_font(pid)?;
     let line_height = font.max_height * LABEL_SCALE + 2;
     let state = game_state(pid)?;
-    let plane_text = |position: &Position| position.plane.map_or("?".to_string(), |plane| plane.to_string());
-    let here = || state.position.ok_or("the player's position isn't known (not logged in?)");
+    let plane_text = |position: &Position| {
+        position
+            .plane
+            .map_or("?".to_string(), |plane| plane.to_string())
+    };
+    let here = || {
+        state
+            .position
+            .ok_or("the player's position isn't known (not logged in?)")
+    };
 
     let mut plan = Plan::default();
 
     // boxes on the canvas, such as the widget inspector's selection
     for (x, y, width, height, color) in layers.iter().filter_map(|layer| widget_layer(layer)) {
-        plan.rects.push(Rect { x, y, width, height, color });
+        plan.rects.push(Rect {
+            x,
+            y,
+            width,
+            height,
+            color,
+        });
     }
 
     if on("grid") {
@@ -2782,7 +3901,13 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     if on("npcs") {
         for npc in npcs(pid)? {
             let color = NPC_TILE_COLOR;
-            actor_marker(&mut plan, (npc.local_x, npc.local_y), npc.height, npc_label(&npc), color);
+            actor_marker(
+                &mut plan,
+                (npc.local_x, npc.local_y),
+                npc.height,
+                npc_label(&npc),
+                color,
+            );
         }
     }
 
@@ -2791,8 +3916,18 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let me = state.position.map(|p| (p.local_x, p.local_y));
         for player in players(pid)? {
             let local = (player.local_x, player.local_y);
-            let color = if Some(local) == me { LOCAL_PLAYER_TILE_COLOR } else { PLAYER_TILE_COLOR };
-            actor_marker(&mut plan, local, player.height, player_label(&player), color);
+            let color = if Some(local) == me {
+                LOCAL_PLAYER_TILE_COLOR
+            } else {
+                PLAYER_TILE_COLOR
+            };
+            actor_marker(
+                &mut plan,
+                local,
+                player.height,
+                player_label(&player),
+                color,
+            );
         }
     }
 
@@ -2800,25 +3935,56 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         // Each moving sub-scene (a boat), labelled where it is in the top-level scene.
         for entity in world_entities(pid)? {
             let label = format!("ID: {} Type: {}", entity.view_id, entity.config_id);
-            plan.label(projection::Point::new(entity.local_x, entity.local_y, 0), label, WORLD_ENTITY_COLOR);
+            plan.label(
+                projection::Point::new(entity.local_x, entity.local_y, 0),
+                label,
+                WORLD_ENTITY_COLOR,
+            );
         }
     }
 
     if on("interacting") {
         // An arrow from each actor to the one it interacts with, from middle to middle.
         let (npcs, players) = (npcs(pid)?, players(pid)?);
-        let middle = |local_x, local_y, height: i32| projection::Point::new(local_x, local_y, -(if height > 0 { height } else { NPC_LABEL_DEFAULT_HEIGHT }) / 2);
-        let npc_at = |index: i32| npcs.iter().find(|n| n.index == index).map(|n| middle(n.local_x, n.local_y, n.height));
-        let player_at = |index: i32| players.iter().find(|p| p.index == index).map(|p| middle(p.local_x, p.local_y, p.height));
+        let middle = |local_x, local_y, height: i32| {
+            projection::Point::new(
+                local_x,
+                local_y,
+                -(if height > 0 {
+                    height
+                } else {
+                    NPC_LABEL_DEFAULT_HEIGHT
+                }) / 2,
+            )
+        };
+        let npc_at = |index: i32| {
+            npcs.iter()
+                .find(|n| n.index == index)
+                .map(|n| middle(n.local_x, n.local_y, n.height))
+        };
+        let player_at = |index: i32| {
+            players
+                .iter()
+                .find(|p| p.index == index)
+                .map(|p| middle(p.local_x, p.local_y, p.height))
+        };
         let target = |npc: i32, player: i32| npc_at(npc).or_else(|| player_at(player));
         for npc in &npcs {
             if let Some(to) = target(npc.interacting_npc, npc.interacting_player) {
-                plan.arrow(middle(npc.local_x, npc.local_y, npc.height), to, INTERACTING_COLOR);
+                plan.arrow(
+                    middle(npc.local_x, npc.local_y, npc.height),
+                    to,
+                    INTERACTING_COLOR,
+                );
             }
         }
         for player in &players {
             if let Some(to) = target(player.interacting_npc, player.interacting_player) {
-                plan.arrow(middle(player.local_x, player.local_y, player.height), to, INTERACTING_COLOR);
+                plan.arrow(
+                    middle(player.local_x, player.local_y, player.height),
+                    to,
+                    INTERACTING_COLOR,
+                );
             }
         }
     }
@@ -2828,15 +3994,37 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let (origin_x, origin_y) = scene_origin(&here);
         let projectiles = projectiles(pid)?;
         // a projectile at an actor follows it, so its line ends where the actor stands now
-        let npcs = if projectiles.iter().any(|p| p.target_npc >= 0) { npcs(pid)? } else { Vec::new() };
-        let players = if projectiles.iter().any(|p| p.target_player >= 0) { players(pid)? } else { Vec::new() };
-        for p in projectiles.iter().filter(|p| Some(p.source_plane) == here.plane) {
+        let npcs = if projectiles.iter().any(|p| p.target_npc >= 0) {
+            npcs(pid)?
+        } else {
+            Vec::new()
+        };
+        let players = if projectiles.iter().any(|p| p.target_player >= 0) {
+            players(pid)?
+        } else {
+            Vec::new()
+        };
+        for p in projectiles
+            .iter()
+            .filter(|p| Some(p.source_plane) == here.plane)
+        {
             let at = projection::Point::new(p.local_x, p.local_y, -p.height);
-            let actor = npcs.iter().find(|n| n.index == p.target_npc).map(|n| (n.local_x, n.local_y))
-                .or_else(|| players.iter().find(|pl| pl.index == p.target_player).map(|pl| (pl.local_x, pl.local_y)));
+            let actor = npcs
+                .iter()
+                .find(|n| n.index == p.target_npc)
+                .map(|n| (n.local_x, n.local_y))
+                .or_else(|| {
+                    players
+                        .iter()
+                        .find(|pl| pl.index == p.target_player)
+                        .map(|pl| (pl.local_x, pl.local_y))
+                });
             let target = match actor {
                 Some((x, y)) => projection::Point::new(x, y, -p.end_height),
-                None => projection::Point { z: -p.end_height, ..tile_centre([p.target_x - origin_x, p.target_y - origin_y]) },
+                None => projection::Point {
+                    z: -p.end_height,
+                    ..tile_centre([p.target_x - origin_x, p.target_y - origin_y])
+                },
             };
             plan.path(&[at, target], PROJECTILE_PATH_COLOR, false, false);
             plan.label(at, projectile_label(p), PROJECTILE_COLOR);
@@ -2846,10 +4034,17 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     if on("spot-anims") {
         let here = here()?;
         // the points are projected in the main world, so the effects inside a boat (their own coordinates) are left out
-        for object in spot_anims(pid)?.iter().filter(|object| object.view_id == 0 && Some(object.plane) == here.plane) {
+        for object in spot_anims(pid)?
+            .iter()
+            .filter(|object| object.view_id == 0 && Some(object.plane) == here.plane)
+        {
             let tile = [object.local_x >> 7, object.local_y >> 7];
             plan.path(&tile_corners(tile), SPOT_ANIM_COLOR, true, true);
-            plan.label(tile_centre(tile), format!("(ID: {})", object.id), TEXT_COLOR);
+            plan.label(
+                tile_centre(tile),
+                format!("(ID: {})", object.id),
+                TEXT_COLOR,
+            );
         }
     }
 
@@ -2869,8 +4064,15 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("ground-items") {
         let here = here()?;
-        for item in cached(&GROUND_ITEMS_CACHE, pid, || ground_items(pid).map(Arc::new))?.iter().filter(|item| Some(item.plane) == here.plane) {
-            plan.tile([item.scene_x, item.scene_y], format!("ID: {} Qty:{}", item.id, item.quantity), GROUND_ITEM_COLOR);
+        for item in cached(&GROUND_ITEMS_CACHE, pid, || ground_items(pid).map(Arc::new))?
+            .iter()
+            .filter(|item| Some(item.plane) == here.plane)
+        {
+            plan.tile(
+                [item.scene_x, item.scene_y],
+                format!("ID: {} Qty:{}", item.id, item.quantity),
+                GROUND_ITEM_COLOR,
+            );
         }
     }
 
@@ -2881,8 +4083,13 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
             let mut flagged = Vec::new();
             for x in 0..size_x {
                 for y in 0..size_y {
-                    let bridge = terrain.setting(1, x, y).is_some_and(|s| s & crate::devtools::TILE_FLAG_BRIDGE != 0);
-                    let text = crate::devtools::tile_flag_text(bridge, terrain.setting(plane, x, y).unwrap_or(0));
+                    let bridge = terrain
+                        .setting(1, x, y)
+                        .is_some_and(|s| s & crate::devtools::TILE_FLAG_BRIDGE != 0);
+                    let text = crate::devtools::tile_flag_text(
+                        bridge,
+                        terrain.setting(plane, x, y).unwrap_or(0),
+                    );
                     if !text.is_empty() {
                         flagged.push(([x, y], text));
                     }
@@ -2897,7 +4104,9 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("zone-borders") {
         // The chunk grid across the whole scene, as RuneLite's zone borders.
-        let lines: Vec<i32> = (CHUNK_TILES..=SCENE_TILES - CHUNK_TILES).step_by(CHUNK_TILES as usize).collect();
+        let lines: Vec<i32> = (CHUNK_TILES..=SCENE_TILES - CHUNK_TILES)
+            .step_by(CHUNK_TILES as usize)
+            .collect();
         for &x in &lines {
             let points: Vec<_> = lines.iter().map(|&y| boundary(x, y)).collect();
             plan.path(&points, CHUNK_COLOR, false, false);
@@ -2913,19 +4122,32 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let (origin_x, origin_y) = scene_origin(&here);
         let (near_x, near_y) = (here.x, here.y);
         // The map square edges within reach of the player, as RuneLite's map squares.
-        for x in (near_x - MAP_SQUARE_RANGE..=near_x + MAP_SQUARE_RANGE).filter(|x| x.rem_euclid(MAP_SQUARE_TILES) == 0) {
-            let points: Vec<_> = (near_y - MAP_SQUARE_RANGE..=near_y + MAP_SQUARE_RANGE).map(|y| boundary(x - origin_x, y - origin_y)).collect();
+        for x in (near_x - MAP_SQUARE_RANGE..=near_x + MAP_SQUARE_RANGE)
+            .filter(|x| x.rem_euclid(MAP_SQUARE_TILES) == 0)
+        {
+            let points: Vec<_> = (near_y - MAP_SQUARE_RANGE..=near_y + MAP_SQUARE_RANGE)
+                .map(|y| boundary(x - origin_x, y - origin_y))
+                .collect();
             plan.path(&points, MAP_SQUARE_COLOR, false, false);
         }
-        for y in (near_y - MAP_SQUARE_RANGE..=near_y + MAP_SQUARE_RANGE).filter(|y| y.rem_euclid(MAP_SQUARE_TILES) == 0) {
-            let points: Vec<_> = (near_x - MAP_SQUARE_RANGE..=near_x + MAP_SQUARE_RANGE).map(|x| boundary(x - origin_x, y - origin_y)).collect();
+        for y in (near_y - MAP_SQUARE_RANGE..=near_y + MAP_SQUARE_RANGE)
+            .filter(|y| y.rem_euclid(MAP_SQUARE_TILES) == 0)
+        {
+            let points: Vec<_> = (near_x - MAP_SQUARE_RANGE..=near_x + MAP_SQUARE_RANGE)
+                .map(|x| boundary(x - origin_x, y - origin_y))
+                .collect();
             plan.path(&points, MAP_SQUARE_COLOR, false, false);
         }
     }
 
     if on("loading-lines") {
         let (near, far) = (LOADING_INSET, SCENE_TILES - LOADING_INSET);
-        let square = [boundary(near, near), boundary(near, far), boundary(far, far), boundary(far, near)];
+        let square = [
+            boundary(near, near),
+            boundary(near, far),
+            boundary(far, far),
+            boundary(far, near),
+        ];
         plan.path(&square, CHUNK_COLOR, true, false);
     }
 
@@ -2933,12 +4155,21 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
         let (x1, y1, _, flags) = scene_collision(pid)?;
-        let flag_at = |x: i32, y: i32| flags.get((x - x1) as usize).and_then(|column| column.get((y - y1) as usize)).copied().unwrap_or(0);
+        let flag_at = |x: i32, y: i32| {
+            flags
+                .get((x - x1) as usize)
+                .and_then(|column| column.get((y - y1) as usize))
+                .copied()
+                .unwrap_or(0)
+        };
         let from = (here.x, here.y);
         for x in here.x - LOS_RANGE..=here.x + LOS_RANGE {
             for y in here.y - LOS_RANGE..=here.y + LOS_RANGE {
                 let tile = [x - origin_x, y - origin_y];
-                if (x, y) == from || !in_scene(tile) || !crate::devtools::line_of_sight(flag_at, from, (x, y)) {
+                if (x, y) == from
+                    || !in_scene(tile)
+                    || !crate::devtools::line_of_sight(flag_at, from, (x, y))
+                {
                     continue;
                 }
                 plan.path(&tile_corners(tile), LINE_OF_SIGHT_COLOR, true, false);
@@ -2954,7 +4185,10 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         for dx in -1..=1 {
             for dy in -1..=1 {
                 let tile = [here.x + dx - origin_x, here.y + dy - origin_y];
-                if (dx, dy) != (0, 0) && in_scene(tile) && crate::pathfinding::can_step(&world, plane, here.x, here.y, dx, dy) {
+                if (dx, dy) != (0, 0)
+                    && in_scene(tile)
+                    && crate::pathfinding::can_step(&world, plane, here.x, here.y, dx, dy)
+                {
                     plan.path(&tile_corners(tile), LOCAL_VALID_MOVEMENT_COLOR, true, false);
                 }
             }
@@ -2988,7 +4222,10 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                 format!("Camera {}, {}, {}", camera.x, camera.y, camera.z),
                 format!("Pitch {}", camera.pitch),
                 format!("Yaw {}", camera.yaw),
-                format!("Scale {}", camera.zoom.map_or("?".to_string(), |zoom| zoom.to_string())),
+                format!(
+                    "Scale {}",
+                    camera.zoom.map_or("?".to_string(), |zoom| zoom.to_string())
+                ),
             ],
         );
     }
@@ -3001,15 +4238,30 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
             let (x, y) = (origin_x + tile[0], origin_y + tile[1]);
             let mut lines = Vec::new();
             if on("tile-location") {
-                let settings = with_terrain(pid, |terrain| terrain.setting(terrain.key().plane, tile[0], tile[1]).unwrap_or(0))?;
+                let settings = with_terrain(pid, |terrain| {
+                    terrain
+                        .setting(terrain.key().plane, tile[0], tile[1])
+                        .unwrap_or(0)
+                })?;
                 let (region, region_x, region_y) = crate::devtools::region(x, y);
-                lines.push(format!("World location: {}, {}, {}", x, y, plane_text(&here)));
-                lines.push(format!("Region ID: {region} location: {region_x}, {region_y}"));
+                lines.push(format!(
+                    "World location: {}, {}, {}",
+                    x,
+                    y,
+                    plane_text(&here)
+                ));
+                lines.push(format!(
+                    "Region ID: {region} location: {region_x}, {region_y}"
+                ));
                 lines.push(format!("Flags: {settings}"));
             }
             if on("movement-flags") {
                 let (x1, y1, _, flags) = scene_collision(pid)?;
-                let data = flags.get((x - x1) as usize).and_then(|column| column.get((y - y1) as usize)).copied().unwrap_or(0);
+                let data = flags
+                    .get((x - x1) as usize)
+                    .and_then(|column| column.get((y - y1) as usize))
+                    .copied()
+                    .unwrap_or(0);
                 let names = crate::devtools::movement_flag_names(data);
                 if names.is_empty() {
                     lines.push("No movement flags".to_string());
@@ -3023,9 +4275,17 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         }
     }
 
-    let screen = if plan.points.is_empty() { Vec::new() } else { project_clipped(pid, &plan.points)? };
+    let screen = if plan.points.is_empty() {
+        Vec::new()
+    } else {
+        project_clipped(pid, &plan.points)?
+    };
     let on_screen = |[x, y]: &[f32; 2]| x.abs() < SCREEN_LIMIT && y.abs() < SCREEN_LIMIT;
-    let drawn = plan.paths.iter().filter(|path| path.marker && path.points.iter().all(|&i| on_screen(&screen[i]))).count();
+    let drawn = plan
+        .paths
+        .iter()
+        .filter(|path| path.marker && path.points.iter().all(|&i| on_screen(&screen[i])))
+        .count();
 
     // What ends up on the canvas, to skip repainting a frame identical to the last one.
     let mut hasher = DefaultHasher::new();
@@ -3037,7 +4297,12 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         }
     }
     for arrow in &plan.arrows {
-        (arrow.color, screen[arrow.from].map(|v| v.round() as i32), screen[arrow.to].map(|v| v.round() as i32)).hash(&mut hasher);
+        (
+            arrow.color,
+            screen[arrow.from].map(|v| v.round() as i32),
+            screen[arrow.to].map(|v| v.round() as i32),
+        )
+            .hash(&mut hasher);
     }
     for label in &plan.labels {
         let [x, y] = screen[label.anchor];
@@ -3050,59 +4315,125 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         (rect.x, rect.y, rect.width, rect.height, rect.color).hash(&mut hasher);
     }
 
-    with_overlay(pid, overlay_mode::ON_SERIAL, false, Some(hasher.finish()), |buf, width, height| unsafe {
-        for path in &plan.paths {
-            let points: Vec<[f32; 2]> = path.points.iter().map(|&i| screen[i]).collect();
-            let edges = if path.closed { points.len() } else { points.len().saturating_sub(1) };
-            for i in 0..edges {
-                let (a, b) = (points[i], points[(i + 1) % points.len()]);
-                if on_screen(&a) && on_screen(&b) {
-                    let [x1, y1, x2, y2] = [a[0].round() as i32, a[1].round() as i32, b[0].round() as i32, b[1].round() as i32];
-                    // two pixels thick: the line and its copy one pixel to the right and down
-                    for shift in 0..STROKE_WIDTH {
-                        draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], path.color);
-                        draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], path.color);
+    with_overlay(
+        pid,
+        overlay_mode::ON_SERIAL,
+        false,
+        Some(hasher.finish()),
+        |buf, width, height| unsafe {
+            for path in &plan.paths {
+                let points: Vec<[f32; 2]> = path.points.iter().map(|&i| screen[i]).collect();
+                let edges = if path.closed {
+                    points.len()
+                } else {
+                    points.len().saturating_sub(1)
+                };
+                for i in 0..edges {
+                    let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                    if on_screen(&a) && on_screen(&b) {
+                        let [x1, y1, x2, y2] = [
+                            a[0].round() as i32,
+                            a[1].round() as i32,
+                            b[0].round() as i32,
+                            b[1].round() as i32,
+                        ];
+                        // two pixels thick: the line and its copy one pixel to the right and down
+                        for shift in 0..STROKE_WIDTH {
+                            draw_line(
+                                buf,
+                                width,
+                                height,
+                                [x1 + shift, y1, x2 + shift, y2],
+                                path.color,
+                            );
+                            draw_line(
+                                buf,
+                                width,
+                                height,
+                                [x1, y1 + shift, x2, y2 + shift],
+                                path.color,
+                            );
+                        }
                     }
                 }
             }
-        }
-        for arrow in &plan.arrows {
-            let [from, to] = [arrow.from, arrow.to].map(|i| screen[i]);
-            if on_screen(&from) && on_screen(&to) {
-                draw_arrow(buf, width, height, [from[0], from[1] + INTERACTING_SHIFT], [to[0], to[1] + INTERACTING_SHIFT], arrow.color);
-            }
-        }
-        for label in &plan.labels {
-            let [ax, ay] = screen[label.anchor];
-            if !on_screen(&[ax, ay]) {
-                continue;
-            }
-            let left = ax.round() as i32 - font.width(&label.text, LABEL_SCALE) / 2;
-            let top = ay.round() as i32 - font.max_height * LABEL_SCALE;
-            font.plot(&label.text, left + 1, top + 1, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, LABEL_SHADOW));
-            font.plot(&label.text, left, top, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, label.color));
-        }
-        for rect in &plan.rects {
-            let (left, top, right, bottom) = (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
-            for [x1, y1, x2, y2] in [[left, top, right, top], [right, top, right, bottom], [right, bottom, left, bottom], [left, bottom, left, top]] {
-                for shift in 0..STROKE_WIDTH {
-                    draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], rect.color);
-                    draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], rect.color);
+            for arrow in &plan.arrows {
+                let [from, to] = [arrow.from, arrow.to].map(|i| screen[i]);
+                if on_screen(&from) && on_screen(&to) {
+                    draw_arrow(
+                        buf,
+                        width,
+                        height,
+                        [from[0], from[1] + INTERACTING_SHIFT],
+                        [to[0], to[1] + INTERACTING_SHIFT],
+                        arrow.color,
+                    );
                 }
             }
-        }
-        for text in &plan.texts {
-            font.plot(&text.text, text.x + 1, text.y + 1, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, LABEL_SHADOW));
-            font.plot(&text.text, text.x, text.y, LABEL_SCALE, |x, y| put_pixel(buf, width, height, x, y, text.color));
-        }
-    })?;
+            for label in &plan.labels {
+                let [ax, ay] = screen[label.anchor];
+                if !on_screen(&[ax, ay]) {
+                    continue;
+                }
+                let left = ax.round() as i32 - font.width(&label.text, LABEL_SCALE) / 2;
+                let top = ay.round() as i32 - font.max_height * LABEL_SCALE;
+                font.plot(&label.text, left + 1, top + 1, LABEL_SCALE, |x, y| {
+                    put_pixel(buf, width, height, x, y, LABEL_SHADOW)
+                });
+                font.plot(&label.text, left, top, LABEL_SCALE, |x, y| {
+                    put_pixel(buf, width, height, x, y, label.color)
+                });
+            }
+            for rect in &plan.rects {
+                let (left, top, right, bottom) =
+                    (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+                for [x1, y1, x2, y2] in [
+                    [left, top, right, top],
+                    [right, top, right, bottom],
+                    [right, bottom, left, bottom],
+                    [left, bottom, left, top],
+                ] {
+                    for shift in 0..STROKE_WIDTH {
+                        draw_line(
+                            buf,
+                            width,
+                            height,
+                            [x1 + shift, y1, x2 + shift, y2],
+                            rect.color,
+                        );
+                        draw_line(
+                            buf,
+                            width,
+                            height,
+                            [x1, y1 + shift, x2, y2 + shift],
+                            rect.color,
+                        );
+                    }
+                }
+            }
+            for text in &plan.texts {
+                font.plot(&text.text, text.x + 1, text.y + 1, LABEL_SCALE, |x, y| {
+                    put_pixel(buf, width, height, x, y, LABEL_SHADOW)
+                });
+                font.plot(&text.text, text.x, text.y, LABEL_SCALE, |x, y| {
+                    put_pixel(buf, width, height, x, y, text.color)
+                });
+            }
+        },
+    )?;
     Ok(drawn)
 }
 
 // Paints the overlay into the slot not shown and flips `overlay_serial`; `keep` starts from what is shown, `hash` and `mode` skip repeats, and `EVERY_FRAME` is painted in place.
-fn with_overlay(pid: u32, mode: u8, keep: bool, hash: Option<u64>, paint: impl FnOnce(*mut u8, i32, i32)) -> Result<(), String> {
-    let connection = connection(pid)
-        .ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
+fn with_overlay(
+    pid: u32,
+    mode: u8,
+    keep: bool,
+    hash: Option<u64>,
+    paint: impl FnOnce(*mut u8, i32, i32),
+) -> Result<(), String> {
+    let connection =
+        connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
     if connection.protocol != ipc::PROTOCOL_VERSION {
         return Err(format!(
             "Client {pid} runs agent protocol {}, this is {}: restart the client and load a matching agent",
@@ -3121,7 +4452,10 @@ fn with_overlay(pid: u32, mode: u8, keep: bool, hash: Option<u64>, paint: impl F
     let size = overlay_offset(ipc::OVERLAY_SLOTS);
     let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_WRITE, 0, 0, size) };
     if view.Value.is_null() {
-        return Err(format!("Cannot map agent's shared memory in client {pid}: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "Cannot map agent's shared memory in client {pid}: {}",
+            io::Error::last_os_error()
+        ));
     }
 
     let base = view.Value as *mut u8;
@@ -3163,7 +4497,13 @@ fn with_overlay(pid: u32, mode: u8, keep: bool, hash: Option<u64>, paint: impl F
     Ok(())
 }
 
-unsafe fn draw_rect(buf: *mut u8, width: i32, height: i32, [x1, y1, x2, y2]: [i32; 4], color: Rgba) {
+unsafe fn draw_rect(
+    buf: *mut u8,
+    width: i32,
+    height: i32,
+    [x1, y1, x2, y2]: [i32; 4],
+    color: Rgba,
+) {
     let (left, right) = (x1.min(x2), x1.max(x2));
     let (top, bottom) = (y1.min(y2), y1.max(y2));
     for x in left..=right {
@@ -3181,7 +4521,14 @@ unsafe fn draw_rect(buf: *mut u8, width: i32, height: i32, [x1, y1, x2, y2]: [i3
 }
 
 // A thick line from `from` to `to` with a filled head at `to`, like RuneLite's interacting arrows.
-unsafe fn draw_arrow(buf: *mut u8, width: i32, height: i32, from: [f32; 2], to: [f32; 2], color: Rgba) {
+unsafe fn draw_arrow(
+    buf: *mut u8,
+    width: i32,
+    height: i32,
+    from: [f32; 2],
+    to: [f32; 2],
+    color: Rgba,
+) {
     let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
     let length = dx.hypot(dy);
     let round = |[x, y]: [f32; 2]| [x.round() as i32, y.round() as i32];
@@ -3199,16 +4546,42 @@ unsafe fn draw_arrow(buf: *mut u8, width: i32, height: i32, from: [f32; 2], to: 
     // the head: its tip at `to`, 5 long and 6 wide, pointing along the line
     let (ux, uy) = (dx / length * ARROW_SCALE, dy / length * ARROW_SCALE);
     let base = [to[0] - 5.0 * ux, to[1] - 5.0 * uy];
-    let corners = [to, [base[0] - 3.0 * uy, base[1] + 3.0 * ux], [base[0] + 3.0 * uy, base[1] - 3.0 * ux]];
-    let edge = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
-    let low = corners.map(|c| c[0].floor() as i32).into_iter().min().unwrap();
-    let high = corners.map(|c| c[0].ceil() as i32).into_iter().max().unwrap();
-    let top = corners.map(|c| c[1].floor() as i32).into_iter().min().unwrap();
-    let bottom = corners.map(|c| c[1].ceil() as i32).into_iter().max().unwrap();
+    let corners = [
+        to,
+        [base[0] - 3.0 * uy, base[1] + 3.0 * ux],
+        [base[0] + 3.0 * uy, base[1] - 3.0 * ux],
+    ];
+    let edge = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| {
+        (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    };
+    let low = corners
+        .map(|c| c[0].floor() as i32)
+        .into_iter()
+        .min()
+        .unwrap();
+    let high = corners
+        .map(|c| c[0].ceil() as i32)
+        .into_iter()
+        .max()
+        .unwrap();
+    let top = corners
+        .map(|c| c[1].floor() as i32)
+        .into_iter()
+        .min()
+        .unwrap();
+    let bottom = corners
+        .map(|c| c[1].ceil() as i32)
+        .into_iter()
+        .max()
+        .unwrap();
     for y in top..=bottom {
         for x in low..=high {
             let p = [x as f32 + 0.5, y as f32 + 0.5];
-            let sides = [edge(corners[0], corners[1], p), edge(corners[1], corners[2], p), edge(corners[2], corners[0], p)];
+            let sides = [
+                edge(corners[0], corners[1], p),
+                edge(corners[1], corners[2], p),
+                edge(corners[2], corners[0], p),
+            ];
             if sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0) {
                 unsafe { put_pixel(buf, width, height, x, y, color) };
             }
@@ -3216,7 +4589,13 @@ unsafe fn draw_arrow(buf: *mut u8, width: i32, height: i32, from: [f32; 2], to: 
     }
 }
 
-unsafe fn draw_line(buf: *mut u8, width: i32, height: i32, [x1, y1, x2, y2]: [i32; 4], color: Rgba) {
+unsafe fn draw_line(
+    buf: *mut u8,
+    width: i32,
+    height: i32,
+    [x1, y1, x2, y2]: [i32; 4],
+    color: Rgba,
+) {
     let (dx, dy) = ((x2 - x1).abs(), -(y2 - y1).abs());
     let (sx, sy) = (if x1 < x2 { 1 } else { -1 }, if y1 < y2 { 1 } else { -1 });
     let (mut x, mut y, mut err) = (x1, y1, dx + dy);
@@ -3262,7 +4641,9 @@ pub fn script_runs(pid: u32, since: u64, limit: usize) -> Result<crate::ScriptPa
     }
     let log = view.Value as *const script_log::Log;
     // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let page = unsafe { script_log::is_compatible(log).then(|| script_log::read_since(log, since, limit)) };
+    let page = unsafe {
+        script_log::is_compatible(log).then(|| script_log::read_since(log, since, limit))
+    };
     unsafe { UnmapViewOfFile(view) };
     let page = page.ok_or_else(|| format!("The script log of client {pid} has another layout: restart the client and load a matching agent"))?;
     Ok(crate::ScriptPage {
@@ -3304,7 +4685,8 @@ pub fn varc_changes(pid: u32, since: u64, limit: usize) -> Result<crate::VarcPag
     }
     let log = view.Value as *const varc_log::Log;
     // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let page = unsafe { varc_log::is_compatible(log).then(|| varc_log::read_since(log, since, limit)) };
+    let page =
+        unsafe { varc_log::is_compatible(log).then(|| varc_log::read_since(log, since, limit)) };
     unsafe { UnmapViewOfFile(view) };
     let page = page.ok_or_else(|| format!("The varc log of client {pid} has another layout: restart the client and load a matching agent"))?;
     // the text a string keeps, with a mark when the log kept only the start of it
@@ -3328,8 +4710,18 @@ pub fn varc_changes(pid: u32, since: u64, limit: usize) -> Result<crate::VarcPag
                     time_ms: entry.time_ms,
                     index: entry.index,
                     string,
-                    old: entry.old_known.then(|| if string { text(&entry.old_text, entry.old_length) } else { entry.old_int.to_string() }),
-                    new: if string { text(&entry.new_text, entry.new_length) } else { entry.new_int.to_string() },
+                    old: entry.old_known.then(|| {
+                        if string {
+                            text(&entry.old_text, entry.old_length)
+                        } else {
+                            entry.old_int.to_string()
+                        }
+                    }),
+                    new: if string {
+                        text(&entry.new_text, entry.new_length)
+                    } else {
+                        entry.new_int.to_string()
+                    },
                 }
             })
             .collect(),
@@ -3350,7 +4742,10 @@ pub fn item_changes(pid: u32, since: u64, limit: usize) -> Result<crate::ItemPag
     let page = unsafe {
         item_log::is_compatible(log).then(|| {
             if since == crate::ITEM_CHANGES_NOW {
-                item_log::Page { next: item_log::written(log), ..Default::default() }
+                item_log::Page {
+                    next: item_log::written(log),
+                    ..Default::default()
+                }
             } else {
                 item_log::read_since(log, since, limit)
             }
@@ -3379,7 +4774,15 @@ impl ItemWatcher {
         let name = wide(item_log_memory_name(pid));
         let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) })
             .ok_or_else(|| format!("No item log in client {pid}: the agent isn't loaded, is too old, or didn't find the item container writes"))?;
-        let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, item_log::LOG_SIZE) };
+        let view = unsafe {
+            MapViewOfFile(
+                mapping.0,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0,
+                0,
+                item_log::LOG_SIZE,
+            )
+        };
         if view.Value.is_null() {
             return Err(format!("Cannot map the item log of client {pid}"));
         }
@@ -3387,7 +4790,9 @@ impl ItemWatcher {
         // SAFETY: the mapping is LOG_SIZE bytes, writable, and stays mapped until the watcher is dropped.
         if !unsafe { item_log::is_compatible(log) } {
             unsafe { UnmapViewOfFile(view) };
-            return Err(format!("The item log of client {pid} has another layout: restart the client and load a matching agent"));
+            return Err(format!(
+                "The item log of client {pid} has another layout: restart the client and load a matching agent"
+            ));
         }
         // A slot is ours once its event is new and the mask bit is ours; a stale bit is cleared by the agent later.
         let mut event = None;
@@ -3407,10 +4812,19 @@ impl ItemWatcher {
         };
         let (Some(slot), Some(event)) = (slot, event) else {
             unsafe { UnmapViewOfFile(view) };
-            return Err(format!("Too many readers are waiting for item changes in client {pid}"));
+            return Err(format!(
+                "Too many readers are waiting for item changes in client {pid}"
+            ));
         };
         let next = unsafe { item_log::written(log) };
-        Ok(Self { pid, mapping, view, event, slot, next })
+        Ok(Self {
+            pid,
+            mapping,
+            view,
+            event,
+            slot,
+            next,
+        })
     }
 
     fn log(&self) -> *const item_log::Log {
@@ -3427,7 +4841,12 @@ impl ItemWatcher {
         if self.pending() {
             return true;
         }
-        unsafe { WaitForSingleObject(self.event.0, timeout.as_millis().min(u32::MAX as u128 - 1) as u32) == WAIT_OBJECT_0 }
+        unsafe {
+            WaitForSingleObject(
+                self.event.0,
+                timeout.as_millis().min(u32::MAX as u128 - 1) as u32,
+            ) == WAIT_OBJECT_0
+        }
     }
 
     /// The changes logged since the last read, at most `limit`.
@@ -3478,9 +4897,19 @@ fn item_page(page: item_log::Page) -> crate::ItemPage {
 }
 
 /// Like `item_changes`, but blocks up to `wait` for the agent to log something when nothing is new.
-pub fn item_changes_wait(pid: u32, since: u64, limit: usize, wait: Duration) -> Result<crate::ItemPage, String> {
+pub fn item_changes_wait(
+    pid: u32,
+    since: u64,
+    limit: usize,
+    wait: Duration,
+) -> Result<crate::ItemPage, String> {
     let ready = item_changes(pid, since, 1)?;
-    if since == crate::ITEM_CHANGES_NOW || !ready.changes.is_empty() || ready.dropped > 0 || ready.next != since || wait.is_zero() {
+    if since == crate::ITEM_CHANGES_NOW
+        || !ready.changes.is_empty()
+        || ready.dropped > 0
+        || ready.next != since
+        || wait.is_zero()
+    {
         return item_changes(pid, since, limit);
     }
     // nothing yet: claim an event, then look once more so a change made meanwhile isn't waited for

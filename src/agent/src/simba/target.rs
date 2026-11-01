@@ -29,7 +29,8 @@ pub struct SimbaTarget {
     pub mouse: [bool; 3],
 }
 
-pub static TARGETS: LazyLock<Mutex<HashMap<u32, Box<SimbaTarget>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+pub static TARGETS: LazyLock<Mutex<HashMap<u32, Box<SimbaTarget>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn get_mouse_pos(hwnd: u64) -> POINT {
     let mem_manager = MEMORY_MANAGER

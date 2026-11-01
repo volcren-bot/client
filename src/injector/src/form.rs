@@ -55,7 +55,10 @@ pub struct BreakPlan {
 }
 
 pub fn breaks_line(plan: &BreakPlan) -> String {
-    format!("{BREAKS_PREFIX}{}", serde_json::to_string(plan).unwrap_or_default())
+    format!(
+        "{BREAKS_PREFIX}{}",
+        serde_json::to_string(plan).unwrap_or_default()
+    )
 }
 
 /// The plan of a `BREAKS_PREFIX` line, without the prefix.
@@ -92,7 +95,10 @@ pub struct Counter {
 }
 
 pub fn counters_line(counters: &[Counter]) -> String {
-    format!("{COUNTERS_PREFIX}{}", serde_json::to_string(counters).unwrap_or_default())
+    format!(
+        "{COUNTERS_PREFIX}{}",
+        serde_json::to_string(counters).unwrap_or_default()
+    )
 }
 
 /// The counters of a `COUNTERS_PREFIX` line, without the prefix.
@@ -104,12 +110,17 @@ static UPDATE: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
 
 /// Keeps `values` for the script to pick up, replacing an update it hasn't picked up yet.
 pub fn push_update(values: Value) {
-    *UPDATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values);
+    *UPDATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values);
 }
 
 /// The latest values the user updated the settings to since the last call, if any.
 pub fn take_update() -> Option<Value> {
-    UPDATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    UPDATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 /// The line that tells a running script its settings changed.
@@ -119,7 +130,9 @@ pub fn update_line(values: &Value) -> String {
 
 /// The values of an `UPDATE_PREFIX` line, without the prefix.
 pub fn parse_update(payload: &str) -> Option<Value> {
-    serde_json::from_str::<Value>(payload.trim()).ok().filter(Value::is_object)
+    serde_json::from_str::<Value>(payload.trim())
+        .ok()
+        .filter(Value::is_object)
 }
 
 pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
@@ -127,7 +140,10 @@ pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
 pub const KINDS: [&str; 6] = ["label", "check", "number", "text", "choice", "list"];
 
 pub fn fields(spec: &Value) -> &[Value] {
-    spec.get("fields").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
+    spec.get("fields")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 pub fn kind(field: &Value) -> &str {
@@ -142,7 +158,11 @@ pub fn options(field: &Value) -> Vec<String> {
     field
         .get("options")
         .and_then(Value::as_array)
-        .map(|o| o.iter().map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_owned)).collect())
+        .map(|o| {
+            o.iter()
+                .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_owned))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -156,7 +176,11 @@ pub fn items(field: &Value) -> Vec<(String, String, bool)> {
                 .filter_map(|row| {
                     let id = row.get("id").and_then(Value::as_str)?;
                     let label = row.get("label").and_then(Value::as_str).unwrap_or(id);
-                    Some((id.to_owned(), label.to_owned(), row.get("default").and_then(Value::as_bool).unwrap_or(false)))
+                    Some((
+                        id.to_owned(),
+                        label.to_owned(),
+                        row.get("default").and_then(Value::as_bool).unwrap_or(false),
+                    ))
                 })
                 .collect()
         })
@@ -176,7 +200,11 @@ pub fn validate(spec: &Value) -> Result<(), String> {
     for (i, field) in fields(spec).iter().enumerate() {
         let kind = kind(field);
         if !KINDS.contains(&kind) {
-            return Err(format!("field {}: unknown kind \"{kind}\" (one of {})", i + 1, KINDS.join(", ")));
+            return Err(format!(
+                "field {}: unknown kind \"{kind}\" (one of {})",
+                i + 1,
+                KINDS.join(", ")
+            ));
         }
         if kind == "label" {
             continue;
@@ -192,7 +220,9 @@ pub fn validate(spec: &Value) -> Result<(), String> {
             return Err(format!("field \"{id}\": a choice needs options"));
         }
         if kind == "list" && items(field).is_empty() {
-            return Err(format!("field \"{id}\": a list needs items, each with an id"));
+            return Err(format!(
+                "field \"{id}\": a list needs items, each with an id"
+            ));
         }
     }
     Ok(())
@@ -203,14 +233,34 @@ pub fn default_value(field: &Value) -> Option<Value> {
     match kind(field) {
         "label" => None,
         "check" => Some(json!(given.and_then(|v| v.as_bool()).unwrap_or(false))),
-        "number" => Some(given.filter(Value::is_number).or_else(|| field.get("min").cloned().filter(Value::is_number)).unwrap_or(json!(0))),
+        "number" => Some(
+            given
+                .filter(Value::is_number)
+                .or_else(|| field.get("min").cloned().filter(Value::is_number))
+                .unwrap_or(json!(0)),
+        ),
         "choice" => {
             let options = options(field);
-            let given = given.and_then(|v| v.as_str().map(str::to_owned)).filter(|g| options.contains(g));
-            Some(json!(given.or_else(|| options.first().cloned()).unwrap_or_default()))
+            let given = given
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .filter(|g| options.contains(g));
+            Some(json!(
+                given
+                    .or_else(|| options.first().cloned())
+                    .unwrap_or_default()
+            ))
         }
-        "list" => Some(Value::Object(items(field).into_iter().map(|(id, _, on)| (id, json!(on))).collect())),
-        _ => Some(json!(given.and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default())),
+        "list" => Some(Value::Object(
+            items(field)
+                .into_iter()
+                .map(|(id, _, on)| (id, json!(on)))
+                .collect(),
+        )),
+        _ => Some(json!(
+            given
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        )),
     }
 }
 
@@ -225,14 +275,26 @@ pub fn defaults(spec: &Value) -> Value {
 }
 
 pub fn stats_line(experience: i64, gold: i64, custom: &[i64]) -> String {
-    format!("{STATS_PREFIX}{}", json!({ "experience": experience, "gold": gold, "custom": custom }))
+    format!(
+        "{STATS_PREFIX}{}",
+        json!({ "experience": experience, "gold": gold, "custom": custom })
+    )
 }
 
 /// The values of a `STATS_PREFIX` line, without the prefix.
 pub fn parse_stats(payload: &str) -> Option<(i64, i64, Vec<i64>)> {
     let value: Value = serde_json::from_str(payload).ok()?;
-    let custom = value.get("custom").and_then(Value::as_array).map_or_else(Vec::new, |values| values.iter().filter_map(Value::as_i64).collect());
-    Some((value.get("experience")?.as_i64()?, value.get("gold")?.as_i64()?, custom))
+    let custom = value
+        .get("custom")
+        .and_then(Value::as_array)
+        .map_or_else(Vec::new, |values| {
+            values.iter().filter_map(Value::as_i64).collect()
+        });
+    Some((
+        value.get("experience")?.as_i64()?,
+        value.get("gold")?.as_i64()?,
+        custom,
+    ))
 }
 
 /// Ends every entry the script writes to stdout, so an entry can hold newlines.
@@ -257,7 +319,8 @@ pub fn pin_reply_line(answer: &Result<Option<String>, String>) -> String {
 }
 
 pub fn parse_pin_reply(line: &str) -> Result<Option<String>, String> {
-    let reply: Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad PIN reply from the loader: {e}"))?;
+    let reply: Value = serde_json::from_str(line.trim())
+        .map_err(|e| format!("bad PIN reply from the loader: {e}"))?;
     if let Some(error) = reply.get("error").and_then(Value::as_str) {
         return Err(error.to_owned());
     }
@@ -265,11 +328,16 @@ pub fn parse_pin_reply(line: &str) -> Result<Option<String>, String> {
 }
 
 pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {
-    let reply: Value = serde_json::from_str(line.trim()).map_err(|e| format!("bad form reply from the loader: {e}"))?;
+    let reply: Value = serde_json::from_str(line.trim())
+        .map_err(|e| format!("bad form reply from the loader: {e}"))?;
     if reply.get("cancelled").and_then(Value::as_bool) == Some(true) {
         return Ok(None);
     }
-    reply.get("values").cloned().map(Some).ok_or_else(|| "the loader's form reply has no values".into())
+    reply
+        .get("values")
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| "the loader's form reply has no values".into())
 }
 
 #[cfg(test)]
@@ -289,7 +357,11 @@ mod tests {
 
     #[test]
     fn pin_replies_round_trip() {
-        for answer in [Ok(Some("0123".to_owned())), Ok(None), Err("locked".to_owned())] {
+        for answer in [
+            Ok(Some("0123".to_owned())),
+            Ok(None),
+            Err("locked".to_owned()),
+        ] {
             assert_eq!(parse_pin_reply(&pin_reply_line(&answer)), answer);
         }
         assert!(parse_pin_reply("nonsense").is_err());
@@ -308,7 +380,10 @@ mod tests {
             ]
         });
         assert_eq!(validate(&spec), Ok(()));
-        assert_eq!(defaults(&spec), json!({ "spot": "Harpoon", "bank": true, "hours": 1, "note": "" }));
+        assert_eq!(
+            defaults(&spec),
+            json!({ "spot": "Harpoon", "bank": true, "hours": 1, "note": "" })
+        );
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "slider" }] })).is_err());
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "choice" }] })).is_err());
         assert!(validate(&json!({ "fields": [{ "id": "a", "kind": "list" }] })).is_err());
@@ -316,23 +391,66 @@ mod tests {
         assert_eq!(default_value(&list), Some(json!({ "x": true, "y": false })));
         assert!(validate(&json!({ "fields": [{ "id": "a" }, { "id": "a" }] })).is_err());
         let line = stats_line(10, -5, &[1, 2]);
-        assert_eq!(parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()), Some((10, -5, vec![1, 2])));
+        assert_eq!(
+            parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()),
+            Some((10, -5, vec![1, 2]))
+        );
         assert_eq!(parse_stats("nope"), None);
         let plan = BreakPlan {
-            breaks: vec![PlannedBreak { remaining: 1000.0, length: 500.0, at: None, index: 0 }],
-            sleeps: vec![PlannedBreak { remaining: 5000.0, length: 9000.0, at: Some(3600.0), index: 0 }],
-            active: Some(ActiveBreak { kind: "break".into(), remaining: 20.0 }),
+            breaks: vec![PlannedBreak {
+                remaining: 1000.0,
+                length: 500.0,
+                at: None,
+                index: 0,
+            }],
+            sleeps: vec![PlannedBreak {
+                remaining: 5000.0,
+                length: 9000.0,
+                at: Some(3600.0),
+                index: 0,
+            }],
+            active: Some(ActiveBreak {
+                kind: "break".into(),
+                remaining: 20.0,
+            }),
         };
-        assert_eq!(parse_breaks(breaks_line(&plan).strip_prefix(BREAKS_PREFIX).unwrap()), Some(plan));
+        assert_eq!(
+            parse_breaks(breaks_line(&plan).strip_prefix(BREAKS_PREFIX).unwrap()),
+            Some(plan)
+        );
         let counters = vec![
-            Counter { id: "wins".into(), label: "Wins".into(), value: 3.0, hourly: true, per: None, percent_of: Some("games".into()) },
-            Counter { id: "points".into(), label: "Points".into(), value: 9.5, hourly: false, per: Some("games".into()), percent_of: None },
+            Counter {
+                id: "wins".into(),
+                label: "Wins".into(),
+                value: 3.0,
+                hourly: true,
+                per: None,
+                percent_of: Some("games".into()),
+            },
+            Counter {
+                id: "points".into(),
+                label: "Points".into(),
+                value: 9.5,
+                hourly: false,
+                per: Some("games".into()),
+                percent_of: None,
+            },
         ];
-        assert_eq!(parse_counters(counters_line(&counters).strip_prefix(COUNTERS_PREFIX).unwrap()), Some(counters));
+        assert_eq!(
+            parse_counters(
+                counters_line(&counters)
+                    .strip_prefix(COUNTERS_PREFIX)
+                    .unwrap()
+            ),
+            Some(counters)
+        );
         assert!(parse_counters(r#"[{"id":"a","label":"A","value":1}]"#).unwrap()[0].hourly);
         assert_eq!(parse_counters("{}"), None);
         assert_eq!(parse_breaks("{}"), Some(BreakPlan::default()));
         assert_eq!(parse_reply("{\"cancelled\":true}"), Ok(None));
-        assert_eq!(parse_reply("{\"values\":{\"a\":1}}"), Ok(Some(json!({ "a": 1 }))));
+        assert_eq!(
+            parse_reply("{\"values\":{\"a\":1}}"),
+            Ok(Some(json!({ "a": 1 })))
+        );
     }
 }

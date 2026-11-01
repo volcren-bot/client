@@ -117,8 +117,9 @@ pub fn inject(module_path: &str, pid: u32) -> bool {
             return false;
         }
 
-        let load_library = GetProcAddress(kernel32, s!("LoadLibraryA"))
-            .map(|addr| std::mem::transmute::<_, unsafe extern "system" fn(*mut c_void) -> u32>(addr));
+        let load_library = GetProcAddress(kernel32, s!("LoadLibraryA")).map(|addr| {
+            std::mem::transmute::<_, unsafe extern "system" fn(*mut c_void) -> u32>(addr)
+        });
 
         let load_library = match load_library {
             Some(f) => f,

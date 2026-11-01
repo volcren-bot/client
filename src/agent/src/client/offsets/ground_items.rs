@@ -18,14 +18,27 @@ fn tile_lookup(instrs: &[Instruction]) -> Option<(u32, u32)> {
     {
         return None;
     }
-    let tripled = instrs.iter().filter(|i| i.mnemonic() == Mnemonic::Lea && i.memory_index_scale() == 2 && i.memory_base() == i.memory_index()).count();
+    let tripled = instrs
+        .iter()
+        .filter(|i| {
+            i.mnemonic() == Mnemonic::Lea
+                && i.memory_index_scale() == 2
+                && i.memory_base() == i.memory_index()
+        })
+        .count();
     let levels: Vec<u32> = instrs
         .iter()
         .take_while(|i| i.mnemonic() != Mnemonic::Ret)
-        .filter(|i| i.mnemonic() == Mnemonic::Mov && i.op1_kind() == OpKind::Memory && i.memory_index_scale() == 8 && i.memory_index() != Register::None)
+        .filter(|i| {
+            i.mnemonic() == Mnemonic::Mov
+                && i.op1_kind() == OpKind::Memory
+                && i.memory_index_scale() == 8
+                && i.memory_index() != Register::None
+        })
         .map(|i| i.memory_displacement64() as u32)
         .collect();
-    (tripled == 3 && levels.len() == 2 && levels[0] == levels[1]).then_some((first.memory_displacement64() as u32, levels[0]))
+    (tripled == 3 && levels.len() == 2 && levels[0] == levels[1])
+        .then_some((first.memory_displacement64() as u32, levels[0]))
 }
 
 fn id_compares(instrs: &[Instruction]) -> Vec<(u32, u32)> {
@@ -44,13 +57,22 @@ fn id_compares(instrs: &[Instruction]) -> Vec<(u32, u32)> {
                 && compare.memory_base() == load.op0_register()
                 && compare.memory_size() == iced_x86::MemorySize::UInt32
                 && compare.op1_kind() == OpKind::Register)
-                .then(|| (load.memory_displacement64() as u32, compare.memory_displacement64() as u32))
+                .then(|| {
+                    (
+                        load.memory_displacement64() as u32,
+                        compare.memory_displacement64() as u32,
+                    )
+                })
         })
         .collect()
 }
 
 fn direct_targets(instrs: &[Instruction]) -> Vec<u32> {
-    instrs.iter().filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64).map(|i| i.near_branch_target() as u32).collect()
+    instrs
+        .iter()
+        .filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
+        .map(|i| i.near_branch_target() as u32)
+        .collect()
 }
 
 pub fn find_ground_items(pe: &Pe) -> Result<GroundItems, ScanError> {
@@ -61,7 +83,12 @@ pub fn find_ground_items(pe: &Pe) -> Result<GroundItems, ScanError> {
         let compares = id_compares(&instrs);
         for lookup in direct_targets(&instrs) {
             if let Some((items, level)) = tile_lookup(&whole_function(pe, lookup, 0x80)) {
-                found.extend(compares.iter().map(|&(node_item, id)| GroundItems { items, level, node_item, id }));
+                found.extend(compares.iter().map(|&(node_item, id)| GroundItems {
+                    items,
+                    level,
+                    node_item,
+                    id,
+                }));
             }
         }
     }
@@ -77,16 +104,31 @@ fn pile_store(instrs: &[Instruction], decoration: &DecorationLayout) -> Option<u
             && w[1].mnemonic() == Mnemonic::Call
             && w[1].op0_kind() == OpKind::NearBranch64
         {
-            slots.entry((w[1].near_branch_target() as u32, w[0].memory_base())).or_default().insert(w[0].memory_displacement64() as u32);
+            slots
+                .entry((w[1].near_branch_target() as u32, w[0].memory_base()))
+                .or_default()
+                .insert(w[0].memory_displacement64() as u32);
         }
     }
     let stores = |pile: Register, field: u32| {
-        instrs.iter().any(|i| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Memory && i.memory_base() == pile && i.memory_displacement64() == field as u64)
+        instrs.iter().any(|i| {
+            i.mnemonic() == Mnemonic::Mov
+                && i.op0_kind() == OpKind::Memory
+                && i.memory_base() == pile
+                && i.memory_displacement64() == field as u64
+        })
     };
     // the old pile's slots are destroyed three times too: keep the base that gets placed
-    slots.iter().filter(|(_, offsets)| offsets.len() == 3).find(|(&(_, base), _)| stores(base, decoration.x) && stores(base, decoration.y))?;
+    slots
+        .iter()
+        .filter(|(_, offsets)| offsets.len() == 3)
+        .find(|(&(_, base), _)| stores(base, decoration.x) && stores(base, decoration.y))?;
     instrs.iter().enumerate().find_map(|(at, i)| {
-        let (true, OpKind::Register, OpKind::Immediate32to64) = (i.mnemonic() == Mnemonic::Add, i.op0_kind(), i.op1_kind()) else { return None };
+        let (true, OpKind::Register, OpKind::Immediate32to64) =
+            (i.mnemonic() == Mnemonic::Add, i.op0_kind(), i.op1_kind())
+        else {
+            return None;
+        };
         let tile = i.op0_register();
         instrs[at + 1..(at + 8).min(instrs.len())]
             .iter()
@@ -107,7 +149,10 @@ pub fn find_item_pile(pe: &Pe, decoration: &DecorationLayout) -> Result<u32, Sca
         if end - begin > 0x800 {
             continue;
         }
-        let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
+        let instrs: Vec<Instruction> =
+            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
+                .into_iter()
+                .collect();
         found.extend(pile_store(&instrs, decoration));
     }
     one(found)

@@ -29,14 +29,21 @@ pub(super) fn range_handler(pe: &Pe, upper: u32) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
+            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
+                .into_iter()
+                .collect();
         let values: HashSet<u32> = instrs.iter().filter_map(compares).collect();
         if !ranges.iter().all(|r| values.contains(r)) {
             continue;
         }
-        let Some(at) = instrs.iter().position(|i| compares(i) == Some(upper)) else { continue };
+        let Some(at) = instrs.iter().position(|i| compares(i) == Some(upper)) else {
+            continue;
+        };
         // a range's handler is called, or tail called by a jmp
-        let branches = |i: &&Instruction| matches!(i.mnemonic(), Mnemonic::Call | Mnemonic::Jmp) && i.op0_kind() == OpKind::NearBranch64;
+        let branches = |i: &&Instruction| {
+            matches!(i.mnemonic(), Mnemonic::Call | Mnemonic::Jmp)
+                && i.op0_kind() == OpKind::NearBranch64
+        };
         if let Some(branch) = instrs[at..].iter().take(6).find(branches) {
             found.push(branch.near_branch_target() as u32);
         }
@@ -50,7 +57,10 @@ fn setter_case(pe: &Pe, handler: u32, case: u32) -> Result<u32, ScanError> {
 
 // A range handler switches on the opcode (`add r32, -base; cmp r32, cases`) through an image-relative case table.
 pub(super) fn switch_case(pe: &Pe, handler: u32, base: u32, case: u32) -> Result<u32, ScanError> {
-    switch_cases(pe, handler, base)?.get(case as usize).copied().ok_or(ScanError::NotFound)
+    switch_cases(pe, handler, base)?
+        .get(case as usize)
+        .copied()
+        .ok_or(ScanError::NotFound)
 }
 
 pub(super) fn switch_cases(pe: &Pe, handler: u32, base: u32) -> Result<Vec<u32>, ScanError> {
@@ -88,7 +98,9 @@ pub(super) fn switch_cases(pe: &Pe, handler: u32, base: u32) -> Result<Vec<u32>,
                 .then(|| i.memory_displacement64() as u32)
         })
         .ok_or(ScanError::NotFound)?;
-    (0..=cases).map(|case| u32_at(pe.image, (table + case * 4) as usize).ok_or(ScanError::NotFound)).collect()
+    (0..=cases)
+        .map(|case| u32_at(pe.image, (table + case * 4) as usize).ok_or(ScanError::NotFound))
+        .collect()
 }
 
 fn invalidate_at(pe: &Pe, rva: u32) -> Option<(u32, u32)> {
@@ -112,23 +124,43 @@ pub fn find_component_invalidate(pe: &Pe) -> Result<ComponentInvalidate, ScanErr
             *adds.entry(i.immediate(1) as u32).or_default() += 1;
         }
     }
-    let text = one(adds.into_iter().filter(|&(_, n)| n >= 2).map(|(add, _)| add).collect())?;
+    let text = one(adds
+        .into_iter()
+        .filter(|&(_, n)| n >= 2)
+        .map(|(add, _)| add)
+        .collect())?;
     let after = instrs
         .iter()
-        .position(|i| i.mnemonic() == Mnemonic::Add && i.op0_register().size() == 8 && i.op1_kind() == OpKind::Immediate32to64 && i.immediate(1) as u32 == text)
+        .position(|i| {
+            i.mnemonic() == Mnemonic::Add
+                && i.op0_register().size() == 8
+                && i.op1_kind() == OpKind::Immediate32to64
+                && i.immediate(1) as u32 == text
+        })
         .ok_or(ScanError::NotFound)?;
     let found = instrs[after..].windows(3).find_map(|w| {
         let [a, b, call] = w else { return None };
-        let moves = |i: &Instruction| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Register && i.op0_register().size() == 8;
-        let args = moves(a) && moves(b) && [a.op0_register(), b.op0_register()].contains(&Register::RCX) && [a.op0_register(), b.op0_register()].contains(&Register::RDX);
+        let moves = |i: &Instruction| {
+            i.mnemonic() == Mnemonic::Mov
+                && i.op0_kind() == OpKind::Register
+                && i.op1_kind() == OpKind::Register
+                && i.op0_register().size() == 8
+        };
+        let args = moves(a)
+            && moves(b)
+            && [a.op0_register(), b.op0_register()].contains(&Register::RCX)
+            && [a.op0_register(), b.op0_register()].contains(&Register::RDX);
         (args && call.mnemonic() == Mnemonic::Call && call.op0_kind() == OpKind::NearBranch64)
             .then(|| invalidate_at(pe, call.near_branch_target() as u32))
             .flatten()
     });
     let (function, holder_component) = found.ok_or(ScanError::NotFound)?;
-    Ok(ComponentInvalidate { function, holder_component, text })
+    Ok(ComponentInvalidate {
+        function,
+        holder_component,
+        text,
+    })
 }
-
 
 pub fn find_component_sprite(pe: &Pe) -> Result<u32, ScanError> {
     let case = setter_case(pe, setter_handler(pe)?, SET_GRAPHIC)?;
@@ -169,9 +201,14 @@ fn hidden(pe: &Pe) -> Result<u32, ScanError> {
         .windows(4)
         .filter_map(|w| {
             let field = field_operand(&w[0], 0)?;
-            let compares = w[0].mnemonic() == Mnemonic::Cmp && w[0].memory_size() == iced_x86::MemorySize::UInt8 && w[0].op1_kind() == OpKind::Register;
+            let compares = w[0].mnemonic() == Mnemonic::Cmp
+                && w[0].memory_size() == iced_x86::MemorySize::UInt8
+                && w[0].op1_kind() == OpKind::Register;
             let stores = w[1..].iter().any(|i| {
-                i.mnemonic() == Mnemonic::Mov && field_operand(i, 0) == Some(field) && i.op1_kind() == OpKind::Register && i.op1_register() == w[0].op1_register()
+                i.mnemonic() == Mnemonic::Mov
+                    && field_operand(i, 0) == Some(field)
+                    && i.op1_kind() == OpKind::Register
+                    && i.op1_register() == w[0].op1_register()
             });
             (compares && stores).then_some(field)
         })
@@ -190,9 +227,12 @@ fn popped_store(instrs: &[Instruction]) -> Vec<(usize, u32)> {
                 && w[0].op1_kind() == OpKind::Memory
                 && w[0].memory_index() != Register::None
                 && w[0].memory_index_scale() == 4;
-            (popped && w[1].mnemonic() == Mnemonic::Mov && w[1].op1_kind() == OpKind::Register && w[1].op1_register() == w[0].op0_register())
-                .then(|| field_operand(&w[1], 0).map(|field| (at + 1, field)))
-                .flatten()
+            (popped
+                && w[1].mnemonic() == Mnemonic::Mov
+                && w[1].op1_kind() == OpKind::Register
+                && w[1].op1_register() == w[0].op0_register())
+            .then(|| field_operand(&w[1], 0).map(|field| (at + 1, field)))
+            .flatten()
         })
         .collect()
 }
@@ -200,19 +240,36 @@ fn popped_store(instrs: &[Instruction]) -> Vec<(usize, u32)> {
 fn children(pe: &Pe) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> = Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE).into_iter().collect();
+        let instrs: Vec<Instruction> =
+            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
+                .into_iter()
+                .collect();
         for (at, cmp) in instrs.iter().enumerate() {
-            let Some(count) = field_operand(cmp, 0) else { continue };
-            if cmp.mnemonic() != Mnemonic::Cmp || cmp.memory_size() != iced_x86::MemorySize::UInt64 || cmp.op1_kind() != OpKind::Register {
+            let Some(count) = field_operand(cmp, 0) else {
+                continue;
+            };
+            if cmp.mnemonic() != Mnemonic::Cmp
+                || cmp.memory_size() != iced_x86::MemorySize::UInt64
+                || cmp.op1_kind() != OpKind::Register
+            {
                 continue;
             }
             let base = cmp.memory_base();
             let rest = &instrs[at + 1..(at + 5).min(instrs.len())];
-            let shifts = rest.iter().any(|i| i.mnemonic() == Mnemonic::Shl && i.op1_kind() == OpKind::Immediate8 && i.immediate(1) == 4);
-            let adds = rest.iter().any(|i| {
-                i.mnemonic() == Mnemonic::Add && i.op1_kind() == OpKind::Memory && i.memory_base() == base && i.memory_displacement64() as u32 == count + 8
+            let shifts = rest.iter().any(|i| {
+                i.mnemonic() == Mnemonic::Shl
+                    && i.op1_kind() == OpKind::Immediate8
+                    && i.immediate(1) == 4
             });
-            let checks_sign = instrs[at.saturating_sub(4)..at].iter().any(|i| i.mnemonic() == Mnemonic::Test) ;
+            let adds = rest.iter().any(|i| {
+                i.mnemonic() == Mnemonic::Add
+                    && i.op1_kind() == OpKind::Memory
+                    && i.memory_base() == base
+                    && i.memory_displacement64() as u32 == count + 8
+            });
+            let checks_sign = instrs[at.saturating_sub(4)..at]
+                .iter()
+                .any(|i| i.mnemonic() == Mnemonic::Test);
             if shifts && adds && checks_sign && count > 0x100 {
                 found.push(count);
             }
@@ -224,12 +281,17 @@ fn children(pe: &Pe) -> Result<u32, ScanError> {
 pub fn find_component_fields(pe: &Pe) -> Result<ComponentFields, ScanError> {
     let handler = setter_handler(pe)?;
     let colour = decode_at(pe, setter_case(pe, handler, SET_COLOUR)?, 8);
-    let text_color = one(popped_store(&colour).into_iter().map(|(_, field)| field).collect())?;
+    let text_color = one(popped_store(&colour)
+        .into_iter()
+        .map(|(_, field)| field)
+        .collect())?;
 
     // CC_SETSCROLLSIZE stores width then height, then compares the child index before reading the id's group half.
     let scroll = decode_at(pe, setter_case(pe, handler, SET_SCROLL_SIZE)?, 30);
     let stores = popped_store(&scroll);
-    let [(_, scroll_width), (_, scroll_height), ..] = stores.as_slice() else { return Err(ScanError::NotFound) };
+    let [(_, scroll_width), (_, scroll_height), ..] = stores.as_slice() else {
+        return Err(ScanError::NotFound);
+    };
     if *scroll_height != scroll_width + 4 {
         return Err(ScanError::NotFound);
     }
@@ -238,11 +300,20 @@ pub fn find_component_fields(pe: &Pe) -> Result<ComponentFields, ScanError> {
         .filter_map(|w| {
             let field = field_operand(&w[0], 0)?;
             let reads_group = w[1..].iter().any(|i| {
-                i.mnemonic() == Mnemonic::Movsx && i.memory_size() == iced_x86::MemorySize::Int16 && i.memory_base() == w[0].memory_base()
+                i.mnemonic() == Mnemonic::Movsx
+                    && i.memory_size() == iced_x86::MemorySize::Int16
+                    && i.memory_base() == w[0].memory_base()
             });
-            (w[0].mnemonic() == Mnemonic::Cmp && w[0].op1_kind() == OpKind::Register && reads_group).then_some(field)
+            (w[0].mnemonic() == Mnemonic::Cmp && w[0].op1_kind() == OpKind::Register && reads_group)
+                .then_some(field)
         })
         .collect())?;
 
-    Ok(ComponentFields { hidden: hidden(pe)?, text_color, scroll_width: *scroll_width, index, children: children(pe)? })
+    Ok(ComponentFields {
+        hidden: hidden(pe)?,
+        text_color,
+        scroll_width: *scroll_width,
+        index,
+        children: children(pe)?,
+    })
 }

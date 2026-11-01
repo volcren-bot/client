@@ -1,7 +1,9 @@
 //! The reads the agent's worker answers, plain functions over a `Memory` so the injector can run them too; `serve` encodes results (postcard).
 
 use ipc::state::{
-    Layout, game_state::{LOGGED_IN, LOGIN_SCREEN, LOGIN_SCREEN_AUTHENTICATOR}, part, worker_kind as kind, worker_status as status,
+    Layout,
+    game_state::{LOGGED_IN, LOGIN_SCREEN, LOGIN_SCREEN_AUTHENTICATOR},
+    part, worker_kind as kind, worker_status as status,
 };
 use serde::Serialize;
 
@@ -11,7 +13,7 @@ use crate::{
     memory::Memory,
     state,
     widgets::{self, SubInterface, Widget, WidgetTree, find_children, find_tree, find_widget},
-    world::{self, SpotAnim, GroundItem, Item, Npc, Player, Projectile},
+    world::{self, GroundItem, Item, Npc, Player, Projectile, SpotAnim},
     world_select::{self, WorldSelect},
 };
 
@@ -72,9 +74,15 @@ pub fn widget(memory: &impl Memory, layout: &Layout, group: u16, child: u16) -> 
     find_widget(memory, &layout.interfaces, root, group, child).map(|w| w.scaled(scale))
 }
 
-pub fn widget_children(memory: &impl Memory, layout: &Layout, group: u16, child: u16) -> Option<Vec<Widget>> {
+pub fn widget_children(
+    memory: &impl Memory,
+    layout: &Layout,
+    group: u16,
+    child: u16,
+) -> Option<Vec<Widget>> {
     let (root, scale) = interface_root(memory, layout)?;
-    find_children(memory, &layout.interfaces, root, group, child).map(|children| children.into_iter().map(|w| w.scaled(scale)).collect())
+    find_children(memory, &layout.interfaces, root, group, child)
+        .map(|children| children.into_iter().map(|w| w.scaled(scale)).collect())
 }
 
 /// Every open interface with its components, read by the injector since the worker's reply buffer is small.
@@ -110,7 +118,10 @@ pub fn chat(memory: &impl Memory, layout: &Layout, now: i64) -> Option<Vec<ChatM
 }
 
 pub fn world_select(memory: &impl Memory, layout: &Layout) -> Option<WorldSelect> {
-    if !matches!(state::current(memory, layout), Some(LOGIN_SCREEN | LOGIN_SCREEN_AUTHENTICATOR | LOGGED_IN)) {
+    if !matches!(
+        state::current(memory, layout),
+        Some(LOGIN_SCREEN | LOGIN_SCREEN_AUTHENTICATOR | LOGGED_IN)
+    ) {
         return None;
     }
     let client = ipc::read::client(memory, layout)?;
@@ -133,11 +144,19 @@ pub fn parts(kind_id: u32) -> Option<u64> {
 }
 
 fn put<T: Serialize>(value: &T, out: &mut [u8]) -> Result<usize, i32> {
-    postcard::to_slice(value, out).map(|used| used.len()).map_err(|_| status::TOO_BIG)
+    postcard::to_slice(value, out)
+        .map(|used| used.len())
+        .map_err(|_| status::TOO_BIG)
 }
 
 /// Runs the read `kind_id` names with `args` and encodes the result into `out`: the length used or a status.
-pub fn serve(memory: &impl Memory, layout: &Layout, kind_id: u32, args: [i32; 4], out: &mut [u8]) -> Result<usize, i32> {
+pub fn serve(
+    memory: &impl Memory,
+    layout: &Layout,
+    kind_id: u32,
+    args: [i32; 4],
+    out: &mut [u8],
+) -> Result<usize, i32> {
     if !parts(kind_id).is_some_and(|needed| layout.has(needed)) {
         return Err(status::NOT_FOUND);
     }
@@ -146,12 +165,22 @@ pub fn serve(memory: &impl Memory, layout: &Layout, kind_id: u32, args: [i32; 4]
         kind::PLAYERS => put(&players(memory, layout), out),
         kind::GROUND_ITEMS => put(&ground_items(memory, layout), out),
         kind::WIDGET => put(&widget(memory, layout, args[0] as u16, args[1] as u16), out),
-        kind::WIDGET_CHILDREN => put(&widget_children(memory, layout, args[0] as u16, args[1] as u16), out),
+        kind::WIDGET_CHILDREN => put(
+            &widget_children(memory, layout, args[0] as u16, args[1] as u16),
+            out,
+        ),
         kind::SUB_INTERFACES => put(&sub_interfaces(memory, layout), out),
         kind::GAME_STATE => put(&game_state(memory, layout), out),
         kind::ITEM_CONTAINER => put(&item_container(memory, layout, args[0]), out),
         kind::VARC => put(&varc(memory, layout, args[0]), out),
-        kind::CHAT => put(&chat(memory, layout, (args[0] as u32 as i64) | ((args[1] as i64) << 32)), out),
+        kind::CHAT => put(
+            &chat(
+                memory,
+                layout,
+                (args[0] as u32 as i64) | ((args[1] as i64) << 32),
+            ),
+            out,
+        ),
         kind::WORLD_SELECT => put(&world_select(memory, layout), out),
         kind::PROJECTILES => put(&projectiles(memory, layout), out),
         kind::SPOT_ANIMS => put(&spot_anims(memory, layout), out),
@@ -179,9 +208,18 @@ mod tests {
         let memory = Fake::default();
         let layout = Layout::default();
         let mut out = vec![0u8; 1];
-        assert_eq!(serve(&memory, &layout, kind::GAME_STATE, [0; 4], &mut out), Err(status::TOO_BIG));
-        assert_eq!(serve(&memory, &layout, 9999, [0; 4], &mut out), Err(status::NOT_FOUND));
+        assert_eq!(
+            serve(&memory, &layout, kind::GAME_STATE, [0; 4], &mut out),
+            Err(status::TOO_BIG)
+        );
+        assert_eq!(
+            serve(&memory, &layout, 9999, [0; 4], &mut out),
+            Err(status::NOT_FOUND)
+        );
         // the agent found no interfaces in a default layout
-        assert_eq!(serve(&memory, &layout, kind::WIDGET, [1, 2, 0, 0], &mut out), Err(status::NOT_FOUND));
+        assert_eq!(
+            serve(&memory, &layout, kind::WIDGET, [1, 2, 0, 0], &mut out),
+            Err(status::NOT_FOUND)
+        );
     }
 }

@@ -20,8 +20,17 @@ fn position(memory: &impl Memory, layout: &Layout) -> Option<Position> {
     let base_x = memory.i32(view + p.base_x as u64)?;
     let base_y = memory.i32(view + p.base_x as u64 + 4)?;
     // the player's own world view, not the top one: they differ on a boat
-    let plane = layout.has(part::PROJECTION).then(|| memory.i32(view + layout.projection.plane as u64)).flatten();
-    Some(Position { local_x, local_y, x: base_x + (local_x >> 7), y: base_y + (local_y >> 7), plane })
+    let plane = layout
+        .has(part::PROJECTION)
+        .then(|| memory.i32(view + layout.projection.plane as u64))
+        .flatten();
+    Some(Position {
+        local_x,
+        local_y,
+        x: base_x + (local_x >> 7),
+        y: base_y + (local_y >> 7),
+        plane,
+    })
 }
 
 /// The local player's server tile: entry 0 of its path, on its own world view's base.
@@ -36,8 +45,16 @@ pub fn server_tile(memory: &impl Memory, layout: &Layout) -> Option<ServerTile> 
     let steps = memory.i32(player + path.length as u64)?;
     let base_x = memory.i32(view + layout.player.base_x as u64)?;
     let base_y = memory.i32(view + layout.player.base_x as u64 + 4)?;
-    let plane = layout.has(part::PROJECTION).then(|| memory.i32(view + layout.projection.plane as u64)).flatten();
-    Some(ServerTile { x: base_x + scene_x, y: base_y + scene_y, plane, steps })
+    let plane = layout
+        .has(part::PROJECTION)
+        .then(|| memory.i32(view + layout.projection.plane as u64))
+        .flatten();
+    Some(ServerTile {
+        x: base_x + scene_x,
+        y: base_y + scene_y,
+        plane,
+        steps,
+    })
 }
 
 fn skills(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Vec<Skill>> {
@@ -53,7 +70,9 @@ fn skills(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Vec<Skil
         (0..count)
             .filter(|&i| i < SKILL_NAMES.len() || xp[i] > 0)
             .map(|i| Skill {
-                name: SKILL_NAMES.get(i).map_or_else(|| format!("Skill {i}"), |name| (*name).to_owned()),
+                name: SKILL_NAMES
+                    .get(i)
+                    .map_or_else(|| format!("Skill {i}"), |name| (*name).to_owned()),
                 level: levels[i],
                 real_level: real_levels[i],
                 xp: xp[i],
@@ -76,26 +95,38 @@ fn player_name(memory: &impl Memory, layout: &Layout) -> Option<String> {
 /// The logged in account's normalized name (lowercase, spaces as `_`), which the display name override never touches.
 fn account_name(memory: &impl Memory, layout: &Layout) -> Option<String> {
     let object = local_name_object(memory, layout)?;
-    Some(read_string(memory, object + NAME_CLEAN)?.replace('\u{a0}', " ")).filter(|name| !name.is_empty())
+    Some(read_string(memory, object + NAME_CLEAN)?.replace('\u{a0}', " "))
+        .filter(|name| !name.is_empty())
 }
 
 pub const MAX_NAME_BYTES: usize = SHORT_STRING_MAX;
 
-pub fn name_request(memory: &impl Memory, layout: &Layout, name: &str) -> Result<NameRequest, String> {
+pub fn name_request(
+    memory: &impl Memory,
+    layout: &Layout,
+    name: &str,
+) -> Result<NameRequest, String> {
     if name.is_empty() {
         return Ok(NameRequest::default());
     }
     if !layout.has(part::PLAYER | part::WORLD) {
         return Err("agent didn't find the local player's name".into());
     }
-    let display = short_string(name.replace(' ', "\u{a0}").as_bytes())
-        .ok_or_else(|| format!("a name can be at most {MAX_NAME_BYTES} bytes (a space counts as two)"))?;
-    let object = local_name_object(memory, layout).ok_or("log in first: the name is set for the account logged in")?;
+    let display = short_string(name.replace(' ', "\u{a0}").as_bytes()).ok_or_else(|| {
+        format!("a name can be at most {MAX_NAME_BYTES} bytes (a space counts as two)")
+    })?;
+    let object = local_name_object(memory, layout)
+        .ok_or("log in first: the name is set for the account logged in")?;
     let mut account = [0u8; 24];
     if !memory.read(object + NAME_CLEAN, &mut account) || account[23] & 0x80 != 0 {
         return Err("the account's name can't be read".into());
     }
-    Ok(NameRequest { enabled: 1, display, account, ..NameRequest::default() })
+    Ok(NameRequest {
+        enabled: 1,
+        display,
+        account,
+        ..NameRequest::default()
+    })
 }
 
 fn ui(memory: &impl Memory, layout: &Layout, client: u64) -> Option<(i32, i32, f32)> {
@@ -115,7 +146,8 @@ pub fn ui_scale(memory: &impl Memory, layout: &Layout) -> Option<f32> {
 }
 
 pub fn root_interface(memory: &impl Memory, layout: &Layout, state: Option<i32>) -> Option<i32> {
-    if !layout.has(part::INTERFACES) || !matches!(state, Some(states::LOGGED_IN | states::LOADING)) {
+    if !layout.has(part::INTERFACES) || !matches!(state, Some(states::LOGGED_IN | states::LOADING))
+    {
         return None;
     }
     memory.i32(client(memory, layout)? + layout.interfaces.root as u64)
@@ -150,7 +182,10 @@ fn destination(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Til
     }
     let (view, _) = local_player(memory, layout)?;
     let base = view + layout.player.base_x as u64;
-    Some(Tile { x: memory.i32(base)? + x, y: memory.i32(base + 4)? + y })
+    Some(Tile {
+        x: memory.i32(base)? + x,
+        y: memory.i32(base + 4)? + y,
+    })
 }
 
 const VARC_ZOOM_FIXED: i32 = 73;
@@ -159,7 +194,11 @@ const VARC_ZOOM_RESIZABLE: i32 = 74;
 fn camera(memory: &impl Memory, layout: &Layout, client: u64, root: Option<i32>) -> Option<Camera> {
     let c = &layout.camera;
     let field = |offset: u32| memory.i32(client + offset as u64);
-    let varc = if root == Some(interfaces::ROOT_FIXED) { VARC_ZOOM_FIXED } else { VARC_ZOOM_RESIZABLE };
+    let varc = if root == Some(interfaces::ROOT_FIXED) {
+        VARC_ZOOM_FIXED
+    } else {
+        VARC_ZOOM_RESIZABLE
+    };
     Some(Camera {
         x: field(c.position)?,
         y: field(c.position + 8)?,
@@ -169,7 +208,10 @@ fn camera(memory: &impl Memory, layout: &Layout, client: u64, root: Option<i32>)
         focal_x: field(c.focal)?,
         focal_y: field(c.focal + 8)?,
         focal_z: field(c.focal + 4)?,
-        zoom: layout.has(part::WORLD).then(|| crate::world::varc(memory, &layout.world, varc)).flatten(),
+        zoom: layout
+            .has(part::WORLD)
+            .then(|| crate::world::varc(memory, &layout.world, varc))
+            .flatten(),
     })
 }
 
@@ -179,12 +221,21 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
     };
     let state = current(memory, layout);
     let logged_in = state == Some(states::LOGGED_IN);
-    let on_login_screen = matches!(state, Some(states::LOGIN_SCREEN | states::LOGIN_SCREEN_AUTHENTICATOR));
-    let ui = layout.has(part::INTERFACES).then(|| ui(memory, layout, client)).flatten();
+    let on_login_screen = matches!(
+        state,
+        Some(states::LOGIN_SCREEN | states::LOGIN_SCREEN_AUTHENTICATOR)
+    );
+    let ui = layout
+        .has(part::INTERFACES)
+        .then(|| ui(memory, layout, client))
+        .flatten();
     let run_energy = (logged_in && layout.has(part::WORLD))
         .then(|| {
             let w = &layout.world;
-            Some((memory.i32(client + w.run_energy as u64)?, memory.i32(client + w.weight as u64)?))
+            Some((
+                memory.i32(client + w.run_energy as u64)?,
+                memory.i32(client + w.weight as u64)?,
+            ))
         })
         .flatten();
 
@@ -193,8 +244,13 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
         player_name: player_name(memory, layout),
         account_name: account_name(memory, layout),
         game_state: state,
-        skills: (logged_in && layout.has(part::SKILLS)).then(|| skills(memory, layout, client)).flatten(),
-        tick_count: layout.has(part::TICK_COUNT).then(|| memory.i32(client + layout.tick_count as u64)).flatten(),
+        skills: (logged_in && layout.has(part::SKILLS))
+            .then(|| skills(memory, layout, client))
+            .flatten(),
+        tick_count: layout
+            .has(part::TICK_COUNT)
+            .then(|| memory.i32(client + layout.tick_count as u64))
+            .flatten(),
         login: (on_login_screen && layout.has(part::LOGIN))
             .then(|| login(memory, layout, ui.map_or(1.0, |(_, _, scale)| scale)))
             .flatten(),
@@ -203,10 +259,21 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
         run_energy: run_energy.map(|(energy, _)| energy),
         weight: run_energy.map(|(_, weight)| weight),
         camera: (logged_in && layout.has(part::CAMERA))
-            .then(|| camera(memory, layout, client, root_interface(memory, layout, state)))
+            .then(|| {
+                camera(
+                    memory,
+                    layout,
+                    client,
+                    root_interface(memory, layout, state),
+                )
+            })
             .flatten(),
-        minimap: (logged_in && layout.has(part::MINIMAP)).then(|| minimap(memory, layout, client)).flatten(),
-        destination: (logged_in && layout.has(part::MINIMAP | part::DESTINATION)).then(|| destination(memory, layout, client)).flatten(),
+        minimap: (logged_in && layout.has(part::MINIMAP))
+            .then(|| minimap(memory, layout, client))
+            .flatten(),
+        destination: (logged_in && layout.has(part::MINIMAP | part::DESTINATION))
+            .then(|| destination(memory, layout, client))
+            .flatten(),
     }
 }
 
@@ -227,14 +294,19 @@ pub fn varps(memory: &impl Memory, layout: &Layout) -> Option<Vec<i32>> {
 
 pub fn varp(memory: &impl Memory, layout: &Layout, id: usize) -> Option<i32> {
     let (elements, count) = varp_array(memory, layout)?;
-    (id < count).then(|| memory.i32(elements + id as u64 * 4)).flatten()
+    (id < count)
+        .then(|| memory.i32(elements + id as u64 * 4))
+        .flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::Fake;
-    use ipc::state::{CameraLayout, InterfaceLayout, LoginLayout, MinimapLayout, PathLayout, PlayerLayout, ProjectionLayout, SkillsLayout, WorldLayout};
+    use ipc::state::{
+        CameraLayout, InterfaceLayout, LoginLayout, MinimapLayout, PathLayout, PlayerLayout,
+        ProjectionLayout, SkillsLayout, WorldLayout,
+    };
 
     const TABLE_BUCKETS: u64 = 0x8;
     const TABLE_COUNT: u64 = 0x10;
@@ -270,13 +342,47 @@ mod tests {
                 base_x: 0x24,
                 local_x: 0x268,
             },
-            skills: SkillsLayout { levels: 0x3350, real_levels: 0x33b4, xp: 0x3418, count: 25 },
-            login: LoginLayout { screen: 0xe98c10, panel_x: 0xe98bd8, box_x: 0x154fc64, center_x: 0xe98bdc, y: 0xcfb094 },
-            interfaces: InterfaceLayout { canvas: 0x90, ui_width: 0x6c, ui_scale: 0x68, root: 0x413bc8, ..Default::default() },
-            world: WorldLayout { run_energy: 0x34e0, weight: 0x34e4, player_name: 0x718, ..Default::default() },
-            camera: CameraLayout { position: 0x895c8, pitch: 0x895dc, yaw: 0x895e0, focal: 0x8964c },
-            minimap: MinimapLayout { object: 0x40eab0, zoom: 0x6470, destination: 0 },
-            projection: ProjectionLayout { plane: 0x18, ..Default::default() },
+            skills: SkillsLayout {
+                levels: 0x3350,
+                real_levels: 0x33b4,
+                xp: 0x3418,
+                count: 25,
+            },
+            login: LoginLayout {
+                screen: 0xe98c10,
+                panel_x: 0xe98bd8,
+                box_x: 0x154fc64,
+                center_x: 0xe98bdc,
+                y: 0xcfb094,
+            },
+            interfaces: InterfaceLayout {
+                canvas: 0x90,
+                ui_width: 0x6c,
+                ui_scale: 0x68,
+                root: 0x413bc8,
+                ..Default::default()
+            },
+            world: WorldLayout {
+                run_energy: 0x34e0,
+                weight: 0x34e4,
+                player_name: 0x718,
+                ..Default::default()
+            },
+            camera: CameraLayout {
+                position: 0x895c8,
+                pitch: 0x895dc,
+                yaw: 0x895e0,
+                focal: 0x8964c,
+            },
+            minimap: MinimapLayout {
+                object: 0x40eab0,
+                zoom: 0x6470,
+                destination: 0,
+            },
+            projection: ProjectionLayout {
+                plane: 0x18,
+                ..Default::default()
+            },
             ..Layout::default()
         }
     }
@@ -303,8 +409,20 @@ mod tests {
         let (view, player) = (0x20_0000, 0x21_0000);
         m.put_i32(CLIENT + l.player.world_view_id as u64, 0);
         m.put_i32(CLIENT + l.player.player_index as u64, 780);
-        table(&mut m, CLIENT + l.player.world_views as u64, 0x22_0000, 0, view);
-        table(&mut m, view + l.player.players as u64, 0x23_0000, 780, player);
+        table(
+            &mut m,
+            CLIENT + l.player.world_views as u64,
+            0x22_0000,
+            0,
+            view,
+        );
+        table(
+            &mut m,
+            view + l.player.players as u64,
+            0x23_0000,
+            780,
+            player,
+        );
         m.put_i32(view + 0x24, 3112);
         m.put_i32(view + 0x28, 3335);
         m.put_i32(view + 0x18, 1);
@@ -339,7 +457,13 @@ mod tests {
         m.put_i32(0x50_0000 + 0x6470, 4);
         m.put_i32(0x50_0000, 52);
         m.put_i32(0x50_0004, 61);
-        for (offset, value) in [(0x895c8, 5336), (0x895cc, -936), (0x895d0, 7717), (0x895dc, 3064), (0x895e0, 1991)] {
+        for (offset, value) in [
+            (0x895c8, 5336),
+            (0x895cc, -936),
+            (0x895d0, 7717),
+            (0x895dc, 3064),
+            (0x895e0, 1991),
+        ] {
             m.put_i32(CLIENT + offset, value);
         }
         for (offset, value) in [(0x8964c, 6336), (0x89650, -240), (0x89654, 6080)] {
@@ -359,12 +483,28 @@ mod tests {
         let player = 0x21_0000;
         // the model stands on scene tile (51, 53) while the server already put the player one tile east
         l.found |= part::PATH;
-        l.path = PathLayout { x: 0x3f0, y: 0x418, length: 0x3ec, reserved: 0 };
+        l.path = PathLayout {
+            x: 0x3f0,
+            y: 0x418,
+            length: 0x3ec,
+            reserved: 0,
+        };
         m.put_i32(player + 0x3f0, 52);
         m.put_i32(player + 0x418, 53);
         m.put_i32(player + 0x3ec, 1);
-        assert_eq!(server_tile(&m, &l), Some(ServerTile { x: 3164, y: 3388, plane: Some(1), steps: 1 }));
-        assert_eq!(game_state(&m, &l).position.map(|p| (p.x, p.y)), Some((3163, 3388)));
+        assert_eq!(
+            server_tile(&m, &l),
+            Some(ServerTile {
+                x: 3164,
+                y: 3388,
+                plane: Some(1),
+                steps: 1
+            })
+        );
+        assert_eq!(
+            game_state(&m, &l).position.map(|p| (p.x, p.y)),
+            Some((3163, 3388))
+        );
         assert_eq!(server_tile(&m, &layout()), None);
     }
 
@@ -372,26 +512,65 @@ mod tests {
     fn reads_everything_in_game() {
         let state = game_state(&logged_in(), &layout());
         assert_eq!(state.game_state, Some(states::LOGGED_IN));
-        assert_eq!(state.position, Some(Position { local_x: 6592, local_y: 6784, x: 3163, y: 3388, plane: Some(1) }));
+        assert_eq!(
+            state.position,
+            Some(Position {
+                local_x: 6592,
+                local_y: 6784,
+                x: 3163,
+                y: 3388,
+                plane: Some(1)
+            })
+        );
         assert_eq!(state.tick_count, Some(1234));
         assert_eq!(state.player_name.as_deref(), Some("P 4I N"));
-        assert_eq!(state.account_name, None, "the fixture has no normalized name");
+        assert_eq!(
+            state.account_name, None,
+            "the fixture has no normalized name"
+        );
         let mut named = logged_in();
         named.put_short_string(0x24_0018, "p_4i_n");
-        assert_eq!(game_state(&named, &layout()).account_name.as_deref(), Some("p_4i_n"));
+        assert_eq!(
+            game_state(&named, &layout()).account_name.as_deref(),
+            Some("p_4i_n")
+        );
         let skills = state.skills.unwrap();
         assert_eq!(skills.len(), 24, "the unused 25th slot has no xp");
-        assert_eq!(skills[3], Skill { name: "Hitpoints".into(), level: 90, real_level: 99, xp: 13_034_431 });
+        assert_eq!(
+            skills[3],
+            Skill {
+                name: "Hitpoints".into(),
+                level: 90,
+                real_level: 99,
+                xp: 13_034_431
+            }
+        );
         assert_eq!(state.login, None);
         assert_eq!(state.root_interface, Some(161));
         assert_eq!(state.ui_scale, Some(1.7373));
         assert_eq!((state.run_energy, state.weight), (Some(10000), Some(-3)));
         assert_eq!(
             state.camera,
-            Some(Camera { x: 5336, y: 7717, z: -936, pitch: 3064, yaw: 1991, focal_x: 6336, focal_y: 6080, focal_z: -240, zoom: None })
+            Some(Camera {
+                x: 5336,
+                y: 7717,
+                z: -936,
+                pitch: 3064,
+                yaw: 1991,
+                focal_x: 6336,
+                focal_y: 6080,
+                focal_z: -240,
+                zoom: None
+            })
         );
         assert_eq!(state.minimap, Some(Minimap { zoom: 4 }));
-        assert_eq!(state.destination, Some(Tile { x: 3163 - (6592 >> 7) + 52, y: 3388 - (6784 >> 7) + 61 }));
+        assert_eq!(
+            state.destination,
+            Some(Tile {
+                x: 3163 - (6592 >> 7) + 52,
+                y: 3388 - (6784 >> 7) + 61
+            })
+        );
     }
 
     #[test]
@@ -408,16 +587,43 @@ mod tests {
         let mut m = logged_in();
         m.put_i32(CLIENT + l.game_state as u64, states::LOGIN_SCREEN);
         m.put_u64(CLIENT + 0x90, 0);
-        for (rva, value) in [(0xe98c10u64, 10), (0xe98bd8, 318), (0x154fc64, 520), (0xe98bdc, 700), (0xcfb094, 171)] {
+        for (rva, value) in [
+            (0xe98c10u64, 10),
+            (0xe98bd8, 318),
+            (0x154fc64, 520),
+            (0xe98bdc, 700),
+            (0xcfb094, 171),
+        ] {
             m.put_i32(BASE + rva, value);
         }
 
         let state = game_state(&m, &l);
         assert_eq!(state.game_state, Some(states::LOGIN_SCREEN));
-        assert_eq!(state.login, Some(Login { screen: 10, panel_x: 318, box_x: 520, center_x: 700, y: 171, scale: 1.0 }));
-        assert_eq!((state.skills, state.root_interface, state.run_energy, state.minimap), (None, None, None, None));
+        assert_eq!(
+            state.login,
+            Some(Login {
+                screen: 10,
+                panel_x: 318,
+                box_x: 520,
+                center_x: 700,
+                y: 171,
+                scale: 1.0
+            })
+        );
+        assert_eq!(
+            (
+                state.skills,
+                state.root_interface,
+                state.run_energy,
+                state.minimap
+            ),
+            (None, None, None, None)
+        );
         assert_eq!(state.camera, None);
-        assert_eq!(state.player_name, None, "the player table keeps the last account");
+        assert_eq!(
+            state.player_name, None,
+            "the player table keeps the last account"
+        );
         assert_eq!(varps(&m, &l), None);
         assert_eq!(varp(&m, &l, 173), None);
     }
@@ -431,11 +637,18 @@ mod tests {
         assert_eq!(&request.display[..12], "Test\u{a0}Player".as_bytes());
         assert_eq!(request.display[23], 23 - 12);
         assert_eq!(&request.account[..6], b"p_4i_n");
-        assert_eq!(name_request(&m, &l, "").unwrap(), NameRequest::default(), "empty asks for the real name");
+        assert_eq!(
+            name_request(&m, &l, "").unwrap(),
+            NameRequest::default(),
+            "empty asks for the real name"
+        );
         assert!(name_request(&m, &l, "twenty three bytes long").is_err());
 
         m.put_i32(CLIENT + l.game_state as u64, states::LOGIN_SCREEN);
-        assert!(name_request(&m, &l, "Test Player").is_err(), "needs the account logged in");
+        assert!(
+            name_request(&m, &l, "Test Player").is_err(),
+            "needs the account logged in"
+        );
     }
 
     #[test]
@@ -452,10 +665,21 @@ mod tests {
     #[test]
     fn missing_parts_read_as_none() {
         let m = logged_in();
-        let l = Layout { found: part::GAME_STATE, ..layout() };
+        let l = Layout {
+            found: part::GAME_STATE,
+            ..layout()
+        };
         let state = game_state(&m, &l);
         assert_eq!(state.game_state, Some(states::LOGGED_IN));
-        assert_eq!((state.position, state.skills, state.tick_count, state.ui_scale), (None, None, None, None));
+        assert_eq!(
+            (
+                state.position,
+                state.skills,
+                state.tick_count,
+                state.ui_scale
+            ),
+            (None, None, None, None)
+        );
         assert_eq!(varp(&m, &l, 173), None);
         assert_eq!(game_state(&m, &Layout::default()), GameState::default());
     }

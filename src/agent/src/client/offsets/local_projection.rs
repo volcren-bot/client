@@ -36,7 +36,9 @@ fn calls(instrs: &[Instruction]) -> impl Iterator<Item = (usize, u32)> + '_ {
 }
 
 fn plain_memory(i: &Instruction) -> bool {
-    i.op1_kind() == OpKind::Memory && i.memory_index() == Register::None && !matches!(i.memory_base(), Register::RIP | Register::RSP)
+    i.op1_kind() == OpKind::Memory
+        && i.memory_index() == Register::None
+        && !matches!(i.memory_base(), Register::RIP | Register::RSP)
 }
 
 fn zoom(instrs: &[Instruction], client: u32) -> Result<u32, ScanError> {
@@ -57,7 +59,10 @@ fn view_holder(pe: &Pe, instrs: &[Instruction], canvas: u32) -> Result<u32, Scan
                     && load.op0_register() == Register::RAX
                     && add.mnemonic() == Mnemonic::Add
                     && add.op0_register() == Register::RAX
-                    && matches!(add.op1_kind(), OpKind::Immediate32to64 | OpKind::Immediate8to64)
+                    && matches!(
+                        add.op1_kind(),
+                        OpKind::Immediate32to64 | OpKind::Immediate8to64
+                    )
                     && ret.mnemonic() == Mnemonic::Ret =>
             {
                 Some(add.immediate(1) as u32)
@@ -74,20 +79,43 @@ fn view_slot(pe: &Pe, holder: u32) -> Result<u32, ScanError> {
         for back in [3, 4] {
             let instrs = decode_at(pe, hit - back, 4);
             let Some(lea) = instrs.first() else { continue };
-            if lea.mnemonic() != Mnemonic::Lea || lea.op0_register() != Register::RCX || lea.memory_displacement64() != holder as u64 || lea.next_ip() != hit as u64 + 4 {
+            if lea.mnemonic() != Mnemonic::Lea
+                || lea.op0_register() != Register::RCX
+                || lea.memory_displacement64() != holder as u64
+                || lea.next_ip() != hit as u64 + 4
+            {
                 continue;
             }
             let base = lea.memory_base();
-            let passes_view = instrs[1..].iter().any(|i| i.mnemonic() == Mnemonic::Lea && i.op0_register() == Register::RDX && i.memory_base() == base);
-            let Some((_, constructor)) = calls(&instrs[1..]).next().filter(|_| passes_view) else { continue };
+            let passes_view = instrs[1..].iter().any(|i| {
+                i.mnemonic() == Mnemonic::Lea
+                    && i.op0_register() == Register::RDX
+                    && i.memory_base() == base
+            });
+            let Some((_, constructor)) = calls(&instrs[1..]).next().filter(|_| passes_view) else {
+                continue;
+            };
             let body = whole_function(pe, constructor, 0x100);
-            let Some(kept) = body.iter().find(|i| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Register && i.op1_kind() == OpKind::Register && i.op1_register() == Register::RDX).map(|i| i.op0_register())
+            let Some(kept) = body
+                .iter()
+                .find(|i| {
+                    i.mnemonic() == Mnemonic::Mov
+                        && i.op0_kind() == OpKind::Register
+                        && i.op1_kind() == OpKind::Register
+                        && i.op1_register() == Register::RDX
+                })
+                .map(|i| i.op0_register())
             else {
                 continue;
             };
             let stores: HashSet<u32> = body
                 .iter()
-                .filter(|i| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Memory && i.op1_kind() == OpKind::Register && i.op1_register() == kept)
+                .filter(|i| {
+                    i.mnemonic() == Mnemonic::Mov
+                        && i.op0_kind() == OpKind::Memory
+                        && i.op1_kind() == OpKind::Register
+                        && i.op1_register() == kept
+                })
                 .map(|i| i.memory_displacement64() as u32)
                 .collect();
             // other constructors called the same way spread their argument over several fields
@@ -110,7 +138,12 @@ fn projector(pe: &Pe, function: u32) -> Option<Projector> {
     let instrs = whole_function(pe, function, 0x200);
     let mut trig: Vec<u32> = instrs
         .iter()
-        .filter(|i| i.mnemonic() == Mnemonic::Movss && i.op1_kind() == OpKind::Memory && i.memory_base() == Register::RCX && i.memory_index() == Register::None)
+        .filter(|i| {
+            i.mnemonic() == Mnemonic::Movss
+                && i.op1_kind() == OpKind::Memory
+                && i.memory_base() == Register::RCX
+                && i.memory_index() == Register::None
+        })
         .map(|i| i.memory_displacement64() as u32)
         .collect();
     trig.sort_unstable();
@@ -121,33 +154,61 @@ fn projector(pe: &Pe, function: u32) -> Option<Projector> {
     let adds = |register: Register| -> Vec<u32> {
         instrs
             .iter()
-            .filter(|i| i.mnemonic() == Mnemonic::Add && i.op0_register() == register && plain_memory(i))
+            .filter(|i| {
+                i.mnemonic() == Mnemonic::Add && i.op0_register() == register && plain_memory(i)
+            })
             .map(|i| i.memory_displacement64() as u32)
             .collect()
     };
     let (xs, ys) = (adds(Register::EDX), adds(Register::ECX));
     let [x1, x2] = xs[..] else { return None };
     let [y1, y2] = ys[..] else { return None };
-    let (center, offset_x) = if ys.contains(&(x1 + 4)) { (x1, x2) } else if ys.contains(&(x2 + 4)) { (x2, x1) } else { return None };
+    let (center, offset_x) = if ys.contains(&(x1 + 4)) {
+        (x1, x2)
+    } else if ys.contains(&(x2 + 4)) {
+        (x2, x1)
+    } else {
+        return None;
+    };
     let offset_y = if y1 == center + 4 { y2 } else { y1 };
-    Some(Projector { trig: trig[0], view_center: center, view_offset_x: offset_x, view_offset_y: offset_y })
+    Some(Projector {
+        trig: trig[0],
+        view_center: center,
+        view_offset_x: offset_x,
+        view_offset_y: offset_y,
+    })
 }
 
 fn canvas_sizes(pe: &Pe, instrs: &[Instruction]) -> Result<(u32, u32), ScanError> {
     let mut found = HashSet::new();
     for (n, lea) in instrs.iter().enumerate() {
-        if lea.mnemonic() != Mnemonic::Lea || lea.op0_register() != Register::RCX || lea.memory_base() != Register::RAX {
+        if lea.mnemonic() != Mnemonic::Lea
+            || lea.op0_register() != Register::RCX
+            || lea.memory_base() != Register::RAX
+        {
             continue;
         }
-        let Some(&(_, target)) = calls(&instrs[n + 1..(n + 2).min(instrs.len())]).collect::<Vec<_>>().first() else { continue };
+        let Some(&(_, target)) = calls(&instrs[n + 1..(n + 2).min(instrs.len())])
+            .collect::<Vec<_>>()
+            .first()
+        else {
+            continue;
+        };
         let body = decode_at(pe, target, 32);
         let reads: Vec<u32> = body
             .iter()
-            .filter(|i| i.mnemonic() == Mnemonic::Movd && i.op1_kind() == OpKind::Memory && i.memory_base() == Register::RCX)
+            .filter(|i| {
+                i.mnemonic() == Mnemonic::Movd
+                    && i.op1_kind() == OpKind::Memory
+                    && i.memory_base() == Register::RCX
+            })
             .map(|i| i.memory_displacement64() as u32)
             .collect();
         if let [ui, size, ..] = reads[..] {
-            if reads.contains(&(ui + 4)) && reads.contains(&(size + 4)) && body.iter().any(|i| i.mnemonic() == Mnemonic::Divss) {
+            if reads.contains(&(ui + 4))
+                && reads.contains(&(size + 4))
+                && body.iter().any(|i| i.mnemonic() == Mnemonic::Divss)
+            {
                 let m = lea.memory_displacement64() as u32;
                 found.insert((m + size, m + ui));
             }
@@ -178,12 +239,19 @@ fn scene_arrays(pe: &Pe, functions: &[u32], scene: &Scene, size: usize) -> Vec<u
     let mut found = HashSet::new();
     for &function in functions {
         let instrs = whole_function(pe, function, 0x400);
-        let reads = |field: u32| instrs.iter().any(|i| i.op_count() == 2 && plain_memory(i) && i.memory_displacement64() == field as u64);
+        let reads = |field: u32| {
+            instrs.iter().any(|i| {
+                i.op_count() == 2 && plain_memory(i) && i.memory_displacement64() == field as u64
+            })
+        };
         if !reads(scene.size_x) || !reads(scene.size_y) {
             continue;
         }
         for (n, load) in instrs.iter().enumerate() {
-            if load.mnemonic() != Mnemonic::Mov || load.op0_register().size() != 8 || !plain_memory(load) {
+            if load.mnemonic() != Mnemonic::Mov
+                || load.op0_register().size() != 8
+                || !plain_memory(load)
+            {
                 continue;
             }
             let array = load.op0_register();
@@ -208,13 +276,15 @@ fn tile_x(pe: &Pe, functions: &[u32]) -> Result<u32, ScanError> {
         let instrs = decode_at(pe, function, 8);
         let mut fields = Vec::new();
         for [load, store] in instrs.as_chunks::<2>().0.iter().take(3) {
-            let copies = load_from(load, Register::RCX).filter(|_| load.op0_register() == Register::EAX).filter(|_| {
-                store.mnemonic() == Mnemonic::Mov
-                    && store.op0_kind() == OpKind::Memory
-                    && store.memory_base() == Register::RDX
-                    && store.memory_displacement64() == 4 * fields.len() as u64
-                    && store.op1_register() == Register::EAX
-            });
+            let copies = load_from(load, Register::RCX)
+                .filter(|_| load.op0_register() == Register::EAX)
+                .filter(|_| {
+                    store.mnemonic() == Mnemonic::Mov
+                        && store.op0_kind() == OpKind::Memory
+                        && store.memory_base() == Register::RDX
+                        && store.memory_displacement64() == 4 * fields.len() as u64
+                        && store.op1_register() == Register::EAX
+                });
             match copies {
                 Some(field) => fields.push(field),
                 None => break,
@@ -240,10 +310,16 @@ fn tile_model(pe: &Pe) -> Result<(u32, u32), ScanError> {
             }
             let begin = (section.rva + offset - 11) as u32;
             if let [copy, end, sub, ..] = decode_at(pe, begin, 3).as_slice() {
-                let begin_field = (sub.mnemonic() == Mnemonic::Sub && sub.op0_register() == Register::RCX && plain_memory(sub) && sub.memory_base() == Register::RAX)
+                let begin_field = (sub.mnemonic() == Mnemonic::Sub
+                    && sub.op0_register() == Register::RCX
+                    && plain_memory(sub)
+                    && sub.memory_base() == Register::RAX)
                     .then(|| sub.memory_displacement64() as u32);
-                let copies = copy.mnemonic() == Mnemonic::Mov && copy.op0_register() == Register::RAX && copy.op1_register() == Register::RCX;
-                let end_field = load_from(end, Register::RCX).filter(|_| end.op0_register() == Register::RCX);
+                let copies = copy.mnemonic() == Mnemonic::Mov
+                    && copy.op0_register() == Register::RAX
+                    && copy.op1_register() == Register::RCX;
+                let end_field =
+                    load_from(end, Register::RCX).filter(|_| end.op0_register() == Register::RCX);
                 if let (true, Some(b), Some(e)) = (copies, begin_field, end_field) {
                     if e == b + 8 {
                         counts.push((begin, b));
@@ -268,10 +344,18 @@ fn tile_model(pe: &Pe) -> Result<(u32, u32), ScanError> {
             _ => None,
         }
     };
-    let qword = |at: usize| pe.image.get(at..at + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    let qword = |at: usize| {
+        pe.image
+            .get(at..at + 8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+    };
     let mut found = HashSet::new();
     for at in (0..pe.image.len().saturating_sub(0x28)).step_by(8) {
-        if pe.code.iter().any(|s| (s.rva..s.rva + s.size).contains(&at)) {
+        if pe
+            .code
+            .iter()
+            .any(|s| (s.rva..s.rva + s.size).contains(&at))
+        {
             continue;
         }
         let Some(first) = qword(at) else { continue };
@@ -281,7 +365,9 @@ fn tile_model(pe: &Pe) -> Result<(u32, u32), ScanError> {
                 continue;
             }
             let slot = |n: usize| qword(at + 8 * n).map(|q| q.wrapping_sub(base));
-            if let (Some(vertices), Some(triangles)) = (slot(2).and_then(element), slot(4).and_then(element)) {
+            if let (Some(vertices), Some(triangles)) =
+                (slot(2).and_then(element), slot(4).and_then(element))
+            {
                 if triangles == begin {
                     found.insert((vertices, triangles));
                 }
@@ -291,13 +377,27 @@ fn tile_model(pe: &Pe) -> Result<(u32, u32), ScanError> {
     one(found.into_iter().collect())
 }
 
-pub fn find_local_projection(pe: &Pe, client: u32, canvas: u32, projection: &Projection, scene: &Scene) -> Result<LocalProjection, ScanError> {
+pub fn find_local_projection(
+    pe: &Pe,
+    client: u32,
+    canvas: u32,
+    projection: &Projection,
+    scene: &Scene,
+) -> Result<LocalProjection, ScanError> {
     let instrs = whole_function(pe, projection.world_to_screen, 0x300);
     let zoom = zoom(&instrs, client)?;
     let view_holder = view_holder(pe, &instrs, canvas)?;
     let view = view_slot(pe, view_holder)?;
-    let projectors: Vec<_> = calls(&instrs).filter_map(|(_, target)| projector(pe, target)).collect();
-    let [ref p] = projectors[..] else { return Err(if projectors.is_empty() { ScanError::NotFound } else { ScanError::Ambiguous(projectors.len()) }) };
+    let projectors: Vec<_> = calls(&instrs)
+        .filter_map(|(_, target)| projector(pe, target))
+        .collect();
+    let [ref p] = projectors[..] else {
+        return Err(if projectors.is_empty() {
+            ScanError::NotFound
+        } else {
+            ScanError::Ambiguous(projectors.len())
+        });
+    };
     let (canvas_size, ui_size) = canvas_sizes(pe, &instrs)?;
 
     // the tile height function, behind the jump of `getFineCoordinate`'s callee
@@ -310,21 +410,38 @@ pub fn find_local_projection(pe: &Pe, client: u32, canvas: u32, projection: &Pro
     let mut slots: Vec<u32> = Vec::new();
     for i in &instrs {
         let slot = match i.mnemonic() {
-            Mnemonic::Lea if i.op0_register() == Register::RCX && plain_memory(i) => i.memory_displacement64() as u32,
-            Mnemonic::Add if i.op0_register() == Register::RCX && matches!(i.op1_kind(), OpKind::Immediate32to64 | OpKind::Immediate8to64) => i.immediate(1) as u32,
+            Mnemonic::Lea if i.op0_register() == Register::RCX && plain_memory(i) => {
+                i.memory_displacement64() as u32
+            }
+            Mnemonic::Add
+                if i.op0_register() == Register::RCX
+                    && matches!(
+                        i.op1_kind(),
+                        OpKind::Immediate32to64 | OpKind::Immediate8to64
+                    ) =>
+            {
+                i.immediate(1) as u32
+            }
             _ => continue,
         };
         if !slots.contains(&slot) {
             slots.push(slot);
         }
     }
-    let [tile_model_slot, tile_paint, decoration, ..] = slots[..] else { return Err(ScanError::NotFound) };
+    let [tile_model_slot, tile_paint, decoration, ..] = slots[..] else {
+        return Err(ScanError::NotFound);
+    };
     if decoration != scene.ground_decoration {
         return Err(ScanError::NotFound);
     }
     let heights: HashSet<u32> = instrs
         .iter()
-        .filter(|i| i.mnemonic() == Mnemonic::Sub && i.op0_kind() == OpKind::Register && i.op0_register().size() == 4 && plain_memory(i))
+        .filter(|i| {
+            i.mnemonic() == Mnemonic::Sub
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register().size() == 4
+                && plain_memory(i)
+        })
         .map(|i| i.memory_displacement64() as u32)
         .collect();
     let decoration_height = one(heights.into_iter().collect())?;

@@ -12,13 +12,22 @@ pub struct Snapshot<'a, M: Memory> {
 impl<'a, M: Memory> Snapshot<'a, M> {
     /// Snapshots of `len` bytes over `memory`, taken with `load`; with `len` 0 every read goes through.
     pub fn new(memory: &'a M, len: usize) -> Self {
-        Self { memory, base: 0, bytes: vec![0; len], len: 0 }
+        Self {
+            memory,
+            base: 0,
+            bytes: vec![0; len],
+            len: 0,
+        }
     }
 
     /// Copies the span at `base`, replacing the last one.
     pub fn load(&mut self, base: u64) {
         self.base = base;
-        self.len = if !self.bytes.is_empty() && self.memory.read(base, &mut self.bytes) { self.bytes.len() } else { 0 };
+        self.len = if !self.bytes.is_empty() && self.memory.read(base, &mut self.bytes) {
+            self.bytes.len()
+        } else {
+            0
+        };
     }
 }
 
@@ -114,7 +123,10 @@ mod tests {
         snapshot.load(0x100);
         assert_eq!(counting.1.get(), 1);
         assert_eq!(snapshot.i32(0x104), Some(i32::from_le_bytes([4, 5, 6, 7])));
-        assert_eq!(snapshot.u64(0x118), Some(u64::from_le_bytes([24, 25, 26, 27, 28, 29, 30, 31])));
+        assert_eq!(
+            snapshot.u64(0x118),
+            Some(u64::from_le_bytes([24, 25, 26, 27, 28, 29, 30, 31]))
+        );
         assert_eq!(counting.1.get(), 1);
         // past the end, straddling it and before it: read through
         assert_eq!(snapshot.i32(0x200), Some(7));
@@ -148,6 +160,9 @@ mod tests {
         m.put_u64(0x200, 0x1000);
         m.put_u64(0x208, 20);
         m.put_u64(0x210, 0x8000_0000_0000_0020);
-        assert_eq!(read_string(&m, 0x200).as_deref(), Some("Grand Exchange Clerk"));
+        assert_eq!(
+            read_string(&m, 0x200).as_deref(),
+            Some("Grand Exchange Clerk")
+        );
     }
 }

@@ -43,9 +43,16 @@ impl Jobs {
                 (self.send)(input, pace)?;
                 let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
                 match *input {
-                    Input::Button { button, down: true } if !held.buttons.contains(&button) => held.buttons.push(button),
-                    Input::Button { button, down: false } => held.buttons.retain(|b| *b != button),
-                    Input::Key { key, down: true } if !held.keys.contains(&key) => held.keys.push(key),
+                    Input::Button { button, down: true } if !held.buttons.contains(&button) => {
+                        held.buttons.push(button)
+                    }
+                    Input::Button {
+                        button,
+                        down: false,
+                    } => held.buttons.retain(|b| *b != button),
+                    Input::Key { key, down: true } if !held.keys.contains(&key) => {
+                        held.keys.push(key)
+                    }
                     Input::Key { key, down: false } => held.keys.retain(|k| *k != key),
                     _ => {}
                 }
@@ -61,16 +68,30 @@ impl Jobs {
             let _ = (self.send)(&Input::Key { key, down: false }, &Blocking);
         }
         for button in held.buttons.into_iter().rev() {
-            let _ = (self.send)(&Input::Button { button, down: false }, &Blocking);
+            let _ = (self.send)(
+                &Input::Button {
+                    button,
+                    down: false,
+                },
+                &Blocking,
+            );
         }
     }
 }
 
 // A worker for `send`. When it is cancelled or shut down it releases every button and key its jobs left held.
-pub fn worker(send: impl Fn(&Input, &dyn Pace) -> Result<(), String> + Send + Sync + 'static) -> Worker<Job> {
-    let jobs = Arc::new(Jobs { send: Box::new(send), held: Mutex::default() });
+pub fn worker(
+    send: impl Fn(&Input, &dyn Pace) -> Result<(), String> + Send + Sync + 'static,
+) -> Worker<Job> {
+    let jobs = Arc::new(Jobs {
+        send: Box::new(send),
+        held: Mutex::default(),
+    });
     let release = jobs.clone();
-    Worker::new(move |job, pace| jobs.run(job, pace), move || release.release())
+    Worker::new(
+        move |job, pace| jobs.run(job, pace),
+        move || release.release(),
+    )
 }
 
 #[cfg(test)]
@@ -100,7 +121,12 @@ mod tests {
         let (log, worker) = recorded();
         worker.push(key(16, true)).unwrap();
         worker.push(key(37, true)).unwrap();
-        worker.push(Job::Input(Input::Button { button: MouseButton::Middle, down: true })).unwrap();
+        worker
+            .push(Job::Input(Input::Button {
+                button: MouseButton::Middle,
+                down: true,
+            }))
+            .unwrap();
         worker.push(Job::Wait(10_000)).unwrap();
         while log.lock().unwrap().len() < 3 {
             std::thread::yield_now();
@@ -112,9 +138,18 @@ mod tests {
         assert_eq!(
             log.lock().unwrap()[3..],
             [
-                Input::Key { key: 37, down: false },
-                Input::Key { key: 16, down: false },
-                Input::Button { button: MouseButton::Middle, down: false },
+                Input::Key {
+                    key: 37,
+                    down: false
+                },
+                Input::Key {
+                    key: 16,
+                    down: false
+                },
+                Input::Button {
+                    button: MouseButton::Middle,
+                    down: false
+                },
             ]
         );
 
@@ -139,7 +174,13 @@ mod tests {
         worker.push(key(40, true)).unwrap();
         worker.wait();
         worker.shutdown();
-        assert_eq!(log.lock().unwrap().last(), Some(&Input::Key { key: 40, down: false }));
+        assert_eq!(
+            log.lock().unwrap().last(),
+            Some(&Input::Key {
+                key: 40,
+                down: false
+            })
+        );
     }
 
     #[test]

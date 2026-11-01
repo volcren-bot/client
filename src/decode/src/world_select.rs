@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use ipc::state::Layout;
+use serde::{Deserialize, Serialize};
 
 use crate::memory::{Memory, read_string};
 
@@ -28,7 +28,9 @@ pub struct WorldSelect {
 fn world(memory: &impl Memory, layout: &Layout, address: u64) -> Option<World> {
     let w = &layout.world_select;
     let mut types = [0u8; 4];
-    memory.read(address + w.types as u64, &mut types).then_some(())?;
+    memory
+        .read(address + w.types as u64, &mut types)
+        .then_some(())?;
     Some(World {
         id: memory.i32(address + w.id as u64)?,
         types: u32::from_le_bytes(types),
@@ -41,17 +43,24 @@ fn world(memory: &impl Memory, layout: &Layout, address: u64) -> Option<World> {
 fn worlds(memory: &impl Memory, layout: &Layout) -> Option<Vec<World>> {
     let w = &layout.world_select;
     let count = memory.i32(layout.module_base + w.count as u64)?;
-    let Some(array) = memory.ptr(layout.module_base + w.worlds as u64).filter(|_| (1..=MAX_WORLDS).contains(&count)) else {
+    let Some(array) = memory
+        .ptr(layout.module_base + w.worlds as u64)
+        .filter(|_| (1..=MAX_WORLDS).contains(&count))
+    else {
         return Some(Vec::new());
     };
-    (0..count as u64).map(|i| world(memory, layout, memory.ptr(array + i * 8)?)).collect()
+    (0..count as u64)
+        .map(|i| world(memory, layout, memory.ptr(array + i * 8)?))
+        .collect()
 }
 
 pub fn world_select(memory: &impl Memory, layout: &Layout, client: u64) -> Option<WorldSelect> {
     let w = &layout.world_select;
     let global = |rva: u32| memory.i32(layout.module_base + rva as u64);
     let mut open = [0u8];
-    memory.read(layout.module_base + w.open as u64, &mut open).then_some(())?;
+    memory
+        .read(layout.module_base + w.open as u64, &mut open)
+        .then_some(())?;
     let background_height = memory
         .ptr(layout.module_base + w.background as u64)
         .and_then(|background| memory.i32(background + w.background_height as u64));
@@ -98,7 +107,15 @@ mod tests {
         }
     }
 
-    fn put_world(m: &mut Fake, address: u64, id: i32, types: u32, players: i32, location: i32, activity: &str) {
+    fn put_world(
+        m: &mut Fake,
+        address: u64,
+        id: i32,
+        types: u32,
+        players: i32,
+        location: i32,
+        activity: &str,
+    ) {
         m.put_i32(address, id);
         m.put(address + 4, &types.to_le_bytes());
         m.put_i32(address + 8, players);
@@ -138,8 +155,20 @@ mod tests {
                 hovered: -1,
                 background_height: Some(671),
                 worlds: vec![
-                    World { id: 301, types: 0, players: 796, location: 0, activity: "Trade - Free".into() },
-                    World { id: 345, types: 0x2000_0001, players: 59, location: 0, activity: "Deadman".into() },
+                    World {
+                        id: 301,
+                        types: 0,
+                        players: 796,
+                        location: 0,
+                        activity: "Trade - Free".into()
+                    },
+                    World {
+                        id: 345,
+                        types: 0x2000_0001,
+                        players: 59,
+                        location: 0,
+                        activity: "Deadman".into()
+                    },
                 ],
             }
         );

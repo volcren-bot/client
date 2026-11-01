@@ -1,5 +1,3 @@
-
-
 pub const REGION_SIZE: i32 = 64;
 pub const PLANES: usize = 4;
 const TILES: usize = (REGION_SIZE * REGION_SIZE) as usize;
@@ -41,7 +39,12 @@ pub mod flag {
     /// The walls and the block a tile's door bits stand for: what opening its doors takes away.
     pub fn door_blocks(flags: u32) -> u32 {
         let mut blocks = 0;
-        for (door, wall) in [(DOOR_NORTH, WALL_NORTH), (DOOR_EAST, WALL_EAST), (DOOR_SOUTH, WALL_SOUTH), (DOOR_WEST, WALL_WEST)] {
+        for (door, wall) in [
+            (DOOR_NORTH, WALL_NORTH),
+            (DOOR_EAST, WALL_EAST),
+            (DOOR_SOUTH, WALL_SOUTH),
+            (DOOR_WEST, WALL_WEST),
+        ] {
             if flags & door != 0 {
                 blocks |= wall;
             }
@@ -73,7 +76,14 @@ pub struct LocDef {
 
 impl Default for LocDef {
     fn default() -> Self {
-        Self { size_x: 1, size_y: 1, interact_type: 2, blocks_projectile: true, interactive: false, door: false }
+        Self {
+            size_x: 1,
+            size_y: 1,
+            interact_type: 2,
+            blocks_projectile: true,
+            interactive: false,
+            door: false,
+        }
     }
 }
 
@@ -109,7 +119,6 @@ impl<'a> Reader<'a> {
         Some(((self.u8()? as u16) << 8) | self.u8()? as u16)
     }
 
-
     fn skip(&mut self, n: usize) -> Option<()> {
         (self.at + n <= self.data.len()).then(|| self.at += n)
     }
@@ -128,7 +137,11 @@ impl<'a> Reader<'a> {
     }
 
     fn ushort_smart(&mut self) -> Option<u32> {
-        if *self.data.get(self.at)? < 128 { self.u8().map(u32::from) } else { self.u16().map(|v| v as u32 - 0x8000) }
+        if *self.data.get(self.at)? < 128 {
+            self.u8().map(u32::from)
+        } else {
+            self.u16().map(|v| v as u32 - 0x8000)
+        }
     }
 
     fn uint_smart_compat(&mut self) -> Option<u32> {
@@ -247,7 +260,10 @@ fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef
             0 => {
                 let interactive = match int1 {
                     Some(v) => v != 0,
-                    None => models.is_some_and(|shape| shape.is_none_or(|s| s == 10)) || options.iter().any(|&o| o),
+                    None => {
+                        models.is_some_and(|shape| shape.is_none_or(|s| s == 10))
+                            || options.iter().any(|&o| o)
+                    }
                 };
                 def.interactive = interactive;
                 def.door = interactive && opens;
@@ -309,7 +325,11 @@ fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef
                 let id = |v: u16| (v != 0xffff).then_some(v);
                 let varbit = id(r.u16()?);
                 let varp = id(r.u16()?);
-                let default = if op == 92 { id(r.u16()?).map(u32::from) } else { None };
+                let default = if op == 92 {
+                    id(r.u16()?).map(u32::from)
+                } else {
+                    None
+                };
                 let n = r.u8()? as usize;
                 let mut ids = Vec::with_capacity(n + 2);
                 for _ in 0..=n {
@@ -379,14 +399,31 @@ impl Movement {
     pub fn opened(self) -> Movement {
         let doors = (self.0 as u32) << Self::DOOR_SHIFT & flag::DOORS;
         let blocks = flag::door_blocks(doors);
-        Movement(self.0 & !(blocks as u16 & 0xff) & !if blocks & flag::OBJECT != 0 { Self::BLOCKS } else { 0 })
+        Movement(
+            self.0
+                & !(blocks as u16 & 0xff)
+                & !if blocks & flag::OBJECT != 0 {
+                    Self::BLOCKS
+                } else {
+                    0
+                },
+        )
     }
 }
 
 impl Cell for Movement {
     fn with(self, flags: u32) -> Self {
         let doors = ((flags & flag::DOORS) >> Self::DOOR_SHIFT) as u16;
-        Movement(self.0 | (flags & 0xff) as u16 | doors | if flags & flag::BLOCKED != 0 { Self::BLOCKS } else { 0 })
+        Movement(
+            self.0
+                | (flags & 0xff) as u16
+                | doors
+                | if flags & flag::BLOCKED != 0 {
+                    Self::BLOCKS
+                } else {
+                    0
+                },
+        )
     }
 }
 
@@ -405,7 +442,11 @@ pub struct WorldCollision<T: Cell = u32> {
 
 impl<T: Cell> Default for WorldCollision<T> {
     fn default() -> Self {
-        Self { planes: (0..PLANES).map(|_| (0..SQUARES).map(|_| Square::Missing).collect()).collect() }
+        Self {
+            planes: (0..PLANES)
+                .map(|_| (0..SQUARES).map(|_| Square::Missing).collect())
+                .collect(),
+        }
     }
 }
 
@@ -413,7 +454,10 @@ fn square_index(x: i32, y: i32) -> Option<(usize, usize)> {
     if !(0..REGION_SIZE * 256).contains(&x) || !(0..REGION_SIZE * 256).contains(&y) {
         return None;
     }
-    Some((region_id(x / REGION_SIZE, y / REGION_SIZE) as usize, ((x % REGION_SIZE) * REGION_SIZE + y % REGION_SIZE) as usize))
+    Some((
+        region_id(x / REGION_SIZE, y / REGION_SIZE) as usize,
+        ((x % REGION_SIZE) * REGION_SIZE + y % REGION_SIZE) as usize,
+    ))
 }
 
 impl<T: Cell> WorldCollision<T> {
@@ -452,8 +496,15 @@ impl<T: Cell> WorldCollision<T> {
     }
 
     fn add(&mut self, plane: i32, x: i32, y: i32, flags: u32) {
-        let Some(squares) = usize::try_from(plane).ok().and_then(|p| self.planes.get_mut(p)) else { return };
-        let Some((square, tile)) = square_index(x, y) else { return };
+        let Some(squares) = usize::try_from(plane)
+            .ok()
+            .and_then(|p| self.planes.get_mut(p))
+        else {
+            return;
+        };
+        let Some((square, tile)) = square_index(x, y) else {
+            return;
+        };
         let square = &mut squares[square];
         if let Square::Open = square {
             *square = Square::Tiles(Box::new([T::default(); TILES]));
@@ -467,14 +518,21 @@ impl<T: Cell> WorldCollision<T> {
         for squares in &mut self.planes {
             for square in squares.iter_mut() {
                 if let Square::Tiles(tiles) = square
-                    && tiles.iter().all(|t| *t == T::default()) {
-                        *square = Square::Open;
-                    }
+                    && tiles.iter().all(|t| *t == T::default())
+                {
+                    *square = Square::Open;
+                }
             }
         }
     }
 
-    pub fn add_terrain_and_locs(&mut self, region: u32, settings: &Settings, locs: &[Placement], defs: &impl Fn(u32) -> Option<LocDef>) {
+    pub fn add_terrain_and_locs(
+        &mut self,
+        region: u32,
+        settings: &Settings,
+        locs: &[Placement],
+        defs: &impl Fn(u32) -> Option<LocDef>,
+    ) {
         let base_x = (region >> 8) as i32 * REGION_SIZE;
         let base_y = (region & 0xff) as i32 * REGION_SIZE;
         let bridge = |x: usize, y: usize| settings[1][x][y] & SETTING_BRIDGE != 0;
@@ -494,7 +552,14 @@ impl<T: Cell> WorldCollision<T> {
                 continue;
             }
             let Some(def) = defs(loc.id) else { continue };
-            self.add_loc(walked, base_x + loc.x as i32, base_y + loc.y as i32, loc.shape, loc.rotation, &def);
+            self.add_loc(
+                walked,
+                base_x + loc.x as i32,
+                base_y + loc.y as i32,
+                loc.shape,
+                loc.rotation,
+                &def,
+            );
         }
     }
 
@@ -507,9 +572,23 @@ impl<T: Cell> WorldCollision<T> {
             }
             0..=3 if def.interact_type != 0 => self.add_wall(plane, x, y, shape, rotation, def),
             9..=21 if def.interact_type != 0 => {
-                let (w, h) = if rotation == 1 || rotation == 3 { (def.size_y, def.size_x) } else { (def.size_x, def.size_y) };
-                let door = if shape == 9 && def.door { flag::DOOR_OBJECT } else { 0 };
-                let flags = flag::OBJECT | door | if def.blocks_projectile { flag::OBJECT_PROJECTILE } else { 0 };
+                let (w, h) = if rotation == 1 || rotation == 3 {
+                    (def.size_y, def.size_x)
+                } else {
+                    (def.size_x, def.size_y)
+                };
+                let door = if shape == 9 && def.door {
+                    flag::DOOR_OBJECT
+                } else {
+                    0
+                };
+                let flags = flag::OBJECT
+                    | door
+                    | if def.blocks_projectile {
+                        flag::OBJECT_PROJECTILE
+                    } else {
+                        0
+                    };
                 for dx in 0..w as i32 {
                     for dy in 0..h as i32 {
                         self.add(plane, x + dx, y + dy, flags);
@@ -522,8 +601,19 @@ impl<T: Cell> WorldCollision<T> {
 
     fn add_wall(&mut self, plane: i32, x: i32, y: i32, shape: u8, rotation: u8, def: &LocDef) {
         for &(dx, dy, wall) in wall_marks(shape, rotation) {
-            let doors = if def.door { (0..8).map(|bit| flag::door_of(wall & (1 << bit))).fold(0, |a, b| a | b) } else { 0 };
-            let flags = wall | if def.blocks_projectile { wall << flag::PROJECTILE_SHIFT } else { 0 } | doors;
+            let doors = if def.door {
+                (0..8)
+                    .map(|bit| flag::door_of(wall & (1 << bit)))
+                    .fold(0, |a, b| a | b)
+            } else {
+                0
+            };
+            let flags =
+                wall | if def.blocks_projectile {
+                    wall << flag::PROJECTILE_SHIFT
+                } else {
+                    0
+                } | doors;
             self.add(plane, x + dx, y + dy, flags);
         }
     }
@@ -533,19 +623,35 @@ impl<T: Cell> WorldCollision<T> {
 pub fn wall_marks(shape: u8, rotation: u8) -> &'static [(i32, i32, u32)] {
     use flag::*;
     match (shape, rotation & 3) {
-            (0, 0) => &[(0, 0, WALL_WEST), (-1, 0, WALL_EAST)],
-            (0, 1) => &[(0, 0, WALL_NORTH), (0, 1, WALL_SOUTH)],
-            (0, 2) => &[(0, 0, WALL_EAST), (1, 0, WALL_WEST)],
-            (0, _) => &[(0, 0, WALL_SOUTH), (0, -1, WALL_NORTH)],
-            (1 | 3, 0) => &[(0, 0, WALL_NORTH_WEST), (-1, 1, WALL_SOUTH_EAST)],
-            (1 | 3, 1) => &[(0, 0, WALL_NORTH_EAST), (1, 1, WALL_SOUTH_WEST)],
-            (1 | 3, 2) => &[(0, 0, WALL_SOUTH_EAST), (1, -1, WALL_NORTH_WEST)],
-            (1 | 3, _) => &[(0, 0, WALL_SOUTH_WEST), (-1, -1, WALL_NORTH_EAST)],
-            (2, 0) => &[(0, 0, WALL_WEST | WALL_NORTH), (-1, 0, WALL_EAST), (0, 1, WALL_SOUTH)],
-            (2, 1) => &[(0, 0, WALL_NORTH | WALL_EAST), (0, 1, WALL_SOUTH), (1, 0, WALL_WEST)],
-            (2, 2) => &[(0, 0, WALL_EAST | WALL_SOUTH), (1, 0, WALL_WEST), (0, -1, WALL_NORTH)],
-            (2, _) => &[(0, 0, WALL_SOUTH | WALL_WEST), (0, -1, WALL_NORTH), (-1, 0, WALL_EAST)],
-            _ => &[],
+        (0, 0) => &[(0, 0, WALL_WEST), (-1, 0, WALL_EAST)],
+        (0, 1) => &[(0, 0, WALL_NORTH), (0, 1, WALL_SOUTH)],
+        (0, 2) => &[(0, 0, WALL_EAST), (1, 0, WALL_WEST)],
+        (0, _) => &[(0, 0, WALL_SOUTH), (0, -1, WALL_NORTH)],
+        (1 | 3, 0) => &[(0, 0, WALL_NORTH_WEST), (-1, 1, WALL_SOUTH_EAST)],
+        (1 | 3, 1) => &[(0, 0, WALL_NORTH_EAST), (1, 1, WALL_SOUTH_WEST)],
+        (1 | 3, 2) => &[(0, 0, WALL_SOUTH_EAST), (1, -1, WALL_NORTH_WEST)],
+        (1 | 3, _) => &[(0, 0, WALL_SOUTH_WEST), (-1, -1, WALL_NORTH_EAST)],
+        (2, 0) => &[
+            (0, 0, WALL_WEST | WALL_NORTH),
+            (-1, 0, WALL_EAST),
+            (0, 1, WALL_SOUTH),
+        ],
+        (2, 1) => &[
+            (0, 0, WALL_NORTH | WALL_EAST),
+            (0, 1, WALL_SOUTH),
+            (1, 0, WALL_WEST),
+        ],
+        (2, 2) => &[
+            (0, 0, WALL_EAST | WALL_SOUTH),
+            (1, 0, WALL_WEST),
+            (0, -1, WALL_NORTH),
+        ],
+        (2, _) => &[
+            (0, 0, WALL_SOUTH | WALL_WEST),
+            (0, -1, WALL_NORTH),
+            (-1, 0, WALL_EAST),
+        ],
+        _ => &[],
     }
 }
 
@@ -668,10 +774,27 @@ mod tests {
         data.push(0);
         data.push(0);
         let locs = decode_locs(&data).unwrap();
-        assert_eq!(locs, vec![
-            Placement { id: 5, x: 2, y: 3, plane: 1, shape: 10, rotation: 1 },
-            Placement { id: 8, x: 0, y: 0, plane: 0, shape: 0, rotation: 2 },
-        ]);
+        assert_eq!(
+            locs,
+            vec![
+                Placement {
+                    id: 5,
+                    x: 2,
+                    y: 3,
+                    plane: 1,
+                    shape: 10,
+                    rotation: 1
+                },
+                Placement {
+                    id: 8,
+                    x: 0,
+                    y: 0,
+                    plane: 0,
+                    shape: 0,
+                    rotation: 2
+                },
+            ]
+        );
     }
 
     #[test]
@@ -682,13 +805,43 @@ mod tests {
         data.extend_from_slice(&[14, 2, 15, 3, 30]);
         data.extend_from_slice(b"Open\0");
         data.extend_from_slice(&[18, 249, 1, 0, 0, 0, 1, 0, 0, 0, 7, 0]);
-        assert_eq!(decode_loc(&data), Some(LocDef { size_x: 2, size_y: 3, interact_type: 2, blocks_projectile: false, interactive: true, door: true }));
+        assert_eq!(
+            decode_loc(&data),
+            Some(LocDef {
+                size_x: 2,
+                size_y: 3,
+                interact_type: 2,
+                blocks_projectile: false,
+                interactive: true,
+                door: true
+            })
+        );
         let (_, text) = decode_loc_text(&data).unwrap();
         assert_eq!(
             text,
-            LocText { name: "Door".into(), actions: ["Open".into(), String::new(), String::new(), String::new(), String::new()], transforms: None }
+            LocText {
+                name: "Door".into(),
+                actions: [
+                    "Open".into(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new()
+                ],
+                transforms: None
+            }
         );
-        assert_eq!(decode_loc(&[17, 0]), Some(LocDef { size_x: 1, size_y: 1, interact_type: 0, blocks_projectile: false, interactive: false, door: false }));
+        assert_eq!(
+            decode_loc(&[17, 0]),
+            Some(LocDef {
+                size_x: 1,
+                size_y: 1,
+                interact_type: 0,
+                blocks_projectile: false,
+                interactive: false,
+                door: false
+            })
+        );
         assert_eq!(decode_loc(&[200, 0]), None);
     }
 
@@ -696,21 +849,33 @@ mod tests {
     fn interactive_is_the_minimaps_red_wall_rule() {
         // a wall model (op 1, shape 0) and no options: a plain wall
         let wall = [1, 1, 0, 5, 0, 0];
-        assert_eq!(decode_loc(&wall).map(|d| (d.interactive, d.door)), Some((false, false)));
+        assert_eq!(
+            decode_loc(&wall).map(|d| (d.interactive, d.door)),
+            Some((false, false))
+        );
         // the same with "Open": a door; with only "Search": interactive, not a door
         let mut door = vec![1, 1, 0, 5, 0, 30];
         door.extend_from_slice(b"Open\0");
         door.push(0);
-        assert_eq!(decode_loc(&door).map(|d| (d.interactive, d.door)), Some((true, true)));
+        assert_eq!(
+            decode_loc(&door).map(|d| (d.interactive, d.door)),
+            Some((true, true))
+        );
         let mut search = vec![1, 1, 0, 5, 0, 30];
         search.extend_from_slice(b"Search\0");
         search.push(0);
-        assert_eq!(decode_loc(&search).map(|d| (d.interactive, d.door)), Some((true, false)));
+        assert_eq!(
+            decode_loc(&search).map(|d| (d.interactive, d.door)),
+            Some((true, false))
+        );
         // op 19 says otherwise
         let mut not = vec![19, 0, 30];
         not.extend_from_slice(b"Open\0");
         not.push(0);
-        assert_eq!(decode_loc(&not).map(|d| (d.interactive, d.door)), Some((false, false)));
+        assert_eq!(
+            decode_loc(&not).map(|d| (d.interactive, d.door)),
+            Some((false, false))
+        );
     }
 
     #[test]
@@ -732,8 +897,31 @@ mod tests {
         let (bx, by) = (50 * 64, 50 * 64);
         let settings = Box::new([[[0u8; 64]; 64]; PLANES]);
         // a door on the east edge of (5, 5), and a plain wall on the east edge of (5, 6)
-        let locs = [Placement { id: 1, x: 5, y: 5, plane: 0, shape: 0, rotation: 2 }, Placement { id: 2, x: 5, y: 6, plane: 0, shape: 0, rotation: 2 }];
-        let defs = |id: u32| Some(LocDef { door: id == 1, interactive: id == 1, ..LocDef::default() });
+        let locs = [
+            Placement {
+                id: 1,
+                x: 5,
+                y: 5,
+                plane: 0,
+                shape: 0,
+                rotation: 2,
+            },
+            Placement {
+                id: 2,
+                x: 5,
+                y: 6,
+                plane: 0,
+                shape: 0,
+                rotation: 2,
+            },
+        ];
+        let defs = |id: u32| {
+            Some(LocDef {
+                door: id == 1,
+                interactive: id == 1,
+                ..LocDef::default()
+            })
+        };
         let mut world = WorldCollision::<Movement>::default();
         world.add_square(region);
         world.add_terrain_and_locs(region, &settings, &locs, &defs);
@@ -757,25 +945,61 @@ mod tests {
         settings[1][10][10] = SETTING_BRIDGE;
         let locs = [
             // A wall on the north edge of (5, 5), blocking projectiles.
-            Placement { id: 1, x: 5, y: 5, plane: 0, shape: 0, rotation: 1 },
+            Placement {
+                id: 1,
+                x: 5,
+                y: 5,
+                plane: 0,
+                shape: 0,
+                rotation: 1,
+            },
             // A 2 x 1 object turned a quarter: 1 x 2 at (20, 20).
-            Placement { id: 2, x: 20, y: 20, plane: 0, shape: 10, rotation: 1 },
+            Placement {
+                id: 2,
+                x: 20,
+                y: 20,
+                plane: 0,
+                shape: 10,
+                rotation: 1,
+            },
             // An object on plane 1 over the bridge tile: walked on plane 0.
-            Placement { id: 3, x: 10, y: 10, plane: 1, shape: 10, rotation: 0 },
+            Placement {
+                id: 3,
+                x: 10,
+                y: 10,
+                plane: 1,
+                shape: 10,
+                rotation: 0,
+            },
         ];
         let defs = |id: u32| match id {
-            2 => Some(LocDef { size_x: 2, size_y: 1, interact_type: 2, blocks_projectile: false, ..LocDef::default() }),
+            2 => Some(LocDef {
+                size_x: 2,
+                size_y: 1,
+                interact_type: 2,
+                blocks_projectile: false,
+                ..LocDef::default()
+            }),
             _ => Some(LocDef::default()),
         };
         let mut world = WorldCollision::<u32>::default();
         world.add_square(region);
         world.add_terrain_and_locs(region, &settings, &locs, &defs);
-        assert_eq!(world.flags(0, bx + 5, by + 5), Some(flag::WALL_NORTH | flag::WALL_NORTH << flag::PROJECTILE_SHIFT));
-        assert_eq!(world.flags(0, bx + 5, by + 6), Some(flag::WALL_SOUTH | flag::WALL_SOUTH << flag::PROJECTILE_SHIFT));
+        assert_eq!(
+            world.flags(0, bx + 5, by + 5),
+            Some(flag::WALL_NORTH | flag::WALL_NORTH << flag::PROJECTILE_SHIFT)
+        );
+        assert_eq!(
+            world.flags(0, bx + 5, by + 6),
+            Some(flag::WALL_SOUTH | flag::WALL_SOUTH << flag::PROJECTILE_SHIFT)
+        );
         assert_eq!(world.flags(0, bx + 20, by + 20), Some(flag::OBJECT));
         assert_eq!(world.flags(0, bx + 20, by + 21), Some(flag::OBJECT));
         assert_eq!(world.flags(0, bx + 21, by + 20), Some(0));
-        assert_eq!(world.flags(0, bx + 10, by + 10), Some(flag::OBJECT | flag::OBJECT_PROJECTILE));
+        assert_eq!(
+            world.flags(0, bx + 10, by + 10),
+            Some(flag::OBJECT | flag::OBJECT_PROJECTILE)
+        );
         assert_eq!(world.flags(1, bx + 10, by + 10), Some(0));
         assert_eq!(world.flags(0, bx - 1, by), None);
     }
@@ -791,7 +1015,10 @@ mod tests {
         let bytes = world.to_bytes(7);
         assert!(WorldCollision::from_bytes(&bytes, 8).is_none());
         let back = WorldCollision::from_bytes(&bytes, 7).unwrap();
-        assert_eq!(back.flags(0, 50 * 64 + 3, 50 * 64 + 4), Some(Movement(Movement::BLOCKS | flag::WALL_EAST as u16)));
+        assert_eq!(
+            back.flags(0, 50 * 64 + 3, 50 * 64 + 4),
+            Some(Movement(Movement::BLOCKS | flag::WALL_EAST as u16))
+        );
         assert_eq!(back.flags(0, 51 * 64, 50 * 64), Some(Movement(0)));
         assert_eq!(back.flags(0, 52 * 64, 50 * 64), None);
     }

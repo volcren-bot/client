@@ -112,7 +112,9 @@ fn unload_client(pid: u32) -> bool {
 pub extern "system" fn OpenConsole() {
     let hwnd = WINDOW_HWND.lock().unwrap();
 
-    if let Some(h) = *hwnd { open_console(h) }
+    if let Some(h) = *hwnd {
+        open_console(h)
+    }
 }
 
 #[no_mangle]

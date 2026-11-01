@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use ipc::state::{InterfaceLayout, interfaces::*};
+use serde::{Deserialize, Serialize};
 
 pub use crate::memory::Memory;
 
@@ -82,7 +82,10 @@ impl<M: Memory> Tree<'_, M> {
     }
 
     fn opened_in(&self, group: i32) -> Option<i32> {
-        self.sub_interfaces()?.into_iter().find(|&(_, g)| g == group).map(|(parent, _)| parent)
+        self.sub_interfaces()?
+            .into_iter()
+            .find(|&(_, g)| g == group)
+            .map(|(parent, _)| parent)
     }
 
     fn sub_interfaces(&self) -> Option<Vec<(i32, i32)>> {
@@ -100,7 +103,10 @@ impl<M: Memory> Tree<'_, M> {
                 if node == 0 || node == end {
                     break;
                 }
-                found.push((self.memory.i32(node + NODE_KEY as u64)?, self.memory.i32(node + NODE_GROUP as u64)?));
+                found.push((
+                    self.memory.i32(node + NODE_KEY as u64)?,
+                    self.memory.i32(node + NODE_GROUP as u64)?,
+                ));
                 node = self.memory.u64(node + NODE_NEXT as u64)?;
             }
         }
@@ -110,11 +116,20 @@ impl<M: Memory> Tree<'_, M> {
 
 pub fn sub_interfaces(memory: &impl Memory, layout: &InterfaceLayout) -> Option<Vec<SubInterface>> {
     let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree { memory, layout, client };
+    let tree = Tree {
+        memory,
+        layout,
+        client,
+    };
     let mut list: Vec<SubInterface> = tree
         .sub_interfaces()?
         .into_iter()
-        .map(|(parent, group)| SubInterface { group, parent, parent_group: parent >> 16, parent_child: parent & 0xffff })
+        .map(|(parent, group)| SubInterface {
+            group,
+            parent,
+            parent_group: parent >> 16,
+            parent_child: parent & 0xffff,
+        })
         .collect();
     list.sort_by_key(|s| (s.parent_group, s.parent_child));
     Some(list)
@@ -128,7 +143,9 @@ fn place<M: Memory>(tree: &Tree<M>, component: u64, root: i32) -> Option<(i32, i
             return Some(false);
         }
         let mut b = [0u8];
-        tree.memory.read(c + layout.hidden as u64, &mut b).then_some(b[0] != 0)
+        tree.memory
+            .read(c + layout.hidden as u64, &mut b)
+            .then_some(b[0] != 0)
     };
     let (mut x, mut y) = (field(component, layout.x)?, field(component, layout.x + 4)?);
     let mut is_hidden = hidden(component)?;
@@ -150,7 +167,11 @@ fn place<M: Memory>(tree: &Tree<M>, component: u64, root: i32) -> Option<(i32, i
     None
 }
 
-fn widget_at<M: Memory>(tree: &Tree<M>, component: u64, (x, y, hidden): (i32, i32, bool)) -> Option<Widget> {
+fn widget_at<M: Memory>(
+    tree: &Tree<M>,
+    component: u64,
+    (x, y, hidden): (i32, i32, bool),
+) -> Option<Widget> {
     let layout = tree.layout;
     let field = |offset: u32| tree.field(component, offset);
     let optional = |offset: u32| if offset == 0 { Some(-1) } else { field(offset) };
@@ -160,7 +181,13 @@ fn widget_at<M: Memory>(tree: &Tree<M>, component: u64, (x, y, hidden): (i32, i3
         .then(|| crate::memory::read_string(tree.memory, component + layout.text as u64))
         .flatten()
         .filter(|text| !text.is_empty() || kind == TEXT);
-    let scroll = |offset: u32, extra: u32| if offset == 0 { Some(0) } else { field(offset + extra) };
+    let scroll = |offset: u32, extra: u32| {
+        if offset == 0 {
+            Some(0)
+        } else {
+            field(offset + extra)
+        }
+    };
     Some(Widget {
         id,
         group: id >> 16,
@@ -172,7 +199,11 @@ fn widget_at<M: Memory>(tree: &Tree<M>, component: u64, (x, y, hidden): (i32, i3
         height: field(layout.width + 4)?,
         parent: field(layout.parent)?,
         sprite: optional(layout.sprite)?,
-        index: if layout.index == 0 { -1 } else { field(layout.index)? },
+        index: if layout.index == 0 {
+            -1
+        } else {
+            field(layout.index)?
+        },
         hidden,
         text,
         text_color: optional(layout.text_color)?,
@@ -186,36 +217,72 @@ fn widget_at<M: Memory>(tree: &Tree<M>, component: u64, (x, y, hidden): (i32, i3
 const TEXT: i32 = 4;
 const MAX_CHILDREN: u64 = 1 << 14;
 
-pub fn find_widget(memory: &impl Memory, layout: &InterfaceLayout, root: i32, group: u16, child: u16) -> Option<Widget> {
+pub fn find_widget(
+    memory: &impl Memory,
+    layout: &InterfaceLayout,
+    root: i32,
+    group: u16,
+    child: u16,
+) -> Option<Widget> {
     if root < 0 {
         return None;
     }
     let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree { memory, layout, client };
+    let tree = Tree {
+        memory,
+        layout,
+        client,
+    };
     let component = tree.component((group as i32) << 16 | child as i32)?;
     widget_at(&tree, component, place(&tree, component, root)?)
 }
 
-pub fn find_children(memory: &impl Memory, layout: &InterfaceLayout, root: i32, group: u16, child: u16) -> Option<Vec<Widget>> {
+pub fn find_children(
+    memory: &impl Memory,
+    layout: &InterfaceLayout,
+    root: i32,
+    group: u16,
+    child: u16,
+) -> Option<Vec<Widget>> {
     if root < 0 || layout.children == 0 {
         return None;
     }
     let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree { memory, layout, client };
+    let tree = Tree {
+        memory,
+        layout,
+        client,
+    };
     let parent = tree.component((group as i32) << 16 | child as i32)?;
     let placed = place(&tree, parent, root)?;
     dynamic_children(&tree, parent, placed)
 }
 
 // The dynamic children of `parent`, which stands at `placed` (see `place`).
-fn dynamic_children<M: Memory>(tree: &Tree<M>, parent: u64, placed: (i32, i32, bool)) -> Option<Vec<Widget>> {
-    Some(dynamic_children_with_components(tree, parent, placed)?.into_iter().map(|(widget, _)| widget).collect())
+fn dynamic_children<M: Memory>(
+    tree: &Tree<M>,
+    parent: u64,
+    placed: (i32, i32, bool),
+) -> Option<Vec<Widget>> {
+    Some(
+        dynamic_children_with_components(tree, parent, placed)?
+            .into_iter()
+            .map(|(widget, _)| widget)
+            .collect(),
+    )
 }
 
 // The same with the address of each child's component.
-fn dynamic_children_with_components<M: Memory>(tree: &Tree<M>, parent: u64, (x, y, hidden): (i32, i32, bool)) -> Option<Vec<(Widget, u64)>> {
+fn dynamic_children_with_components<M: Memory>(
+    tree: &Tree<M>,
+    parent: u64,
+    (x, y, hidden): (i32, i32, bool),
+) -> Option<Vec<(Widget, u64)>> {
     let (memory, layout) = (tree.memory, tree.layout);
-    let (x, y) = (x - tree.field(parent, layout.scroll_x)?, y - tree.field(parent, layout.scroll_x + 4)?);
+    let (x, y) = (
+        x - tree.field(parent, layout.scroll_x)?,
+        y - tree.field(parent, layout.scroll_x + 4)?,
+    );
     let count = memory.u64(parent + layout.children as u64)?;
     if count == 0 {
         return Some(Vec::new());
@@ -226,8 +293,15 @@ fn dynamic_children_with_components<M: Memory>(tree: &Tree<M>, parent: u64, (x, 
     let entries = memory.ptr(parent + layout.children as u64 + CHILDREN_DATA as u64)?;
     let mut children = Vec::new();
     for i in 0..count {
-        let Some(component) = memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64) else { continue };
-        let at = (x + tree.field(component, layout.x)?, y + tree.field(component, layout.x + 4)?, hidden);
+        let Some(component) = memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
+        else {
+            continue;
+        };
+        let at = (
+            x + tree.field(component, layout.x)?,
+            y + tree.field(component, layout.x + 4)?,
+            hidden,
+        );
         let mut widget = widget_at(tree, component, at)?;
         if layout.hidden != 0 {
             let mut b = [0u8];
@@ -349,14 +423,24 @@ const MAX_GROUP: u64 = 1 << 14;
 fn group_size<M: Memory>(tree: &Tree<M>, group: i32) -> Option<u64> {
     let manager = tree.memory.ptr(tree.client + tree.layout.manager as u64)?;
     let groups = tree.memory.ptr(manager + tree.layout.groups as u64)?;
-    let count = tree.memory.u64(groups + group as u64 * GROUP_SIZE as u64 + ARRAY_COUNT as u64)?;
+    let count = tree
+        .memory
+        .u64(groups + group as u64 * GROUP_SIZE as u64 + ARRAY_COUNT as u64)?;
     (count <= MAX_GROUP).then_some(count)
 }
 
 /// The id, index and address of every component of the open groups, for reverse engineering fields.
-pub fn component_addresses(memory: &impl Memory, layout: &InterfaceLayout, root: i32) -> Option<Vec<(i32, i32, u64)>> {
+pub fn component_addresses(
+    memory: &impl Memory,
+    layout: &InterfaceLayout,
+    root: i32,
+) -> Option<Vec<(i32, i32, u64)>> {
     let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree { memory, layout, client };
+    let tree = Tree {
+        memory,
+        layout,
+        client,
+    };
     let mut groups = vec![root];
     for sub in sub_interfaces(memory, layout)? {
         if !groups.contains(&sub.group) {
@@ -369,10 +453,19 @@ pub fn component_addresses(memory: &impl Memory, layout: &InterfaceLayout, root:
             let id = group << 16 | child as i32;
             if let Some(component) = tree.component(id) {
                 found.push((id, -1, component));
-                let count = memory.u64(component + layout.children as u64).filter(|&count| count <= MAX_CHILDREN).unwrap_or(0);
-                let entries = if count == 0 { None } else { memory.ptr(component + layout.children as u64 + CHILDREN_DATA as u64) };
+                let count = memory
+                    .u64(component + layout.children as u64)
+                    .filter(|&count| count <= MAX_CHILDREN)
+                    .unwrap_or(0);
+                let entries = if count == 0 {
+                    None
+                } else {
+                    memory.ptr(component + layout.children as u64 + CHILDREN_DATA as u64)
+                };
                 for i in 0..count {
-                    if let Some(child) = entries.and_then(|entries| memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)) {
+                    if let Some(child) = entries.and_then(|entries| {
+                        memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
+                    }) {
                         found.push((id, i as i32, child));
                     }
                 }
@@ -382,12 +475,21 @@ pub fn component_addresses(memory: &impl Memory, layout: &InterfaceLayout, root:
     Some(found)
 }
 
-pub fn find_tree(memory: &impl Memory, layout: &InterfaceLayout, root: i32, scale: f32) -> Option<WidgetTree> {
+pub fn find_tree(
+    memory: &impl Memory,
+    layout: &InterfaceLayout,
+    root: i32,
+    scale: f32,
+) -> Option<WidgetTree> {
     if root < 0 {
         return None;
     }
     let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree { memory, layout, client };
+    let tree = Tree {
+        memory,
+        layout,
+        client,
+    };
     let sub_interfaces = sub_interfaces(memory, layout)?;
     let mut groups = vec![root];
     for sub in &sub_interfaces {
@@ -399,16 +501,38 @@ pub fn find_tree(memory: &impl Memory, layout: &InterfaceLayout, root: i32, scal
     for group in groups {
         for child in 0..group_size(&tree, group).unwrap_or(0) {
             let id = group << 16 | child as i32;
-            let Some(component) = tree.component(id) else { continue };
-            let Some(placed) = place(&tree, component, root) else { continue };
-            let Some(widget) = widget_at(&tree, component, placed) else { continue };
-            widgets.push(TreeWidget { widget: widget.scaled(scale), detail: detail_at(&tree, component), dynamic: false, owner: -1 });
-            for (child, address) in dynamic_children_with_components(&tree, component, placed).unwrap_or_default() {
-                widgets.push(TreeWidget { widget: child.scaled(scale), detail: detail_at(&tree, address), dynamic: true, owner: id });
+            let Some(component) = tree.component(id) else {
+                continue;
+            };
+            let Some(placed) = place(&tree, component, root) else {
+                continue;
+            };
+            let Some(widget) = widget_at(&tree, component, placed) else {
+                continue;
+            };
+            widgets.push(TreeWidget {
+                widget: widget.scaled(scale),
+                detail: detail_at(&tree, component),
+                dynamic: false,
+                owner: -1,
+            });
+            for (child, address) in
+                dynamic_children_with_components(&tree, component, placed).unwrap_or_default()
+            {
+                widgets.push(TreeWidget {
+                    widget: child.scaled(scale),
+                    detail: detail_at(&tree, address),
+                    dynamic: true,
+                    owner: id,
+                });
             }
         }
     }
-    Some(WidgetTree { root, sub_interfaces, widgets })
+    Some(WidgetTree {
+        root,
+        sub_interfaces,
+        widgets,
+    })
 }
 
 #[cfg(test)]
@@ -442,16 +566,71 @@ mod tests {
         for (offset, value) in words {
             m.put_i32(c + offset, value);
         }
-        for (offset, value) in [(LAYOUT.hidden as u64, 1u8), (DETAIL_OPACITY, 200), (DETAIL_FILLED, 1), (DETAIL_TEXT_SHADOWED, 1), (DETAIL_SPRITE_TILING, 0)] {
+        for (offset, value) in [
+            (LAYOUT.hidden as u64, 1u8),
+            (DETAIL_OPACITY, 200),
+            (DETAIL_FILLED, 1),
+            (DETAIL_TEXT_SHADOWED, 1),
+            (DETAIL_SPRITE_TILING, 0),
+        ] {
             m.put(c + offset, &[value]);
         }
-        let tree = Tree { memory: &m, layout: &LAYOUT, client: 0 };
+        let tree = Tree {
+            memory: &m,
+            layout: &LAYOUT,
+            client: 0,
+        };
         let d = detail_at(&tree, c);
-        assert_eq!((d.content_type, d.self_hidden, d.opacity, d.filled, d.text_shadowed, d.sprite_tiling, d.no_click_through), (7, true, 200, true, true, false, false));
-        assert_eq!((d.x_position_mode, d.y_position_mode, d.width_mode, d.height_mode), (1, 2, 1, 0));
-        assert_eq!((d.original_x, d.original_y, d.original_width, d.original_height), (4, 16, 23, 13));
-        assert_eq!((d.relative_x, d.relative_y, d.relative_width, d.relative_height), (5, 0, 0, 14));
-        assert_eq!((d.font_id, d.line_height, d.x_text_alignment, d.y_text_alignment, d.item_id, d.item_quantity), (494, 3, 1, 2, 1891, 28));
+        assert_eq!(
+            (
+                d.content_type,
+                d.self_hidden,
+                d.opacity,
+                d.filled,
+                d.text_shadowed,
+                d.sprite_tiling,
+                d.no_click_through
+            ),
+            (7, true, 200, true, true, false, false)
+        );
+        assert_eq!(
+            (
+                d.x_position_mode,
+                d.y_position_mode,
+                d.width_mode,
+                d.height_mode
+            ),
+            (1, 2, 1, 0)
+        );
+        assert_eq!(
+            (
+                d.original_x,
+                d.original_y,
+                d.original_width,
+                d.original_height
+            ),
+            (4, 16, 23, 13)
+        );
+        assert_eq!(
+            (
+                d.relative_x,
+                d.relative_y,
+                d.relative_width,
+                d.relative_height
+            ),
+            (5, 0, 0, 14)
+        );
+        assert_eq!(
+            (
+                d.font_id,
+                d.line_height,
+                d.x_text_alignment,
+                d.y_text_alignment,
+                d.item_id,
+                d.item_quantity
+            ),
+            (494, 3, 1, 2, 1891, 28)
+        );
     }
 
     const LAYOUT: InterfaceLayout = InterfaceLayout {
@@ -490,14 +669,23 @@ mod tests {
         m.put_u64(manager + LAYOUT.groups as u64, groups);
 
         let mut next = 0x40_0000u64;
-        let mut component = |m: &mut Fake, group: u64, child: u64, count: u64, parent: i32, pos: (i32, i32), size: (i32, i32)| {
+        let mut component = |m: &mut Fake,
+                             group: u64,
+                             child: u64,
+                             count: u64,
+                             parent: i32,
+                             pos: (i32, i32),
+                             size: (i32, i32)| {
             let array = groups + group * GROUP_SIZE as u64;
             let elements = 0x1000_0000 + group * 0x1_0000;
             m.put_u64(array + ARRAY_COUNT as u64, count);
             m.put_u64(array + ARRAY_DATA as u64, elements);
             let c = next;
             next += 0x1000;
-            m.put_u64(elements + child * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64, c);
+            m.put_u64(
+                elements + child * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64,
+                c,
+            );
             m.put_i32(c + LAYOUT.id as u64, (group << 16 | child) as i32);
             m.put_i32(c + LAYOUT.kind as u64, 0);
             m.put_i32(c + LAYOUT.parent as u64, parent);
@@ -540,7 +728,10 @@ mod tests {
     #[test]
     fn finds_the_lobby_play_button() {
         let widget = find_widget(&lobby(), &LAYOUT, 165, 378, 72).unwrap();
-        assert_eq!((widget.x, widget.y, widget.width, widget.height), (565, 292, 229, 90));
+        assert_eq!(
+            (widget.x, widget.y, widget.width, widget.height),
+            (565, 292, 229, 90)
+        );
         assert_eq!(widget.id, 378 << 16 | 72);
         assert_eq!(widget.parent, 378 << 16 | 57);
         assert_eq!(widget.sprite, -1);
@@ -549,17 +740,24 @@ mod tests {
     #[test]
     fn reads_the_sprite() {
         let mut m = lobby();
-        let c72 = m.u64(0x1000_0000 + 378 * 0x1_0000 + 72 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64).unwrap();
+        let c72 = m
+            .u64(0x1000_0000 + 378 * 0x1_0000 + 72 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
+            .unwrap();
         m.put_i32(c72 + LAYOUT.sprite as u64, 1218);
         assert_eq!(find_widget(&m, &LAYOUT, 165, 378, 72).unwrap().sprite, 1218);
-        let unknown = InterfaceLayout { sprite: 0, ..LAYOUT };
+        let unknown = InterfaceLayout {
+            sprite: 0,
+            ..LAYOUT
+        };
         assert_eq!(find_widget(&m, &unknown, 165, 378, 72).unwrap().sprite, -1);
     }
 
     #[test]
     fn scroll_moves_children() {
         let mut m = lobby();
-        let c57 = m.u64(0x1000_0000 + 378 * 0x1_0000 + 57 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64).unwrap();
+        let c57 = m
+            .u64(0x1000_0000 + 378 * 0x1_0000 + 57 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
+            .unwrap();
         m.put_i32(c57 + LAYOUT.scroll_x as u64 + 4, 50);
         assert_eq!(find_widget(&m, &LAYOUT, 165, 378, 72).unwrap().y, 242);
     }
@@ -587,16 +785,28 @@ mod tests {
             scroll_height: 5104,
         };
         let scaled = widget.clone().scaled(1402.0 / 807.0);
-        assert_eq!((scaled.x, scaled.y, scaled.width, scaled.height), (953, 1302, 330, 454));
+        assert_eq!(
+            (scaled.x, scaled.y, scaled.width, scaled.height),
+            (953, 1302, 330, 454)
+        );
         assert_eq!((scaled.scroll_y, scaled.scroll_height), (173, 8867));
         assert_eq!(widget.clone().scaled(1.0), widget);
     }
 
     fn component_of(m: &Fake, group: u64, child: u64) -> u64 {
-        m.u64(0x1000_0000 + group * 0x1_0000 + child * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64).unwrap()
+        m.u64(0x1000_0000 + group * 0x1_0000 + child * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
+            .unwrap()
     }
 
-    fn dynamic_child(m: &mut Fake, at: u64, id: i32, index: i32, pos: (i32, i32), text: &str, hidden: bool) {
+    fn dynamic_child(
+        m: &mut Fake,
+        at: u64,
+        id: i32,
+        index: i32,
+        pos: (i32, i32),
+        text: &str,
+        hidden: bool,
+    ) {
         m.put_i32(at + LAYOUT.id as u64, id);
         m.put_i32(at + LAYOUT.index as u64, index);
         m.put_i32(at + LAYOUT.kind as u64, TEXT);
@@ -624,16 +834,32 @@ mod tests {
         m.put_u64(c57 + LAYOUT.children as u64, 2);
         m.put_u64(c57 + LAYOUT.children as u64 + CHILDREN_DATA as u64, entries);
         m.put_u64(entries + ENTRY_COMPONENT as u64, 0x81_0000);
-        m.put_u64(entries + ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64, 0x82_0000);
+        m.put_u64(
+            entries + ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64,
+            0x82_0000,
+        );
         let id = 378 << 16 | 57;
         dynamic_child(&mut m, 0x81_0000, id, 0, (16, 0), "301", false);
         dynamic_child(&mut m, 0x82_0000, id, 1, (16, 16), "302", true);
 
         let children = find_children(&m, &LAYOUT, 165, 378, 57).unwrap();
         assert_eq!(children.len(), 2);
-        assert_eq!((children[0].x, children[0].y, children[0].index), (297 + 16, 10 - 16, 0));
-        assert_eq!((children[1].y, children[1].text.as_deref(), children[1].hidden), (10, Some("302"), true));
-        assert_eq!((children[0].text_color, children[0].hidden), (0xf0f000, false));
+        assert_eq!(
+            (children[0].x, children[0].y, children[0].index),
+            (297 + 16, 10 - 16, 0)
+        );
+        assert_eq!(
+            (
+                children[1].y,
+                children[1].text.as_deref(),
+                children[1].hidden
+            ),
+            (10, Some("302"), true)
+        );
+        assert_eq!(
+            (children[0].text_color, children[0].hidden),
+            (0xf0f000, false)
+        );
         assert_eq!(find_children(&m, &LAYOUT, 165, 378, 72), Some(Vec::new()));
     }
 
@@ -649,7 +875,12 @@ mod tests {
     fn lists_sub_interfaces() {
         assert_eq!(
             sub_interfaces(&lobby(), &LAYOUT),
-            Some(vec![SubInterface { group: 378, parent: 165 << 16 | 40, parent_group: 165, parent_child: 40 }])
+            Some(vec![SubInterface {
+                group: 378,
+                parent: 165 << 16 | 40,
+                parent_group: 165,
+                parent_child: 40
+            }])
         );
     }
 

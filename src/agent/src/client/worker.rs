@@ -18,7 +18,10 @@ fn shared() -> Option<Arc<Mapping>> {
 pub fn on_work(done: HANDLE) {
     let Some(mapping) = shared() else { return };
     let shared = mapping.shared();
-    let Some((sequence, request)) = shared.read_worker_request().filter(|(s, _)| shared.worker_reply_answers() != Some(*s)) else {
+    let Some((sequence, request)) = shared
+        .read_worker_request()
+        .filter(|(s, _)| shared.worker_reply_answers() != Some(*s))
+    else {
         return;
     };
     shared.write_worker_reply_with(|reply| {
@@ -26,7 +29,13 @@ pub fn on_work(done: HANDLE) {
         reply.length = 0;
         reply.status = match LAYOUT.get() {
             None => worker_status::NOT_FOUND,
-            Some(layout) => match decode::worker::serve(&OwnMemory, layout, request.kind, request.args, &mut reply.data) {
+            Some(layout) => match decode::worker::serve(
+                &OwnMemory,
+                layout,
+                request.kind,
+                request.args,
+                &mut reply.data,
+            ) {
                 Ok(length) => {
                     reply.length = length as u32;
                     worker_status::OK

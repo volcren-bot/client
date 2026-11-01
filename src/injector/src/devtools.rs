@@ -38,7 +38,11 @@ pub fn movement_flag_names(data: u32) -> Vec<&'static str> {
         ("BLOCK_MOVEMENT_FLOOR", flag::FLOOR),
         ("BLOCK_MOVEMENT_FULL", flag::BLOCKED),
     ];
-    FLAGS.iter().filter(|(_, bits)| data & bits != 0).map(|(name, _)| *name).collect()
+    FLAGS
+        .iter()
+        .filter(|(_, bits)| data & bits != 0)
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 // The RuneLite region of a world tile: its region id, and its offset inside that region.
@@ -58,8 +62,18 @@ pub fn line_of_sight(flags: impl Fn(i32, i32) -> u32, from: (i32, i32), to: (i32
     let full = flag::OBJECT_PROJECTILE;
     let sight = |bit: u32| bit << flag::PROJECTILE_SHIFT;
     // The flags that block a step along each axis, which the tile being entered must not have.
-    let x_flags = full | if dx < 0 { sight(flag::WALL_EAST) } else { sight(flag::WALL_WEST) };
-    let y_flags = full | if dy < 0 { sight(flag::WALL_NORTH) } else { sight(flag::WALL_SOUTH) };
+    let x_flags = full
+        | if dx < 0 {
+            sight(flag::WALL_EAST)
+        } else {
+            sight(flag::WALL_WEST)
+        };
+    let y_flags = full
+        | if dy < 0 {
+            sight(flag::WALL_NORTH)
+        } else {
+            sight(flag::WALL_SOUTH)
+        };
     let blocked = |x: i32, y: i32, bits: u32| flags(x, y) & bits != 0;
 
     if dx_abs > dy_abs {
@@ -106,7 +120,11 @@ mod tests {
 
     #[test]
     fn a_tile_is_its_own_line_of_sight() {
-        assert!(line_of_sight(|_, _| flag::OBJECT_PROJECTILE, (5, 5), (5, 5)));
+        assert!(line_of_sight(
+            |_, _| flag::OBJECT_PROJECTILE,
+            (5, 5),
+            (5, 5)
+        ));
     }
 
     #[test]
@@ -119,15 +137,30 @@ mod tests {
     #[test]
     fn a_wall_between_two_tiles_blocks_the_sight() {
         // A wall on the west edge of tile (6, 5): walking east from (5, 5) enters that tile through it.
-        let wall = |x: i32, y: i32| if (x, y) == (6, 5) { flag::WALL_WEST << flag::PROJECTILE_SHIFT } else { 0 };
+        let wall = |x: i32, y: i32| {
+            if (x, y) == (6, 5) {
+                flag::WALL_WEST << flag::PROJECTILE_SHIFT
+            } else {
+                0
+            }
+        };
         assert!(!line_of_sight(wall, (5, 5), (8, 5)));
-        assert!(line_of_sight(wall, (8, 5), (5, 5)), "walking west leaves through the other edge");
+        assert!(
+            line_of_sight(wall, (8, 5), (5, 5)),
+            "walking west leaves through the other edge"
+        );
         assert!(line_of_sight(wall, (5, 5), (5, 8)));
     }
 
     #[test]
     fn a_full_object_blocks_the_sight_through_its_tile() {
-        let rock = |x: i32, y: i32| if (x, y) == (6, 5) { flag::OBJECT_PROJECTILE } else { 0 };
+        let rock = |x: i32, y: i32| {
+            if (x, y) == (6, 5) {
+                flag::OBJECT_PROJECTILE
+            } else {
+                0
+            }
+        };
         assert!(!line_of_sight(rock, (5, 5), (7, 5)));
         assert!(line_of_sight(rock, (5, 5), (5, 7)));
     }
@@ -135,21 +168,33 @@ mod tests {
     #[test]
     fn movement_flags_are_named_in_order() {
         assert_eq!(movement_flag_names(0), Vec::<&str>::new());
-        assert_eq!(movement_flag_names(flag::WALL_NORTH | flag::WALL_WEST), ["BLOCK_MOVEMENT_NORTH", "BLOCK_MOVEMENT_WEST"]);
-        assert_eq!(movement_flag_names(flag::FLOOR), ["BLOCK_MOVEMENT_FLOOR", "BLOCK_MOVEMENT_FULL"]);
+        assert_eq!(
+            movement_flag_names(flag::WALL_NORTH | flag::WALL_WEST),
+            ["BLOCK_MOVEMENT_NORTH", "BLOCK_MOVEMENT_WEST"]
+        );
+        assert_eq!(
+            movement_flag_names(flag::FLOOR),
+            ["BLOCK_MOVEMENT_FLOOR", "BLOCK_MOVEMENT_FULL"]
+        );
     }
 
     #[test]
     fn tile_flags_read_as_letters() {
         assert_eq!(tile_flag_text(false, 0), "");
-        assert_eq!(tile_flag_text(true, TILE_FLAG_VIS_BELOW | TILE_FLAG_UNDER_ROOF), "BVR");
+        assert_eq!(
+            tile_flag_text(true, TILE_FLAG_VIS_BELOW | TILE_FLAG_UNDER_ROOF),
+            "BVR"
+        );
         assert_eq!(tile_flag_text(false, TILE_FLAG_UNDER_ROOF), "R");
     }
 
     #[test]
     fn regions_split_a_tile_into_its_region_and_offset() {
         // Lumbridge castle is in region 50, 50 (3222, 3218).
-        assert_eq!(region(3222, 3218), (((3222 >> 6) << 8) | (3218 >> 6), 3222 & 63, 3218 & 63));
+        assert_eq!(
+            region(3222, 3218),
+            (((3222 >> 6) << 8) | (3218 >> 6), 3222 & 63, 3218 & 63)
+        );
         assert_eq!(region(3222, 3218).0, (50 << 8) | 50);
     }
 }

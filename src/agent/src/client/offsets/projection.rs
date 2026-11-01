@@ -9,9 +9,11 @@ pub struct Projection {
 }
 
 fn reads_client(pe: &Pe, function: u32, client: u32) -> bool {
-    decode_at(pe, function, 12)
-        .iter()
-        .any(|i| i.mnemonic() == Mnemonic::Mov && i.is_ip_rel_memory_operand() && i.ip_rel_memory_address() as u32 == client)
+    decode_at(pe, function, 12).iter().any(|i| {
+        i.mnemonic() == Mnemonic::Mov
+            && i.is_ip_rel_memory_operand()
+            && i.ip_rel_memory_address() as u32 == client
+    })
 }
 
 pub fn find_projection(pe: &Pe, client: u32) -> Result<Projection, ScanError> {
@@ -34,5 +36,10 @@ pub fn find_projection(pe: &Pe, client: u32) -> Result<Projection, ScanError> {
         .find(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
         .map(|i| i.near_branch_target() as u32)
         .ok_or(ScanError::NotFound)?;
-    Ok(Projection { world_to_screen, tile_height, top_world_view, plane })
+    Ok(Projection {
+        world_to_screen,
+        tile_height,
+        top_world_view,
+        plane,
+    })
 }

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use ipc::state::{Layout, WorldLayout};
+use serde::{Deserialize, Serialize};
 
 use ipc::read::{Table, local_player, table_get};
 
@@ -52,17 +52,25 @@ fn ground_items_in(memory: &impl Memory, layout: &Layout, view: u64) -> Option<V
     let base = view + layout.player.base_x as u64;
     let (base_x, base_y) = (memory.i32(base)?, memory.i32(base + 4)?);
     let scene = memory.ptr(view + p.scene as u64);
-    let size = |offset: u32| scene.and_then(|s| memory.i32(s + offset as u64)).filter(|n| (1..=256).contains(n)).unwrap_or(SCENE_TILES);
+    let size = |offset: u32| {
+        scene
+            .and_then(|s| memory.i32(s + offset as u64))
+            .filter(|n| (1..=256).contains(n))
+            .unwrap_or(SCENE_TILES)
+    };
     let (size_x, size_y) = (size(p.size_x), size(p.size_y));
     if !(0..4).contains(&plane) {
         return None;
     }
-    let level = |array: u64, index: i32| memory.ptr(array + index as u64 * LIST_SIZE + g.level as u64);
+    let level =
+        |array: u64, index: i32| memory.ptr(array + index as u64 * LIST_SIZE + g.level as u64);
     let columns = level(memory.ptr(view + g.items as u64)?, plane)?;
     let mut items = Vec::new();
     let mut heads = vec![0u8; size_y as usize * LIST_SIZE as usize];
     for x in 0..size_x {
-        let Some(column) = level(columns, x) else { continue };
+        let Some(column) = level(columns, x) else {
+            continue;
+        };
         if !memory.read(column, &mut heads) {
             continue;
         }
@@ -74,9 +82,25 @@ fn ground_items_in(memory: &impl Memory, layout: &Layout, view: u64) -> Option<V
                 if node == 0 || node == list {
                     break;
                 }
-                let Some(item) = memory.ptr(node + g.node_item as u64) else { break };
-                let (Some(id), Some(quantity)) = (memory.i32(item + g.id as u64), memory.i32(item + g.id as u64 + 4)) else { break };
-                items.push(GroundItem { id, quantity, name: None, x: base_x + x, y: base_y + y, plane, scene_x: x, scene_y: y });
+                let Some(item) = memory.ptr(node + g.node_item as u64) else {
+                    break;
+                };
+                let (Some(id), Some(quantity)) = (
+                    memory.i32(item + g.id as u64),
+                    memory.i32(item + g.id as u64 + 4),
+                ) else {
+                    break;
+                };
+                items.push(GroundItem {
+                    id,
+                    quantity,
+                    name: None,
+                    x: base_x + x,
+                    y: base_y + y,
+                    plane,
+                    scene_x: x,
+                    scene_y: y,
+                });
                 let Some(next) = memory.u64(node) else { break };
                 node = next;
             }
@@ -145,8 +169,13 @@ const PLAYER_TARGET_TILE: u64 = 0x3b0;
 
 // The actor an actor interacts with: the top byte is the kind (1 NPC, 2 player, 0 none), the next word its index.
 fn interacting(memory: &impl Memory, actor: u64) -> (i32, i32) {
-    let kind = memory.i32(actor + PLAYER_TARGET_STATE).map_or(0, |s| s >> 24);
-    let index = memory.i32(actor + PLAYER_TARGET_NPC).filter(|&i| i >= 0).unwrap_or(-1);
+    let kind = memory
+        .i32(actor + PLAYER_TARGET_STATE)
+        .map_or(0, |s| s >> 24);
+    let index = memory
+        .i32(actor + PLAYER_TARGET_NPC)
+        .filter(|&i| i >= 0)
+        .unwrap_or(-1);
     match kind {
         1 => (index, -1),
         2 => (-1, index),
@@ -176,8 +205,16 @@ const MAX_OBJECT_SPAN: u64 = 0x1000;
 
 // The bytes from an object's start that cover every (offset, size) field read from it, 0 when that's over `MAX_OBJECT_SPAN`.
 fn span(fields: &[(u64, u64)]) -> usize {
-    let end = fields.iter().map(|&(offset, size)| offset + size).max().unwrap_or(0);
-    if end > MAX_OBJECT_SPAN { 0 } else { end as usize }
+    let end = fields
+        .iter()
+        .map(|&(offset, size)| offset + size)
+        .max()
+        .unwrap_or(0);
+    if end > MAX_OBJECT_SPAN {
+        0
+    } else {
+        end as usize
+    }
 }
 
 // The fields `actor_fields`, `interacting` and `position` read from any actor.
@@ -205,7 +242,14 @@ fn read_ints(memory: &impl Memory, address: u64) -> Option<Vec<i32>> {
     if count > 0 && !memory.read(begin, &mut bytes) {
         return None;
     }
-    Some(bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect())
+    Some(
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect(),
+    )
 }
 
 fn client(memory: &impl Memory, layout: &WorldLayout) -> Option<u64> {
@@ -218,7 +262,11 @@ fn container_items(memory: &impl Memory, layout: &WorldLayout, node: u64) -> Opt
     Some(
         ids.iter()
             .enumerate()
-            .map(|(slot, &item)| Item { slot: slot as i32, id: item, quantity: quantities.get(slot).copied().unwrap_or(0) })
+            .map(|(slot, &item)| Item {
+                slot: slot as i32,
+                id: item,
+                quantity: quantities.get(slot).copied().unwrap_or(0),
+            })
             .collect(),
     )
 }
@@ -255,14 +303,23 @@ pub fn item_slot(memory: &impl Memory, layout: &WorldLayout, id: i32, slot: i32)
         let begin = memory.u64(node + vector as u64)?;
         let end = memory.u64(node + vector as u64 + 8)?;
         let length = end.checked_sub(begin)? / 4;
-        let index = u64::try_from(slot).ok().filter(|&index| index < length && index < MAX_ITEMS)?;
+        let index = u64::try_from(slot)
+            .ok()
+            .filter(|&index| index < length && index < MAX_ITEMS)?;
         memory.i32(begin + index * 4)
     };
-    Some(Item { slot, id: read(layout.container_ids).unwrap_or(-1), quantity: read(layout.container_quantities).unwrap_or(0) })
+    Some(Item {
+        slot,
+        id: read(layout.container_ids).unwrap_or(-1),
+        quantity: read(layout.container_quantities).unwrap_or(0),
+    })
 }
 
 /// Every item container the client holds, as (container id, items), by ascending id. A container the client has dropped is gone.
-pub fn item_containers(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<(i32, Vec<Item>)>> {
+pub fn item_containers(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+) -> Option<Vec<(i32, Vec<Item>)>> {
     let table = layout.module_base + layout.containers as u64;
     let buckets = memory.ptr(table + TABLE_BUCKETS)?;
     let count = memory.u64(table + TABLE_COUNT)?;
@@ -314,9 +371,13 @@ pub fn varc(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<i32> 
         } else {
             let kind = {
                 let mut b = [0u8];
-                memory.read(entry + layout.varc_kind as u64, &mut b).then_some(b[0])?
+                memory
+                    .read(entry + layout.varc_kind as u64, &mut b)
+                    .then_some(b[0])?
             };
-            return (kind == 1).then(|| memory.i32(entry + layout.varc_value as u64)).flatten();
+            return (kind == 1)
+                .then(|| memory.i32(entry + layout.varc_value as u64))
+                .flatten();
         }
     }
     None
@@ -330,16 +391,31 @@ fn world_view(memory: &impl Memory, layout: &WorldLayout, client: u64) -> Option
     Some((view, base_x, base_y))
 }
 
-fn position(memory: &impl Memory, layout: &WorldLayout, actor: u64, base: (i32, i32)) -> Option<(i32, i32, i32, i32)> {
+fn position(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+    actor: u64,
+    base: (i32, i32),
+) -> Option<(i32, i32, i32, i32)> {
     let local_x = memory.i32(actor + layout.local_x as u64)?;
     let local_y = memory.i32(actor + layout.local_x as u64 + 4)?;
-    Some((base.0 + (local_x >> 7), base.1 + (local_y >> 7), local_x, local_y))
+    Some((
+        base.0 + (local_x >> 7),
+        base.1 + (local_y >> 7),
+        local_x,
+        local_y,
+    ))
 }
 
 // The fields NPCs and players share, all read from the actor itself.
 fn actor_fields(memory: &impl Memory, layout: &WorldLayout, actor: u64) -> (i32, i32, i32, i32) {
-    let animation = memory.i32(actor + layout.npc_animation as u64).unwrap_or(-1);
-    let height = memory.i32(actor + ACTOR_HEIGHT).filter(|h| (1..=1000).contains(h)).unwrap_or(-1);
+    let animation = memory
+        .i32(actor + layout.npc_animation as u64)
+        .unwrap_or(-1);
+    let height = memory
+        .i32(actor + ACTOR_HEIGHT)
+        .filter(|h| (1..=1000).contains(h))
+        .unwrap_or(-1);
     let pose = memory.i32(actor + ACTOR_POSE).unwrap_or(-1);
     let graphic = memory
         .ptr(actor + ACTOR_SPOT_ANIM)
@@ -361,23 +437,54 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
     let table = Table::open(memory, view + layout.npc_table as u64);
     let mut list = Snapshot::new(memory, count as usize * 4);
     list.load(indices);
-    let mut actor = Snapshot::new(memory, actor_span(layout, &[(layout.npc_definition as u64, 8), (layout.npc_name_override as u64, 24)]));
+    let mut actor = Snapshot::new(
+        memory,
+        actor_span(
+            layout,
+            &[
+                (layout.npc_definition as u64, 8),
+                (layout.npc_name_override as u64, 24),
+            ],
+        ),
+    );
     let mut npcs = Vec::with_capacity(count as usize);
     for i in 0..count as u64 {
-        let Some(index) = list.i32(indices + i * 4) else { continue };
-        let Some(npc) = table.and_then(|t| t.get(memory, index)) else { continue };
+        let Some(index) = list.i32(indices + i * 4) else {
+            continue;
+        };
+        let Some(npc) = table.and_then(|t| t.get(memory, index)) else {
+            continue;
+        };
         actor.load(npc);
         let m = &actor;
-        let Some((x, y, local_x, local_y)) = position(m, layout, npc, (base_x, base_y)) else { continue };
+        let Some((x, y, local_x, local_y)) = position(m, layout, npc, (base_x, base_y)) else {
+            continue;
+        };
         let definition = m.ptr(npc + layout.npc_definition as u64);
-        let id = definition.and_then(|d| m.i32(d + layout.definition_id as u64)).unwrap_or(-1);
+        let id = definition
+            .and_then(|d| m.i32(d + layout.definition_id as u64))
+            .unwrap_or(-1);
         let name = read_string(m, npc + layout.npc_name_override as u64)
             .filter(|n| !n.is_empty())
             .or_else(|| definition.and_then(|d| read_string(m, d + layout.definition_name as u64)))
             .unwrap_or_default();
         let (animation, height, pose, graphic) = actor_fields(m, layout, npc);
         let (interacting_npc, interacting_player) = interacting(m, npc);
-        npcs.push(Npc { index, id, name, x, y, local_x, local_y, animation, height, pose, graphic, interacting_npc, interacting_player });
+        npcs.push(Npc {
+            index,
+            id,
+            name,
+            x,
+            y,
+            local_x,
+            local_y,
+            animation,
+            height,
+            pose,
+            graphic,
+            interacting_npc,
+            interacting_player,
+        });
     }
     Some(npcs)
 }
@@ -402,7 +509,11 @@ const HITSPLAT_SIZE: u64 = 12;
 const HITSPLAT_SLOTS: u64 = 4;
 
 /// The hitsplats in use on the NPC with `index` (None when gone); read every tick to see every hit.
-pub fn npc_hitsplats(memory: &impl Memory, layout: &WorldLayout, index: i32) -> Option<Vec<Hitsplat>> {
+pub fn npc_hitsplats(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+    index: i32,
+) -> Option<Vec<Hitsplat>> {
     let client = client(memory, layout)?;
     let (view, _, _) = world_view(memory, layout, client)?;
     let npc = table_get(memory, view + layout.npc_table as u64, index)?;
@@ -411,7 +522,12 @@ pub fn npc_hitsplats(memory: &impl Memory, layout: &WorldLayout, index: i32) -> 
         let at = npc + ACTOR_HITSPLATS + slot * HITSPLAT_SIZE;
         let (kind, damage, cycle) = (memory.i32(at)?, memory.i32(at + 4)?, memory.i32(at + 8)?);
         if cycle != -1 && kind != -1 {
-            splats.push(Hitsplat { slot: slot as i32, kind, damage, cycle });
+            splats.push(Hitsplat {
+                slot: slot as i32,
+                kind,
+                damage,
+                cycle,
+            });
         }
     }
     Some(splats)
@@ -423,24 +539,49 @@ pub fn npc_size(memory: &impl Memory, layout: &WorldLayout, index: i32) -> Optio
     let (view, _, _) = world_view(memory, layout, client)?;
     let npc = table_get(memory, view + layout.npc_table as u64, index)?;
     let definition = memory.ptr(npc + layout.npc_definition as u64)?;
-    memory.i32(definition + DEFINITION_SIZE).filter(|s| (1..=MAX_NPC_SIZE).contains(s))
+    memory
+        .i32(definition + DEFINITION_SIZE)
+        .filter(|s| (1..=MAX_NPC_SIZE).contains(s))
 }
 
 // Debug: the NPC actor with `index`, or its definition (address and first `count` words), to find fields.
-pub fn npc_words(memory: &impl Memory, layout: &WorldLayout, index: i32, count: usize, definition: bool) -> Option<(u64, Vec<i32>)> {
+pub fn npc_words(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+    index: i32,
+    count: usize,
+    definition: bool,
+) -> Option<(u64, Vec<i32>)> {
     let client = client(memory, layout)?;
     let (view, _, _) = world_view(memory, layout, client)?;
     let npc = table_get(memory, view + layout.npc_table as u64, index)?;
-    let at = if definition { memory.ptr(npc + layout.npc_definition as u64)? } else { npc };
+    let at = if definition {
+        memory.ptr(npc + layout.npc_definition as u64)?
+    } else {
+        npc
+    };
     let mut bytes = vec![0u8; count * 4];
     if !memory.read(at, &mut bytes) {
         return None;
     }
-    Some((at, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()))
+    Some((
+        at,
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect(),
+    ))
 }
 
 // Debug: the player actor with `index` (its address and first `count` 4-byte words), to find fields.
-pub fn player_words(memory: &impl Memory, layout: &WorldLayout, index: i32, count: usize) -> Option<(u64, Vec<i32>)> {
+pub fn player_words(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+    index: i32,
+    count: usize,
+) -> Option<(u64, Vec<i32>)> {
     let client = client(memory, layout)?;
     let (view, _, _) = world_view(memory, layout, client)?;
     let player = table_get(memory, view + layout.players as u64, index)?;
@@ -448,7 +589,15 @@ pub fn player_words(memory: &impl Memory, layout: &WorldLayout, index: i32, coun
     if !memory.read(player, &mut bytes) {
         return None;
     }
-    Some((player, bytes.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes(*c)).collect()))
+    Some((
+        player,
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect(),
+    ))
 }
 
 // A world entity (RuneLite's `WorldEntity`): a moving sub-scene such as a boat, with a world view of its own.
@@ -483,7 +632,9 @@ pub fn world_entities(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<
             .into_iter()
             .filter_map(|(view_id, entity)| {
                 // a stale or half-built entry names a different view than its key, or sits outside the scene
-                if memory.i32(entity + ENTITY_VIEW_ID)? != view_id || memory.ptr(entity + ENTITY_VIEW)? != table_get(memory, views, view_id)? {
+                if memory.i32(entity + ENTITY_VIEW_ID)? != view_id
+                    || memory.ptr(entity + ENTITY_VIEW)? != table_get(memory, views, view_id)?
+                {
                     return None;
                 }
                 let local_x = memory.i32(entity + ENTITY_LOCAL_X)?;
@@ -491,13 +642,20 @@ pub fn world_entities(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<
                 if !(0..scene).contains(&local_x) || !(0..scene).contains(&local_y) {
                     return None;
                 }
-                let config_id = memory.ptr(entity + ENTITY_CONFIG).and_then(|config| memory.i32(config)).unwrap_or(-1);
-                Some(WorldEntity { view_id, config_id, local_x, local_y })
+                let config_id = memory
+                    .ptr(entity + ENTITY_CONFIG)
+                    .and_then(|config| memory.i32(config))
+                    .unwrap_or(-1);
+                Some(WorldEntity {
+                    view_id,
+                    config_id,
+                    local_x,
+                    local_y,
+                })
             })
             .collect(),
     )
 }
-
 
 // Debug: the world views the client holds and, in the local player's, every offset that looks like a table with entries.
 pub fn world_debug(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<String>> {
@@ -506,15 +664,25 @@ pub fn world_debug(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Str
     let mine = memory.i32(client + layout.world_view_id as u64)?;
     lines.push(format!("own world view id {mine}"));
     for (id, view) in ipc::read::table_entries(memory, client + layout.world_views as u64) {
-        let (bx, by) = (memory.i32(view + layout.base_x as u64), memory.i32(view + layout.base_x as u64 + 4));
+        let (bx, by) = (
+            memory.i32(view + layout.base_x as u64),
+            memory.i32(view + layout.base_x as u64 + 4),
+        );
         lines.push(format!("view id {id} at {view:#x} base {bx:?} {by:?}"));
     }
     let view = table_get(memory, client + layout.world_views as u64, 0)?;
     for offset in (0..0x4000u64).step_by(8) {
         let entries = ipc::read::table_entries(memory, view + offset);
         if !entries.is_empty() {
-            let keys: Vec<_> = entries.iter().take(4).map(|e| (e.0, format!("{:#x}", e.1))).collect();
-            lines.push(format!("table at +{offset:#x}: {} entries, keys {keys:?}", entries.len()));
+            let keys: Vec<_> = entries
+                .iter()
+                .take(4)
+                .map(|e| (e.0, format!("{:#x}", e.1)))
+                .collect();
+            lines.push(format!(
+                "table at +{offset:#x}: {} entries, keys {keys:?}",
+                entries.len()
+            ));
         }
     }
     Some(lines)
@@ -531,14 +699,26 @@ pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>
     let indices = client + layout.player_count as u64 + 4;
     let mut list = Snapshot::new(memory, count as usize * 4);
     list.load(indices);
-    let mut actor = Snapshot::new(memory, actor_span(layout, &[(layout.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)]));
+    let mut actor = Snapshot::new(
+        memory,
+        actor_span(
+            layout,
+            &[(layout.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)],
+        ),
+    );
     let mut players = Vec::with_capacity(count as usize);
     for i in 0..count as u64 {
-        let Some(index) = list.i32(indices + i * 4) else { continue };
-        let Some(player) = table.and_then(|t| t.get(memory, index)) else { continue };
+        let Some(index) = list.i32(indices + i * 4) else {
+            continue;
+        };
+        let Some(player) = table.and_then(|t| t.get(memory, index)) else {
+            continue;
+        };
         actor.load(player);
         let m = &actor;
-        let Some((x, y, local_x, local_y)) = position(m, layout, player, (base_x, base_y)) else { continue };
+        let Some((x, y, local_x, local_y)) = position(m, layout, player, (base_x, base_y)) else {
+            continue;
+        };
         let name = m
             .ptr(player + layout.player_name as u64)
             .and_then(|n| read_string(m, n))
@@ -548,8 +728,22 @@ pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>
         let (target_state, target_npc, target_x, target_y) = player_target(m, player);
         let (interacting_npc, interacting_player) = interacting(m, player);
         players.push(Player {
-            index, name, x, y, local_x, local_y, height, animation, pose, graphic, target_state, target_npc, target_x, target_y,
-            interacting_npc, interacting_player,
+            index,
+            name,
+            x,
+            y,
+            local_x,
+            local_y,
+            height,
+            animation,
+            pose,
+            graphic,
+            target_state,
+            target_npc,
+            target_x,
+            target_y,
+            interacting_npc,
+            interacting_player,
         });
     }
     Some(players)
@@ -615,8 +809,26 @@ pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projecti
         return None;
     }
     let fields = [
-        p.id, p.source_x, p.source_y, p.source_level, p.source_actor, p.start_height, p.target_x, p.target_y, p.target_level,
-        p.target_actor, p.end_height, p.start_cycle, p.end_cycle, p.slope, p.start_pos, p.x, p.y, p.z, p.orientation, p.moving,
+        p.id,
+        p.source_x,
+        p.source_y,
+        p.source_level,
+        p.source_actor,
+        p.start_height,
+        p.target_x,
+        p.target_y,
+        p.target_level,
+        p.target_actor,
+        p.end_height,
+        p.start_cycle,
+        p.end_cycle,
+        p.slope,
+        p.start_pos,
+        p.x,
+        p.y,
+        p.z,
+        p.orientation,
+        p.moving,
     ];
     let mut object = Snapshot::new(memory, span(&fields.map(|offset| (offset as u64, 8))));
     let mut projectiles = Vec::new();
@@ -633,8 +845,19 @@ pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projecti
         object.load(at);
         let m = &object;
         let int = |offset: u32| m.i32(at + offset as u64);
-        let double = |offset: u32| m.u64(at + offset as u64).map(f64::from_bits).filter(|v| v.is_finite()).map(|v| v as i32);
-        let (Some(id), Some(source_x), Some(source_y), Some(target_x), Some(target_y)) = (int(p.id), int(p.source_x), int(p.source_y), int(p.target_x), int(p.target_y)) else {
+        let double = |offset: u32| {
+            m.u64(at + offset as u64)
+                .map(f64::from_bits)
+                .filter(|v| v.is_finite())
+                .map(|v| v as i32)
+        };
+        let (Some(id), Some(source_x), Some(source_y), Some(target_x), Some(target_y)) = (
+            int(p.id),
+            int(p.source_x),
+            int(p.source_y),
+            int(p.target_x),
+            int(p.target_y),
+        ) else {
             node = next;
             continue;
         };
@@ -644,7 +867,11 @@ pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projecti
         let moving = m.read(at + p.moving as u64, &mut moving) && moving[0] != 0;
         let (local_x, local_y, z) = match (moving, double(p.x), double(p.y), double(p.z)) {
             (true, Some(x), Some(y), Some(z)) => (x, y, z),
-            _ => (((source_x - base_x) << 7) + 64, ((source_y - base_y) << 7) + 64, 0),
+            _ => (
+                ((source_x - base_x) << 7) + 64,
+                ((source_y - base_y) << 7) + 64,
+                0,
+            ),
         };
         projectiles.push(Projectile {
             id,
@@ -710,7 +937,11 @@ pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Option<Vec<SpotAnim>
     let mut objects = Vec::new();
     if own_id != TOP_LEVEL_VIEW {
         // a main world that can't be read doesn't hide the player's own view
-        if let Some(top) = table_get(memory, client + layout.player.world_views as u64, TOP_LEVEL_VIEW) {
+        if let Some(top) = table_get(
+            memory,
+            client + layout.player.world_views as u64,
+            TOP_LEVEL_VIEW,
+        ) {
             objects.extend(spot_anims_in(memory, layout, top, TOP_LEVEL_VIEW).unwrap_or_default());
         }
     }
@@ -718,7 +949,12 @@ pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Option<Vec<SpotAnim>
     Some(objects)
 }
 
-fn spot_anims_in(memory: &impl Memory, layout: &Layout, view: u64, view_id: i32) -> Option<Vec<SpotAnim>> {
+fn spot_anims_in(
+    memory: &impl Memory,
+    layout: &Layout,
+    view: u64,
+    view_id: i32,
+) -> Option<Vec<SpotAnim>> {
     let g = &layout.spot_anims;
     let base = view + layout.player.base_x as u64;
     let (base_x, base_y) = (memory.i32(base)?, memory.i32(base + 4)?);
@@ -846,7 +1082,10 @@ mod tests {
         let entries = 0x31_0000;
         m.put_u64(varcs + 0x48, entries);
         m.put_u64(varcs + 0x50, entries + 3 * 0x30);
-        for (i, (id, value, kind)) in [(3, -1, 1u8), (171, 3, 1), (200, 7, 2)].into_iter().enumerate() {
+        for (i, (id, value, kind)) in [(3, -1, 1u8), (171, 3, 1), (200, 7, 2)]
+            .into_iter()
+            .enumerate()
+        {
             let e = entries + i as u64 * 0x30;
             m.put_i32(e, id);
             m.put_i32(e + 8, value);
@@ -855,18 +1094,31 @@ mod tests {
 
         let view = 0x40_0000;
         m.put_i32(CLIENT + LAYOUT.world_view_id as u64, 0);
-        table(&mut m, CLIENT + LAYOUT.world_views as u64, 0x41_0000, &[(0, view)]);
+        table(
+            &mut m,
+            CLIENT + LAYOUT.world_views as u64,
+            0x41_0000,
+            &[(0, view)],
+        );
         m.put_i32(view + 0x24, 3112);
         m.put_i32(view + 0x28, 3440);
 
         let (clerk, banker) = (0x50_0000u64, 0x51_0000u64);
-        table(&mut m, view + LAYOUT.npc_table as u64, 0x52_0000, &[(25400, clerk), (25399, banker)]);
+        table(
+            &mut m,
+            view + LAYOUT.npc_table as u64,
+            0x52_0000,
+            &[(25400, clerk), (25399, banker)],
+        );
         let indices = 0x58_0000;
         m.put_u64(view + LAYOUT.npc_indices as u64, indices);
         m.put_i32(view + LAYOUT.npc_indices as u64 + 8, 2);
         m.put_i32(indices, 25400);
         m.put_i32(indices + 4, 25399);
-        for (npc, (id, name, x, y)) in [(clerk, (2149, "", 6720, 6208)), (banker, (6528, "", 6592, 6464))] {
+        for (npc, (id, name, x, y)) in [
+            (clerk, (2149, "", 6720, 6208)),
+            (banker, (6528, "", 6592, 6464)),
+        ] {
             m.put_i32(npc + LAYOUT.local_x as u64, x);
             m.put_i32(npc + LAYOUT.local_x as u64 + 4, y);
             m.put_short_string(npc + LAYOUT.npc_name_override as u64, name);
@@ -874,7 +1126,10 @@ mod tests {
             m.put_u64(npc + LAYOUT.npc_definition as u64, definition);
             m.put_i32(definition, id);
         }
-        m.put_short_string(clerk + 0x8000 + 8, "Grand Exchange Clerk".get(..20).unwrap_or_default());
+        m.put_short_string(
+            clerk + 0x8000 + 8,
+            "Grand Exchange Clerk".get(..20).unwrap_or_default(),
+        );
         m.put_short_string(banker + 0x8000 + 8, "Banker");
         let long = 0x54_0000;
         m.put(long, b"Grand Exchange Clerk");
@@ -883,7 +1138,12 @@ mod tests {
         m.put_u64(clerk + 0x8000 + 0x18, 0x8000_0000_0000_0020);
 
         let player = 0x60_0000;
-        table(&mut m, view + LAYOUT.players as u64, 0x61_0000, &[(780, player)]);
+        table(
+            &mut m,
+            view + LAYOUT.players as u64,
+            0x61_0000,
+            &[(780, player)],
+        );
         m.put_i32(CLIENT + LAYOUT.player_count as u64, 1);
         m.put_i32(CLIENT + LAYOUT.player_count as u64 + 4, 780);
         m.put_i32(player + LAYOUT.local_x as u64, 6464);
@@ -899,13 +1159,48 @@ mod tests {
         let m = grand_exchange();
         let inventory = item_container(&m, &LAYOUT, 93).unwrap();
         assert_eq!(inventory.len(), 4);
-        assert_eq!(inventory[0], Item { slot: 0, id: -1, quantity: 0 });
-        assert_eq!(inventory[3], Item { slot: 3, id: 27281, quantity: 1 });
+        assert_eq!(
+            inventory[0],
+            Item {
+                slot: 0,
+                id: -1,
+                quantity: 0
+            }
+        );
+        assert_eq!(
+            inventory[3],
+            Item {
+                slot: 3,
+                id: 27281,
+                quantity: 1
+            }
+        );
         assert_eq!(item_container(&m, &LAYOUT, 94).unwrap()[1].id, 13342);
         assert_eq!(item_container(&m, &LAYOUT, 95), None);
-        assert_eq!(item_slot(&m, &LAYOUT, 93, 3), Some(Item { slot: 3, id: 27281, quantity: 1 }));
-        assert_eq!(item_slot(&m, &LAYOUT, 93, 4), Some(Item { slot: 4, id: -1, quantity: 0 }));
-        assert_eq!(item_slot(&m, &LAYOUT, 93, -1), Some(Item { slot: -1, id: -1, quantity: 0 }));
+        assert_eq!(
+            item_slot(&m, &LAYOUT, 93, 3),
+            Some(Item {
+                slot: 3,
+                id: 27281,
+                quantity: 1
+            })
+        );
+        assert_eq!(
+            item_slot(&m, &LAYOUT, 93, 4),
+            Some(Item {
+                slot: 4,
+                id: -1,
+                quantity: 0
+            })
+        );
+        assert_eq!(
+            item_slot(&m, &LAYOUT, 93, -1),
+            Some(Item {
+                slot: -1,
+                id: -1,
+                quantity: 0
+            })
+        );
         assert_eq!(item_slot(&m, &LAYOUT, 95, 0), None);
         let all = item_containers(&m, &LAYOUT).unwrap();
         assert_eq!(all.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [93, 94]);
@@ -926,12 +1221,49 @@ mod tests {
         let m = grand_exchange();
         let npcs = npcs(&m, &LAYOUT).unwrap();
         assert_eq!(npcs.len(), 2);
-        assert_eq!(npcs[0], Npc { index: 25400, id: 2149, name: "Grand Exchange Clerk".into(), x: 3164, y: 3488, local_x: 6720, local_y: 6208, animation: -1, height: -1, pose: -1, graphic: -1, interacting_npc: -1, interacting_player: -1 });
-        assert_eq!((npcs[1].id, npcs[1].name.as_str(), npcs[1].x, npcs[1].y), (6528, "Banker", 3163, 3490));
+        assert_eq!(
+            npcs[0],
+            Npc {
+                index: 25400,
+                id: 2149,
+                name: "Grand Exchange Clerk".into(),
+                x: 3164,
+                y: 3488,
+                local_x: 6720,
+                local_y: 6208,
+                animation: -1,
+                height: -1,
+                pose: -1,
+                graphic: -1,
+                interacting_npc: -1,
+                interacting_player: -1
+            }
+        );
+        assert_eq!(
+            (npcs[1].id, npcs[1].name.as_str(), npcs[1].x, npcs[1].y),
+            (6528, "Banker", 3163, 3490)
+        );
         let players = players(&m, &LAYOUT).unwrap();
         assert_eq!(
             players,
-            [Player { index: 780, name: "gambri jani5".into(), x: 3162, y: 3488, local_x: 6464, local_y: 6208, height: -1, animation: -1, pose: -1, graphic: -1, target_state: -1, target_npc: -1, target_x: -1, target_y: -1, interacting_npc: -1, interacting_player: -1 }]
+            [Player {
+                index: 780,
+                name: "gambri jani5".into(),
+                x: 3162,
+                y: 3488,
+                local_x: 6464,
+                local_y: 6208,
+                height: -1,
+                animation: -1,
+                pose: -1,
+                graphic: -1,
+                target_state: -1,
+                target_npc: -1,
+                target_x: -1,
+                target_y: -1,
+                interacting_npc: -1,
+                interacting_player: -1
+            }]
         );
     }
 
@@ -956,11 +1288,27 @@ mod tests {
         // the fixture only holds the fields it sets: fill the rest of each actor, so its span reads at once
         let client = m.ptr(LAYOUT.module_base + LAYOUT.client as u64).unwrap();
         let (view, _, _) = world_view(&m, &LAYOUT, client).unwrap();
-        let npc_span = actor_span(&LAYOUT, &[(LAYOUT.npc_definition as u64, 8), (LAYOUT.npc_name_override as u64, 24)]);
-        let player_span = actor_span(&LAYOUT, &[(LAYOUT.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)]);
-        let npcs_in = ipc::read::table_entries(&m, view + LAYOUT.npc_table as u64).into_iter().map(|(_, npc)| (npc, npc_span));
-        let players_in = ipc::read::table_entries(&m, view + LAYOUT.players as u64).into_iter().map(|(_, player)| (player, player_span));
-        let actors: Vec<(u64, u64)> = npcs_in.chain(players_in).map(|(actor, span)| (actor, actor + span as u64)).collect();
+        let npc_span = actor_span(
+            &LAYOUT,
+            &[
+                (LAYOUT.npc_definition as u64, 8),
+                (LAYOUT.npc_name_override as u64, 24),
+            ],
+        );
+        let player_span = actor_span(
+            &LAYOUT,
+            &[(LAYOUT.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)],
+        );
+        let npcs_in = ipc::read::table_entries(&m, view + LAYOUT.npc_table as u64)
+            .into_iter()
+            .map(|(_, npc)| (npc, npc_span));
+        let players_in = ipc::read::table_entries(&m, view + LAYOUT.players as u64)
+            .into_iter()
+            .map(|(_, player)| (player, player_span));
+        let actors: Vec<(u64, u64)> = npcs_in
+            .chain(players_in)
+            .map(|(actor, span)| (actor, actor + span as u64))
+            .collect();
         assert_eq!(actors.len(), 3);
         for &(begin, end) in &actors {
             for address in begin..end {
@@ -968,10 +1316,25 @@ mod tests {
             }
         }
         let decode = |short: bool| {
-            let memory = Recording { memory: &m, short, reads: Default::default() };
-            let decoded = (npcs(&memory, &LAYOUT).unwrap(), players(&memory, &LAYOUT).unwrap());
+            let memory = Recording {
+                memory: &m,
+                short,
+                reads: Default::default(),
+            };
+            let decoded = (
+                npcs(&memory, &LAYOUT).unwrap(),
+                players(&memory, &LAYOUT).unwrap(),
+            );
             let reads = memory.reads.into_inner();
-            let per_actor: Vec<usize> = actors.iter().map(|&(begin, end)| reads.iter().filter(|&&at| (begin..end).contains(&at)).count()).collect();
+            let per_actor: Vec<usize> = actors
+                .iter()
+                .map(|&(begin, end)| {
+                    reads
+                        .iter()
+                        .filter(|&&at| (begin..end).contains(&at))
+                        .count()
+                })
+                .collect();
             (decoded, per_actor)
         };
 
@@ -980,7 +1343,10 @@ mod tests {
         assert_eq!(at_once, field_by_field);
         assert_eq!((at_once.0.len(), at_once.1.len()), (2, 1));
         assert_eq!(reads_at_once, [1, 1, 1]);
-        assert!(reads_field_by_field.iter().all(|&reads| reads >= 10), "{reads_field_by_field:?}");
+        assert!(
+            reads_field_by_field.iter().all(|&reads| reads >= 10),
+            "{reads_field_by_field:?}"
+        );
     }
 
     #[test]
@@ -1013,21 +1379,47 @@ mod tests {
             moving: 0x2c0,
             reserved: 0,
         };
-        let layout = Layout { module_base: LAYOUT.module_base, world: LAYOUT, projectiles: p, ..Layout::default() };
+        let layout = Layout {
+            module_base: LAYOUT.module_base,
+            world: LAYOUT,
+            projectiles: p,
+            ..Layout::default()
+        };
         m.put_i32(LAYOUT.module_base + 0xe98c14, 1000);
         // the list's sentinel and two nodes: a bolt on its way to the clerk, a spell waiting to leave for the player
         let head = CLIENT + 0xcc70;
-        let (bolt_node, spell_node, bolt, spell) = (0x70_0000u64, 0x70_1000u64, 0x71_0000u64, 0x72_0000u64);
+        let (bolt_node, spell_node, bolt, spell) =
+            (0x70_0000u64, 0x70_1000u64, 0x71_0000u64, 0x72_0000u64);
         m.put_u64(head, bolt_node);
         m.put_u64(head + 0x10, 2);
         m.put_u64(bolt_node, spell_node);
         m.put_u64(bolt_node + 0x18, bolt);
         m.put_u64(spell_node, head);
         m.put_u64(spell_node + 0x18, spell);
-        for (at, id, source, target, actor, cycles, moving) in
-            [(bolt, 27, (3162, 3488), (3164, 3488), 25401, (990, 1010), true), (spell, 91, (3164, 3488), (3162, 3488), -781, (1015, 1040), false)]
-        {
-            let ints = [0, source.0, source.1, 155, 0, 0, target.0, target.1, 146, actor, cycles.0, cycles.1, 5, 11, id];
+        for (at, id, source, target, actor, cycles, moving) in [
+            (
+                bolt,
+                27,
+                (3162, 3488),
+                (3164, 3488),
+                25401,
+                (990, 1010),
+                true,
+            ),
+            (
+                spell,
+                91,
+                (3164, 3488),
+                (3162, 3488),
+                -781,
+                (1015, 1040),
+                false,
+            ),
+        ] {
+            let ints = [
+                0, source.0, source.1, 155, 0, 0, target.0, target.1, 146, actor, cycles.0,
+                cycles.1, 5, 11, id,
+            ];
             for (i, v) in ints.into_iter().enumerate() {
                 m.put_i32(at + 0x260 + i as u64 * 4, v);
             }
@@ -1041,23 +1433,77 @@ mod tests {
         let projectiles = projectiles(&m, &layout).unwrap();
         assert_eq!(projectiles.len(), 2);
         let (bolt, spell) = (&projectiles[0], &projectiles[1]);
-        assert_eq!((bolt.id, bolt.target_npc, bolt.target_player, bolt.source_npc, bolt.cycle), (27, 25400, -1, -1, 1000));
-        assert_eq!((bolt.moving, bolt.x, bolt.y, bolt.local_x, bolt.local_y, bolt.z, bolt.orientation), (true, 3163, 3488, 6592, 6208, -420, 512));
-        assert_eq!((spell.id, spell.target_npc, spell.target_player, spell.start_cycle, spell.end_cycle), (91, -1, 780, 1015, 1040));
+        assert_eq!(
+            (
+                bolt.id,
+                bolt.target_npc,
+                bolt.target_player,
+                bolt.source_npc,
+                bolt.cycle
+            ),
+            (27, 25400, -1, -1, 1000)
+        );
+        assert_eq!(
+            (
+                bolt.moving,
+                bolt.x,
+                bolt.y,
+                bolt.local_x,
+                bolt.local_y,
+                bolt.z,
+                bolt.orientation
+            ),
+            (true, 3163, 3488, 6592, 6208, -420, 512)
+        );
+        assert_eq!(
+            (
+                spell.id,
+                spell.target_npc,
+                spell.target_player,
+                spell.start_cycle,
+                spell.end_cycle
+            ),
+            (91, -1, 780, 1015, 1040)
+        );
         // until it leaves, a projectile sits on the centre of its source tile at its start height
-        assert_eq!((spell.moving, spell.x, spell.y, spell.local_x, spell.local_y, spell.height), (false, 3164, 3488, 6720, 6208, 155));
+        assert_eq!(
+            (
+                spell.moving,
+                spell.x,
+                spell.y,
+                spell.local_x,
+                spell.local_y,
+                spell.height
+            ),
+            (false, 3164, 3488, 6720, 6208, 155)
+        );
     }
 
     #[test]
     fn walks_the_ground_item_lists() {
         use ipc::state::{GroundItemsLayout, PlayerLayout, ProjectionLayout};
         let layout = Layout {
-            player: PlayerLayout { base_x: 0x24, ..Default::default() },
-            projection: ProjectionLayout { plane: 0x18, scene: 0x10, size_x: 0x948, size_y: 0x94c, ..Default::default() },
-            ground_items: GroundItemsLayout { items: 0x140, level: 0x10, node_item: 0x18, id: 0x20 },
+            player: PlayerLayout {
+                base_x: 0x24,
+                ..Default::default()
+            },
+            projection: ProjectionLayout {
+                plane: 0x18,
+                scene: 0x10,
+                size_x: 0x948,
+                size_y: 0x94c,
+                ..Default::default()
+            },
+            ground_items: GroundItemsLayout {
+                items: 0x140,
+                level: 0x10,
+                node_item: 0x18,
+                id: 0x20,
+            },
             ..Layout::default()
         };
-        let (view, scene, planes, columns, rows) = (0x1000u64, 0x2000u64, 0x3000u64, 0x4000u64, 0x10_0000u64);
+        let (view, scene, planes, columns, rows) =
+            (0x1000u64, 0x2000u64, 0x3000u64, 0x4000u64, 0x10_0000u64);
         let mut m = Fake::default();
         m.put_i32(view + 0x18, 1);
         m.put_i32(view + 0x24, 3136);
@@ -1082,25 +1528,52 @@ mod tests {
         m.put_u64(list, first);
         m.put_u64(first, second);
         m.put_u64(second, list);
-        for (node, item, id, quantity) in [(first, 0x30_0000u64, 311, 1), (second, 0x30_1000u64, 995, 2500)] {
+        for (node, item, id, quantity) in [
+            (first, 0x30_0000u64, 311, 1),
+            (second, 0x30_1000u64, 995, 2500),
+        ] {
             m.put_u64(node + 0x18, item);
             m.put_i32(item + 0x20, id);
             m.put_i32(item + 0x24, quantity);
         }
         let items = ground_items_in(&m, &layout, view).unwrap();
         let tile = |i: &GroundItem| (i.id, i.quantity, i.x, i.y, i.plane, i.scene_x, i.scene_y);
-        assert_eq!(items.iter().map(tile).collect::<Vec<_>>(), vec![(311, 1, 3138, 2785, 1, 2, 1), (995, 2500, 3138, 2785, 1, 2, 1)]);
+        assert_eq!(
+            items.iter().map(tile).collect::<Vec<_>>(),
+            vec![
+                (311, 1, 3138, 2785, 1, 2, 1),
+                (995, 2500, 3138, 2785, 1, 2, 1)
+            ]
+        );
     }
     #[test]
     fn reads_spot_anims() {
-        use ipc::state::{SpotAnimLayout, PlayerLayout};
+        use ipc::state::{PlayerLayout, SpotAnimLayout};
         let layout = Layout {
             module_base: LAYOUT.module_base,
-            player: PlayerLayout { base_x: 0x24, ..Default::default() },
-            spot_anims: SpotAnimLayout { list: 0x160, cycle: 0xe98c14, start_cycle: 0x260, level: 0x264, x: 0x268, y: 0x26c, z: 0x270, id: 0x274 },
+            player: PlayerLayout {
+                base_x: 0x24,
+                ..Default::default()
+            },
+            spot_anims: SpotAnimLayout {
+                list: 0x160,
+                cycle: 0xe98c14,
+                start_cycle: 0x260,
+                level: 0x264,
+                x: 0x268,
+                y: 0x26c,
+                z: 0x270,
+                id: 0x274,
+            },
             ..Layout::default()
         };
-        let (view, first, second, a, b) = (0x1000u64, 0x20_0000u64, 0x20_1000u64, 0x30_0000u64, 0x31_0000u64);
+        let (view, first, second, a, b) = (
+            0x1000u64,
+            0x20_0000u64,
+            0x20_1000u64,
+            0x30_0000u64,
+            0x31_0000u64,
+        );
         let mut m = Fake::default();
         m.put_i32(LAYOUT.module_base + 0xe98c14, 500);
         m.put_i32(view + 0x24, 3136);
@@ -1113,26 +1586,51 @@ mod tests {
         m.put_u64(first + 0x18, a);
         m.put_u64(second, head);
         m.put_u64(second + 0x18, b);
-        for (at, start, level, x, y, z, id) in [(a, 510, 1, 2 * 128 + 64, 3 * 128 + 64, -100, 308), (b, 495, 1, 70 * 128 + 64, 5 * 128 + 64, 0, 86)] {
+        for (at, start, level, x, y, z, id) in [
+            (a, 510, 1, 2 * 128 + 64, 3 * 128 + 64, -100, 308),
+            (b, 495, 1, 70 * 128 + 64, 5 * 128 + 64, 0, 86),
+        ] {
             for (i, v) in [start, level, x, y, z, id].into_iter().enumerate() {
                 m.put_i32(at + 0x260 + i as u64 * 4, v);
             }
         }
         let objects = spot_anims_in(&m, &layout, view, 0).unwrap();
         let tile = |o: &SpotAnim| (o.id, o.x, o.y, o.plane, o.z, o.start_cycle, o.cycle);
-        assert_eq!(objects.iter().map(tile).collect::<Vec<_>>(), vec![(308, 3138, 2787, 1, -100, 510, 500), (86, 3206, 2789, 1, 0, 495, 500)]);
+        assert_eq!(
+            objects.iter().map(tile).collect::<Vec<_>>(),
+            vec![
+                (308, 3138, 2787, 1, -100, 510, 500),
+                (86, 3206, 2789, 1, 0, 495, 500)
+            ]
+        );
     }
 
     #[test]
     fn reads_the_main_worlds_spot_anims_when_the_player_is_on_a_boat() {
-        use ipc::state::{part, PlayerLayout, SpotAnimLayout};
+        use ipc::state::{PlayerLayout, SpotAnimLayout, part};
         let client = 0x2000u64;
         let layout = Layout {
             found: part::PLAYER | part::SPOT_ANIMS,
             module_base: LAYOUT.module_base,
             client: LAYOUT.client,
-            player: PlayerLayout { world_views: 0x300, world_view_id: 0x320, player_index: 0x324, players: 0x60, base_x: 0x24, local_x: 0x268 },
-            spot_anims: SpotAnimLayout { list: 0x160, cycle: 0xe98c14, start_cycle: 0x260, level: 0x264, x: 0x268, y: 0x26c, z: 0x270, id: 0x274 },
+            player: PlayerLayout {
+                world_views: 0x300,
+                world_view_id: 0x320,
+                player_index: 0x324,
+                players: 0x60,
+                base_x: 0x24,
+                local_x: 0x268,
+            },
+            spot_anims: SpotAnimLayout {
+                list: 0x160,
+                cycle: 0xe98c14,
+                start_cycle: 0x260,
+                level: 0x264,
+                x: 0x268,
+                y: 0x26c,
+                z: 0x270,
+                id: 0x274,
+            },
             ..Layout::default()
         };
         let (top, boat, player) = (0x1000u64, 0x5000u64, 0x6000u64);
@@ -1151,19 +1649,27 @@ mod tests {
             m.put_u64(view + 0x160, view + 0x160);
         }
         // one spot anim in each view
-        for (view, node, at, id) in [(top, 0x50_0000u64, 0x51_0000u64, 308), (boat, 0x52_0000, 0x53_0000, 86)] {
+        for (view, node, at, id) in [
+            (top, 0x50_0000u64, 0x51_0000u64, 308),
+            (boat, 0x52_0000, 0x53_0000, 86),
+        ] {
             let head = view + 0x160;
             m.put_u64(head, node);
             m.put_u64(head + 0x10, 1);
             m.put_u64(node, head);
             m.put_u64(node + 0x18, at);
-            for (i, v) in [500, 0, 2 * 128 + 64, 3 * 128 + 64, 0, id].into_iter().enumerate() {
+            for (i, v) in [500, 0, 2 * 128 + 64, 3 * 128 + 64, 0, id]
+                .into_iter()
+                .enumerate()
+            {
                 m.put_i32(at + 0x260 + i as u64 * 4, v);
             }
         }
         let found = spot_anims(&m, &layout).unwrap();
-        assert_eq!(found.iter().map(|o| (o.view_id, o.id)).collect::<Vec<_>>(), vec![(0, 308), (5, 86)]);
+        assert_eq!(
+            found.iter().map(|o| (o.view_id, o.id)).collect::<Vec<_>>(),
+            vec![(0, 308), (5, 86)]
+        );
         assert_eq!((found[0].x, found[0].y), (3138, 3139));
     }
-
 }

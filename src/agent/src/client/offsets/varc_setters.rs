@@ -14,14 +14,23 @@ pub const VARIANT_KIND: u32 = 0x20;
 pub const VARIANT_STRING: u8 = 2;
 
 fn imm1(i: &Instruction) -> Option<u64> {
-    matches!(i.op1_kind(), OpKind::Immediate8 | OpKind::Immediate8to32 | OpKind::Immediate8to64 | OpKind::Immediate32 | OpKind::Immediate32to64).then(|| i.immediate(1))
+    matches!(
+        i.op1_kind(),
+        OpKind::Immediate8
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64
+            | OpKind::Immediate32
+            | OpKind::Immediate32to64
+    )
+    .then(|| i.immediate(1))
 }
 
 pub fn find_varc_setters(pe: &Pe) -> Result<VarcSetters, ScanError> {
-
     // the getter: `mov rax, [client]; mov rcx, [rax + varcs]; jmp lookup`
     let binding = decode_at(pe, lua_binding(pe, "getIntegerVarc")?, 3);
-    let [_, _, jmp, ..] = binding.as_slice() else { return Err(ScanError::NotFound) };
+    let [_, _, jmp, ..] = binding.as_slice() else {
+        return Err(ScanError::NotFound);
+    };
     if jmp.mnemonic() != Mnemonic::Jmp || jmp.op0_kind() != OpKind::NearBranch64 {
         return Err(ScanError::NotFound);
     }
@@ -30,8 +39,16 @@ pub fn find_varc_setters(pe: &Pe) -> Result<VarcSetters, ScanError> {
     let lookup = whole_function(pe, begin, end - begin);
 
     // the map search every varc function calls, and the two map fields it is given (loaded from `rcx`)
-    let search = lookup.iter().find(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64).ok_or(ScanError::NotFound)?.near_branch_target() as u32;
-    let fields: Vec<u32> = lookup.iter().take(12).filter_map(|i| load_from(i, Register::RCX)).collect();
+    let search = lookup
+        .iter()
+        .find(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
+        .ok_or(ScanError::NotFound)?
+        .near_branch_target() as u32;
+    let fields: Vec<u32> = lookup
+        .iter()
+        .take(12)
+        .filter_map(|i| load_from(i, Register::RCX))
+        .collect();
     if fields.len() < 2 {
         return Err(ScanError::NotFound);
     }
@@ -42,14 +59,31 @@ pub fn find_varc_setters(pe: &Pe) -> Result<VarcSetters, ScanError> {
             continue;
         }
         let instrs = whole_function(pe, begin, end - begin);
-        let calls_search = instrs.iter().any(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64 && i.near_branch_target() as u32 == search);
-        let uses_fields = fields.iter().all(|&field| instrs.iter().any(|i| i.memory_displacement64() as u32 == field && i.memory_base() != Register::None));
+        let calls_search = instrs.iter().any(|i| {
+            i.mnemonic() == Mnemonic::Call
+                && i.op0_kind() == OpKind::NearBranch64
+                && i.near_branch_target() as u32 == search
+        });
+        let uses_fields = fields.iter().all(|&field| {
+            instrs.iter().any(|i| {
+                i.memory_displacement64() as u32 == field && i.memory_base() != Register::None
+            })
+        });
         // ends by marking the varcs as changed: `mov byte [varcs + n], 1`
-        let marks_changed = instrs.iter().any(|i| i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Memory && i.memory_size() == iced_x86::MemorySize::UInt8 && imm1(i) == Some(1));
+        let marks_changed = instrs.iter().any(|i| {
+            i.mnemonic() == Mnemonic::Mov
+                && i.op0_kind() == OpKind::Memory
+                && i.memory_size() == iced_x86::MemorySize::UInt8
+                && imm1(i) == Some(1)
+        });
         if !calls_search || !uses_fields || !marks_changed {
             continue;
         }
-        let kind = instrs.iter().find_map(|i| (i.mnemonic() == Mnemonic::Mov && i.op0_register() == Register::R11L).then(|| imm1(i)).flatten());
+        let kind = instrs.iter().find_map(|i| {
+            (i.mnemonic() == Mnemonic::Mov && i.op0_register() == Register::R11L)
+                .then(|| imm1(i))
+                .flatten()
+        });
         match kind {
             Some(1) => ints.push(begin),
             Some(5) => longs.push(begin),
@@ -57,5 +91,9 @@ pub fn find_varc_setters(pe: &Pe) -> Result<VarcSetters, ScanError> {
         }
     }
     let (set_int, _long, set_object) = (one(ints)?, one(longs)?, one(objects)?);
-    Ok(VarcSetters { get_int, set_int, set_object })
+    Ok(VarcSetters {
+        get_int,
+        set_int,
+        set_object,
+    })
 }

@@ -33,7 +33,9 @@ pub(super) unsafe fn release(control: u64) {
         return;
     }
     let memory = OwnMemory;
-    let Some(vtable) = memory.ptr(control) else { return };
+    let Some(vtable) = memory.ptr(control) else {
+        return;
+    };
     let uses = &*((control + USES) as *const std::sync::atomic::AtomicI32);
     if uses.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) != 1 {
         return;
@@ -57,7 +59,9 @@ unsafe fn name(lookup: Lookup, rule: &ObjTypeLookup, id: i32) -> Option<String> 
     let mut out = [0u64; 2];
     lookup(&mut out, id);
     let [control, obj] = out;
-    let name = (obj != 0).then(|| read_string(&OwnMemory, obj + rule.name as u64)).flatten();
+    let name = (obj != 0)
+        .then(|| read_string(&OwnMemory, obj + rule.name as u64))
+        .flatten();
     release(control);
     name
 }
@@ -69,8 +73,13 @@ fn shared() -> Option<Arc<Mapping>> {
 pub fn on_request() {
     let Some(mapping) = shared() else { return };
     let shared = mapping.shared();
-    let Some((sequence, request)) = shared.read_item_name_request() else { return };
-    let mut status = NamesReply { sequence, ..NamesReply::default() };
+    let Some((sequence, request)) = shared.read_item_name_request() else {
+        return;
+    };
+    let mut status = NamesReply {
+        sequence,
+        ..NamesReply::default()
+    };
     let count = request.count as usize;
     status.status = if count > ITEM_NAME_BATCH {
         item_name_status::TOO_MANY
@@ -123,10 +132,13 @@ unsafe fn game_val(reader: Reader, index: u64, kind: u32, id: i32) -> Option<Vec
     let memory = OwnMemory;
     let name = (buffer != 0)
         .then(|| {
-            let length = memory.u64(buffer + BUFFER_LENGTH).filter(|&l| l <= MAX_FILE)?;
+            let length = memory
+                .u64(buffer + BUFFER_LENGTH)
+                .filter(|&l| l <= MAX_FILE)?;
             let read = length.min(ITEM_NAME_SIZE as u64 * 4) as usize;
             let mut data = vec![0u8; read];
-            (read == 0 || memory.read(memory.ptr(buffer + BUFFER_DATA)?, &mut data)).then(|| game_val_name(kind, &data).to_vec())
+            (read == 0 || memory.read(memory.ptr(buffer + BUFFER_DATA)?, &mut data))
+                .then(|| game_val_name(kind, &data).to_vec())
         })
         .flatten();
     release(control);
@@ -136,13 +148,27 @@ unsafe fn game_val(reader: Reader, index: u64, kind: u32, id: i32) -> Option<Vec
 pub fn on_game_val_request() {
     let Some(mapping) = shared() else { return };
     let shared = mapping.shared();
-    let Some((sequence, request)) = shared.read_game_val_request() else { return };
-    let mut status = NamesReply { sequence, ..NamesReply::default() };
+    let Some((sequence, request)) = shared.read_game_val_request() else {
+        return;
+    };
+    let mut status = NamesReply {
+        sequence,
+        ..NamesReply::default()
+    };
     let count = request.count as usize;
     let memory = OwnMemory;
-    let index = LAYOUT.get().and_then(|layout| read::client(&memory, layout)).zip(GAME_VALS.get()).and_then(|(client, (reader, rule))| {
-        Some((*reader, memory.ptr(client + rule.index as u64).filter(|&index| index != 0)?))
-    });
+    let index = LAYOUT
+        .get()
+        .and_then(|layout| read::client(&memory, layout))
+        .zip(GAME_VALS.get())
+        .and_then(|(client, (reader, rule))| {
+            Some((
+                *reader,
+                memory
+                    .ptr(client + rule.index as u64)
+                    .filter(|&index| index != 0)?,
+            ))
+        });
     status.status = if count > ITEM_NAME_BATCH {
         item_name_status::TOO_MANY
     } else if on_other_thread() {
@@ -167,9 +193,18 @@ mod tests {
 
     #[test]
     fn parses_each_game_val_format() {
-        assert_eq!(game_val_name(game_val::OBJ, b"bucket_empty"), b"bucket_empty");
-        assert_eq!(game_val_name(game_val::INTERFACE, b"inventory\0\0\0items\0\xff\xff"), b"inventory");
-        assert_eq!(game_val_name(game_val::TABLE, b"\x01quests\0\x01name\0\0"), b"quests");
+        assert_eq!(
+            game_val_name(game_val::OBJ, b"bucket_empty"),
+            b"bucket_empty"
+        );
+        assert_eq!(
+            game_val_name(game_val::INTERFACE, b"inventory\0\0\0items\0\xff\xff"),
+            b"inventory"
+        );
+        assert_eq!(
+            game_val_name(game_val::TABLE, b"\x01quests\0\x01name\0\0"),
+            b"quests"
+        );
         assert_eq!(game_val_name(game_val::INTERFACE, b""), b"");
     }
 }

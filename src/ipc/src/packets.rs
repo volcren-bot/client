@@ -25,7 +25,8 @@ pub type Filter = [u32; FILTER_WORDS];
 
 /// The filter bit of a packet; opcodes from 256 up can't be filtered for (the client has 151 server packets).
 pub fn filter_bit(direction: u8, opcode: u16) -> Option<usize> {
-    (direction <= direction::SENT && opcode < 256).then(|| direction as usize * 256 + opcode as usize)
+    (direction <= direction::SENT && opcode < 256)
+        .then(|| direction as usize * 256 + opcode as usize)
 }
 
 pub fn filter_has(filter: &Filter, direction: u8, opcode: u16) -> bool {
@@ -34,7 +35,9 @@ pub fn filter_has(filter: &Filter, direction: u8, opcode: u16) -> bool {
 
 /// Adds a packet to `filter`; false when the opcode can't be filtered for.
 pub fn filter_add(filter: &mut Filter, direction: u8, opcode: u16) -> bool {
-    let Some(bit) = filter_bit(direction, opcode) else { return false };
+    let Some(bit) = filter_bit(direction, opcode) else {
+        return false;
+    };
     filter[bit / 32] |= 1 << (bit % 32);
     true
 }
@@ -124,7 +127,15 @@ pub struct Movement {
 
 impl Movement {
     fn fields(&self) -> [i32; MOVEMENT_FIELDS] {
-        [self.x, self.y, self.plane, self.moved_tick, self.from_x, self.from_y, self.from_plane]
+        [
+            self.x,
+            self.y,
+            self.plane,
+            self.moved_tick,
+            self.from_x,
+            self.from_y,
+            self.from_plane,
+        ]
     }
 
     /// Whether the tile changed in the last tick that ended, or in the one being received; `tick` is the client's tick counter now (one behind `moved_tick` means the counter was reset, so not moving).
@@ -180,8 +191,15 @@ pub fn encode_field(field: &Field) -> Option<[u8; 2]> {
     if !(1..=4).contains(&width) || field.shifts.iter().any(|&s| s > 3) {
         return None;
     }
-    let order = field.shifts.iter().enumerate().fold(0u8, |acc, (i, &s)| acc | s << (2 * i));
-    Some([width as u8 | (field.signed as u8) << 3 | (field.transform as u8) << 4, order])
+    let order = field
+        .shifts
+        .iter()
+        .enumerate()
+        .fold(0u8, |acc, (i, &s)| acc | s << (2 * i));
+    Some([
+        width as u8 | (field.signed as u8) << 3 | (field.transform as u8) << 4,
+        order,
+    ])
 }
 
 pub fn decode_field(code: [u8; 2]) -> Option<Field> {
@@ -195,7 +213,11 @@ pub fn decode_field(code: [u8; 2]) -> Option<Field> {
         2 => Transform::Neg,
         _ => Transform::Sub,
     };
-    Some(Field { signed: code[0] >> 3 & 1 == 1, shifts: (0..width).map(|i| code[1] >> (2 * i) & 3).collect(), transform })
+    Some(Field {
+        signed: code[0] >> 3 & 1 == 1,
+        shifts: (0..width).map(|i| code[1] >> (2 * i) & 3).collect(),
+        transform,
+    })
 }
 
 impl Field {
@@ -209,7 +231,14 @@ impl Field {
         } else if self.shifts.windows(2).all(|w| w[0] < w[1]) {
             "le".into()
         } else {
-            format!(":{}", self.shifts.iter().map(|s| format!("{s}")).collect::<Vec<_>>().join("."))
+            format!(
+                ":{}",
+                self.shifts
+                    .iter()
+                    .map(|s| format!("{s}"))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            )
         };
         let transform = match self.transform {
             Transform::None => "",
@@ -218,7 +247,11 @@ impl Field {
             Transform::Sub => "sub",
         };
         // a four byte value is always an int: there is nothing wider to extend it into
-        format!("{}{}{order}{transform}", if self.signed || width == 4 { "i" } else { "u" }, width * 8)
+        format!(
+            "{}{}{order}{transform}",
+            if self.signed || width == 4 { "i" } else { "u" },
+            width * 8
+        )
     }
 }
 
@@ -237,7 +270,10 @@ pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field
     for (id, (size, fields)) in layouts.iter().enumerate().take(LAYOUT_IDS) {
         let slot = addr_of!((*log).layouts[id]) as *mut LayoutSlot;
         write_volatile(addr_of_mut!((*slot).size), *size);
-        let codes: Option<Vec<[u8; 2]>> = fields.as_ref().and_then(|fields| fields.iter().map(encode_field).collect()).filter(|codes: &Vec<[u8; 2]>| codes.len() < LAYOUT_FIELDS);
+        let codes: Option<Vec<[u8; 2]>> = fields
+            .as_ref()
+            .and_then(|fields| fields.iter().map(encode_field).collect())
+            .filter(|codes: &Vec<[u8; 2]>| codes.len() < LAYOUT_FIELDS);
         match codes {
             Some(codes) => {
                 for (i, code) in codes.iter().enumerate() {
@@ -248,7 +284,9 @@ pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field
             None => write_volatile(addr_of_mut!((*slot).fields_count), NO_LAYOUT),
         }
     }
-    (*log).layouts_ready.store(layouts.len().min(LAYOUT_IDS) as u32 + 1, Ordering::Release);
+    (*log)
+        .layouts_ready
+        .store(layouts.len().min(LAYOUT_IDS) as u32 + 1, Ordering::Release);
 }
 
 /// What the agent published, `None` until it has. `log` must point to `LOG_SIZE` readable bytes.
@@ -261,9 +299,17 @@ pub unsafe fn read_layouts(log: *const Log) -> Option<Vec<Layout>> {
                 let slot = addr_of!((*log).layouts[id]);
                 let n = read_volatile(addr_of!((*slot).fields_count));
                 let fields = (n != NO_LAYOUT && (n as usize) < LAYOUT_FIELDS)
-                    .then(|| (0..n as usize).map(|i| decode_field(read_volatile(addr_of!((*slot).fields[i])))).collect::<Option<Vec<_>>>())
+                    .then(|| {
+                        (0..n as usize)
+                            .map(|i| decode_field(read_volatile(addr_of!((*slot).fields[i]))))
+                            .collect::<Option<Vec<_>>>()
+                    })
                     .flatten();
-                Layout { opcode: id as u16, size: read_volatile(addr_of!((*slot).size)), fields }
+                Layout {
+                    opcode: id as u16,
+                    size: read_volatile(addr_of!((*slot).size)),
+                    fields,
+                }
             })
             .collect(),
     )
@@ -272,16 +318,27 @@ pub unsafe fn read_layouts(log: *const Log) -> Option<Vec<Layout>> {
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(addr_of_mut!((*log).slot_size), core::mem::size_of::<Slot>() as u32);
+    write_volatile(
+        addr_of_mut!((*log).slot_size),
+        core::mem::size_of::<Slot>() as u32,
+    );
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32 && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
+        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
 }
 
 /// Appends a packet, keeping the first `PAYLOAD_SIZE` bytes of `data`; `log` must point to an initialised `Log`.
-pub unsafe fn push(log: *const Log, time_ms: u64, direction: u8, opcode: u16, length: u32, data: &[u8]) {
+pub unsafe fn push(
+    log: *const Log,
+    time_ms: u64,
+    direction: u8,
+    opcode: u16,
+    length: u32,
+    data: &[u8],
+) {
     let sequence = (*log).written.fetch_add(1, Ordering::AcqRel);
     let slot = addr_of!((*log).entries[sequence as usize % SLOT_COUNT]) as *mut Slot;
     let stored = data.len().min(PAYLOAD_SIZE);
@@ -302,13 +359,17 @@ pub unsafe fn push(log: *const Log, time_ms: u64, direction: u8, opcode: u16, le
 /// Publishes the player's movement; one writer only (the game thread); `log` must point to an initialised `Log`.
 pub unsafe fn set_movement(log: *const Log, movement: &Movement) {
     let sequence = (*log).movement_sequence.load(Ordering::Relaxed);
-    (*log).movement_sequence.store(sequence.wrapping_add(1) | 1, Ordering::Relaxed);
+    (*log)
+        .movement_sequence
+        .store(sequence.wrapping_add(1) | 1, Ordering::Relaxed);
     fence(Ordering::Release);
     for (field, value) in (*log).movement.iter().zip(movement.fields()) {
         field.store(value, Ordering::Relaxed);
     }
     // even and never 0 again, so a reader can tell "written" from "never written"
-    (*log).movement_sequence.store((sequence | 1).wrapping_add(1).max(2), Ordering::Release);
+    (*log)
+        .movement_sequence
+        .store((sequence | 1).wrapping_add(1).max(2), Ordering::Release);
 }
 
 /// The player's movement as last published (None before the hook first saw the player, or when the writer kept tearing it); `log` must point to an initialised `Log`.
@@ -322,10 +383,19 @@ pub unsafe fn movement(log: *const Log) -> Option<Movement> {
             core::hint::spin_loop();
             continue;
         }
-        let f: [i32; MOVEMENT_FIELDS] = core::array::from_fn(|i| (*log).movement[i].load(Ordering::Relaxed));
+        let f: [i32; MOVEMENT_FIELDS] =
+            core::array::from_fn(|i| (*log).movement[i].load(Ordering::Relaxed));
         fence(Ordering::Acquire);
         if (*log).movement_sequence.load(Ordering::Relaxed) == before {
-            return Some(Movement { x: f[0], y: f[1], plane: f[2], moved_tick: f[3], from_x: f[4], from_y: f[5], from_plane: f[6] });
+            return Some(Movement {
+                x: f[0],
+                y: f[1],
+                plane: f[2],
+                moved_tick: f[3],
+                from_x: f[4],
+                from_y: f[5],
+                from_plane: f[6],
+            });
         }
     }
     None
@@ -334,13 +404,16 @@ pub unsafe fn movement(log: *const Log) -> Option<Movement> {
 /// The readers whose filter has this packet, as a bit mask of their slots; `log` must point to an initialised `Log`.
 pub unsafe fn subscribers_for(log: *const Log, direction: u8, opcode: u16) -> u32 {
     let mask = (*log).subscribers.load(Ordering::Acquire);
-    let Some(bit) = filter_bit(direction, opcode).filter(|_| mask != 0) else { return 0 };
+    let Some(bit) = filter_bit(direction, opcode).filter(|_| mask != 0) else {
+        return 0;
+    };
     let mut wanted = 0;
     let mut rest = mask;
     while rest != 0 {
         let slot = rest.trailing_zeros();
         rest &= rest - 1;
-        if (*log).filters[slot as usize][bit / 32].load(Ordering::Acquire) & (1 << (bit % 32)) != 0 {
+        if (*log).filters[slot as usize][bit / 32].load(Ordering::Acquire) & (1 << (bit % 32)) != 0
+        {
             wanted |= 1 << slot;
         }
     }
@@ -372,7 +445,9 @@ pub unsafe fn set_filter(log: *const Log, slot: u32, filter: &Filter) {
 
 /// Gives a slot back; `log` must be writable.
 pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
-    (*log).subscribers.fetch_and(!(1u32 << slot), Ordering::AcqRel);
+    (*log)
+        .subscribers
+        .fetch_and(!(1u32 << slot), Ordering::AcqRel);
 }
 
 /// The sequence number the next packet will get; `log` must point to an initialised `Log`.
@@ -417,7 +492,9 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
         });
         fence(Ordering::Acquire);
         match entry {
-            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => page.entries.push(entry),
+            Some(entry) if (*slot).commit.load(Ordering::Acquire) == before => {
+                page.entries.push(entry)
+            }
             _ => page.dropped += 1,
         }
         at += 1;
@@ -429,7 +506,10 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{alloc::{alloc_zeroed, dealloc, Layout as AllocLayout}, vec};
+    use alloc::{
+        alloc::{alloc_zeroed, dealloc, Layout as AllocLayout},
+        vec,
+    };
 
     struct Memory(*mut Log);
 
@@ -455,8 +535,14 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Log, entries), 64);
         assert_eq!(core::mem::offset_of!(Log, filters), 64 + SLOT_COUNT * 128);
         assert_eq!(core::mem::size_of::<LayoutSlot>(), 40);
-        assert_eq!(core::mem::offset_of!(Log, layouts), 64 + SLOT_COUNT * 128 + SUBSCRIBER_SLOTS as usize * FILTER_WORDS * 4);
-        assert_eq!(LOG_SIZE, 64 + SLOT_COUNT * 128 + SUBSCRIBER_SLOTS as usize * FILTER_WORDS * 4 + LAYOUT_IDS * 40);
+        assert_eq!(
+            core::mem::offset_of!(Log, layouts),
+            64 + SLOT_COUNT * 128 + SUBSCRIBER_SLOTS as usize * FILTER_WORDS * 4
+        );
+        assert_eq!(
+            LOG_SIZE,
+            64 + SLOT_COUNT * 128 + SUBSCRIBER_SLOTS as usize * FILTER_WORDS * 4 + LAYOUT_IDS * 40
+        );
         assert_eq!(packets_memory_name(32), "AGENT_PACKETS_32");
         assert_eq!(packet_wake_event_name(32, 5), "AGENT_PACKETS_WAKE_32_5");
     }
@@ -464,29 +550,96 @@ mod tests {
     #[test]
     fn fields_survive_the_two_byte_form_and_spell_like_the_loader_table() {
         for (field, spelling) in [
-            (Field { signed: false, shifts: vec![0], transform: Transform::Add }, "u8add"),
-            (Field { signed: true, shifts: vec![1, 0], transform: Transform::None }, "i16be"),
-            (Field { signed: false, shifts: vec![0, 1], transform: Transform::Add }, "u16leadd"),
-            (Field { signed: true, shifts: vec![2, 3, 0, 1], transform: Transform::None }, "i32:2.3.0.1"),
+            (
+                Field {
+                    signed: false,
+                    shifts: vec![0],
+                    transform: Transform::Add,
+                },
+                "u8add",
+            ),
+            (
+                Field {
+                    signed: true,
+                    shifts: vec![1, 0],
+                    transform: Transform::None,
+                },
+                "i16be",
+            ),
+            (
+                Field {
+                    signed: false,
+                    shifts: vec![0, 1],
+                    transform: Transform::Add,
+                },
+                "u16leadd",
+            ),
+            (
+                Field {
+                    signed: true,
+                    shifts: vec![2, 3, 0, 1],
+                    transform: Transform::None,
+                },
+                "i32:2.3.0.1",
+            ),
         ] {
             assert_eq!(field.spelling(), spelling);
             assert_eq!(decode_field(encode_field(&field).unwrap()), Some(field));
         }
-        assert_eq!(encode_field(&Field { signed: false, shifts: vec![], transform: Transform::None }), None);
+        assert_eq!(
+            encode_field(&Field {
+                signed: false,
+                shifts: vec![],
+                transform: Transform::None
+            }),
+            None
+        );
     }
 
     #[test]
     fn layouts_are_unpublished_until_the_agent_publishes_them() {
         let memory = Memory::new();
-        let u16le = Field { signed: false, shifts: vec![0, 1], transform: Transform::None };
+        let u16le = Field {
+            signed: false,
+            shifts: vec![0, 1],
+            transform: Transform::None,
+        };
         unsafe {
             assert_eq!(read_layouts(memory.0), None);
-            publish_layouts(memory.0, &[(0, Some(vec![])), (-1, None), (2, Some(vec![u16le.clone()]))]);
+            publish_layouts(
+                memory.0,
+                &[
+                    (0, Some(vec![])),
+                    (-1, None),
+                    (2, Some(vec![u16le.clone()])),
+                ],
+            );
             let layouts = read_layouts(memory.0).unwrap();
             assert_eq!(layouts.len(), 3);
-            assert_eq!(layouts[0], Layout { opcode: 0, size: 0, fields: Some(vec![]) });
-            assert_eq!(layouts[1], Layout { opcode: 1, size: -1, fields: None });
-            assert_eq!(layouts[2], Layout { opcode: 2, size: 2, fields: Some(vec![u16le]) });
+            assert_eq!(
+                layouts[0],
+                Layout {
+                    opcode: 0,
+                    size: 0,
+                    fields: Some(vec![])
+                }
+            );
+            assert_eq!(
+                layouts[1],
+                Layout {
+                    opcode: 1,
+                    size: -1,
+                    fields: None
+                }
+            );
+            assert_eq!(
+                layouts[2],
+                Layout {
+                    opcode: 2,
+                    size: 2,
+                    fields: Some(vec![u16le])
+                }
+            );
         }
     }
 
@@ -495,18 +648,34 @@ mod tests {
         let memory = Memory::new();
         unsafe {
             assert_eq!(movement(memory.0), None);
-            let standing = Movement { x: 3200, y: 3200, plane: 0, moved_tick: NO_TICK, from_x: 3200, from_y: 3200, from_plane: 0 };
+            let standing = Movement {
+                x: 3200,
+                y: 3200,
+                plane: 0,
+                moved_tick: NO_TICK,
+                from_x: 3200,
+                from_y: 3200,
+                from_plane: 0,
+            };
             set_movement(memory.0, &standing);
             assert_eq!(movement(memory.0), Some(standing));
             assert!(!standing.moving(500));
 
             // Player Info of the tick that ends at counter 101 moved the player: moving while it is received, and through the next tick
-            let walked = Movement { x: 3201, moved_tick: 100, ..standing };
+            let walked = Movement {
+                x: 3201,
+                moved_tick: 100,
+                ..standing
+            };
             set_movement(memory.0, &walked);
             assert_eq!(movement(memory.0), Some(walked));
             assert!(walked.moving(100) && walked.moving(101));
             assert!(!walked.moving(102) && !walked.moving(99) && !walked.moving(0));
-            assert!(Movement { moved_tick: i32::MAX, ..walked }.moving(i32::MIN));
+            assert!(Movement {
+                moved_tick: i32::MAX,
+                ..walked
+            }
+            .moving(i32::MIN));
         }
     }
 
@@ -558,19 +727,39 @@ mod tests {
         let memory = Memory::new();
         unsafe {
             assert!(is_compatible(memory.0));
-            push(memory.0, 10, direction::RECEIVED, 40, 6, &[1, 2, 3, 4, 5, 6]);
+            push(
+                memory.0,
+                10,
+                direction::RECEIVED,
+                40,
+                6,
+                &[1, 2, 3, 4, 5, 6],
+            );
             push(memory.0, 11, direction::SENT, 75, 0, &[]);
             let page = read_since(memory.0, 0, 10);
             assert_eq!(page.next, 2);
             assert_eq!(page.dropped, 0);
-            assert_eq!(page.entries[0], Entry { sequence: 0, time_ms: 10, direction: direction::RECEIVED, opcode: 40, length: 6, payload: alloc::vec![1, 2, 3, 4, 5, 6] });
+            assert_eq!(
+                page.entries[0],
+                Entry {
+                    sequence: 0,
+                    time_ms: 10,
+                    direction: direction::RECEIVED,
+                    opcode: 40,
+                    length: 6,
+                    payload: alloc::vec![1, 2, 3, 4, 5, 6]
+                }
+            );
             assert_eq!(page.entries[1].opcode, 75);
             assert!(page.entries[1].payload.is_empty());
 
             // reading on from `next` returns only what is new
             push(memory.0, 12, direction::RECEIVED, 2, 0, &[]);
             let page = read_since(memory.0, page.next, 10);
-            assert_eq!((page.entries.len(), page.entries[0].sequence, page.next), (1, 2, 3));
+            assert_eq!(
+                (page.entries.len(), page.entries[0].sequence, page.next),
+                (1, 2, 3)
+            );
         }
     }
 

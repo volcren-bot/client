@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use ipc::{Header, Incompatible};
 pub use ipc::PROTOCOL_VERSION;
+use ipc::{Header, Incompatible};
+use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
 pub const HOST_API: u32 = 8;
@@ -11,30 +11,29 @@ pub use ipc::state::varp;
 pub mod antiban;
 pub mod async_input;
 pub mod bank_pin;
-pub mod biometrics;
 mod bank_pin_overlay;
-pub mod input_jobs;
+pub mod biometrics;
 pub mod cache;
 pub mod collision;
-pub mod devtools;
 pub mod config;
-pub mod pathfinding;
+pub mod devtools;
 pub mod font;
 pub mod form;
 pub mod http;
+pub mod input_jobs;
+pub mod nav;
+pub mod pathfinding;
 pub mod projection;
 pub mod sandbox;
-pub mod nav;
 pub mod scene_collision;
 pub mod scene_graph;
 pub mod wind_mouse;
-pub use decode::{
-    worker,
-    Camera, Chunk, GameState, Login, Minimap, Position, ServerTile, Skill, Tile, chat, game_state_name, memory, state, strip_tags, widgets, world,
-    world_select,
-};
 pub use decode::state::MAX_VARPS;
 pub use decode::widgets::{SubInterface, Widget};
+pub use decode::{
+    Camera, Chunk, GameState, Login, Minimap, Position, ServerTile, Skill, Tile, chat,
+    game_state_name, memory, state, strip_tags, widgets, worker, world, world_select,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuRect {
@@ -305,8 +304,8 @@ pub struct ItemPage {
 /// Pass this as `since` to `item_changes` to get no changes, only `next`: the point to read from for what happens from now on.
 pub const ITEM_CHANGES_NOW: u64 = u64::MAX;
 
-pub use decode::widgets::{TreeWidget, WidgetDetail, WidgetTree};
 pub use decode::chat::ChatMessage;
+pub use decode::widgets::{TreeWidget, WidgetDetail, WidgetTree};
 pub use decode::world::{GroundItem, Hitsplat, Item, Npc, Player, Projectile, SpotAnim};
 pub use decode::world_select::{World, WorldSelect};
 
@@ -315,13 +314,24 @@ mod input;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub(crate) use win::paint_overlay;
-#[cfg(windows)]
 pub use input::{open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
+pub(crate) use win::paint_overlay;
+#[cfg(windows)]
 pub use win::{
-    cache_archive_files, cache_archives, cache_files, cache_locs, chat_messages, collision_area, connection, enum_def, item_params, item_stackable, varbit, varbit_def, varbits_of, find_path, scene_collision, scene_route, player_plane, map_regions, in_instance, server_tile, movement, world_movement, draw, set_cursor, draw_batch, draw_lines, game_state, item_container, item_containers, item_changes, item_changes_wait, ItemWatcher, PacketWatcher, wait_watchers, item_names, game_val_names, ground_items, list_clients, menu, menu_click, menu_layout, menu_open, selected_widget, scene_tiles, scene_tiles_next_frame, project, project_moved, sub_interfaces, load, loc_model, locs, clickable_locs, nav_plan, memory_words, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs, player_model, player_words, players, world_debug, world_entities, watch_client, projectiles, screenshot, set_display_name, set_total_xp, spot_anims, packets, packet_layouts, script_runs, varc_changes,
-    unload, varc, varp_value, varps, widget, widget_children, widget_dump, widget_tree, widget_words, world_select,
+    ItemWatcher, PacketWatcher, cache_archive_files, cache_archives, cache_files, cache_locs,
+    chat_messages, clickable_locs, collision_area, connection, draw, draw_batch, draw_lines,
+    enum_def, find_path, game_state, game_val_names, ground_items, in_instance, item_changes,
+    item_changes_wait, item_container, item_containers, item_names, item_params, item_stackable,
+    list_clients, load, loc_model, locs, map_regions, memory_words, menu, menu_click, menu_layout,
+    menu_open, movement, nav_plan, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs,
+    packet_layouts, packets, player_model, player_plane, player_words, players, project,
+    project_moved, projectiles, scene_collision, scene_route, scene_tiles, scene_tiles_next_frame,
+    screenshot, script_runs, selected_widget, server_tile, set_cursor, set_display_name,
+    set_total_xp, spot_anims, sub_interfaces, unload, varbit, varbit_def, varbits_of, varc,
+    varc_changes, varp_value, varps, wait_watchers, watch_client, widget, widget_children,
+    widget_dump, widget_tree, widget_words, world_debug, world_entities, world_movement,
+    world_select,
 };
 
 pub const MODULE_PREFIX: &str = "agent";
@@ -374,9 +384,15 @@ impl Connection {
                     offsets_found: header.offsets_found(),
                 }
             }
-            Err(Incompatible { version, protocol }) => {
-                Self { version, protocol, width: -1, height: -1, mouse_x: -1, mouse_y: -1, offsets_found: None }
-            }
+            Err(Incompatible { version, protocol }) => Self {
+                version,
+                protocol,
+                width: -1,
+                height: -1,
+                mouse_x: -1,
+                mouse_y: -1,
+                offsets_found: None,
+            },
         }
     }
 
@@ -431,13 +447,36 @@ pub const CLICK_HOLD_MS: u32 = 60;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {
-    Move { x: i32, y: i32 },
-    WindMouse { x: i32, y: i32, options: wind_mouse::Options },
-    Click { button: MouseButton, x: i32, y: i32, hold_ms: u32 },
-    Button { button: MouseButton, down: bool },
-    Scroll { notches: i32 },
-    Key { key: u8, down: bool },
-    Type { text: String, hold_ms: u32 },
+    Move {
+        x: i32,
+        y: i32,
+    },
+    WindMouse {
+        x: i32,
+        y: i32,
+        options: wind_mouse::Options,
+    },
+    Click {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        hold_ms: u32,
+    },
+    Button {
+        button: MouseButton,
+        down: bool,
+    },
+    Scroll {
+        notches: i32,
+    },
+    Key {
+        key: u8,
+        down: bool,
+    },
+    Type {
+        text: String,
+        hold_ms: u32,
+    },
 }
 
 impl Input {
@@ -456,29 +495,61 @@ impl Input {
                 options.gravity.to_string(),
                 options.timeout_ms.to_string(),
             ],
-            Self::Click { button, x, y, hold_ms } => {
-                vec!["click".into(), pid, button.name().into(), x.to_string(), y.to_string(), hold_ms.to_string()]
+            Self::Click {
+                button,
+                x,
+                y,
+                hold_ms,
+            } => {
+                vec![
+                    "click".into(),
+                    pid,
+                    button.name().into(),
+                    x.to_string(),
+                    y.to_string(),
+                    hold_ms.to_string(),
+                ]
             }
-            Self::Button { button, down } => vec!["button".into(), pid, button.name().into(), state(down)],
+            Self::Button { button, down } => {
+                vec!["button".into(), pid, button.name().into(), state(down)]
+            }
             Self::Scroll { notches } => vec!["scroll".into(), pid, notches.to_string()],
             Self::Key { key, down } => vec!["key".into(), pid, key.to_string(), state(down)],
-            Self::Type { text, hold_ms } => vec!["type".into(), pid, text.clone(), hold_ms.to_string()],
+            Self::Type { text, hold_ms } => {
+                vec!["type".into(), pid, text.clone(), hold_ms.to_string()]
+            }
         }
     }
 
     pub fn from_args(args: &[&str]) -> Option<Result<(u32, Self), String>> {
         let number = |s: &str| s.parse::<i32>().map_err(|_| format!("Invalid number: {s}"));
-        let real = |s: &str| s.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("Invalid number: {s}"));
+        let real = |s: &str| {
+            s.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("Invalid number: {s}"))
+        };
         let down = |s: &str| match s {
             "down" => Ok(true),
             "up" => Ok(false),
             other => Err(format!("Invalid button/key state: {other} (down or up)")),
         };
         let parse = |pid: &str, input: Result<Self, String>| -> Result<(u32, Self), String> {
-            Ok((pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?, input?))
+            Ok((
+                pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?,
+                input?,
+            ))
         };
         Some(match args {
-            ["move", pid, x, y] => parse(pid, (|| Ok(Self::Move { x: number(x)?, y: number(y)? }))()),
+            ["move", pid, x, y] => parse(
+                pid,
+                (|| {
+                    Ok(Self::Move {
+                        x: number(x)?,
+                        y: number(y)?,
+                    })
+                })(),
+            ),
             ["wind_mouse", pid, x, y, speed, wind, gravity, timeout_ms] => parse(
                 pid,
                 (|| {
@@ -486,39 +557,88 @@ impl Input {
                         speed: real(speed)?,
                         wind: real(wind)?,
                         gravity: real(gravity)?,
-                        timeout_ms: timeout_ms.parse().map_err(|_| format!("Invalid timeout: {timeout_ms}"))?,
+                        timeout_ms: timeout_ms
+                            .parse()
+                            .map_err(|_| format!("Invalid timeout: {timeout_ms}"))?,
                     };
-                    Ok(Self::WindMouse { x: number(x)?, y: number(y)?, options })
+                    Ok(Self::WindMouse {
+                        x: number(x)?,
+                        y: number(y)?,
+                        options,
+                    })
                 })(),
             ),
             ["click", pid, button, x, y] => parse(
                 pid,
-                (|| Ok(Self::Click { button: MouseButton::parse(button)?, x: number(x)?, y: number(y)?, hold_ms: CLICK_HOLD_MS }))(),
+                (|| {
+                    Ok(Self::Click {
+                        button: MouseButton::parse(button)?,
+                        x: number(x)?,
+                        y: number(y)?,
+                        hold_ms: CLICK_HOLD_MS,
+                    })
+                })(),
             ),
             ["click", pid, button, x, y, hold_ms] => parse(
                 pid,
                 (|| {
-                    let hold_ms = hold_ms.parse().map_err(|_| format!("Invalid hold time: {hold_ms}"))?;
-                    Ok(Self::Click { button: MouseButton::parse(button)?, x: number(x)?, y: number(y)?, hold_ms })
+                    let hold_ms = hold_ms
+                        .parse()
+                        .map_err(|_| format!("Invalid hold time: {hold_ms}"))?;
+                    Ok(Self::Click {
+                        button: MouseButton::parse(button)?,
+                        x: number(x)?,
+                        y: number(y)?,
+                        hold_ms,
+                    })
                 })(),
             ),
-            ["button", pid, button, state] => {
-                parse(pid, (|| Ok(Self::Button { button: MouseButton::parse(button)?, down: down(state)? }))())
-            }
-            ["scroll", pid, notches] => parse(pid, (|| Ok(Self::Scroll { notches: number(notches)? }))()),
+            ["button", pid, button, state] => parse(
+                pid,
+                (|| {
+                    Ok(Self::Button {
+                        button: MouseButton::parse(button)?,
+                        down: down(state)?,
+                    })
+                })(),
+            ),
+            ["scroll", pid, notches] => parse(
+                pid,
+                (|| {
+                    Ok(Self::Scroll {
+                        notches: number(notches)?,
+                    })
+                })(),
+            ),
             ["key", pid, key, state] => parse(
                 pid,
                 (|| {
-                    let key = key.parse().map_err(|_| format!("Invalid key code: {key} (0-255)"))?;
-                    Ok(Self::Key { key, down: down(state)? })
+                    let key = key
+                        .parse()
+                        .map_err(|_| format!("Invalid key code: {key} (0-255)"))?;
+                    Ok(Self::Key {
+                        key,
+                        down: down(state)?,
+                    })
                 })(),
             ),
-            ["type", pid, text] => parse(pid, Ok(Self::Type { text: text.to_string(), hold_ms: KEY_HOLD_MS })),
+            ["type", pid, text] => parse(
+                pid,
+                Ok(Self::Type {
+                    text: text.to_string(),
+                    hold_ms: KEY_HOLD_MS,
+                }),
+            ),
             ["type", pid, text, hold_ms] => parse(
                 pid,
                 (|| {
-                    let hold_ms = hold_ms.parse().map_err(|_| format!("Invalid hold time: {hold_ms}"))?;
-                    Ok(Self::Type { text: text.to_string(), hold_ms })
+                    let hold_ms = hold_ms
+                        .parse()
+                        .map_err(|_| format!("Invalid hold time: {hold_ms}"))?;
+                    Ok(Self::Type {
+                        text: text.to_string(),
+                        hold_ms,
+                    })
                 })(),
             ),
             _ => return None,
@@ -536,8 +656,20 @@ pub struct Rgba {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Overlay {
-    Rect { x1: i32, y1: i32, x2: i32, y2: i32, color: Rgba },
-    Line { x1: i32, y1: i32, x2: i32, y2: i32, color: Rgba },
+    Rect {
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: Rgba,
+    },
+    Line {
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+        color: Rgba,
+    },
     Clear,
 }
 
@@ -545,10 +677,28 @@ impl Overlay {
     pub fn args(&self, pid: u32) -> Vec<String> {
         let pid = pid.to_string();
         match self {
-            Self::Rect { x1, y1, x2, y2, color: Rgba { r, g, b, a } } | Self::Line { x1, y1, x2, y2, color: Rgba { r, g, b, a } } => vec![
+            Self::Rect {
+                x1,
+                y1,
+                x2,
+                y2,
+                color: Rgba { r, g, b, a },
+            }
+            | Self::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color: Rgba { r, g, b, a },
+            } => vec![
                 "overlay".into(),
                 pid,
-                if matches!(self, Self::Line { .. }) { "line" } else { "rect" }.into(),
+                if matches!(self, Self::Line { .. }) {
+                    "line"
+                } else {
+                    "rect"
+                }
+                .into(),
                 x1.to_string(),
                 y1.to_string(),
                 x2.to_string(),
@@ -564,9 +714,15 @@ impl Overlay {
 
     pub fn from_args(args: &[&str]) -> Option<Result<(u32, Self), String>> {
         let number = |s: &str| s.parse::<i32>().map_err(|_| format!("Invalid number: {s}"));
-        let byte = |s: &str| s.parse::<u8>().map_err(|_| format!("Invalid color component: {s}"));
+        let byte = |s: &str| {
+            s.parse::<u8>()
+                .map_err(|_| format!("Invalid color component: {s}"))
+        };
         let parse = |pid: &str, overlay: Result<Self, String>| -> Result<(u32, Self), String> {
-            Ok((pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?, overlay?))
+            Ok((
+                pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?,
+                overlay?,
+            ))
         };
         Some(match args {
             ["overlay", pid, "rect", x1, y1, x2, y2, r, g, b, a] => parse(
@@ -577,7 +733,12 @@ impl Overlay {
                         y1: number(y1)?,
                         x2: number(x2)?,
                         y2: number(y2)?,
-                        color: Rgba { r: byte(r)?, g: byte(g)?, b: byte(b)?, a: byte(a)? },
+                        color: Rgba {
+                            r: byte(r)?,
+                            g: byte(g)?,
+                            b: byte(b)?,
+                            a: byte(a)?,
+                        },
                     })
                 })(),
             ),
@@ -589,7 +750,12 @@ impl Overlay {
                         y1: number(y1)?,
                         x2: number(x2)?,
                         y2: number(y2)?,
-                        color: Rgba { r: byte(r)?, g: byte(g)?, b: byte(b)?, a: byte(a)? },
+                        color: Rgba {
+                            r: byte(r)?,
+                            g: byte(g)?,
+                            b: byte(b)?,
+                            a: byte(a)?,
+                        },
                     })
                 })(),
             ),
@@ -635,22 +801,46 @@ impl Cursor {
             CursorStyle::X => "x",
         };
         let [r, g, b] = self.color;
-        vec!["cursor".into(), pid.to_string(), style.into(), r.to_string(), g.to_string(), b.to_string(), self.size.to_string()]
+        vec![
+            "cursor".into(),
+            pid.to_string(),
+            style.into(),
+            r.to_string(),
+            g.to_string(),
+            b.to_string(),
+            self.size.to_string(),
+        ]
     }
 
     pub fn from_args(args: &[&str]) -> Option<Result<(u32, Self), String>> {
-        let ["cursor", pid, style, r, g, b, size] = args else { return None };
-        let byte = |s: &str| s.parse::<u8>().map_err(|_| format!("Invalid color component: {s}"));
+        let ["cursor", pid, style, r, g, b, size] = args else {
+            return None;
+        };
+        let byte = |s: &str| {
+            s.parse::<u8>()
+                .map_err(|_| format!("Invalid color component: {s}"))
+        };
         Some((|| {
             let style = match *style {
                 "off" => CursorStyle::Off,
                 "cross" => CursorStyle::Cross,
                 "dot" => CursorStyle::Dot,
                 "x" => CursorStyle::X,
-                other => return Err(format!("Invalid cursor style: {other} (off, cross, dot or x)")),
+                other => {
+                    return Err(format!(
+                        "Invalid cursor style: {other} (off, cross, dot or x)"
+                    ));
+                }
             };
             let pid = pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?;
-            Ok((pid, Self { style, color: [byte(r)?, byte(g)?, byte(b)?], size: byte(size)? }))
+            Ok((
+                pid,
+                Self {
+                    style,
+                    color: [byte(r)?, byte(g)?, byte(b)?],
+                    size: byte(size)?,
+                },
+            ))
         })())
     }
 }
@@ -703,29 +893,75 @@ mod tests {
             Input::WindMouse {
                 x: -3,
                 y: 400,
-                options: wind_mouse::Options { speed: 12.5, wind: 0.1, gravity: 9.0, timeout_ms: 2500 },
+                options: wind_mouse::Options {
+                    speed: 12.5,
+                    wind: 0.1,
+                    gravity: 9.0,
+                    timeout_ms: 2500,
+                },
             },
-            Input::Click { button: MouseButton::Right, x: 0, y: 5, hold_ms: 90 },
-            Input::Button { button: MouseButton::Middle, down: true },
-            Input::Button { button: MouseButton::Left, down: false },
+            Input::Click {
+                button: MouseButton::Right,
+                x: 0,
+                y: 5,
+                hold_ms: 90,
+            },
+            Input::Button {
+                button: MouseButton::Middle,
+                down: true,
+            },
+            Input::Button {
+                button: MouseButton::Left,
+                down: false,
+            },
             Input::Scroll { notches: -3 },
-            Input::Key { key: 37, down: true },
-            Input::Key { key: 160, down: false },
-            Input::Type { text: "Hello \"world\"".into(), hold_ms: 45 },
+            Input::Key {
+                key: 37,
+                down: true,
+            },
+            Input::Key {
+                key: 160,
+                down: false,
+            },
+            Input::Type {
+                text: "Hello \"world\"".into(),
+                hold_ms: 45,
+            },
         ] {
             let args = input.args(32);
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             assert_eq!(Input::from_args(&args), Some(Ok((32, input))));
         }
         assert_eq!(Input::from_args(&["list"]), None);
-        assert_eq!(Input::from_args(&["type", "1", "hi"]), Some(Ok((1, Input::Type { text: "hi".into(), hold_ms: KEY_HOLD_MS }))));
-        assert!(matches!(Input::from_args(&["key", "1", "256", "down"]), Some(Err(_))));
-        assert!(matches!(Input::from_args(&["button", "1", "left", "held"]), Some(Err(_))));
+        assert_eq!(
+            Input::from_args(&["type", "1", "hi"]),
+            Some(Ok((
+                1,
+                Input::Type {
+                    text: "hi".into(),
+                    hold_ms: KEY_HOLD_MS
+                }
+            )))
+        );
+        assert!(matches!(
+            Input::from_args(&["key", "1", "256", "down"]),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            Input::from_args(&["button", "1", "left", "held"]),
+            Some(Err(_))
+        ));
     }
 
     #[test]
     fn chunk_of_a_position() {
-        let position = Position { local_x: 0, local_y: 0, x: 3213, y: 3428, plane: Some(0) };
+        let position = Position {
+            local_x: 0,
+            local_y: 0,
+            x: 3213,
+            y: 3428,
+            plane: Some(0),
+        };
         assert_eq!(position.chunk(), Chunk { x: 50, y: 53 });
         assert_eq!(position.chunk().id(), 12853);
     }
@@ -738,9 +974,17 @@ mod tests {
                 assert!(real + offset > 0, "{real} {offset}");
                 let size = offset.abs();
                 assert!(size >= 1_000, "{real} {offset}");
-                assert!(size as f64 <= (real as f64 * 0.3).max(1_000.0) + 1.0, "{real} {offset}");
+                assert!(
+                    size as f64 <= (real as f64 * 0.3).max(1_000.0) + 1.0,
+                    "{real} {offset}"
+                );
             }
         }
-        assert_eq!((6_019_725 + random_total_xp_offset(6_019_725, 7)).to_string().len(), 7);
+        assert_eq!(
+            (6_019_725 + random_total_xp_offset(6_019_725, 7))
+                .to_string()
+                .len(),
+            7
+        );
     }
 }

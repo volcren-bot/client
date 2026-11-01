@@ -41,7 +41,11 @@ pub struct VarbitDef {
 impl VarbitDef {
     pub fn value(&self, varp: i32) -> i32 {
         let bits = (self.msb - self.lsb + 1) as u32;
-        let mask = if bits >= 32 { u32::MAX } else { (1u32 << bits) - 1 };
+        let mask = if bits >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << bits) - 1
+        };
         (((varp as u32) >> self.lsb) & mask) as i32
     }
 }
@@ -71,7 +75,12 @@ impl<'a> Reader<'a> {
     }
 
     fn i32(&mut self) -> Option<i32> {
-        Some(i32::from_be_bytes([self.u8()?, self.u8()?, self.u8()?, self.u8()?]))
+        Some(i32::from_be_bytes([
+            self.u8()?,
+            self.u8()?,
+            self.u8()?,
+            self.u8()?,
+        ]))
     }
 
     fn i64(&mut self) -> Option<i64> {
@@ -84,7 +93,10 @@ impl<'a> Reader<'a> {
 
     fn string(&mut self) -> Option<String> {
         let end = self.data.get(self.at..)?.iter().position(|&b| b == 0)?;
-        let text = self.data[self.at..self.at + end].iter().map(|&b| cp1252(b)).collect();
+        let text = self.data[self.at..self.at + end]
+            .iter()
+            .map(|&b| cp1252(b))
+            .collect();
         self.at += end + 1;
         Some(text)
     }
@@ -93,7 +105,9 @@ impl<'a> Reader<'a> {
 /// The client's strings are CP1252; it only differs from Latin-1 in 0x80..0xA0.
 fn cp1252(b: u8) -> char {
     const HIGH: [char; 32] = [
-        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
     ];
     match b {
         0x80..=0x9f => HIGH[(b - 0x80) as usize],
@@ -103,7 +117,12 @@ fn cp1252(b: u8) -> char {
 
 pub fn decode_enum(data: &[u8]) -> Option<EnumDef> {
     let mut r = Reader::new(data);
-    let mut def = EnumDef { key_type: String::new(), value_type: String::new(), default: None, entries: Vec::new() };
+    let mut def = EnumDef {
+        key_type: String::new(),
+        value_type: String::new(),
+        default: None,
+        entries: Vec::new(),
+    };
     loop {
         match r.u8()? {
             0 => return Some(def),
@@ -153,7 +172,21 @@ pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
             0 => return Some(ObjDef { params, stackable }),
             11 => stackable = true,
             98 => stackable |= r.u16()? != 0,
-            1 | 4..=8 | 24 | 26 | 75 | 78 | 79 | 90..=95 | 97 | 99 | 110..=112 | 139 | 140 | 148 | 149 => r.skip(2)?,
+            1
+            | 4..=8
+            | 24
+            | 26
+            | 75
+            | 78
+            | 79
+            | 90..=95
+            | 97
+            | 99
+            | 110..=112
+            | 139
+            | 140
+            | 148
+            | 149 => r.skip(2)?,
             2 | 3 | 9 | 30..=39 => {
                 r.string()?;
             }
@@ -193,7 +226,11 @@ pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
                 for _ in 0..r.u8()? {
                     let is_string = r.u8()? == 1;
                     let key = r.u24()?;
-                    let value = if is_string { Value::Str(r.string()?) } else { Value::Int(r.i32()? as i64) };
+                    let value = if is_string {
+                        Value::Str(r.string()?)
+                    } else {
+                        Value::Int(r.i32()? as i64)
+                    };
                     params.insert(key, value);
                 }
             }
@@ -208,7 +245,13 @@ pub fn decode_varbit(data: &[u8]) -> Option<VarbitDef> {
     loop {
         match r.u8()? {
             0 => return def,
-            1 => def = Some(VarbitDef { varp: r.u16()?, lsb: r.u8()?, msb: r.u8()? }),
+            1 => {
+                def = Some(VarbitDef {
+                    varp: r.u16()?,
+                    lsb: r.u8()?,
+                    msb: r.u8()?,
+                })
+            }
             _ => return None,
         }
     }
@@ -219,47 +262,102 @@ mod tests {
     use super::*;
 
     fn hex(text: &str) -> Vec<u8> {
-        (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect()
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
     fn decodes_the_spellbook_varbit() {
         // varbit 4070: varp 439, bits 0..1
         let def = decode_varbit(&hex("0101b7000100")).unwrap();
-        assert_eq!(def, VarbitDef { varp: 439, lsb: 0, msb: 1 });
+        assert_eq!(
+            def,
+            VarbitDef {
+                varp: 439,
+                lsb: 0,
+                msb: 1
+            }
+        );
         assert_eq!(def.value(0b1110), 2);
     }
 
     #[test]
     fn varbit_masks_high_bits() {
-        let def = VarbitDef { varp: 0, lsb: 4, msb: 31 };
+        let def = VarbitDef {
+            varp: 0,
+            lsb: 4,
+            msb: 31,
+        };
         assert_eq!(def.value(-16), 0x0fff_ffff);
     }
 
     #[test]
     fn decodes_an_int_enum() {
         // enum 1981: the spellbooks' enums
-        let data = hex("0169026706000400000000000007be00000001000007bf00000002000007c000000003000007c100");
+        let data =
+            hex("0169026706000400000000000007be00000001000007bf00000002000007c000000003000007c100");
         let def = decode_enum(&data).unwrap();
         assert_eq!(def.key_type, "i");
         assert_eq!(def.value_type, "g");
-        let values: Vec<_> = def.entries.iter().map(|e| (e.key, e.value.clone())).collect();
-        assert_eq!(values, [(0, Value::Int(1982)), (1, Value::Int(1983)), (2, Value::Int(1984)), (3, Value::Int(1985))]);
+        let values: Vec<_> = def
+            .entries
+            .iter()
+            .map(|e| (e.key, e.value.clone()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                (0, Value::Int(1982)),
+                (1, Value::Int(1983)),
+                (2, Value::Int(1984)),
+                (3, Value::Int(1985))
+            ]
+        );
     }
 
     #[test]
     fn decodes_a_string_enum() {
-        let data = hex(concat!("016902730300", "050002", "000000014100", "000000074200", "00"));
+        let data = hex(concat!(
+            "016902730300",
+            "050002",
+            "000000014100",
+            "000000074200",
+            "00"
+        ));
         let def = decode_enum(&data).unwrap();
         assert_eq!(def.default, Some(Value::Str(String::new())));
-        assert_eq!(def.entries[0], EnumEntry { key: 1, value: Value::Str("A".into()) });
-        assert_eq!(def.entries[1], EnumEntry { key: 7, value: Value::Str("B".into()) });
+        assert_eq!(
+            def.entries[0],
+            EnumEntry {
+                key: 1,
+                value: Value::Str("A".into())
+            }
+        );
+        assert_eq!(
+            def.entries[1],
+            EnumEntry {
+                key: 7,
+                value: Value::Str("B".into())
+            }
+        );
     }
 
     #[test]
     fn decodes_item_params_after_other_opcodes() {
         // name "X", stackable, cost 5, params { 601 = "Wind Bolt", 596 = 14286869 }
-        let data = hex(concat!("025800", "0b", "0c00000005", "f902", "01000259", "57696e6420426f6c7400", "00000254", "00da0015", "00"));
+        let data = hex(concat!(
+            "025800",
+            "0b",
+            "0c00000005",
+            "f902",
+            "01000259",
+            "57696e6420426f6c7400",
+            "00000254",
+            "00da0015",
+            "00"
+        ));
         let params = decode_obj_params(&data).unwrap();
         assert_eq!(params.get(&601), Some(&Value::Str("Wind Bolt".into())));
         assert_eq!(params.get(&596), Some(&Value::Int(14286869)));

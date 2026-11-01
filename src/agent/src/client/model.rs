@@ -6,7 +6,10 @@ use std::sync::{
 
 use ipc::{
     read::{self, Memory},
-    state::{game_state, model_status, model_target, project_status, ModelReply, ModelRequest, MODEL_FACES, MODEL_HULL},
+    state::{
+        game_state, model_status, model_target, project_status, ModelReply, ModelRequest,
+        MODEL_FACES, MODEL_HULL,
+    },
 };
 
 use super::{
@@ -39,8 +42,16 @@ const BOUNDING_BOX_MARGIN: i32 = 8;
 const ANGLE_STEP: f64 = 0.0030679615;
 
 fn section(image: &[u8], name: &[u8]) -> Option<std::ops::Range<usize>> {
-    let u16_at = |at: usize| image.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let u32_at = |at: usize| image.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let u16_at = |at: usize| {
+        image
+            .get(at..at + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+    };
+    let u32_at = |at: usize| {
+        image
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
     let nt = u32_at(0x3c)? as usize;
     let count = u16_at(nt + 6)? as usize;
     let table = nt + 24 + u16_at(nt + 20)? as usize;
@@ -55,13 +66,34 @@ fn section(image: &[u8], name: &[u8]) -> Option<std::ops::Range<usize>> {
     })
 }
 
-fn animation_slot(image: &[u8], module_base: u64, get_model: u32, animation_height: u32) -> Option<u32> {
-    let (get_model, height) = (module_base + get_model as u64, module_base + animation_height as u64);
+fn animation_slot(
+    image: &[u8],
+    module_base: u64,
+    get_model: u32,
+    animation_height: u32,
+) -> Option<u32> {
+    let (get_model, height) = (
+        module_base + get_model as u64,
+        module_base + animation_height as u64,
+    );
     let rdata = section(image, b".rdata")?;
-    let qwords: Vec<u64> = image.get(rdata)?.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
-    qwords.iter().enumerate().filter(|&(_, &q)| q == get_model).find_map(|(at, _)| {
-        qwords[at..(at + 64).min(qwords.len())].iter().position(|&q| q == height).map(|slot| slot as u32 * 8)
-    })
+    let qwords: Vec<u64> = image
+        .get(rdata)?
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
+        .collect();
+    qwords
+        .iter()
+        .enumerate()
+        .filter(|&(_, &q)| q == get_model)
+        .find_map(|(at, _)| {
+            qwords[at..(at + 64).min(qwords.len())]
+                .iter()
+                .position(|&q| q == height)
+                .map(|slot| slot as u32 * 8)
+        })
 }
 
 pub unsafe fn set_npc_model(
@@ -75,7 +107,14 @@ pub unsafe fn set_npc_model(
 ) {
     let animation_slot = animation_slot(image, module_base, npc.get_model, animation_height);
     println!("[Agent]: Renderable animation height slot: {animation_slot:x?}.\r\n");
-    let _ = RULES.set(Rules { module_base, animation_slot, npc, vertices, faces, orientation });
+    let _ = RULES.set(Rules {
+        module_base,
+        animation_slot,
+        npc,
+        vertices,
+        faces,
+        orientation,
+    });
 }
 
 fn shared() -> Option<Arc<Mapping>> {
@@ -89,11 +128,13 @@ unsafe fn release(control: u64) {
     let vtable = *(control as *const u64);
     let uses = &*((control + 8) as *const AtomicI32);
     if uses.fetch_sub(1, Ordering::AcqRel) == 1 {
-        let destroy: unsafe extern "system" fn(u64) = std::mem::transmute(*((vtable + 8) as *const u64));
+        let destroy: unsafe extern "system" fn(u64) =
+            std::mem::transmute(*((vtable + 8) as *const u64));
         destroy(control);
         let weaks = &*((control + 0xc) as *const AtomicI32);
         if weaks.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let delete: unsafe extern "system" fn(u64) = std::mem::transmute(*((vtable + 16) as *const u64));
+            let delete: unsafe extern "system" fn(u64) =
+                std::mem::transmute(*((vtable + 16) as *const u64));
             delete(control);
         }
     }
@@ -101,7 +142,10 @@ unsafe fn release(control: u64) {
 
 fn sin_cos(orientation: i32) -> (i32, i32) {
     let angle = (orientation & 2047) as f64 * ANGLE_STEP;
-    ((65536.0 * angle.sin()) as i32, (65536.0 * angle.cos()) as i32)
+    (
+        (65536.0 * angle.sin()) as i32,
+        (65536.0 * angle.cos()) as i32,
+    )
 }
 
 fn rotate([x, y, z]: [i32; 3], sin: i32, cos: i32) -> [i32; 3] {
@@ -136,14 +180,22 @@ fn convex_hull(mut points: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
     if points.len() < 3 {
         return points;
     }
-    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| {
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
     let mut hull: Vec<[f32; 2]> = Vec::with_capacity(points.len() * 2);
     let n = points.len();
     for pass in 0..2 {
         let start = hull.len();
         for i in 0..n {
-            let p = if pass == 0 { points[i] } else { points[n - 1 - i] };
-            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+            let p = if pass == 0 {
+                points[i]
+            } else {
+                points[n - 1 - i]
+            };
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
+            {
                 hull.pop();
             }
             hull.push(p);
@@ -165,22 +217,41 @@ fn read_vertices(memory: &OwnMemory, model: u64, layout: &ModelVertices) -> Opti
     if count <= 0 || count as usize > MAX_VERTICES {
         return None;
     }
-    let axis = |offset: u32| memory.ptr(model + offset as u64).filter(|&p| p != 0).and_then(|p| memory.i32s(p, count as usize));
+    let axis = |offset: u32| {
+        memory
+            .ptr(model + offset as u64)
+            .filter(|&p| p != 0)
+            .and_then(|p| memory.i32s(p, count as usize))
+    };
     let (xs, ys, zs) = (axis(layout.x)?, axis(layout.y)?, axis(layout.z)?);
     Some((0..count as usize).map(|i| [xs[i], ys[i], zs[i]]).collect())
 }
 
-fn read_faces(memory: &OwnMemory, model: u64, layout: &ModelFaces, vertex_count: usize) -> Option<Vec<[usize; 3]>> {
+fn read_faces(
+    memory: &OwnMemory,
+    model: u64,
+    layout: &ModelFaces,
+    vertex_count: usize,
+) -> Option<Vec<[usize; 3]>> {
     let count = memory.i32(model + layout.count as u64)?;
     if count <= 0 || count as usize > MAX_FACES {
         return None;
     }
-    let array = |offset: u32| memory.ptr(model + offset as u64).filter(|&p| p != 0).and_then(|p| memory.i32s(p, count as usize));
+    let array = |offset: u32| {
+        memory
+            .ptr(model + offset as u64)
+            .filter(|&p| p != 0)
+            .and_then(|p| memory.i32s(p, count as usize))
+    };
     let (a, b, c) = (array(layout.a)?, array(layout.b)?, array(layout.c)?);
     let colors = array(layout.color);
     Some(
         (0..count as usize)
-            .filter(|&i| colors.as_ref().is_none_or(|colors| colors[i] != HIDDEN_FACE))
+            .filter(|&i| {
+                colors
+                    .as_ref()
+                    .is_none_or(|colors| colors[i] != HIDDEN_FACE)
+            })
             .map(|i| [a[i] as usize, b[i] as usize, c[i] as usize])
             .filter(|f| f.iter().all(|&v| v < vertex_count))
             .collect(),
@@ -206,7 +277,9 @@ struct Projected {
 fn project(scene: &Scene, rules: &Rules, model: u64, at: &Placement) -> Option<Projected> {
     let memory = OwnMemory;
     let vertices = read_vertices(&memory, model, &rules.vertices)?;
-    let bounding_box = memory.u64(model + rules.npc.bounding_box as u64).is_some_and(|v| v as u8 != 0);
+    let bounding_box = memory
+        .u64(model + rules.npc.bounding_box as u64)
+        .is_some_and(|v| v as u8 != 0);
     let (sin, cos) = sin_cos(at.orientation);
     let turned: Vec<[i32; 3]> = vertices.iter().map(|&v| rotate(v, sin, cos)).collect();
     let (x, y, height) = (at.x, at.y, at.height);
@@ -214,18 +287,37 @@ fn project(scene: &Scene, rules: &Rules, model: u64, at: &Placement) -> Option<P
     let (center, extreme) = self::bounding_box(&turned, bounding_box);
     let corners: [Option<[f32; 2]>; 8] = std::array::from_fn(|i| {
         let sign = |bit: i32| if i as i32 & bit == 0 { -1 } else { 1 };
-        scene.project(x + center[0] + sign(1) * extreme[0], y + center[2] + sign(4) * extreme[2], height + center[1] + sign(2) * extreme[1])
+        scene.project(
+            x + center[0] + sign(1) * extreme[0],
+            y + center[2] + sign(4) * extreme[2],
+            height + center[1] + sign(2) * extreme[1],
+        )
     });
-    let corners = corners.iter().all(Option::is_some).then(|| corners.map(|corner| corner.unwrap_or_default()));
+    let corners = corners
+        .iter()
+        .all(Option::is_some)
+        .then(|| corners.map(|corner| corner.unwrap_or_default()));
 
-    let screen: Vec<Option<[f32; 2]>> = turned.iter().map(|v| scene.project(x + v[0], y + v[2], height + v[1])).collect();
+    let screen: Vec<Option<[f32; 2]>> = turned
+        .iter()
+        .map(|v| scene.project(x + v[0], y + v[2], height + v[1]))
+        .collect();
     // box-picked models send their faces too: any point on them is inside the box
     let mut faces = Vec::new();
     for face in read_faces(&memory, model, &rules.faces, vertices.len()).unwrap_or_default() {
-        let (Some(a), Some(b), Some(c)) = (screen[face[0]], screen[face[1]], screen[face[2]]) else { continue };
+        let (Some(a), Some(b), Some(c)) = (screen[face[0]], screen[face[1]], screen[face[2]])
+        else {
+            continue;
+        };
         faces.push([a, b, c]);
     }
-    Some(Projected { bounding_box, corners, points: screen.into_iter().flatten().collect(), faces, vertex_count: vertices.len() })
+    Some(Projected {
+        bounding_box,
+        corners,
+        points: screen.into_iter().flatten().collect(),
+        faces,
+        vertex_count: vertices.len(),
+    })
 }
 
 fn write(reply: &mut ModelReply, models: &[Projected], orientation: i32) {
@@ -237,7 +329,15 @@ fn write(reply: &mut ModelReply, models: &[Projected], orientation: i32) {
         reply.corner_count = 8;
         reply.corners = corners;
     }
-    let hull = thin(convex_hull(models.iter().flat_map(|m| m.points.iter().copied()).collect()), MODEL_HULL);
+    let hull = thin(
+        convex_hull(
+            models
+                .iter()
+                .flat_map(|m| m.points.iter().copied())
+                .collect(),
+        ),
+        MODEL_HULL,
+    );
     reply.hull_count = hull.len() as u32;
     reply.hull[..hull.len()].copy_from_slice(&hull);
     let mut count = 0;
@@ -268,11 +368,23 @@ struct Built {
 unsafe fn build(rules: &Rules, renderable: u64) -> Option<Built> {
     let memory = OwnMemory;
     let vtable = memory.ptr(renderable).filter(|&v| v != 0)?;
-    let bounds = memory.u64(vtable + rules.vertices.bounds_slot as u64).unwrap_or(0);
-    if rules.vertices.bounds.iter().any(|&b| b != 0 && bounds == rules.module_base + b as u64) {
-        return Some(Built { model: renderable, control: 0, lift: 0 });
+    let bounds = memory
+        .u64(vtable + rules.vertices.bounds_slot as u64)
+        .unwrap_or(0);
+    if rules
+        .vertices
+        .bounds
+        .iter()
+        .any(|&b| b != 0 && bounds == rules.module_base + b as u64)
+    {
+        return Some(Built {
+            model: renderable,
+            control: 0,
+            lift: 0,
+        });
     }
-    let get_model: GetModel = std::mem::transmute(memory.ptr(vtable).filter(|&f| f != 0)? as *const ());
+    let get_model: GetModel =
+        std::mem::transmute(memory.ptr(vtable).filter(|&f| f != 0)? as *const ());
     let mut model = [0u64; 2];
     get_model(renderable, &mut model, 0);
     if model[1] == 0 {
@@ -289,19 +401,30 @@ unsafe fn build(rules: &Rules, renderable: u64) -> Option<Built> {
         },
         None => 0,
     };
-    Some(Built { model: model[1], control: model[0], lift })
+    Some(Built {
+        model: model[1],
+        control: model[0],
+        lift,
+    })
 }
 
 fn project_renderables(reply: &mut ModelReply, renderables: &[(u64, Placement)]) -> i32 {
-    let Some(rules) = RULES.get() else { return model_status::NOT_FOUND };
+    let Some(rules) = RULES.get() else {
+        return model_status::NOT_FOUND;
+    };
     let scene = match Scene::current() {
         Ok(scene) => scene,
         Err(status) => return scene_status(status),
     };
     let mut models = Vec::new();
     for &(renderable, at) in renderables {
-        let Some(built) = (unsafe { build(rules, renderable) }) else { continue };
-        let at = Placement { height: at.height - built.lift, ..at };
+        let Some(built) = (unsafe { build(rules, renderable) }) else {
+            continue;
+        };
+        let at = Placement {
+            height: at.height - built.lift,
+            ..at
+        };
         models.extend(project(&scene, rules, built.model, &at));
         unsafe { release(built.control) };
     }
@@ -314,28 +437,56 @@ fn project_renderables(reply: &mut ModelReply, renderables: &[(u64, Placement)])
 
 fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> i32 {
     let memory = OwnMemory;
-    let Some(layout) = LAYOUT.get() else { return model_status::NOT_FOUND };
-    let Some(rules) = RULES.get() else { return model_status::NOT_FOUND };
-    let Some((view, _)) = read::local_player(&memory, layout) else { return model_status::NOT_IN_GAME };
-    let table = if target == model_target::PLAYER { layout.player.players } else { layout.world.npc_table };
+    let Some(layout) = LAYOUT.get() else {
+        return model_status::NOT_FOUND;
+    };
+    let Some(rules) = RULES.get() else {
+        return model_status::NOT_FOUND;
+    };
+    let Some((view, _)) = read::local_player(&memory, layout) else {
+        return model_status::NOT_IN_GAME;
+    };
+    let table = if target == model_target::PLAYER {
+        layout.player.players
+    } else {
+        layout.world.npc_table
+    };
     let Some(actor) = read::table_get(&memory, view + table as u64, index) else {
         return model_status::NO_NPC;
     };
     let local = layout.world.local_x as u64;
-    let (Some(x), Some(y), Some(orientation)) =
-        (memory.i32(actor + local), memory.i32(actor + local + 4), memory.i32(actor + rules.orientation.current as u64))
-    else {
+    let (Some(x), Some(y), Some(orientation)) = (
+        memory.i32(actor + local),
+        memory.i32(actor + local + 4),
+        memory.i32(actor + rules.orientation.current as u64),
+    ) else {
         return model_status::NO_NPC;
     };
     let height = match Scene::current() {
         Ok(scene) => scene.ground(x, y),
         Err(status) => return scene_status(status),
     };
-    project_renderables(reply, &[(actor, Placement { x, y, height, orientation })])
+    project_renderables(
+        reply,
+        &[(
+            actor,
+            Placement {
+                x,
+                y,
+                height,
+                orientation,
+            },
+        )],
+    )
 }
 
 fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
-    match super::scene::loc_renderables(request.loc_kind as u8, request.loc_x, request.loc_y, request.loc_id) {
+    match super::scene::loc_renderables(
+        request.loc_kind as u8,
+        request.loc_x,
+        request.loc_y,
+        request.loc_id,
+    ) {
         Some(renderables) if !renderables.is_empty() => project_renderables(reply, &renderables),
         Some(_) => model_status::NO_MODEL,
         None => model_status::NO_NPC,
@@ -345,7 +496,9 @@ fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
 pub fn on_request() {
     let Some(mapping) = shared() else { return };
     let shared = mapping.shared();
-    let Some((sequence, request)) = shared.read_model_request() else { return };
+    let Some((sequence, request)) = shared.read_model_request() else {
+        return;
+    };
     let memory = OwnMemory;
     shared.write_model_reply_with(|reply| {
         reply.sequence = sequence;
@@ -356,7 +509,11 @@ pub fn on_request() {
             model_status::NOT_FOUND
         } else if on_other_thread() {
             model_status::OTHER_THREAD
-        } else if LAYOUT.get().and_then(|layout| read::current_game_state(&memory, layout)) != Some(game_state::LOGGED_IN) {
+        } else if LAYOUT
+            .get()
+            .and_then(|layout| read::current_game_state(&memory, layout))
+            != Some(game_state::LOGGED_IN)
+        {
             model_status::NOT_IN_GAME
         } else if request.target == model_target::LOC {
             loc_request(reply, &request)
@@ -372,7 +529,14 @@ mod tests {
 
     #[test]
     fn hull_drops_inner_points() {
-        let hull = convex_hull(vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0], [5.0, 5.0], [5.0, 0.0]]);
+        let hull = convex_hull(vec![
+            [0.0, 0.0],
+            [10.0, 0.0],
+            [10.0, 10.0],
+            [0.0, 10.0],
+            [5.0, 5.0],
+            [5.0, 0.0],
+        ]);
         assert_eq!(hull.len(), 4);
         assert!(!hull.contains(&[5.0, 5.0]));
     }

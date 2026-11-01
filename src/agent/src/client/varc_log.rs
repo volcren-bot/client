@@ -10,8 +10,8 @@ use std::{
 };
 
 use ipc::{
-    varc_log::{kind, varc_log_memory_name, Change, Log, LOG_SIZE, TEXT_SIZE},
     read::Memory,
+    varc_log::{kind, varc_log_memory_name, Change, Log, LOG_SIZE, TEXT_SIZE},
 };
 use retour::GenericDetour;
 use windows::{
@@ -19,7 +19,10 @@ use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::{
-            Memory::{CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE},
+            Memory::{
+                CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+                MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+            },
             Threading::GetCurrentProcessId,
         },
     },
@@ -55,7 +58,14 @@ fn open_log() -> bool {
     }
     let name = CString::new(varc_log_memory_name(unsafe { GetCurrentProcessId() })).unwrap();
     unsafe {
-        let Ok(mapping) = CreateFileMappingA(HANDLE::default(), None, PAGE_READWRITE, 0, LOG_SIZE as u32, PCSTR(name.as_ptr() as *const u8)) else {
+        let Ok(mapping) = CreateFileMappingA(
+            HANDLE::default(),
+            None,
+            PAGE_READWRITE,
+            0,
+            LOG_SIZE as u32,
+            PCSTR(name.as_ptr() as *const u8),
+        ) else {
             println!("[Agent]: Cannot create the varc log shared memory.\r\n");
             return false;
         };
@@ -90,7 +100,9 @@ fn log(change: &Change) {
     if log.is_null() {
         return;
     }
-    let time_ms = START.get().map_or(0, |start| start.elapsed().as_millis() as u64);
+    let time_ms = START
+        .get()
+        .map_or(0, |start| start.elapsed().as_millis() as u64);
     unsafe { ipc::varc_log::push(log, time_ms, change) };
 }
 
@@ -105,7 +117,11 @@ fn read_text(variant: u64) -> Option<(Vec<u8>, u32)> {
     if !memory.read(variant + 0x17, &mut room) {
         return None;
     }
-    let (data, length) = if room[0] & 0x80 != 0 { (memory.u64(variant)?, memory.u64(variant + 8)?) } else { (variant, 0x17 - room[0] as u64) };
+    let (data, length) = if room[0] & 0x80 != 0 {
+        (memory.u64(variant)?, memory.u64(variant + 8)?)
+    } else {
+        (variant, 0x17 - room[0] as u64)
+    };
     if length > MAX_TEXT {
         return None;
     }
@@ -123,7 +139,17 @@ unsafe extern "system" fn set_int(varcs: *mut c_void, index: i32, value: i32) {
     detour.call(varcs, index, value);
     if let Some(old) = old.filter(|&old| old != value) {
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            log(&Change { index, kind: kind::INT, old_known: true, old_int: old, new_int: value, old_text: &[], old_length: 0, new_text: &[], new_length: 0 })
+            log(&Change {
+                index,
+                kind: kind::INT,
+                old_known: true,
+                old_int: old,
+                new_int: value,
+                old_text: &[],
+                old_length: 0,
+                new_text: &[],
+                new_length: 0,
+            })
         }));
     }
 }
@@ -133,10 +159,19 @@ unsafe extern "system" fn set_object(varcs: *mut c_void, index: i32, variant: *c
     let detour = SET_OBJECT.get().unwrap();
     if !variant.is_null() {
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let Some((text, length)) = read_text(variant as u64) else { return };
-            let Ok(mut strings) = STRINGS.lock() else { return };
-            let old = strings.get_or_insert_with(HashMap::new).insert(index, (text.clone(), length));
-            if old.as_ref().is_some_and(|(old_text, old_length)| *old_text == text && *old_length == length) {
+            let Some((text, length)) = read_text(variant as u64) else {
+                return;
+            };
+            let Ok(mut strings) = STRINGS.lock() else {
+                return;
+            };
+            let old = strings
+                .get_or_insert_with(HashMap::new)
+                .insert(index, (text.clone(), length));
+            if old
+                .as_ref()
+                .is_some_and(|(old_text, old_length)| *old_text == text && *old_length == length)
+            {
                 return;
             }
             let (old_text, old_length) = old.clone().unzip();
@@ -164,7 +199,10 @@ pub unsafe fn hook(module_base: u64, rule: VarcSetters) {
     let get: GetInt = std::mem::transmute(at(rule.get_int));
     let int: SetInt = std::mem::transmute(at(rule.set_int));
     let object: SetObject = std::mem::transmute(at(rule.set_object));
-    match (GenericDetour::new(int, set_int), GenericDetour::new(object, set_object)) {
+    match (
+        GenericDetour::new(int, set_int),
+        GenericDetour::new(object, set_object),
+    ) {
         (Ok(int), Ok(object)) => {
             let _ = (SET_INT.set((int, get)), SET_OBJECT.set(object));
         }
@@ -175,9 +213,16 @@ pub unsafe fn hook(module_base: u64, rule: VarcSetters) {
             return;
         }
     }
-    match (SET_INT.get().unwrap().0.enable(), SET_OBJECT.get().unwrap().enable()) {
+    match (
+        SET_INT.get().unwrap().0.enable(),
+        SET_OBJECT.get().unwrap().enable(),
+    ) {
         (Ok(()), Ok(())) => println!("[Agent]: Varc log hooked.\r\n"),
-        (int, object) => println!("[Agent]: Failed to enable the varc hooks: {:?} {:?}.\r\n", int.err(), object.err()),
+        (int, object) => println!(
+            "[Agent]: Failed to enable the varc hooks: {:?} {:?}.\r\n",
+            int.err(),
+            object.err()
+        ),
     }
 }
 
@@ -206,7 +251,9 @@ pub unsafe fn unhook() {
         if detour.is_enabled() {
             match detour.disable() {
                 Ok(()) => println!("[Agent]: Varc log unhooked.\r\n"),
-                Err(error) => println!("[Agent]: Failed to disable the varc object hook: {error}.\r\n"),
+                Err(error) => {
+                    println!("[Agent]: Failed to disable the varc object hook: {error}.\r\n")
+                }
             }
         }
     }

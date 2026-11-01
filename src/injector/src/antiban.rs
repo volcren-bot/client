@@ -54,7 +54,12 @@ pub struct Config {
 }
 
 fn timed(minutes: f64, length: f64, randomness: f64, logout_chance: Option<f64>) -> Break {
-    Break { interval: minutes * MINUTE, length: length * MINUTE, randomness: Some(randomness), logout_chance }
+    Break {
+        interval: minutes * MINUTE,
+        length: length * MINUTE,
+        randomness: Some(randomness),
+        logout_chance,
+    }
 }
 
 impl Default for Config {
@@ -68,7 +73,10 @@ impl Default for Config {
                 timed(60.0, 10.0, 0.33, None),
                 timed(250.0, 20.0, 0.33, None),
             ],
-            sleeps: vec![Sleep { randomness: Some(0.1), ..Sleep::default() }],
+            sleeps: vec![Sleep {
+                randomness: Some(0.1),
+                ..Sleep::default()
+            }],
         }
     }
 }
@@ -82,7 +90,11 @@ impl Config {
             _ => Ok(()),
         };
         let positive = |what: &str, value: f64| {
-            if value.is_finite() && value > 0.0 { Ok(()) } else { Err(format!("{what} must be more than 0")) }
+            if value.is_finite() && value > 0.0 {
+                Ok(())
+            } else {
+                Err(format!("{what} must be more than 0"))
+            }
         };
         for (i, b) in self.breaks.iter().enumerate() {
             let at = |what: &str| format!("break {}: {what}", i + 1);
@@ -111,7 +123,12 @@ impl Config {
 /// Seconds since midnight of "HH:MM" or "HH:MM:SS".
 pub fn parse_time(text: &str) -> Option<u32> {
     let mut parts = text.split(':');
-    let mut next = |max: u32| parts.next().and_then(|p| p.parse::<u32>().ok()).filter(|v| *v < max);
+    let mut next = |max: u32| {
+        parts
+            .next()
+            .and_then(|p| p.parse::<u32>().ok())
+            .filter(|v| *v < max)
+    };
     let (h, m) = (next(24)?, next(60)?);
     let s = match parts.next() {
         Some(p) => p.parse::<u32>().ok().filter(|v| *v < 60)?,
@@ -124,7 +141,10 @@ pub fn parse_time(text: &str) -> Option<u32> {
 }
 
 pub fn line(config: &Config) -> String {
-    format!("{PREFIX}{}", serde_json::to_string(config).unwrap_or_default())
+    format!(
+        "{PREFIX}{}",
+        serde_json::to_string(config).unwrap_or_default()
+    )
 }
 
 /// The config of a `PREFIX` line, without the prefix; none if it isn't a valid config.
@@ -137,7 +157,9 @@ pub fn parse(payload: &str) -> Option<Config> {
 static CURRENT: std::sync::Mutex<(u64, Option<Config>)> = std::sync::Mutex::new((0, None));
 
 fn lock() -> std::sync::MutexGuard<'static, (u64, Option<Config>)> {
-    CURRENT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    CURRENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Makes `config` the one the script plans from; the version goes up so the lib notices.
@@ -179,16 +201,26 @@ pub fn skip_line(kind: &str, index: u32) -> String {
 pub fn parse_skip(payload: &str) -> Option<Skip> {
     let (kind, index) = payload.trim().split_once(' ')?;
     matches!(kind, "break" | "sleep").then_some(())?;
-    Some(Skip { kind: kind.to_owned(), index: index.trim().parse().ok()? })
+    Some(Skip {
+        kind: kind.to_owned(),
+        index: index.trim().parse().ok()?,
+    })
 }
 
 pub fn push_skip(skip: Skip) {
-    SKIPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(skip);
+    SKIPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(skip);
 }
 
 /// The skips asked for since the last call, oldest first.
 pub fn take_skips() -> Vec<Skip> {
-    std::mem::take(&mut *SKIPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    std::mem::take(
+        &mut *SKIPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
 }
 
 #[cfg(test)]
@@ -199,7 +231,10 @@ mod tests {
     fn the_default_is_valid_and_survives_a_line() {
         let config = Config::default();
         assert!(config.validate().is_ok());
-        assert_eq!(parse(line(&config).strip_prefix(PREFIX).unwrap()), Some(config));
+        assert_eq!(
+            parse(line(&config).strip_prefix(PREFIX).unwrap()),
+            Some(config)
+        );
     }
 
     #[test]
@@ -213,7 +248,9 @@ mod tests {
     #[test]
     fn bad_configs_are_refused() {
         assert!(parse("{\"breaks\":[{\"interval\":0,\"length\":1}]}").is_none());
-        assert!(parse("{\"breaks\":[{\"interval\":1,\"length\":1,\"logout_chance\":2}]}").is_none());
+        assert!(
+            parse("{\"breaks\":[{\"interval\":1,\"length\":1,\"logout_chance\":2}]}").is_none()
+        );
         assert!(parse("{\"sleeps\":[{\"time\":\"25:00\"}]}").is_none());
         assert!(parse("not json").is_none());
         assert!(parse("{\"breaks_enabled\":false}").is_some());
@@ -222,13 +259,22 @@ mod tests {
     #[test]
     fn skips_round_trip_and_queue_in_order() {
         let line = skip_line("sleep", 1);
-        assert_eq!(parse_skip(line.strip_prefix(SKIP_PREFIX).unwrap()), Some(Skip { kind: "sleep".into(), index: 1 }));
+        assert_eq!(
+            parse_skip(line.strip_prefix(SKIP_PREFIX).unwrap()),
+            Some(Skip {
+                kind: "sleep".into(),
+                index: 1
+            })
+        );
         assert!(parse_skip("nap 1").is_none());
         assert!(parse_skip("break x").is_none());
         assert!(parse_skip("break").is_none());
         push_skip(parse_skip("break 0").unwrap());
         push_skip(parse_skip("break 2").unwrap());
-        assert_eq!(take_skips().iter().map(|s| s.index).collect::<Vec<_>>(), [0, 2]);
+        assert_eq!(
+            take_skips().iter().map(|s| s.index).collect::<Vec<_>>(),
+            [0, 2]
+        );
         assert!(take_skips().is_empty());
     }
 

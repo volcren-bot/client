@@ -7,8 +7,8 @@ use std::{
 
 use gl::{
     types::{
-        GLbitfield, GLchar, GLenum, GLfloat, GLint, GLintptr, GLsizei, GLsizeiptr, GLsync,
-        GLuint, GLuint64, GLvoid,
+        GLbitfield, GLchar, GLenum, GLfloat, GLint, GLintptr, GLsizei, GLsizeiptr, GLsync, GLuint,
+        GLuint64, GLvoid,
     },
     ALREADY_SIGNALED, BGRA, BLEND, BLEND_DST, BLEND_SRC, CLAMP_TO_EDGE, CONDITION_SATISFIED,
     FRAGMENT_SHADER, LINEAR, MAP_COHERENT_BIT, MAP_PERSISTENT_BIT, MAP_READ_BIT,
@@ -212,7 +212,8 @@ impl FrameBuffers {
         for (pbo, mapped) in self.pbos.iter().zip(self.mapped.iter_mut()) {
             gl_bind_buffer(PIXEL_PACK_BUFFER, *pbo);
             gl_buffer_storage(PIXEL_PACK_BUFFER, size as GLsizeiptr, null(), flags);
-            *mapped = gl_map_buffer_range(PIXEL_PACK_BUFFER, 0, size as GLsizeiptr, flags) as *const u8;
+            *mapped =
+                gl_map_buffer_range(PIXEL_PACK_BUFFER, 0, size as GLsizeiptr, flags) as *const u8;
             if mapped.is_null() {
                 return false;
             }
@@ -278,7 +279,15 @@ pub fn read_frame(offset_x: i32, offset_y: i32, width: i32, height: i32, size: i
 
         // Read pixels into the read_index PBO
         gl_bind_buffer(PIXEL_PACK_BUFFER, buffers.pbos[read_index]);
-        glReadPixels(offset_x, offset_y, width, height, BGRA, UNSIGNED_BYTE, null_mut());
+        glReadPixels(
+            offset_x,
+            offset_y,
+            width,
+            height,
+            BGRA,
+            UNSIGNED_BYTE,
+            null_mut(),
+        );
         buffers.fences[read_index] = gl_fence_sync(SYNC_GPU_COMMANDS_COMPLETE, 0);
 
         // Copy out the previous frame's PBO once its read has landed

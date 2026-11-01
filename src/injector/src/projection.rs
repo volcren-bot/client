@@ -1,9 +1,8 @@
-
 use std::collections::HashMap;
 
 use ipc::{
     read::{self, Memory},
-    state::{part, Layout},
+    state::{Layout, part},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,7 +19,9 @@ impl Via {
             None | Some("auto") => Ok(Self::Auto),
             Some("local") => Ok(Self::Local),
             Some("client") => Ok(Self::Client),
-            Some(other) => Err(format!("unknown projection {other:?} (auto, local or client)")),
+            Some(other) => Err(format!(
+                "unknown projection {other:?} (auto, local or client)"
+            )),
         }
     }
 }
@@ -52,13 +53,19 @@ pub enum Failure {
 }
 
 fn truncate(value: f32) -> i32 {
-    if value.is_nan() || value >= 2_147_483_648.0 || value < -2_147_483_648.0 { i32::MIN } else { value as i32 }
+    if value.is_nan() || value >= 2_147_483_648.0 || value < -2_147_483_648.0 {
+        i32::MIN
+    } else {
+        value as i32
+    }
 }
 
 fn i32s<const N: usize>(memory: &impl Memory, address: u64) -> Option<[i32; N]> {
     let mut bytes = [0u8; 16];
     let bytes = bytes.get_mut(..N * 4)?;
-    memory.read(address, bytes).then(|| core::array::from_fn(|i| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())))
+    memory.read(address, bytes).then(|| {
+        core::array::from_fn(|i| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
+    })
 }
 
 const WINDOW_SIZE: usize = 512;
@@ -78,7 +85,14 @@ impl<'a, M: Memory> Window<'a, M> {
     fn new(memory: &'a M, base: u64, fields: &[(u64, u64)]) -> Self {
         let low = fields.iter().map(|f| f.0).min().unwrap_or(0);
         let high = fields.iter().map(|f| f.0 + f.1).max().unwrap_or(0);
-        let mut window = Self { memory, base, low, high, bytes: [0; WINDOW_SIZE], filled: false };
+        let mut window = Self {
+            memory,
+            base,
+            low,
+            high,
+            bytes: [0; WINDOW_SIZE],
+            filled: false,
+        };
         if high > low && ((high - low) as usize) <= WINDOW_SIZE {
             window.filled = memory.read(base + low, &mut window.bytes[..(high - low) as usize]);
         }
@@ -92,7 +106,9 @@ impl<'a, M: Memory> Window<'a, M> {
             return self.bytes[at..at + N].try_into().ok();
         }
         let mut bytes = [0; N];
-        self.memory.read(self.base + offset, &mut bytes).then_some(bytes)
+        self.memory
+            .read(self.base + offset, &mut bytes)
+            .then_some(bytes)
     }
 
     fn i32(&self, offset: u64) -> Option<i32> {
@@ -136,25 +152,58 @@ impl Camera {
     }
 
     // `read` with the scene's trig bytes already in hand.
-    fn read_with(memory: &impl Memory, layout: &Layout, client: u64, trig: [u8; 16]) -> Option<Self> {
+    fn read_with(
+        memory: &impl Memory,
+        layout: &Layout,
+        client: u64,
+        trig: [u8; 16],
+    ) -> Option<Self> {
         let p = &layout.projection;
         let canvas = memory.ptr(client + layout.interfaces.canvas as u64)?;
         let view = memory.ptr(canvas + p.view_holder as u64 + p.view as u64)?;
-        let camera = Window::new(memory, client, &[(layout.camera.position as u64, 12), (p.zoom as u64, 4)]);
-        let view_fields = Window::new(memory, view, &[(p.view_center as u64, 8), (p.view_offset_x as u64, 4), (p.view_offset_y as u64, 4)]);
-        let canvas_fields = Window::new(memory, canvas, &[(p.canvas_size as u64, 8), (p.ui_size as u64, 8), (layout.interfaces.ui_scale as u64, 4)]);
+        let camera = Window::new(
+            memory,
+            client,
+            &[(layout.camera.position as u64, 12), (p.zoom as u64, 4)],
+        );
+        let view_fields = Window::new(
+            memory,
+            view,
+            &[
+                (p.view_center as u64, 8),
+                (p.view_offset_x as u64, 4),
+                (p.view_offset_y as u64, 4),
+            ],
+        );
+        let canvas_fields = Window::new(
+            memory,
+            canvas,
+            &[
+                (p.canvas_size as u64, 8),
+                (p.ui_size as u64, 8),
+                (layout.interfaces.ui_scale as u64, 4),
+            ],
+        );
         let canvas_size = canvas_fields.i32s::<2>(p.canvas_size as u64)?;
         let ui = canvas_fields.i32s::<2>(p.ui_size as u64)?;
         Some(Self {
             position: camera.i32s(layout.camera.position as u64)?,
-            trig: core::array::from_fn(|i| f32::from_le_bytes(trig[i * 4..i * 4 + 4].try_into().unwrap())),
+            trig: core::array::from_fn(|i| {
+                f32::from_le_bytes(trig[i * 4..i * 4 + 4].try_into().unwrap())
+            }),
             zoom: camera.i32(p.zoom as u64)?,
             center: view_fields.i32s(p.view_center as u64)?,
-            offset: [view_fields.i32(p.view_offset_x as u64)?, view_fields.i32(p.view_offset_y as u64)?],
+            offset: [
+                view_fields.i32(p.view_offset_x as u64)?,
+                view_fields.i32(p.view_offset_y as u64)?,
+            ],
             canvas: canvas_size,
             ui,
             scale: canvas_fields.f32(layout.interfaces.ui_scale as u64)?,
-            ratio: [ui[0] as f32 / canvas_size[0] as f32, ui[1] as f32 / canvas_size[1] as f32],
+            ratio: [
+                ui[0] as f32 / canvas_size[0] as f32,
+                ui[1] as f32 / canvas_size[1] as f32,
+            ],
         })
     }
 
@@ -179,14 +228,26 @@ impl Camera {
         let up = cos_pitch * dz - sin_pitch * depth;
         let distance = sin_pitch * dz + cos_pitch * depth;
         let zoom = self.zoom as f32;
-        let sx = truncate(zoom * across / distance).wrapping_add(self.offset[0]).wrapping_add(self.center[0]);
-        let sy = truncate(zoom * up / distance).wrapping_add(self.offset[1]).wrapping_add(self.center[1]);
-        ([self.canvas_units(sx, 0), self.canvas_units(sy, 1)], distance)
+        let sx = truncate(zoom * across / distance)
+            .wrapping_add(self.offset[0])
+            .wrapping_add(self.center[0]);
+        let sy = truncate(zoom * up / distance)
+            .wrapping_add(self.offset[1])
+            .wrapping_add(self.center[1]);
+        (
+            [self.canvas_units(sx, 0), self.canvas_units(sy, 1)],
+            distance,
+        )
     }
 
     fn canvas_units(&self, value: i32, axis: usize) -> f32 {
         let units = self.ratio[axis] * value as f32;
-        truncate(if units < 0.0 { units - 0.5 } else { units + 0.5 }) as f32 * self.scale
+        truncate(if units < 0.0 {
+            units - 0.5
+        } else {
+            units + 0.5
+        }) as f32
+            * self.scale
     }
 }
 
@@ -204,7 +265,11 @@ pub fn scene(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Scene
 }
 
 // The scene's key and its trig bytes, which sit next to the heights pointer and so share its read.
-fn scene_and_trig(memory: &impl Memory, layout: &Layout, client: u64) -> Option<(SceneKey, [u8; 16])> {
+fn scene_and_trig(
+    memory: &impl Memory,
+    layout: &Layout,
+    client: u64,
+) -> Option<(SceneKey, [u8; 16])> {
     let p = &layout.projection;
     let world_view = memory.ptr(client + p.top_world_view as u64)?;
     let has_player = layout.has(part::PLAYER);
@@ -213,12 +278,38 @@ fn scene_and_trig(memory: &impl Memory, layout: &Layout, client: u64) -> Option<
         fields.push((layout.player.base_x as u64, 8));
     }
     let view = Window::new(memory, world_view, &fields);
-    let scene = view.get(p.scene as u64).map(u64::from_le_bytes).filter(|&p| p != 0)?;
-    let base = if has_player { view.i32s(layout.player.base_x as u64)? } else { [0; 2] };
+    let scene = view
+        .get(p.scene as u64)
+        .map(u64::from_le_bytes)
+        .filter(|&p| p != 0)?;
+    let base = if has_player {
+        view.i32s(layout.player.base_x as u64)?
+    } else {
+        [0; 2]
+    };
     let plane = view.i32(p.plane as u64)?;
-    let fields = Window::new(memory, scene, &[(p.heights as u64, 8), (p.tiles as u64, 8), (p.trig as u64, 16)]);
-    let pointer = |offset: u64| fields.get(offset).map(u64::from_le_bytes).filter(|&p| p != 0);
-    let key = SceneKey { scene, plane, base, heights: pointer(p.heights as u64)?, tiles: pointer(p.tiles as u64)? };
+    let fields = Window::new(
+        memory,
+        scene,
+        &[
+            (p.heights as u64, 8),
+            (p.tiles as u64, 8),
+            (p.trig as u64, 16),
+        ],
+    );
+    let pointer = |offset: u64| {
+        fields
+            .get(offset)
+            .map(u64::from_le_bytes)
+            .filter(|&p| p != 0)
+    };
+    let key = SceneKey {
+        scene,
+        plane,
+        base,
+        heights: pointer(p.heights as u64)?,
+        tiles: pointer(p.tiles as u64)?,
+    };
     Some((key, fields.get(p.trig as u64)?))
 }
 
@@ -235,7 +326,10 @@ pub struct Terrain {
 impl Terrain {
     pub fn read(memory: &impl Memory, layout: &Layout, key: SceneKey) -> Option<Self> {
         let p = &layout.projection;
-        let [size_x, size_y] = [memory.i32(key.scene + p.size_x as u64)?, memory.i32(key.scene + p.size_y as u64)?];
+        let [size_x, size_y] = [
+            memory.i32(key.scene + p.size_x as u64)?,
+            memory.i32(key.scene + p.size_y as u64)?,
+        ];
         if !(1..=1024).contains(&size_x) || !(1..=1024).contains(&size_y) {
             return None;
         }
@@ -249,10 +343,26 @@ impl Terrain {
             return None;
         }
         let tiles = entries
-            .as_chunks::<TILE_ENTRY_SIZE>().0.iter()
-            .map(|e| u64::from_le_bytes(e[TILE_ENTRY_OBJECT..TILE_ENTRY_OBJECT + 8].try_into().unwrap()))
+            .as_chunks::<TILE_ENTRY_SIZE>()
+            .0
+            .iter()
+            .map(|e| {
+                u64::from_le_bytes(
+                    e[TILE_ENTRY_OBJECT..TILE_ENTRY_OBJECT + 8]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
             .collect();
-        Some(Self { key, size: [size_x, size_y], heights, settings, tiles, meshes: vec![None; tile_count], decorations: HashMap::new() })
+        Some(Self {
+            key,
+            size: [size_x, size_y],
+            heights,
+            settings,
+            tiles,
+            meshes: vec![None; tile_count],
+            decorations: HashMap::new(),
+        })
     }
 
     pub fn key(&self) -> SceneKey {
@@ -269,30 +379,55 @@ impl Terrain {
         self.size
     }
 
-    pub fn set_decorations(&mut self, decorations: impl IntoIterator<Item = ((i32, i32, i32), i32)>) {
-        self.decorations = decorations.into_iter().filter(|&(_, height)| height != 0).collect();
+    pub fn set_decorations(
+        &mut self,
+        decorations: impl IntoIterator<Item = ((i32, i32, i32), i32)>,
+    ) {
+        self.decorations = decorations
+            .into_iter()
+            .filter(|&(_, height)| height != 0)
+            .collect();
     }
 
     fn tile_index(&self, plane: i32, x: i32, y: i32) -> Option<usize> {
         let [size_x, size_y] = self.size;
-        ((0..PLANES).contains(&plane) && (0..size_x).contains(&x) && (0..size_y).contains(&y)).then(|| ((plane * size_x + x) * size_y + y) as usize)
+        ((0..PLANES).contains(&plane) && (0..size_x).contains(&x) && (0..size_y).contains(&y))
+            .then(|| ((plane * size_x + x) * size_y + y) as usize)
     }
 
     fn height(&self, plane: i32, x: i32, y: i32) -> i32 {
         let [size_x, size_y] = self.size;
-        let index = (plane.wrapping_mul(size_x + 1).wrapping_add(x)).wrapping_mul(size_y + 1).wrapping_add(y);
-        usize::try_from(index).ok().and_then(|i| self.heights.get(i)).copied().unwrap_or(0)
+        let index = (plane.wrapping_mul(size_x + 1).wrapping_add(x))
+            .wrapping_mul(size_y + 1)
+            .wrapping_add(y);
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.heights.get(i))
+            .copied()
+            .unwrap_or(0)
     }
 
     // The tile's heights come from its own corners, which an edge point shares with the tile beyond: `ax`/`ay` can be 0 or TILE.
     fn bilinear(&self, x: i32, y: i32, plane: i32, (tx, ty): (i32, i32)) -> i32 {
-        let bridge = plane < 3 && self.tile_index(1, tx, ty).is_some_and(|i| self.settings[i] & BRIDGE != 0);
+        let bridge = plane < 3
+            && self
+                .tile_index(1, tx, ty)
+                .is_some_and(|i| self.settings[i] & BRIDGE != 0);
         let plane = if bridge { plane + 1 } else { plane };
         let (ax, ay) = (x - (tx << TILE_SHIFT), y - (ty << TILE_SHIFT));
         let h = |dx: i32, dy: i32| self.height(plane, tx + dx, ty + dy);
-        let north = h(0, 1).wrapping_mul(TILE - ax).wrapping_add(h(1, 1).wrapping_mul(ax)) >> TILE_SHIFT;
-        let south = h(1, 0).wrapping_mul(ax).wrapping_add(h(0, 0).wrapping_mul(TILE - ax)) >> TILE_SHIFT;
-        south.wrapping_mul(TILE - ay).wrapping_add(north.wrapping_mul(ay)) >> TILE_SHIFT
+        let north = h(0, 1)
+            .wrapping_mul(TILE - ax)
+            .wrapping_add(h(1, 1).wrapping_mul(ax))
+            >> TILE_SHIFT;
+        let south = h(1, 0)
+            .wrapping_mul(ax)
+            .wrapping_add(h(0, 0).wrapping_mul(TILE - ax))
+            >> TILE_SHIFT;
+        south
+            .wrapping_mul(TILE - ay)
+            .wrapping_add(north.wrapping_mul(ay))
+            >> TILE_SHIFT
     }
 
     fn mesh(&mut self, memory: &impl Memory, layout: &Layout, index: usize) -> Option<&[Triangle]> {
@@ -305,7 +440,10 @@ impl Terrain {
     fn read_mesh(&self, memory: &impl Memory, layout: &Layout, tile: u64) -> Option<Vec<Triangle>> {
         let p = &layout.projection;
         if let Some(model) = memory.ptr(tile + p.tile_model as u64) {
-            let [begin, end] = [memory.ptr(model + p.model_triangles as u64)?, memory.ptr(model + p.model_triangles as u64 + 8)?];
+            let [begin, end] = [
+                memory.ptr(model + p.model_triangles as u64)?,
+                memory.ptr(model + p.model_triangles as u64 + 8)?,
+            ];
             let count = (end.checked_sub(begin)? as usize / VERTEX_SIZE).min(MAX_TRIANGLES);
             let indices = memory.i32s(begin, count * 3)?;
             let vertex_count = usize::try_from(*indices.iter().max()?).ok()? + 1;
@@ -313,15 +451,39 @@ impl Terrain {
             if vertex_count > MAX_TRIANGLES * 3 {
                 return None;
             }
-            let vertices = memory.i32s(memory.ptr(model + p.model_vertices as u64)?, vertex_count * 3)?;
-            let vertex = |i: i32| -> Option<Vertex> { vertices.get(i as usize * 3..i as usize * 3 + 3)?.try_into().ok() };
-            return indices.as_chunks::<3>().0.iter().map(|t| Some([vertex(t[0])?, vertex(t[1])?, vertex(t[2])?])).collect();
+            let vertices = memory.i32s(
+                memory.ptr(model + p.model_vertices as u64)?,
+                vertex_count * 3,
+            )?;
+            let vertex = |i: i32| -> Option<Vertex> {
+                vertices
+                    .get(i as usize * 3..i as usize * 3 + 3)?
+                    .try_into()
+                    .ok()
+            };
+            return indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|t| Some([vertex(t[0])?, vertex(t[1])?, vertex(t[2])?]))
+                .collect();
         }
         memory.ptr(tile + p.tile_paint as u64)?;
         // paint follows the heightmap of the tile's own plane, which differs under bridges
         let [x, y, plane] = i32s(memory, tile + p.tile_x as u64)?;
-        let corners = PAINT_CORNERS.map(|[dx, dy]| [(x + dx) << TILE_SHIFT, self.height(plane, x + dx, y + dy), (y + dy) << TILE_SHIFT]);
-        Some(PAINT_TRIANGLES.iter().map(|t| t.map(|i| corners[i])).collect())
+        let corners = PAINT_CORNERS.map(|[dx, dy]| {
+            [
+                (x + dx) << TILE_SHIFT,
+                self.height(plane, x + dx, y + dy),
+                (y + dy) << TILE_SHIFT,
+            ]
+        });
+        Some(
+            PAINT_TRIANGLES
+                .iter()
+                .map(|t| t.map(|i| corners[i]))
+                .collect(),
+        )
     }
 
     // The heightmap's height under (x, y), without tile models or decorations: what the client flies projectiles over.
@@ -332,15 +494,34 @@ impl Terrain {
     // The heightmap under (x, y), 0 outside the scene.
     pub fn flat_ground(&self, x: i32, y: i32, plane: i32) -> i32 {
         let [size_x, size_y] = self.size;
-        if (0..size_x).contains(&(x >> TILE_SHIFT)) && (0..size_y).contains(&(y >> TILE_SHIFT)) { self.heightmap(x, y, plane) } else { 0 }
+        if (0..size_x).contains(&(x >> TILE_SHIFT)) && (0..size_y).contains(&(y >> TILE_SHIFT)) {
+            self.heightmap(x, y, plane)
+        } else {
+            0
+        }
     }
 
-    pub fn ground(&mut self, memory: &impl Memory, layout: &Layout, x: i32, y: i32, plane: i32) -> i32 {
+    pub fn ground(
+        &mut self,
+        memory: &impl Memory,
+        layout: &Layout,
+        x: i32,
+        y: i32,
+        plane: i32,
+    ) -> i32 {
         self.ground_on(memory, layout, x, y, plane, None)
     }
 
     // The ground under (x, y), from tile `on` if given, else the tile the point falls in (an edge falls in the tile beyond).
-    pub fn ground_on(&mut self, memory: &impl Memory, layout: &Layout, x: i32, y: i32, plane: i32, on: Option<[i32; 2]>) -> i32 {
+    pub fn ground_on(
+        &mut self,
+        memory: &impl Memory,
+        layout: &Layout,
+        x: i32,
+        y: i32,
+        plane: i32,
+        on: Option<[i32; 2]>,
+    ) -> i32 {
         let [size_x, size_y] = self.size;
         let (tx, ty) = match on {
             Some([tx, ty]) if (0..size_x).contains(&tx) && (0..size_y).contains(&ty) => (tx, ty),
@@ -349,10 +530,18 @@ impl Terrain {
         if tx < 0 || ty < 0 || tx > size_x - 1 || ty > size_y - 1 {
             return 0;
         }
-        let Some(index) = self.tile_index(plane, tx, ty).filter(|&i| self.tiles[i] != 0) else {
+        let Some(index) = self
+            .tile_index(plane, tx, ty)
+            .filter(|&i| self.tiles[i] != 0)
+        else {
             return self.bilinear(x, y, plane, (tx, ty));
         };
-        let on_mesh = self.mesh(memory, layout, index).and_then(|triangles| triangles.iter().find(|t| inside(x, y, t)).map(|t| barycentric(x, y, t)));
+        let on_mesh = self.mesh(memory, layout, index).and_then(|triangles| {
+            triangles
+                .iter()
+                .find(|t| inside(x, y, t))
+                .map(|t| barycentric(x, y, t))
+        });
         let height = on_mesh.unwrap_or_else(|| self.bilinear(x, y, plane, (tx, ty)));
         height.wrapping_sub(self.decorations.get(&(plane, tx, ty)).copied().unwrap_or(0))
     }
@@ -360,10 +549,18 @@ impl Terrain {
 
 fn inside(px: i32, py: i32, [a, b, c]: &Triangle) -> bool {
     let (xs, ys) = ([a[0], b[0], c[0]], [a[2], b[2], c[2]]);
-    if ys.iter().all(|&y| py < y) || ys.iter().all(|&y| py > y) || xs.iter().all(|&x| px < x) || xs.iter().all(|&x| px > x) {
+    if ys.iter().all(|&y| py < y)
+        || ys.iter().all(|&y| py > y)
+        || xs.iter().all(|&x| px < x)
+        || xs.iter().all(|&x| px > x)
+    {
         return false;
     }
-    let side = |p: &Vertex, q: &Vertex| (py.wrapping_sub(p[2])).wrapping_mul(q[0].wrapping_sub(p[0])).wrapping_sub((q[2].wrapping_sub(p[2])).wrapping_mul(px.wrapping_sub(p[0])));
+    let side = |p: &Vertex, q: &Vertex| {
+        (py.wrapping_sub(p[2]))
+            .wrapping_mul(q[0].wrapping_sub(p[0]))
+            .wrapping_sub((q[2].wrapping_sub(p[2])).wrapping_mul(px.wrapping_sub(p[0])))
+    };
     let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
     match d1.signum() {
         0 if d2 == 0 => true,
@@ -377,7 +574,8 @@ fn inside(px: i32, py: i32, [a, b, c]: &Triangle) -> bool {
 fn barycentric(px: i32, py: i32, [a, b, c]: &Triangle) -> i32 {
     let [(ax, ah, ay), (bx, bh, by), (cx, ch, cy)] = [a, b, c].map(|v| (v[0], v[1], v[2]));
     let (dx, dy) = (px.wrapping_sub(cx), py.wrapping_sub(cy));
-    let den = ((ay - cy).wrapping_mul(cx - bx)).wrapping_add((by - cy).wrapping_mul(ax - cx)) as f32;
+    let den =
+        ((ay - cy).wrapping_mul(cx - bx)).wrapping_add((by - cy).wrapping_mul(ax - cx)) as f32;
     let wa = ((by - cy).wrapping_mul(dx)).wrapping_add(dy.wrapping_mul(cx - bx)) as f32 / den;
     let wb = ((cy - ay).wrapping_mul(dx)).wrapping_add(dy.wrapping_mul(ax - cx)) as f32 / den;
     let wc = 1.0 - wa - wb;
@@ -402,7 +600,13 @@ pub struct Point {
 
 impl Point {
     pub const fn new(x: i32, y: i32, z: i32) -> Self {
-        Self { x, y, z, tile: None, heightmap: false }
+        Self {
+            x,
+            y,
+            z,
+            tile: None,
+            heightmap: false,
+        }
     }
 }
 
@@ -414,7 +618,9 @@ pub fn ensure_terrain(
     decorations: impl FnOnce() -> Vec<Decoration>,
 ) -> Result<SceneKey, Failure> {
     if !layout.has(NEEDS) {
-        return Err(Failure::Unavailable("agent didn't find what local projection reads".into()));
+        return Err(Failure::Unavailable(
+            "agent didn't find what local projection reads".into(),
+        ));
     }
     let client = read::client(memory, layout).ok_or_else(|| unavailable("client"))?;
     let (key, _) = scene_terrain(memory, layout, client, terrain, decorations)?;
@@ -454,26 +660,51 @@ pub fn project(
     decorations: impl FnOnce() -> Vec<Decoration>,
 ) -> Result<Vec<[f32; 2]>, Failure> {
     if !layout.has(NEEDS) {
-        return Err(Failure::Unavailable("agent didn't find what local projection reads".into()));
+        return Err(Failure::Unavailable(
+            "agent didn't find what local projection reads".into(),
+        ));
     }
     let client = read::client(memory, layout).ok_or_else(|| unavailable("client"))?;
     let (key, trig) = scene_terrain(memory, layout, client, terrain, decorations)?;
-    let mut camera = Camera::read_with(memory, layout, client, trig).ok_or_else(|| unavailable("camera"))?;
+    let mut camera =
+        Camera::read_with(memory, layout, client, trig).ok_or_else(|| unavailable("camera"))?;
     let terrain = terrain.as_mut().unwrap();
     if let Some([dx, dy, plane]) = shift {
-        let [fx, _, fy] = i32s::<3>(memory, client + layout.camera.focal as u64).ok_or_else(|| unavailable("camera's focal point"))?;
+        let [fx, _, fy] = i32s::<3>(memory, client + layout.camera.focal as u64)
+            .ok_or_else(|| unavailable("camera's focal point"))?;
         let from = terrain.ground_on(memory, layout, fx, fy, key.plane, None);
-        let to = terrain.ground_on(memory, layout, fx.wrapping_add(dx), fy.wrapping_add(dy), if plane < 0 { key.plane } else { plane }, None);
+        let to = terrain.ground_on(
+            memory,
+            layout,
+            fx.wrapping_add(dx),
+            fy.wrapping_add(dy),
+            if plane < 0 { key.plane } else { plane },
+            None,
+        );
         let [x, z, y] = camera.position;
-        camera.position = [x.wrapping_add(dx), z.wrapping_add(to.wrapping_sub(from)), y.wrapping_add(dy)];
+        camera.position = [
+            x.wrapping_add(dx),
+            z.wrapping_add(to.wrapping_sub(from)),
+            y.wrapping_add(dy),
+        ];
     }
     Ok(points
         .iter()
         .map(|p| {
-            let ground = if p.heightmap { terrain.flat_ground(p.x, p.y, key.plane) } else { terrain.ground_on(memory, layout, p.x, p.y, key.plane, p.tile) };
+            let ground = if p.heightmap {
+                terrain.flat_ground(p.x, p.y, key.plane)
+            } else {
+                terrain.ground_on(memory, layout, p.x, p.y, key.plane, p.tile)
+            };
             let height = ground.wrapping_add(p.z);
             // a clipped point has no position, which no on-screen test passes
-            if clip { camera.project_near(p.x, p.y, height).unwrap_or([f32::NAN; 2]) } else { camera.project(p.x, p.y, height) }
+            if clip {
+                camera
+                    .project_near(p.x, p.y, height)
+                    .unwrap_or([f32::NAN; 2])
+            } else {
+                camera.project(p.x, p.y, height)
+            }
         })
         .collect())
 }
@@ -496,7 +727,13 @@ mod tests {
     const SIZE: i32 = 4;
 
     fn layout() -> Layout {
-        let mut layout = Layout { found: NEEDS | part::GAME_STATE, module_base: 0x10, client: 0x20, game_state: 0x8, ..Layout::default() };
+        let mut layout = Layout {
+            found: NEEDS | part::GAME_STATE,
+            module_base: 0x10,
+            client: 0x20,
+            game_state: 0x8,
+            ..Layout::default()
+        };
         layout.camera.position = 0x100;
         layout.interfaces.canvas = 0x200;
         layout.interfaces.ui_scale = 0x68;
@@ -588,7 +825,9 @@ mod tests {
 
     fn ground(m: &Fake, layout: &Layout, x: i32, y: i32) -> i32 {
         let key = scene(m, layout, CLIENT).unwrap();
-        Terrain::read(m, layout, key).unwrap().ground(m, layout, x, y, 0)
+        Terrain::read(m, layout, key)
+            .unwrap()
+            .ground(m, layout, x, y, 0)
     }
 
     #[test]
@@ -597,7 +836,10 @@ mod tests {
         // tile (1, 2): corners -12 (SW), -22 (SE), -13 (NW), -23 (NE)
         assert_eq!(ground(&m, &layout, 128, 256), -12);
         assert_eq!(ground(&m, &layout, 192, 256), -17);
-        assert_eq!(ground(&m, &layout, 192, 320), (((-17 * 64) + (-18 * 64)) >> 7));
+        assert_eq!(
+            ground(&m, &layout, 192, 320),
+            (((-17 * 64) + (-18 * 64)) >> 7)
+        );
         // outside the scene
         assert_eq!(ground(&m, &layout, -1, 0), 0);
         assert_eq!(ground(&m, &layout, SIZE * 128, 0), 0);
@@ -621,7 +863,10 @@ mod tests {
         // the edge x = 256, halfway up: the bridge's ground by default, which is a different plane
         assert_ne!(terrain.ground(&m, &layout, 256, 320, 0), -23);
         // named as tile (1, 2)'s, it is interpolated from that tile's own corners: -22 and -23
-        assert_eq!(terrain.ground_on(&m, &layout, 256, 320, 0, Some([1, 2])), -23);
+        assert_eq!(
+            terrain.ground_on(&m, &layout, 256, 320, 0, Some([1, 2])),
+            -23
+        );
     }
 
     #[test]
@@ -641,7 +886,12 @@ mod tests {
         let p = layout.projection;
         put_tile(&mut m, &layout, 0, 0, 0, TILE);
         m.put_u64(TILE + p.tile_model as u64, MODEL);
-        let vertices: [Vertex; 4] = [[0, -100, 0], [128, -200, 0], [128, -300, 128], [0, -400, 128]];
+        let vertices: [Vertex; 4] = [
+            [0, -100, 0],
+            [128, -200, 0],
+            [128, -300, 128],
+            [0, -400, 128],
+        ];
         for (i, v) in vertices.iter().flatten().enumerate() {
             m.put_i32(MODEL + 0x1000 + i as u64 * 4, *v);
         }
@@ -651,7 +901,10 @@ mod tests {
         }
         m.put_u64(MODEL + p.model_triangles as u64, MODEL + 0x2000);
         m.put_u64(MODEL + p.model_triangles as u64 + 8, MODEL + 0x2000 + 24);
-        let [first, second] = [[vertices[0], vertices[1], vertices[2]], [vertices[0], vertices[2], vertices[3]]];
+        let [first, second] = [
+            [vertices[0], vertices[1], vertices[2]],
+            [vertices[0], vertices[2], vertices[3]],
+        ];
         assert_eq!(ground(&m, &layout, 0, 0), -100);
         // on the diagonal both hold it: the first wins
         assert_eq!(ground(&m, &layout, 64, 64), -200);
@@ -691,7 +944,8 @@ mod tests {
         let mut terrain = None;
         let mut asked = 0;
         // straight down from 1000 above (0, 0): across = dx, up = -depth = -dy, distance = dz
-        let points = [[0, 0, 0], [100, 0, 0], [0, 200, 0], [128, 256, -88]].map(|[x, y, z]| Point::new(x, y, z));
+        let points = [[0, 0, 0], [100, 0, 0], [0, 200, 0], [128, 256, -88]]
+            .map(|[x, y, z]| Point::new(x, y, z));
         let screen = project(&m, &layout, &mut terrain, &points, None, false, || {
             asked += 1;
             Vec::new()
@@ -704,13 +958,22 @@ mod tests {
         // ground -12 and 88 up: 100 up, 900 below the camera
         let x = 500 * 128 / 900 + 404;
         let y = 2 + 300 - 500 * 256 / 900;
-        assert_eq!(screen[3], [((x as f32 / 2.0 + 0.5) as i32 * 2) as f32, ((y as f32 / 2.0 + 0.5) as i32 * 2) as f32]);
+        assert_eq!(
+            screen[3],
+            [
+                ((x as f32 / 2.0 + 0.5) as i32 * 2) as f32,
+                ((y as f32 / 2.0 + 0.5) as i32 * 2) as f32
+            ]
+        );
         project(&m, &layout, &mut terrain, &points, None, false, || {
             asked += 1;
             Vec::new()
         })
         .unwrap();
-        assert_eq!(asked, 1, "terrain and decorations are kept while the scene stays");
+        assert_eq!(
+            asked, 1,
+            "terrain and decorations are kept while the scene stays"
+        );
     }
 
     #[test]
@@ -722,15 +985,32 @@ mod tests {
         }
         let mut terrain = None;
         let points = [Point::new(300, 200, -40)];
-        let shifted = project(&m, &layout, &mut terrain, &points, Some([128, 0, -1]), false, Vec::new).unwrap();
+        let shifted = project(
+            &m,
+            &layout,
+            &mut terrain,
+            &points,
+            Some([128, 0, -1]),
+            false,
+            Vec::new,
+        )
+        .unwrap();
         let t = terrain.as_mut().unwrap();
-        let rise = t.ground_on(&m, &layout, 192, 64, 0, None) - t.ground_on(&m, &layout, 64, 64, 0, None);
+        let rise =
+            t.ground_on(&m, &layout, 192, 64, 0, None) - t.ground_on(&m, &layout, 64, 64, 0, None);
         assert_eq!(rise, -10);
         let ground = t.ground_on(&m, &layout, 300, 200, 0, None);
         let mut camera = Camera::read(&m, &layout, CLIENT, SCENE).unwrap();
-        camera.position = [camera.position[0] + 128, camera.position[1] + rise, camera.position[2]];
+        camera.position = [
+            camera.position[0] + 128,
+            camera.position[1] + rise,
+            camera.position[2],
+        ];
         assert_eq!(shifted[0], camera.project(300, 200, ground - 40));
-        assert_ne!(shifted, project(&m, &layout, &mut terrain, &points, None, false, Vec::new).unwrap());
+        assert_ne!(
+            shifted,
+            project(&m, &layout, &mut terrain, &points, None, false, Vec::new).unwrap()
+        );
     }
 
     #[test]
@@ -750,6 +1030,17 @@ mod tests {
     fn needs_the_parts() {
         let (m, mut layout) = world();
         layout.found &= !part::PROJECTION;
-        assert!(matches!(project(&m, &layout, &mut None, &[Point::new(0, 0, 0)], None, false, Vec::new), Err(Failure::Unavailable(_))));
+        assert!(matches!(
+            project(
+                &m,
+                &layout,
+                &mut None,
+                &[Point::new(0, 0, 0)],
+                None,
+                false,
+                Vec::new
+            ),
+            Err(Failure::Unavailable(_))
+        ));
     }
 }
