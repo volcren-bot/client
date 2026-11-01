@@ -202,9 +202,9 @@ const HEADER_STACK_WINDOW: f32 = 400.0;
 const HEADER_TINY_WINDOW: f32 = 200.0;
 /// Width of the strip that toggles the sidebar on narrow windows.
 const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
-/// Widths of the client list's prefix and status columns when there is room; longer status text scrolls.
+/// Widths of the client list's prefix and status columns when there is room; longer status text wraps.
 const CLIENT_PREFIX_WIDTH: f32 = 130.0;
-const CLIENT_STATUS_WIDTH: f32 = 160.0;
+const CLIENT_STATUS_WIDTH: f32 = 220.0;
 
 /// A row of widgets centered horizontally, using the previous frame's width for the offset (it settles after one repaint).
 fn centered_row(
@@ -257,48 +257,6 @@ enum ClientAction {
     Load,
     Unload,
     Console,
-}
-
-/// A label in a fixed-width cell. Text that doesn't fit scrolls slowly from right to left, and hovering shows `tip`.
-fn marquee_cell(
-    ui: &mut egui::Ui,
-    width: f32,
-    text: &str,
-    color: egui::Color32,
-    bold: bool,
-    tip: &str,
-) -> egui::Response {
-    let mut font = egui::TextStyle::Body.resolve(ui.style());
-    if bold {
-        font.family = crate::theme::bold_family();
-    }
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, galley.size().y), egui::Sense::hover());
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter().with_clip_rect(rect);
-        if galley.size().x <= width {
-            painter.galley(rect.left_top(), galley, color);
-        } else {
-            const GAP: f32 = 32.0;
-            const SPEED: f32 = 24.0;
-            let cycle = galley.size().x + GAP;
-            let offset = (ui.input(|i| i.time) as f32 * SPEED) % cycle;
-            painter.galley(
-                rect.left_top() - egui::vec2(offset, 0.0),
-                galley.clone(),
-                color,
-            );
-            painter.galley(
-                rect.left_top() + egui::vec2(cycle - offset, 0.0),
-                galley,
-                color,
-            );
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
-        }
-    }
-    response.on_hover_text(tip)
 }
 
 const DEV_TOGGLES: [&str; 23] = [
@@ -3216,16 +3174,8 @@ impl LoaderApp {
                         );
                         let status_index = flex.len() - 1;
                         let status_font = if bold_status { bold.clone() } else { normal.clone() };
-                        let status_galley = if narrow {
-                            painter.layout(
-                                status.clone(),
-                                status_font,
-                                color,
-                                widths[status_index],
-                            )
-                        } else {
-                            painter.layout_no_wrap(status.clone(), normal.clone(), color)
-                        };
+                        let status_galley =
+                            painter.layout(status.clone(), status_font, color, widths[status_index]);
                         let pid_galley = painter.layout_no_wrap(
                             client.pid.to_string(),
                             font.clone(),
@@ -3290,25 +3240,14 @@ impl LoaderApp {
                                     pad(status_galley.size().y),
                                     spacing,
                                     |ui| {
-                                        if narrow {
-                                            let text = egui::RichText::new(&status).color(color);
-                                            let text = if bold_status {
-                                                text.font(bold.clone())
-                                            } else {
-                                                text
-                                            };
-                                            ui.add(egui::Label::new(text).selectable(false))
-                                                .on_hover_text(&tip);
+                                        let text = egui::RichText::new(&status).color(color);
+                                        let text = if bold_status {
+                                            text.font(bold.clone())
                                         } else {
-                                            marquee_cell(
-                                                ui,
-                                                widths[status_index],
-                                                &status,
-                                                color,
-                                                bold_status,
-                                                &tip,
-                                            );
-                                        }
+                                            text
+                                        };
+                                        ui.add(egui::Label::new(text).selectable(false))
+                                            .on_hover_text(&tip);
                                     },
                                 );
                                 client_cell(ui, controls_width, pad(controls_height), spacing, |ui| {
