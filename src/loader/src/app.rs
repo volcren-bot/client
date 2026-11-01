@@ -206,6 +206,23 @@ const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
 const CLIENT_PREFIX_WIDTH: f32 = 130.0;
 const CLIENT_STATUS_WIDTH: f32 = 220.0;
 
+/// The width every editor button gets: that of the widest label.
+fn uniform_button_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text = ui.fonts_mut(|fonts| {
+        labels
+            .iter()
+            .map(|label| {
+                fonts
+                    .layout_no_wrap((*label).into(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max)
+    });
+    text + 2.0 * ui.spacing().button_padding.x
+}
+
 /// A row of widgets centered horizontally, using the previous frame's width for the offset (it settles after one repaint).
 fn centered_row(
     ui: &mut egui::Ui,
@@ -3948,6 +3965,82 @@ impl LoaderApp {
         self.save_script();
     }
 
+    fn file_buttons(&mut self, ui: &mut egui::Ui, running: bool, width: f32) {
+        if ui
+            .add_enabled(
+                !running,
+                egui::Button::new("Open…").min_size(egui::vec2(width, 0.0)),
+            )
+            .clicked()
+        {
+            self.open_script();
+        }
+        if ui
+            .add_enabled(
+                !running && !self.script_file.path.is_empty(),
+                egui::Button::new("Save").min_size(egui::vec2(width, 0.0)),
+            )
+            .clicked()
+        {
+            self.save_script();
+        }
+        if ui
+            .add_enabled(
+                !running,
+                egui::Button::new("Save as…").min_size(egui::vec2(width, 0.0)),
+            )
+            .on_hover_text("Saves a copy of what's in the editor.")
+            .clicked()
+        {
+            self.save_script_as();
+        }
+    }
+
+    fn run_buttons(
+        &mut self,
+        ui: &mut egui::Ui,
+        running: bool,
+        paused: bool,
+        target: Option<&Target>,
+        width: f32,
+    ) {
+        let can_run = !running && !self.script_file.text.trim().is_empty();
+        if ui
+            .add_enabled(
+                can_run,
+                egui::Button::new("Run").min_size(egui::vec2(width, 0.0)),
+            )
+            .on_hover_text("Runs what's in the editor, against the client selected above if any.")
+            .clicked()
+        {
+            match self.changed_on_disk() {
+                Some(disk) => self.reload_prompt = Some(disk),
+                None => self.run_script(ui.ctx(), target),
+            }
+        }
+        if ui
+            .add_enabled(running, egui::Button::new(if paused { "Resume" } else { "Pause" }).min_size(egui::vec2(width, 0.0)))
+            .on_hover_text(if self.store_run.is_some() {
+                "Suspends the script's process. A store script is still billed while paused: stop it to stop billing."
+            } else {
+                "Suspends the script's process, so it takes effect immediately, even in a tight loop."
+            })
+            .clicked()
+        {
+            self.toggle_pause();
+        }
+        if ui
+            .add_enabled(
+                running,
+                egui::Button::new("Stop").min_size(egui::vec2(width, 0.0)),
+            )
+            .clicked()
+            && let Some(script) = &mut self.script
+        {
+            script.stop();
+        }
+    }
+
     fn scripts_ui(&mut self, ui: &mut egui::Ui) {
         let running = self.script.as_ref().is_some_and(Script::is_running);
         let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
@@ -3966,52 +4059,56 @@ impl LoaderApp {
 
         let target = self.loaded_target_ui(ui);
 
-        ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(!running, egui::Button::new("Open…")).clicked() {
-                self.open_script();
-            }
-            if ui.add_enabled(!running && !self.script_file.path.is_empty(), egui::Button::new("Save")).clicked() {
-                self.save_script();
-            }
-            if ui.add_enabled(!running, egui::Button::new("Save as…")).on_hover_text("Saves a copy of what's in the editor.").clicked() {
-                self.save_script_as();
-            }
-            ui.add_space(16.0);
-            let can_run = !running && !self.script_file.text.trim().is_empty();
-            if ui
-                .add_enabled(can_run, egui::Button::new("Run"))
-                .on_hover_text("Runs what's in the editor, against the client selected above if any.")
-                .clicked()
-            {
-                match self.changed_on_disk() {
-                    Some(disk) => self.reload_prompt = Some(disk),
-                    None => self.run_script(ui.ctx(), target.as_ref()),
-                }
-            }
-            if ui
-                .add_enabled(running, egui::Button::new(if paused { "Resume" } else { "Pause" }))
-                .on_hover_text(if self.store_run.is_some() {
-                    "Suspends the script's process. A store script is still billed while paused: stop it to stop billing."
+        // Run controls on the left, file buttons on the right. Narrow windows stack the two groups first, then the buttons of a group.
+        let button_width = uniform_button_width(
+            ui,
+            &[
+                "Run",
+                "Pause",
+                "Resume",
+                "Stop",
+                "Open…",
+                "Save",
+                "Save as…",
+            ],
+        );
+        let group_width = 3.0 * button_width + 2.0 * ui.spacing().item_spacing.x;
+        let (run_width, file_width) = (group_width, group_width);
+        let gap = 16.0;
+        let available = ui.available_width();
+        if run_width + gap + file_width <= available {
+            ui.horizontal(|ui| {
+                ui.horizontal(|ui| {
+                    self.run_buttons(ui, running, paused, target.as_ref(), button_width)
+                });
+                ui.add_space(gap);
+                ui.horizontal(|ui| self.file_buttons(ui, running, button_width));
+            });
+        } else {
+            ui.vertical(|ui| {
+                if run_width <= available {
+                    ui.horizontal(|ui| {
+                        self.run_buttons(ui, running, paused, target.as_ref(), button_width)
+                    });
                 } else {
-                    "Suspends the script's process, so it takes effect immediately, even in a tight loop."
-                })
-                .clicked()
-            {
-                self.toggle_pause();
-            }
-            if ui.add_enabled(running, egui::Button::new("Stop")).clicked()
-                && let Some(script) = &mut self.script
-            {
-                script.stop();
-            }
-            ui.separator();
-            let status = match (running, paused) {
-                (true, true) => "paused",
-                (true, false) => "running",
-                (false, _) => "not running",
-            };
-            ui.label(format!("{}, {status}", self.script_file.name())).on_hover_text(&self.script_file.path);
-        });
+                    ui.vertical(|ui| {
+                        self.run_buttons(ui, running, paused, target.as_ref(), button_width)
+                    });
+                }
+                if file_width <= available {
+                    ui.horizontal(|ui| self.file_buttons(ui, running, button_width));
+                } else {
+                    ui.vertical(|ui| self.file_buttons(ui, running, button_width));
+                }
+            });
+        }
+        let status = match (running, paused) {
+            (true, true) => "paused",
+            (true, false) => "running",
+            (false, _) => "not running",
+        };
+        ui.label(format!("{}, {status}", self.script_file.name()))
+            .on_hover_text(&self.script_file.path);
         ui.add_space(4.0);
         let matches = if self.find.open {
             let matches = self.find_ui(ui);

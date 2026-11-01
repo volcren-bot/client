@@ -27,23 +27,24 @@ pub enum Outcome {
     Cancelled,
 }
 
+fn collect_one(value: &FieldValue) -> Value {
+    match value {
+        FieldValue::Check(b) => json!(b),
+        FieldValue::Number(n) if n.fract() == 0.0 && n.abs() < 9e15 => json!(*n as i64),
+        FieldValue::Number(n) => json!(n),
+        FieldValue::Text(s) => json!(s),
+        FieldValue::List(rows) => Value::Object(
+            rows.iter()
+                .map(|(id, _, on)| (id.clone(), json!(on)))
+                .collect(),
+        ),
+    }
+}
+
 fn collect(values: &HashMap<String, FieldValue>) -> Map<String, Value> {
     values
         .iter()
-        .map(|(id, value)| {
-            let v = match value {
-                FieldValue::Check(b) => json!(b),
-                FieldValue::Number(n) if n.fract() == 0.0 && n.abs() < 9e15 => json!(*n as i64),
-                FieldValue::Number(n) => json!(n),
-                FieldValue::Text(s) => json!(s),
-                FieldValue::List(rows) => Value::Object(
-                    rows.iter()
-                        .map(|(id, _, on)| (id.clone(), json!(on)))
-                        .collect(),
-                ),
-            };
-            (id.clone(), v)
-        })
+        .map(|(id, value)| (id.clone(), collect_one(value)))
         .collect()
 }
 
@@ -223,7 +224,20 @@ impl Form {
         });
     }
 
+    /// Whether the field's `visible_when` holds for the values now; a field that is hidden still keeps its value and is still sent.
+    fn visible(field: &Value, values: &HashMap<String, FieldValue>) -> bool {
+        let Some((id, equals)) = spec_form::visible_when(field) else {
+            return true;
+        };
+        values
+            .get(id)
+            .is_some_and(|v| spec_form::matches(&collect_one(v), equals))
+    }
+
     fn show_field(ui: &mut egui::Ui, field: &Value, values: &mut HashMap<String, FieldValue>) {
+        if !Self::visible(field, values) {
+            return;
+        }
         let usable = spec_form::enabled_by(field)
             .is_none_or(|id| matches!(values.get(id), Some(FieldValue::Check(true))));
         let value = spec_form::id(field).and_then(|id| values.get_mut(id));

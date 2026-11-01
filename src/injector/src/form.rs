@@ -189,6 +189,20 @@ pub fn enabled_by(field: &Value) -> Option<&str> {
     field.get("enabled_by").and_then(Value::as_str)
 }
 
+/// The condition that has to hold for the field to be shown, when it has one: `{ id, equals }`, where `equals` is a value or a list of values.
+pub fn visible_when(field: &Value) -> Option<(&str, &Value)> {
+    let rule = field.get("visible_when")?;
+    Some((rule.get("id")?.as_str()?, rule.get("equals")?))
+}
+
+/// Whether `value` is the `equals` of a `visible_when`, or one of them when it is a list.
+pub fn matches(value: &Value, equals: &Value) -> bool {
+    match equals {
+        Value::Array(any) => any.iter().any(|e| e == value),
+        other => other == value,
+    }
+}
+
 pub fn validate(spec: &Value) -> Result<(), String> {
     if !spec.is_object() {
         return Err("form() takes a table: { title = ..., fields = { ... } }".into());
@@ -350,6 +364,17 @@ mod tests {
         push_update(values.clone());
         assert_eq!(take_update(), Some(values));
         assert_eq!(take_update(), None);
+    }
+
+    #[test]
+    fn visibility_rules_match_a_value_or_a_list() {
+        let field = json!({ "id": "ring", "visible_when": { "id": "collect", "equals": ["A", "B"] } });
+        let (id, equals) = visible_when(&field).unwrap();
+        assert_eq!(id, "collect");
+        assert!(matches(&json!("B"), equals));
+        assert!(!matches(&json!("C"), equals));
+        assert!(matches(&json!(true), &json!(true)));
+        assert!(visible_when(&json!({ "id": "x" })).is_none());
     }
 
     #[test]
