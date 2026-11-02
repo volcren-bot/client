@@ -47,6 +47,9 @@ fn is_toll(t: &Transport) -> bool {
     t.origin.is_some() && t.destination.is_some() && t.menu.starts_with("Pay-toll")
 }
 
+/// Files whose bundled copy is always used: it differs from upstream's, which would replace it.
+const BUNDLED_ONLY: &[&str] = &["teleportation_levers"];
+
 /// The files to load. An explicit list, so a stray file upstream is never read as a transport.
 const FILES: &[File] = &[
     File {
@@ -144,6 +147,15 @@ const FILES: &[File] = &[
         path: "transports/minecarts.tsv",
         kind: Kind::Transports,
         bundled: include_str!("../data/transports/minecarts.tsv"),
+        keep: None,
+        permute: None,
+        climbs: None,
+    },
+    File {
+        name: "teleportation_levers",
+        path: "transports/teleportation_levers.tsv",
+        kind: Kind::Transports,
+        bundled: include_str!("../data/transports/teleportation_levers.tsv"),
         keep: None,
         permute: None,
         climbs: None,
@@ -289,6 +301,14 @@ fn resolve(dir: Option<&Path>, fetch: impl Fn(&File) -> Result<String, String>) 
     let mut data = Data::default();
     let mut worst = Source::Online;
     for file in FILES {
+        if BUNDLED_ONLY.contains(&file.name) {
+            let parsed = validate(file, file.bundled).expect("the bundled file parses");
+            if let Parsed::Transports(rows, climbs) = parsed {
+                data.transports.extend(rows);
+                data.climbs.extend(climbs);
+            }
+            continue;
+        }
         let online =
             fetch(file).and_then(|text| validate(file, &text).map(|parsed| (text, parsed)));
         let (parsed, source) = match online {
@@ -412,11 +432,27 @@ mod tests {
         assert_eq!(data.source, "online");
         assert_eq!(
             data.transports.len(),
-            // every file but the shortcuts, which give the script only the copies that ask for something
+            // one row per file but the shortcuts, which give the script only the copies that ask for something, and the bundled-only levers
             FILES
                 .iter()
-                .filter(|f| f.kind == Kind::Transports && f.name != "agility_shortcuts")
+                .filter(|f| {
+                    f.kind == Kind::Transports
+                        && f.name != "agility_shortcuts"
+                        && !BUNDLED_ONLY.contains(&f.name)
+                })
                 .count()
+                + data
+                    .transports
+                    .iter()
+                    .filter(|t| t.kind == "teleportation_levers")
+                    .count()
+        );
+        let levers = |t: &&Transport| t.kind == "teleportation_levers";
+        assert_eq!(data.transports.iter().filter(levers).count(), 8);
+        assert!(
+            data.transports
+                .iter()
+                .any(|t| t.menu == "Edgeville Lever 1815")
         );
         assert_eq!(data.items.len(), 1);
         assert!(dir.join("teleportation_spells.tsv").exists());
