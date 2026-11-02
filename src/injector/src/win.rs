@@ -1499,6 +1499,28 @@ fn cache_placements(
 }
 
 /// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
+/// How each of `ids` looks to the player now (see `crate::LocView`), in the order given.
+pub fn loc_shown(pid: u32, ids: &[u32]) -> Result<Vec<crate::LocView>, String> {
+    let shown = shown_locs(pid, ids)?;
+    Ok(ids
+        .iter()
+        .map(|id| {
+            shown
+                .get(id)
+                .map(|(_, text)| crate::LocView {
+                    name: text.name.clone(),
+                    actions: text
+                        .actions
+                        .iter()
+                        .filter(|a| !a.is_empty())
+                        .cloned()
+                        .collect(),
+                })
+                .unwrap_or_default()
+        })
+        .collect())
+}
+
 pub fn cache_locs(
     pid: u32,
     area: [i32; 4],
@@ -1672,7 +1694,8 @@ pub fn world_collision(
 }
 
 const WORLD_SQUARE_BATCH: usize = 16;
-const WORLD_FORMAT: u64 = 3;
+// bump it when how the collision is worked out changes: the saved file is named after it
+const WORLD_FORMAT: u64 = 5;
 
 // The key it was built for, and the process whose cache that key was read from: the cache only changes with a game update, so later calls for that process skip reading its indexes.
 type WorldMovement = Arc<crate::collision::WorldCollision<crate::collision::Movement>>;
@@ -1798,6 +1821,66 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
     let world = std::sync::Arc::new(world);
     *cached = Some((key, pid, world.clone()));
     Ok(world)
+}
+
+// The surface's landmasses, built once from the world collision and kept for the process.
+static LANDMASSES: Mutex<Option<((usize, u64), Arc<crate::landmass::Landmasses>)>> =
+    Mutex::new(None);
+
+/// How far (in tiles) from a point to look for a tile that has a landmass when the point itself has none (a loc stands on it).
+const LANDMASS_RADIUS: i32 = 3;
+
+/// The landmass number of each `[x, y, plane]` (0 for none or off the surface plane). Tiles with the same number can be walked between (doors open; no stairs or shortcuts).
+pub fn landmasses(pid: u32, points: &[[i32; 3]]) -> Result<Vec<u32>, String> {
+    let world = world_movement(pid)?;
+    // the world, and the transport data the always-open links come from
+    let id = (Arc::as_ptr(&world) as usize, crate::transports::version());
+    let masses = {
+        let mut cached = LANDMASSES.lock().unwrap_or_else(|e| e.into_inner());
+        match cached.as_ref().filter(|(key, _)| *key == id) {
+            Some((_, masses)) => masses.clone(),
+            None => {
+                let started = Instant::now();
+                let mut masses = crate::landmass::Landmasses::build(&world, 0);
+                // a way across that asks for nothing (a stile, a Tree Door) joins the landmasses on its two sides; those that ask for something are the script's to join
+                crate::transports::with_climbs(|all| {
+                    for t in all.iter().filter(|t| {
+                        crate::transports::is_link(t)
+                            && !crate::transports::gated(t)
+                            && t.origin
+                                .is_some_and(|o| o.plane == 0 && o.y < crate::nav::UNDERGROUND)
+                    }) {
+                        let (Some(o), Some(d)) = (t.origin, t.destination) else {
+                            continue;
+                        };
+                        let (a, b) = (
+                            masses.near(o.x, o.y, LANDMASS_RADIUS),
+                            masses.near(d.x, d.y, LANDMASS_RADIUS),
+                        );
+                        masses.join(a, b);
+                    }
+                });
+                let masses = Arc::new(masses);
+                eprintln!(
+                    "{} landmasses found in {:.1} s",
+                    masses.count,
+                    started.elapsed().as_secs_f32()
+                );
+                *cached = Some((id, masses.clone()));
+                masses
+            }
+        }
+    };
+    Ok(points
+        .iter()
+        .map(|&[x, y, plane]| {
+            if plane == 0 {
+                masses.near(x, y, LANDMASS_RADIUS)
+            } else {
+                0
+            }
+        })
+        .collect())
 }
 
 /// `max_tiles` caps how many tiles the search looks at (default `PATH_MAX_TILES`): a target that can't be reached would otherwise search every tile that can.
@@ -1971,6 +2054,63 @@ pub fn scene_route(
     })
 }
 
+/// The transport data's ways of changing plane as the planner's rows, and the menu options they start with (any case, each once). Empty when the request turns climbs off.
+/// A row that asks for something is used only if the script allowed it (`Request::allow_climbs`).
+fn climb_rows(request: &crate::nav::Request) -> (Vec<crate::nav::ClimbRow>, Vec<String>) {
+    use crate::transports::{climb_key, gated, with_climbs};
+    if !request.climbs {
+        return (Vec::new(), Vec::new());
+    }
+    let allowed: std::collections::HashSet<&str> =
+        request.allow_climbs.iter().map(String::as_str).collect();
+    let mut options: Vec<String> = Vec::new();
+    let rows = with_climbs(|all| {
+        let mut rows = Vec::new();
+        for t in all {
+            let (Some(o), Some(d)) = (t.origin, t.destination) else {
+                continue;
+            };
+            if gated(t) && !allowed.contains(climb_key(t).as_str()) {
+                continue;
+            }
+            // "Climb-up Rope 51647": the option, the loc's name, its id
+            let mut words = t.menu.split_whitespace();
+            let Some(option) = words.next() else {
+                continue;
+            };
+            let id = t
+                .menu
+                .split_whitespace()
+                .last()
+                .and_then(|w| w.parse().ok());
+            if !options.iter().any(|o| o.eq_ignore_ascii_case(option)) {
+                options.push(option.to_owned());
+            }
+            // the loc's name is what lies between the option and the id; a trapdoor or manhole is opened first
+            let words: Vec<&str> = t.menu.split_whitespace().collect();
+            let name = words
+                .get(1..words.len().saturating_sub(1))
+                .map_or(String::new(), |w| w.join(" "))
+                .to_lowercase();
+            let portal = request
+                .portal_names
+                .iter()
+                .any(|p| name.contains(&p.to_lowercase()));
+            rows.push(crate::nav::ClimbRow {
+                origin: (o.x, o.y, o.plane),
+                destination: (d.x, d.y, d.plane),
+                option: option.to_owned(),
+                id: id.unwrap_or(0),
+                shortcut_ticks: (t.kind == crate::transports::SHORTCUT_KIND)
+                    .then_some(if t.duration > 0 { t.duration } else { 4 }),
+                portal,
+            });
+        }
+        rows
+    });
+    (rows, options)
+}
+
 pub fn nav_plan(
     pid: u32,
     from: crate::nav::Point,
@@ -2033,6 +2173,21 @@ pub fn nav_plan(
     };
     let fits =
         |(x1, y1, x2, y2): (i32, i32, i32, i32)| x2 - x1 < MAX_WINDOW && y2 - y1 < MAX_WINDOW;
+    // a box grown by `extra` tiles on every side, trimmed back (evenly) to the largest the cache can fill in one go
+    const WIDEN: [i32; 3] = [48, 112, 224];
+    let widen = |(x1, y1, x2, y2): (i32, i32, i32, i32), extra: i32| {
+        let trim = |lo: i32, hi: i32| {
+            let over = (hi - lo) - (MAX_WINDOW - 1);
+            if over > 0 {
+                (lo + over / 2, hi - (over - over / 2))
+            } else {
+                (lo, hi)
+            }
+        };
+        let (x1, x2) = trim((x1 - extra).max(0), x2 + extra);
+        let (y1, y2) = trim((y1 - extra).max(0), y2 + extra);
+        (x1, y1, x2, y2)
+    };
     let mut goal = to;
     let mut bounds = scene_box;
     if (goal_across || !in_scene(to.0, to.1, 0)) && !instance {
@@ -2059,6 +2214,12 @@ pub fn nav_plan(
             }
         }
     }
+    // the transport data's ways of changing plane (the ones that ask for something only if the script found it can): their rows, and the menu options to look for on locs
+    let (rows, climb_options) = climb_rows(request);
+    let request = &crate::nav::Request {
+        climb_options,
+        ..request.clone()
+    };
     let locs = clickable_locs(pid)?;
     let mut ids: Vec<u32> = locs.iter().map(|l| l.id as u32).collect();
     ids.sort_unstable();
@@ -2067,7 +2228,9 @@ pub fn nav_plan(
     let lookup = |id: i32| defs.get(&(id as u32));
 
     // one go at planning. `across` also loads the other world and the cache's ladders, caves and the like all over the box (the scene's own are the live ones), so a plan can leave the world and come back to it
-    let attempt = |across: bool| -> Result<Option<crate::nav::Plan>, String> {
+    let attempt = |across: bool,
+                   bounds: (i32, i32, i32, i32)|
+     -> Result<Option<crate::nav::Plan>, String> {
         let regions = if instance || (bounds == scene_box && !across) {
             Vec::new()
         } else {
@@ -2122,11 +2285,19 @@ pub fn nav_plan(
                     bounds.2,
                     bounds.3 + north,
                 ];
-                let loaded = |x: i32, y: i32| north == shift && in_scene(x, y, 0);
+                // the scene's outer tiles are the cache's, as for the collision: the client doesn't fill the last rows with objects, and a ladder there would be in neither list
+                let loaded = |x: i32, y: i32| north == shift && in_scene(x, y, edge);
                 climbables.extend(cache_climbables(pid, area, request, &flags, &loaded)?);
             }
         }
-        let climbs = crate::nav::climbs(&flags, &climbables);
+        // the rows used from inside the box (the underground folded onto the surface's tiles, as the box is)
+        let (x1, y1, x2, y2) = bounds;
+        let in_box: Vec<crate::nav::ClimbRow> = rows
+            .iter()
+            .filter(|r| (x1..=x2).contains(&r.origin.0) && (y1..=y2).contains(&folded(r.origin.1)))
+            .cloned()
+            .collect();
+        let climbs = crate::nav::data_climbs(&flags, &climbables, &in_box, &request.door_options);
         eprintln!(
             "DBG attempt across={across} regions={} climbables={} climbs={} doors={}",
             regions.len(),
@@ -2147,13 +2318,36 @@ pub fn nav_plan(
     eprintln!(
         "DBG nav bounds={bounds:?} scene_box={scene_box:?} goal={goal:?} to={to:?} shift={shift} goal_across={goal_across} instance={instance}"
     );
-    let mut plan = attempt(goal_across)?;
-    // short of the goal: the way may be through the other world (a dungeon's exit, then another's entrance)
-    if !goal_across && !instance && goal == to && plan.as_ref().is_none_or(|p| !p.reached) {
-        plan = match (attempt(true)?, plan) {
-            (Some(through), first) if through.reached || first.is_none() => Some(through),
-            (_, first) => first,
-        };
+    // plans in `bounds`, and again through the other world when it falls short (a dungeon's exit, then another's entrance); the one that reaches the goal wins
+    let in_box = |bounds: (i32, i32, i32, i32)| -> Result<Option<crate::nav::Plan>, String> {
+        let mut plan = attempt(goal_across, bounds)?;
+        if !goal_across && !instance && goal == to && plan.as_ref().is_none_or(|p| !p.reached) {
+            plan = match (attempt(true, bounds)?, plan) {
+                (Some(through), first) if through.reached || first.is_none() => Some(through),
+                (_, first) => first,
+            };
+        }
+        Ok(plan)
+    };
+    let mut plan = in_box(bounds)?;
+    // short of the goal: the way may leave the box (a city's exit past its edge), so try wider boxes, up to the most the cache can fill in one go
+    if !instance && plan.as_ref().is_none_or(|p| !p.reached) {
+        let mut last = bounds;
+        for extra in WIDEN {
+            let wide = widen(bounds, extra);
+            if wide == last {
+                continue;
+            }
+            last = wide;
+            eprintln!("DBG widening the box by {extra}: {wide:?}");
+            plan = match (in_box(wide)?, plan) {
+                (Some(wider), first) if wider.reached || first.is_none() => Some(wider),
+                (_, first) => first,
+            };
+            if plan.as_ref().is_some_and(|p| p.reached) {
+                break;
+            }
+        }
     }
     let plan = plan.ok_or_else(|| {
         format!(

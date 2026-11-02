@@ -40,8 +40,6 @@ const DIAGONAL: u32 = 11;
 const RING: u32 = 0xFF_FFFF;
 // what can't be stood on
 const STAND_BLOCKS: u32 = flag::OBJECT | flag::FLOOR | flag::FLOOR_DECORATION;
-// how far apart (tiles between their footprints) the two ends of a ladder or staircase may be
-pub const PAIR_RADIUS: i32 = 6;
 
 /// A loc the plan uses: what the walk clicks.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -63,21 +61,38 @@ pub struct Door {
     pub blocks: Vec<(i32, i32, u32)>,
 }
 
-/// A ladder, staircase or trapdoor: used from any `reach` tile, it puts the player on one of the `lands` of `to_plane`.
+/// A ladder, staircase, rope or trapdoor: used from any `reach` tile, it puts the player on one of the `lands` of `to_plane` (any plane, and the underground's tiles are its own, 6,400 north).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Climb {
     pub loc: Target,
     pub to_plane: i32,
     pub reach: Vec<(i32, i32)>,
     pub lands: Vec<(i32, i32)>,
+    /// Some(the obstacle's duration in game ticks) for an agility shortcut: it costs that long to cross plus `Options::shortcut_saving`, so it is only used for a real saving.
+    pub shortcut_ticks: Option<u32>,
 }
 
-/// A loc with a climbing option: `dir` is the planes it climbs (1 up, -1 down, 0 for a portal that keeps the plane), `solid` whether it can't be stood in.
+/// A loc with a climbing option (one that some row of the transport data starts with): `solid` whether it can't be stood in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Climbable {
     pub loc: Target,
-    pub dir: i32,
     pub solid: bool,
+}
+
+/// One way of changing plane from the transport data: where it is used from and where it lands (the underground's tiles are 6,400 north), and the menu option and loc id it is clicked with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClimbRow {
+    pub origin: Point,
+    pub destination: Point,
+    /// The menu option, like `Climb-up`.
+    pub option: String,
+    /// The loc's id in the data. It can be another state of the same loc than the one in the scene, so it only decides between locs of the same option.
+    pub id: i32,
+    /// Some(duration in game ticks) for an agility shortcut.
+    pub shortcut_ticks: Option<u32>,
+    /// Whether it is through a trapdoor or manhole (by the loc's name in the data). The one in the scene is then the closed one, which only offers a door option: opening it
+    /// comes first, and the planner plans again from there, where the open one offers the row's option.
+    pub portal: bool,
 }
 
 /// The collision of (x, y, plane); `None` is off the map.
@@ -90,6 +105,8 @@ pub struct Options {
     // what opening a door and climbing add, in tenths of a tile
     pub door_cost: u32,
     pub climb_cost: u32,
+    // the least an agility shortcut has to save, in tenths of a tile, over walking round: added to its cost
+    pub shortcut_saving: u32,
     // with a seed, each tile's cost is scaled by 1 +- rnd / 2: the same seed plans the same way
     pub seed: Option<u64>,
     pub rnd: f64,
@@ -101,6 +118,7 @@ impl Default for Options {
             near: 0,
             door_cost: 30,
             climb_cost: 50,
+            shortcut_saving: 100,
             seed: None,
             rnd: 0.6,
         }
@@ -111,11 +129,14 @@ impl Default for Options {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
     pub options: Options,
-    // the menu options that open a door, and those that climb with the planes they climb, any case
+    // the menu options that open a door, any case
     pub door_options: Vec<String>,
-    pub climb_options: Vec<(String, i32)>,
-    // the menu options that lead into or out of the underground without climbing a plane (a cave's "Enter"), any case: used only with a loc at the other end
-    pub portal_options: Vec<String>,
+    // whether ladders, stairs and the like are used at all
+    pub climbs: bool,
+    // the climbs of the transport data that ask for something and the script found it has (`transports::climb_key`): the others of those aren't used
+    pub allow_climbs: Vec<String>,
+    // the menu options that start a climb in the transport data, any case: what a loc has to offer to be looked at (the planner fills it in)
+    pub climb_options: Vec<String>,
     // names (part of, any case) of the locs whose door option opens a way somewhere, not a door: a trapdoor
     pub portal_names: Vec<String>,
     // locs not to use, as (id, x, y, plane): a door that didn't open, say
@@ -127,10 +148,9 @@ impl Default for Request {
         Request {
             options: Options::default(),
             door_options: vec!["Open".into()],
-            climb_options: vec![("Climb-up".into(), 1), ("Climb-down".into(), -1)],
-            portal_options: ["Enter", "Exit", "Squeeze-through", "Climb"]
-                .map(String::from)
-                .to_vec(),
+            climbs: true,
+            allow_climbs: Vec::new(),
+            climb_options: Vec::new(),
             portal_names: ["trapdoor", "manhole"].map(String::from).to_vec(),
             avoid: Vec::new(),
         }
@@ -189,36 +209,20 @@ pub fn scene_locs<'a>(
                     made = true;
                 }
             }
-            // a closed trapdoor: opening it opens the way, the climb comes after
-            let name = text.name.to_lowercase();
-            if !made
-                && request
-                    .portal_names
-                    .iter()
-                    .any(|n| name.contains(&n.to_lowercase()))
-            {
+            // not a door the walk can open by taking its walls away (a Tree Door is a solid object, a trapdoor leads somewhere): a row of the transport data
+            // may click it all the same ("Open Tree Door 1967"), so it is a candidate, which only a row near it will pick
+            if !made {
                 climbables.push(Climbable {
                     loc: target(option),
-                    dir: 0,
                     solid: loc.kind == GAME && def.interact_type != 0,
                 });
             }
             continue;
         }
-        for (option, dir) in &request.climb_options {
+        for option in &request.climb_options {
             if let Some(option) = offered(option) {
                 climbables.push(Climbable {
                     loc: target(option),
-                    dir: *dir,
-                    solid: loc.kind == GAME && def.interact_type != 0,
-                });
-            }
-        }
-        for option in &request.portal_options {
-            if let Some(option) = offered(option) {
-                climbables.push(Climbable {
-                    loc: target(option),
-                    dir: 0,
                     solid: loc.kind == GAME && def.interact_type != 0,
                 });
             }
@@ -318,122 +322,63 @@ fn footprint_distance(a: &Target, b: &Target) -> i32 {
     gap(a.x, a.size_x, b.x, b.size_x).max(gap(a.y, a.size_y, b.y, b.size_y))
 }
 
-/// The nearest of `candidates` (within `PAIR_RADIUS` of `from` moved `shift` tiles north) on `plane` that `accepts`.
-fn nearest<'a>(
-    from: &Target,
-    shift: i32,
-    plane: i32,
-    candidates: &'a [Climbable],
-    accepts: impl Fn(&Climbable) -> bool,
-) -> Option<&'a Climbable> {
-    let from = Target {
-        y: from.y + shift,
-        ..from.clone()
-    };
-    candidates
-        .iter()
-        .filter(|o| o.loc.plane == plane && accepts(o))
-        .map(|o| (footprint_distance(&from, &o.loc), o))
-        .filter(|(d, _)| *d <= PAIR_RADIUS)
-        .min_by_key(|(d, o)| (*d, o.loc.x, o.loc.y))
-        .map(|(_, o)| o)
-}
+/// How far (tiles between the footprint and the tile you stand on) a loc may be from a row's tile to be the loc the row uses.
+const ROW_REACH: i32 = 2;
 
-/// The climbs of `locs`, each paired with the nearest loc on the plane it leads to that climbs back (or the other world's, 100 squares away).
-pub fn climbs(flags: Flags, locs: &[Climbable]) -> Vec<Climb> {
+/// The climbs of the transport data's `rows`, each tied to the loc it is clicked on: one of `locs` on the row's plane that offers the row's option, beside the tile the row is used from
+/// (the one with the row's id first, else the nearest; for a trapdoor or manhole the closed one, which is opened first). A row with no such loc loaded or in the cache is left out. Nothing is guessed: the row gives the tile and the plane to land on.
+pub fn data_climbs(
+    flags: Flags,
+    locs: &[Climbable],
+    rows: &[ClimbRow],
+    door_options: &[String],
+) -> Vec<Climb> {
+    let mut by_plane: std::collections::HashMap<i32, Vec<&Climbable>> = Default::default();
+    for loc in locs {
+        by_plane.entry(loc.loc.plane).or_default().push(loc);
+    }
     let mut out = Vec::new();
-    for c in locs {
-        let to_plane = c.loc.plane + c.dir;
-        let on = |plane: i32| move |tx: i32, ty: i32| flags(tx, ty, plane);
-        let (x, y, w, h) = (c.loc.x, c.loc.y, c.loc.size_x as i32, c.loc.size_y as i32);
-        let from_reach = reach(&on(c.loc.plane), x, y, w, h, c.solid);
-        if from_reach.is_empty() {
+    for row in rows {
+        let Some(candidates) = by_plane.get(&row.origin.2) else {
+            continue;
+        };
+        let here = Target {
+            id: 0,
+            x: row.origin.0,
+            y: row.origin.1,
+            plane: row.origin.2,
+            kind: 0,
+            size_x: 1,
+            size_y: 1,
+            option: String::new(),
+        };
+        let Some(found) = candidates
+            .iter()
+            .filter(|c| {
+                c.loc.option.eq_ignore_ascii_case(&row.option)
+                    || (row.portal
+                        && door_options
+                            .iter()
+                            .any(|d| d.eq_ignore_ascii_case(&c.loc.option)))
+            })
+            .map(|c| (footprint_distance(&here, &c.loc), *c))
+            .filter(|(d, _)| *d <= ROW_REACH)
+            .min_by_key(|(d, c)| (c.loc.id != row.id, *d, c.loc.x, c.loc.y))
+            .map(|(_, c)| c)
+        else {
+            continue;
+        };
+        // the tile it is used from has to be somewhere the player can stand
+        if flags(row.origin.0, row.origin.1, row.origin.2).is_none_or(|f| !standable(f)) {
             continue;
         }
-        let lands_of = |p: &Climbable| {
-            reach(
-                &on(p.loc.plane),
-                p.loc.x,
-                p.loc.y,
-                p.loc.size_x as i32,
-                p.loc.size_y as i32,
-                p.solid,
-            )
-        };
-        // where it can lead: the plane (and its lands) for each way
-        let mut ways: Vec<(i32, Vec<(i32, i32)>)> = Vec::new();
-        let stairs = c.dir != 0 && (0..PLANES).contains(&to_plane);
-        let partner = if stairs {
-            nearest(&c.loc, 0, to_plane, locs, |o| o.dir == -c.dir)
-        } else {
-            None
-        };
-        if let Some(p) = partner {
-            ways.push((to_plane, lands_of(p)));
-        }
-        // a portal that keeps no direction ("Climb" on steps) leads to the plane above or below that has one beside it
-        if c.dir == 0 {
-            for plane in [c.loc.plane - 1, c.loc.plane + 1]
-                .into_iter()
-                .filter(|p| (0..PLANES).contains(p))
-            {
-                if let Some(p) = nearest(&c.loc, 0, plane, locs, |o| o.dir == 0) {
-                    ways.push((plane, lands_of(p)));
-                }
-            }
-        }
-        // across the worlds: from the surface to the underground, or back
-        let underground = c.loc.y >= UNDERGROUND;
-        let mirrored = c.loc.plane == 0
-            && (!stairs || partner.is_none())
-            && (c.dir == 0 || (c.dir > 0) == underground);
-        if mirrored {
-            let shift = if underground {
-                -UNDERGROUND
-            } else {
-                UNDERGROUND
-            };
-            let leads_here = |o: &Climbable| if underground { o.dir <= 0 } else { o.dir >= 0 };
-            if let Some(p) = nearest(&c.loc, shift, 0, locs, leads_here) {
-                // a portal ("Squeeze-through", "Enter") doesn't take the other end of a ladder or stairs that has a closer one of its own on this side
-                let claimed = c.dir == 0
-                    && locs.iter().any(|q| {
-                        q.dir != 0
-                            && q.loc.plane == 0
-                            && (q.loc.y >= UNDERGROUND) == underground
-                            && footprint_distance(
-                                &Target {
-                                    y: q.loc.y + shift,
-                                    ..q.loc.clone()
-                                },
-                                &p.loc,
-                            ) < footprint_distance(
-                                &Target {
-                                    y: c.loc.y + shift,
-                                    ..c.loc.clone()
-                                },
-                                &p.loc,
-                            )
-                    });
-                if !claimed {
-                    ways.push((0, lands_of(p)));
-                }
-            }
-        }
-        // no partner anywhere: straight up or down
-        if ways.is_empty() && stairs {
-            ways.push((to_plane, reach(&on(to_plane), x, y, w, h, false)));
-        }
-        for (to_plane, lands) in ways {
-            if !lands.is_empty() {
-                out.push(Climb {
-                    loc: c.loc.clone(),
-                    to_plane,
-                    reach: from_reach.clone(),
-                    lands,
-                });
-            }
-        }
+        out.push(Climb {
+            loc: found.loc.clone(),
+            to_plane: row.destination.2,
+            reach: vec![(row.origin.0, row.origin.1)],
+            lands: vec![(row.destination.0, row.destination.1)],
+            shortcut_ticks: row.shortcut_ticks,
+        });
     }
     out
 }
@@ -507,6 +452,13 @@ const WALK: u32 = 0;
 const DOOR: u32 = 1 << 30;
 const CLIMB: u32 = 2 << 30;
 const INDEX: u32 = (1 << 30) - 1;
+
+/// What an agility shortcut costs besides a climb, in tenths of a tile: the time to cross (a tile takes about 0.6 of a tick), and the saving it has to make to be worth the click.
+fn shortcut_extra(climb: &Climb, options: &Options) -> u32 {
+    climb
+        .shortcut_ticks
+        .map_or(0, |ticks| options.shortcut_saving + ticks * 17)
+}
 
 /// Plans from `from` to `to` inside `bounds` (x1, y1, x2, y2) on every plane, with the underground planned together with the surface.
 pub fn plan(
@@ -652,7 +604,7 @@ pub fn plan(
                     if inside(lx, ly, lplane) {
                         relax(
                             index(lx, ly, lplane),
-                            options.climb_cost,
+                            options.climb_cost + shortcut_extra(climb, options),
                             CLIMB | n,
                             &mut heap,
                         );
@@ -910,20 +862,29 @@ mod tests {
         let flags = lookup(&planes, w, h);
         let on0 = |x: i32, y: i32| flags(x, y, 0);
         let door = east_door(&on0, 3, 1, 0);
-        let ladder = |plane: i32, dir: i32| Climbable {
+        let ladder = |plane: i32, option: &str| Climbable {
             loc: Target {
                 kind: 2,
-                ..target(5, 1, plane, if dir > 0 { "Climb-up" } else { "Climb-down" })
+                ..target(5, 1, plane, option)
             },
-            dir,
             solid: true,
         };
-        let found = climbs(&flags, &[ladder(0, 1), ladder(1, -1)]);
-        assert_eq!(found.len(), 2);
+        // the data says where each end is used from and where it lands: beside the ladder, on the plane the other one is on
+        let rows = [
+            row((4, 1, 0), (4, 1, 1), "Climb-up", 1),
+            row((6, 1, 0), (6, 1, 1), "Climb-up", 1),
+            row((4, 1, 1), (4, 1, 0), "Climb-down", 1),
+        ];
+        let found = data_climbs(
+            &flags,
+            &[ladder(0, "Climb-up"), ladder(1, "Climb-down")],
+            &rows,
+        );
+        assert_eq!(found.len(), 3);
         let up = &found[0];
         assert_eq!(up.to_plane, 1);
-        assert_eq!(up.reach, vec![(4, 1), (5, 0), (5, 2), (6, 1)]);
-        assert_eq!(up.lands, up.reach);
+        assert_eq!(up.reach, vec![(4, 1)]);
+        assert_eq!(up.lands, vec![(4, 1)]);
         let plan = plan(
             &flags,
             (0, 0, w - 1, h - 1),
@@ -938,7 +899,10 @@ mod tests {
         let kinds: Vec<&Use> = plan.actions.iter().map(|a| &a.what).collect();
         assert_eq!(
             kinds,
-            vec![&Use::Door(door.loc), &Use::Climb(ladder(0, 1).loc, 1)]
+            vec![
+                &Use::Door(door.loc),
+                &Use::Climb(ladder(0, "Climb-up").loc, 1)
+            ]
         );
         let climb = &plan.actions[1];
         assert_eq!(plan.tiles[climb.at].2, 0);
@@ -1022,7 +986,11 @@ mod tests {
             loc(0, WALL, 0, 2, Some(0), Some(2), false),
         ];
         let lookup_def = |id: i32| defs.get(id as usize);
-        let (doors, climbables) = scene_locs(&flags, &locs, &lookup_def, &Request::default());
+        let request = Request {
+            climb_options: vec!["Climb-up".into(), "Climb-down".into()],
+            ..Request::default()
+        };
+        let (doors, climbables) = scene_locs(&flags, &locs, &lookup_def, &request);
         assert_eq!(
             doors.iter().map(|d| d.loc.id).collect::<Vec<_>>(),
             vec![0, 1]
@@ -1034,14 +1002,14 @@ mod tests {
         assert_eq!(
             climbables
                 .iter()
-                .map(|c| (c.loc.option.as_str(), c.dir))
+                .map(|c| c.loc.option.as_str())
                 .collect::<Vec<_>>(),
-            vec![("Climb-up", 1), ("Climb-down", -1)]
+            vec!["Climb-up", "Climb-down"]
         );
         // avoided locs are left out
         let request = Request {
             avoid: vec![(0, 1, 1, 0)],
-            ..Request::default()
+            ..request
         };
         let (doors, _) = scene_locs(&flags, &locs, &lookup_def, &request);
         assert_eq!(doors.len(), 1);
@@ -1124,11 +1092,26 @@ mod tests {
         }
     }
 
-    fn climbable(x: i32, y: i32, plane: i32, option: &str, dir: i32) -> Climbable {
+    // `data_climbs` with no door options: rows are matched by their own option
+    fn data_climbs(flags: Flags, locs: &[Climbable], rows: &[ClimbRow]) -> Vec<Climb> {
+        super::data_climbs(flags, locs, rows, &[])
+    }
+
+    fn climbable(x: i32, y: i32, plane: i32, option: &str) -> Climbable {
         Climbable {
             loc: target(x, y, plane, option),
-            dir,
             solid: true,
+        }
+    }
+
+    fn row(origin: Point, destination: Point, option: &str, id: i32) -> ClimbRow {
+        ClimbRow {
+            origin,
+            destination,
+            option: option.into(),
+            id,
+            shortcut_ticks: None,
+            portal: false,
         }
     }
 
@@ -1138,14 +1121,18 @@ mod tests {
         let (surface, w, h) = world(&[surface]);
         let (under, _, _) = world(&[&[".....", "...L.", "....."]]);
         let flags = two_worlds(&surface, &under, w, h);
-        let down = climbable(3, 1, 0, "Climb-down", -1);
-        let up = climbable(3, 1 + UNDERGROUND, 0, "Climb-up", 1);
-        // both ends are sources, the one in the other world as far from the player as the cache is
-        let found = climbs(&flags, &[down.clone(), up]);
+        let down = climbable(3, 1, 0, "Climb-down");
+        let up = climbable(3, 1 + UNDERGROUND, 0, "Climb-up");
+        // the underground is the same plane, 6,400 tiles north: the data says so in its tiles, and both ends have a row
+        let rows = [
+            row((2, 1, 0), (2, 1 + UNDERGROUND, 0), "Climb-down", 1),
+            row((2, 1 + UNDERGROUND, 0), (2, 1, 0), "Climb-up", 1),
+        ];
+        let found = data_climbs(&flags, &[down.clone(), up], &rows);
         assert_eq!(found.len(), 2);
         let into = found.iter().find(|c| c.loc == down.loc).unwrap();
         assert_eq!(into.to_plane, 0);
-        assert!(into.lands.iter().all(|&(_, y)| y >= UNDERGROUND));
+        assert_eq!(into.lands, vec![(2, 1 + UNDERGROUND)]);
         let plan = plan(
             &flags,
             (0, 0, w - 1, h - 1),
@@ -1185,19 +1172,31 @@ mod tests {
         let (under, _, _) = world(&[&["....#......", "..L.#...L..", "....#......"]]);
         let flags = two_worlds(&surface, &under, w, h);
         let sources = [
-            climbable(2, 1, 0, "Climb-down", -1),
-            climbable(2, 1 + UNDERGROUND, 0, "Climb-up", 1),
+            climbable(2, 1, 0, "Climb-down"),
+            climbable(2, 1 + UNDERGROUND, 0, "Climb-up"),
             Climbable {
                 loc: Target {
                     id: 9,
                     ..target(8, 1, 0, "Open")
                 },
-                dir: 0,
                 solid: true,
             },
-            climbable(8, 1 + UNDERGROUND, 0, "Climb-up", 1),
+            climbable(8, 1 + UNDERGROUND, 0, "Climb-up"),
         ];
-        let found = climbs(&flags, &sources);
+        let rows = [
+            row((3, 1 + UNDERGROUND, 0), (3, 1, 0), "Climb-up", 1),
+            row((7, 1, 0), (7, 1 + UNDERGROUND, 0), "Open", 9),
+        ];
+        // the west ladder's row is used from beside its underground end; the trapdoor leads down to the east dungeon
+        let found = data_climbs(
+            &flags,
+            &sources,
+            &[
+                rows[0].clone(),
+                rows[1].clone(),
+                row((7, 1 + UNDERGROUND, 0), (7, 1, 0), "Climb-up", 1),
+            ],
+        );
         let plan = plan(
             &flags,
             (0, 0, w - 1, h - 1),
@@ -1221,66 +1220,264 @@ mod tests {
     }
 
     #[test]
-    fn a_way_up_tries_the_plane_above_before_the_surface() {
-        let (surface, w, h) = world(&[&[".....", "...L.", "....."]]);
-        let (under, _, _) = world(&[&[".....", "...L.", "....."], &[".....", "...L.", "....."]]);
-        let flags = two_worlds(&surface, &under, w, h);
-        let up = climbable(3, 1 + UNDERGROUND, 0, "Climb-up", 1);
-        let above = climbable(3, 1 + UNDERGROUND, 1, "Climb-down", -1);
-        let down = climbable(3, 1, 0, "Climb-down", -1);
-        let of = |found: &[Climb], loc: &Target| found.iter().find(|c| &c.loc == loc).cloned();
-        // a ladder on the plane above is where it leads, whatever is on the surface
-        let found = climbs(&flags, &[up.clone(), above, down.clone()]);
-        let to = of(&found, &up.loc).unwrap();
-        assert_eq!(to.to_plane, 1);
-        assert!(to.lands.iter().all(|&(_, y)| y >= UNDERGROUND));
-        // without one it leads out, to the other end of the ladder
-        let found = climbs(&flags, &[up.clone(), down]);
-        let to = of(&found, &up.loc).unwrap();
-        assert_eq!(to.to_plane, 0);
-        assert!(to.lands.iter().all(|&(_, y)| y < UNDERGROUND));
+    fn a_rope_can_climb_two_planes() {
+        // the rope near 1559,3046: from plane 0 it goes to plane 2, past the plane-1 rope (which only climbs up), and the way down is a different rope
+        let (planes, w, h) = world(&[
+            &[".....", "..L..", "....."],
+            &[".....", "..L..", "....."],
+            &[".....", "..L..", "....."],
+        ]);
+        let flags = lookup(&planes, w, h);
+        let ropes = [
+            climbable(2, 1, 0, "Climb-up"),
+            climbable(2, 1, 1, "Climb-up"),
+            climbable(2, 1, 2, "Climb-down"),
+        ];
+        let rows = [
+            row((2, 0, 0), (0, 1, 2), "Climb-up", 5),
+            row((0, 1, 2), (2, 0, 0), "Climb-down", 6),
+        ];
+        let found = data_climbs(&flags, &ropes, &rows);
+        assert_eq!(
+            found
+                .iter()
+                .map(|c| (c.loc.plane, c.to_plane))
+                .collect::<Vec<_>>(),
+            vec![(0, 2), (2, 0)]
+        );
+        assert_eq!(found[0].lands, vec![(0, 1)]);
+        let up = plan(
+            &flags,
+            (0, 0, w - 1, h - 1),
+            &[],
+            &found,
+            (2, 0, 0),
+            (0, 1, 2),
+            &Options::default(),
+        )
+        .unwrap();
+        assert!(up.reached);
+        assert_eq!(up.actions.len(), 1);
+        assert_eq!(up.tiles.last(), Some(&(0, 1, 2)));
+        let down = plan(
+            &flags,
+            (0, 0, w - 1, h - 1),
+            &[],
+            &found,
+            (0, 1, 2),
+            (2, 0, 0),
+            &Options::default(),
+        )
+        .unwrap();
+        assert!(down.reached);
+        assert_eq!(down.tiles.last(), Some(&(2, 0, 0)));
     }
 
     #[test]
-    fn portals_need_the_other_end() {
-        let (surface, w, h) = world(&[&[".....", "...L.", "....."]]);
-        let (under, _, _) = world(&[&[".....", "...L.", "....."]]);
-        let flags = two_worlds(&surface, &under, w, h);
-        let enter = climbable(3, 1, 0, "Enter", 0);
-        // no loc at the other end: nothing to climb, and no guessing
-        assert!(climbs(&flags, std::slice::from_ref(&enter)).is_empty());
-        // the other end may be anywhere near, with any id, and has to lead out
-        let exit = Climbable {
+    fn a_row_picks_its_loc_by_id_then_by_distance() {
+        let (planes, w, h) = world(&[&[".......", ".......", "......."]]);
+        let flags = lookup(&planes, w, h);
+        let near = Climbable {
             loc: Target {
-                id: 99,
-                ..target(4, 2 + UNDERGROUND, 0, "Exit")
+                id: 1,
+                ..target(1, 1, 0, "Climb-up")
             },
-            dir: 0,
-            solid: false,
+            solid: true,
         };
-        let found = climbs(&flags, &[enter.clone(), exit]);
-        let into = found.iter().find(|c| c.loc == enter.loc).unwrap();
-        assert!(into.lands.contains(&(4, 2 + UNDERGROUND)));
-        // a way down at the other end doesn't lead back
-        let wrong = climbable(3, 1 + UNDERGROUND, 0, "Climb-down", -1);
+        let same_id = Climbable {
+            loc: Target {
+                id: 7,
+                ..target(3, 1, 0, "Climb-up")
+            },
+            solid: true,
+        };
+        let other = Climbable {
+            loc: Target {
+                id: 7,
+                ..target(2, 1, 0, "Climb-down")
+            },
+            solid: true,
+        };
+        let from = (2, 0, 0);
+        let to = (0, 0, 1);
+        // the loc with the row's id wins over a nearer one; a loc with another option is never it
+        let found = data_climbs(
+            &flags,
+            &[near.clone(), same_id.clone(), other],
+            &[row(from, to, "Climb-up", 7)],
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].loc, same_id.loc);
+        // an id that is no loc's (another state of the loc) falls back to the nearest
+        let found = data_climbs(
+            &flags,
+            &[same_id, near.clone()],
+            &[row(from, to, "Climb-up", 99)],
+        );
+        assert_eq!(found[0].loc, near.loc);
+        // nothing near the tile, on its plane or offering the option: no climb, and no guessing
         assert!(
-            !climbs(&flags, &[enter.clone(), wrong])
-                .iter()
-                .any(|c| c.loc == enter.loc)
+            data_climbs(
+                &flags,
+                std::slice::from_ref(&near),
+                &[row((6, 2, 0), to, "Climb-up", 1)]
+            )
+            .is_empty()
+        );
+        assert!(
+            data_climbs(
+                &flags,
+                std::slice::from_ref(&near),
+                &[row((1, 0, 1), to, "Climb-up", 1)]
+            )
+            .is_empty()
+        );
+        assert!(
+            data_climbs(
+                &flags,
+                std::slice::from_ref(&near),
+                &[row(from, to, "Enter", 1)]
+            )
+            .is_empty()
         );
     }
 
     #[test]
-    fn a_closed_trapdoor_is_a_portal_but_other_things_that_open_are_not() {
+    fn a_row_used_from_a_tile_you_cannot_stand_on_is_left_out() {
+        let (planes, w, h) = world(&[&["...", ".L#", "..."]]);
+        let flags = lookup(&planes, w, h);
+        let ladder = climbable(1, 1, 0, "Climb-up");
+        assert!(
+            !data_climbs(
+                &flags,
+                std::slice::from_ref(&ladder),
+                &[row((0, 1, 0), (0, 1, 1), "Climb-up", 1)]
+            )
+            .is_empty()
+        );
+        assert!(
+            data_climbs(
+                &flags,
+                std::slice::from_ref(&ladder),
+                &[row((2, 1, 0), (0, 1, 1), "Climb-up", 1)]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_shortcut_is_used_only_for_a_real_saving() {
+        // a wall across the map with a gap only at its north end, and a shortcut over it near the south: round is about 18 tiles
+        let rows: &[&str] = &[
+            ".......", "...#...", "...#...", "...#...", "...#...", "...#...", "...#...", "...#...",
+            "...#...", "...#...", "...#...", "...#...",
+        ];
+        let (planes, w, h) = world(&[rows]);
+        let flags = lookup(&planes, w, h);
+        let hop = Climbable {
+            loc: Target {
+                id: 5,
+                ..target(3, 2, 0, "Jump")
+            },
+            solid: true,
+        };
+        let over = ClimbRow {
+            shortcut_ticks: Some(4),
+            ..row((2, 2, 0), (4, 2, 0), "Jump", 5)
+        };
+        let found = super::data_climbs(&flags, std::slice::from_ref(&hop), &[over], &[]);
+        assert_eq!(found[0].shortcut_ticks, Some(4));
+        let go = |options: Options| {
+            plan(
+                &flags,
+                (0, 0, w - 1, h - 1),
+                &[],
+                &found,
+                (2, 2, 0),
+                (4, 2, 0),
+                &options,
+            )
+            .unwrap()
+        };
+        // round the wall is about 18 tiles; the shortcut costs 5 for the click, 4 ticks (about 7 tiles) and the saving asked
+        let wanted = go(Options::default());
+        assert!(
+            wanted.actions.is_empty(),
+            "10 tiles of saving asked, 8 offered: walks round"
+        );
+        let cheap = go(Options {
+            shortcut_saving: 0,
+            ..Options::default()
+        });
+        assert_eq!(
+            cheap.actions.len(),
+            1,
+            "no saving asked: takes the shortcut"
+        );
+        // a climb that isn't a shortcut has no such cost
+        let ladder = Climb {
+            shortcut_ticks: None,
+            ..found[0].clone()
+        };
+        let free = plan(
+            &flags,
+            (0, 0, w - 1, h - 1),
+            &[],
+            &[ladder],
+            (2, 2, 0),
+            (4, 2, 0),
+            &Options::default(),
+        )
+        .unwrap();
+        assert_eq!(free.actions.len(), 1);
+    }
+
+    #[test]
+    fn a_row_through_a_trapdoor_is_used_on_the_closed_one() {
+        let (planes, w, h) = world(&[&[".....", "..L..", "....."]]);
+        let flags = lookup(&planes, w, h);
+        // the closed trapdoor offers only "Open"; the data's row is for the open one ("Climb-down Trapdoor 1581")
+        let closed = Climbable {
+            loc: Target {
+                id: 1579,
+                ..target(2, 1, 0, "Open")
+            },
+            solid: true,
+        };
+        let trapdoor = ClimbRow {
+            portal: true,
+            ..row((2, 0, 0), (2, 1 + UNDERGROUND, 0), "Climb-down", 1581)
+        };
+        let doors = vec!["Open".to_owned()];
+        let found = super::data_climbs(
+            &flags,
+            std::slice::from_ref(&closed),
+            std::slice::from_ref(&trapdoor),
+            &doors,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].loc, closed.loc);
+        assert_eq!(found[0].lands, vec![(2, 1 + UNDERGROUND)]);
+        // other rows that happen to be near it do not use it, and without the door option it is not matched
+        let ladder = ClimbRow {
+            portal: false,
+            ..trapdoor.clone()
+        };
+        assert!(
+            super::data_climbs(&flags, std::slice::from_ref(&closed), &[ladder], &doors).is_empty()
+        );
+        assert!(
+            super::data_climbs(&flags, std::slice::from_ref(&closed), &[trapdoor], &[]).is_empty()
+        );
+    }
+
+    #[test]
+    fn a_loc_with_a_door_option_that_is_not_a_wall_door_is_a_candidate_for_a_row() {
         let rows: &[&str] = &["...", "...", "..."];
         let (planes, w, h) = world(&[rows]);
         let flags = lookup(&planes, w, h);
-        let mut trapdoor = def(2, &["Open"]);
-        trapdoor.1.name = "Trapdoor".into();
-        let mut chest = def(2, &["Open"]);
-        chest.1.name = "Chest".into();
-        let defs = [trapdoor, chest];
-        // game objects of shape 10: not a door's shape
+        let defs = [def(2, &["Open"]), def(2, &["Open"])];
+        // game objects of shape 10: not a door's shape, so not doors; each is only a candidate for a row of the data
         let locs = [
             loc(0, GAME, 1, 1, Some(10), Some(0), true),
             loc(1, GAME, 2, 2, Some(10), Some(0), true),
@@ -1291,48 +1488,16 @@ mod tests {
         assert_eq!(
             climbables
                 .iter()
-                .map(|c| (c.loc.id, c.loc.option.as_str(), c.dir))
+                .map(|c| (c.loc.id, c.loc.option.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(0, "Open", 0)]
+            vec![(0, "Open"), (1, "Open")]
         );
-    }
-
-    #[test]
-    fn steps_that_only_say_climb_lead_to_the_planes_beside() {
-        let (planes, w, h) = world(&[
-            &[".....", "..L..", "....."],
-            &[".....", "..L..", "....."],
-            &[".....", "..L..", "....."],
-        ]);
-        let flags = lookup(&planes, w, h);
-        let steps = |plane: i32| climbable(2, 1, plane, "Climb", 0);
-        // the middle one leads both ways, the ends one
-        let found = climbs(&flags, &[steps(0), steps(1), steps(2)]);
-        let leads = |plane: i32| {
-            found
-                .iter()
-                .filter(|c| c.loc.plane == plane)
-                .map(|c| c.to_plane)
-                .collect::<Vec<_>>()
+        // a row picks the one beside its tile (by its id first): the Tree Door's "Open", crossing the tile the door stands on
+        let row = ClimbRow {
+            portal: false,
+            ..row((1, 0, 0), (1, 2, 0), "Open", 0)
         };
-        assert_eq!(leads(0), vec![1]);
-        assert_eq!(leads(1), vec![0, 2]);
-        assert_eq!(leads(2), vec![1]);
-        // one with nothing beside it leads nowhere
-        assert!(climbs(&flags, &[steps(0)]).is_empty());
-    }
-
-    #[test]
-    fn a_portal_leaves_the_other_end_of_a_ladder_to_the_ladder() {
-        let (surface, w, h) = world(&[&[".......", "..L....", "......."]]);
-        let (under, _, _) = world(&[&[".......", "..L.L..", "......."]]);
-        let flags = two_worlds(&surface, &under, w, h);
-        let down = climbable(2, 1, 0, "Climb-down", -1);
-        let up = climbable(2, 1 + UNDERGROUND, 0, "Climb-up", 1);
-        // a pipe a few tiles from the ladder, which has the same surface end within reach
-        let pipe = climbable(4, 1 + UNDERGROUND, 0, "Squeeze-through", 0);
-        let found = climbs(&flags, &[down, up, pipe.clone()]);
-        assert!(!found.iter().any(|c| c.loc == pipe.loc));
-        assert_eq!(found.len(), 2);
+        let found = super::data_climbs(&flags, &climbables, &[row], &[]);
+        assert_eq!(found.len(), 1);
     }
 }

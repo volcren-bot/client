@@ -189,10 +189,16 @@ pub fn enabled_by(field: &Value) -> Option<&str> {
     field.get("enabled_by").and_then(Value::as_str)
 }
 
-/// The condition that has to hold for the field to be shown, when it has one: `{ id, equals }`, where `equals` is a value or a list of values.
-pub fn visible_when(field: &Value) -> Option<(&str, &Value)> {
-    let rule = field.get("visible_when")?;
-    Some((rule.get("id")?.as_str()?, rule.get("equals")?))
+/// The conditions that all have to hold for the field to be shown: `visible_when` is one `{ id, equals }` or a list of them, where `equals` is a value or a list of values.
+pub fn visible_rules(field: &Value) -> Vec<(&str, &Value)> {
+    fn rule(r: &Value) -> Option<(&str, &Value)> {
+        Some((r.get("id")?.as_str()?, r.get("equals")?))
+    }
+    match field.get("visible_when") {
+        Some(Value::Array(rules)) => rules.iter().filter_map(rule).collect(),
+        Some(one) => rule(one).into_iter().collect(),
+        None => Vec::new(),
+    }
 }
 
 /// Whether `value` is the `equals` of a `visible_when`, or one of them when it is a list.
@@ -368,13 +374,18 @@ mod tests {
 
     #[test]
     fn visibility_rules_match_a_value_or_a_list() {
-        let field = json!({ "id": "ring", "visible_when": { "id": "collect", "equals": ["A", "B"] } });
-        let (id, equals) = visible_when(&field).unwrap();
+        let field =
+            json!({ "id": "ring", "visible_when": { "id": "collect", "equals": ["A", "B"] } });
+        let rules = visible_rules(&field);
+        let (id, equals) = rules[0];
         assert_eq!(id, "collect");
         assert!(matches(&json!("B"), equals));
         assert!(!matches(&json!("C"), equals));
         assert!(matches(&json!(true), &json!(true)));
-        assert!(visible_when(&json!({ "id": "x" })).is_none());
+        assert!(visible_rules(&json!({ "id": "x" })).is_empty());
+        let both =
+            json!({ "visible_when": [{ "id": "a", "equals": 1 }, { "id": "b", "equals": 2 }] });
+        assert_eq!(visible_rules(&both).len(), 2);
     }
 
     #[test]

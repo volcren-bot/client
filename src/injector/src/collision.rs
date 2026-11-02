@@ -514,6 +514,11 @@ impl<T: Cell> WorldCollision<T> {
         }
     }
 
+    #[cfg(test)]
+    pub fn add_for_test(&mut self, plane: i32, x: i32, y: i32, flags: u32) {
+        self.add(plane, x, y, flags);
+    }
+
     pub fn shrink(&mut self) {
         for squares in &mut self.planes {
             for square in squares.iter_mut() {

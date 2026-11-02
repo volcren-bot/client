@@ -24,14 +24,14 @@ use ipc::packets::{Filter, filter_add, filter_has};
 use crate::bank_pin::enter as bank_pin_enter;
 #[cfg(windows)]
 use crate::{
-    ItemWatcher, PacketWatcher, cache_locs, chat_messages, connection, draw, draw_batch,
-    draw_lines, enum_def, find_path, game_state, game_val_names, ground_items, in_instance,
-    item_container, item_names, item_params, loc_model, locs, map_regions, menu, menu_click,
-    menu_layout, menu_open, movement, nav_plan, npc_hitsplats, npc_model, npc_sizes, npcs,
-    player_model, player_plane, players, project, project_moved, projectiles, scene_collision,
-    scene_route, selected_widget, send_input, send_input_with, server_tile, spot_anims,
-    sub_interfaces, varbit, varc, varp_value, varps, wait_watchers, widget, widget_children,
-    world_select,
+    ItemWatcher, PacketWatcher, cache_files, cache_locs, chat_messages, connection, draw,
+    draw_batch, draw_lines, enum_def, find_path, game_state, game_val_names, ground_items,
+    in_instance, item_container, item_names, item_params, landmasses, loc_model, loc_shown, locs,
+    map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
+    npc_model, npc_sizes, npcs, player_model, player_plane, players, project, project_moved,
+    projectiles, scene_collision, scene_route, selected_widget, send_input, send_input_with,
+    server_tile, spot_anims, sub_interfaces, varbit, varc, varp_value, varps, wait_watchers,
+    widget, widget_children, world_select,
 };
 #[cfg(not(windows))]
 use offline::*;
@@ -143,6 +143,12 @@ mod offline {
     pub fn varbit(_: u32, _: i32) -> Result<Option<i32>, String> {
         Err(NO_WIN32.into())
     }
+    pub fn landmasses(_: u32, _: &[[i32; 3]]) -> Result<Vec<u32>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn cache_files(_: u32, _: u32, _: &[[i32; 2]]) -> Result<Vec<Option<Vec<u8>>>, String> {
+        Err(NO_WIN32.into())
+    }
     pub fn enum_def(_: u32, _: i32) -> Result<Option<crate::config::EnumDef>, String> {
         Err(NO_WIN32.into())
     }
@@ -174,6 +180,9 @@ mod offline {
         Err(NO_WIN32.into())
     }
     pub fn locs(_: u32, _: Option<i32>) -> Result<Vec<Loc>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn loc_shown(_: u32, _: &[u32]) -> Result<Vec<crate::LocView>, String> {
         Err(NO_WIN32.into())
     }
     pub fn cache_locs(
@@ -715,6 +724,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("wornitems", "main/interfaces/gametabs/wornitems.luau"),
     lib_module!("side_panels", "main/interfaces/gametabs/side_panels.luau"),
     lib_module!("magic", "main/interfaces/gametabs/magic.luau"),
+    lib_module!("journal", "main/interfaces/gametabs/journal.luau"),
     lib_module!("prayer", "main/interfaces/gametabs/prayer.luau"),
     lib_module!("npcs", "main/entities/npcs.luau"),
     lib_module!("objects", "main/entities/objects.luau"),
@@ -738,6 +748,13 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     ),
     lib_module!("depositbox", "main/interfaces/mainscreen/depositbox.luau"),
     lib_module!("toplevel", "main/interfaces/mainscreen/toplevel.luau"),
+    lib_module!("chartering", "main/interfaces/mainscreen/chartering.luau"),
+    lib_module!("mushtree", "main/interfaces/mainscreen/mushtree.luau"),
+    lib_module!("quetzal", "main/interfaces/mainscreen/quetzal.luau"),
+    lib_module!("spirittree", "main/interfaces/mainscreen/spirittree.luau"),
+    lib_module!("minecart", "main/interfaces/mainscreen/minecart.luau"),
+    lib_module!("gnomeglider", "main/interfaces/mainscreen/gnomeglider.luau"),
+    lib_module!("fairyring", "main/interfaces/mainscreen/fairyring.luau"),
     lib_module!("widgets", "main/interfaces/widgets.luau"),
     lib_module!("chatbox", "main/interfaces/chatbox/chatbox.luau"),
     lib_module!(
@@ -760,6 +777,10 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("biometrics", "main/antiban/biometrics.luau"),
     lib_module!("antiban", "main/antiban/antiban.luau"),
     lib_module!("antiban_tasks", "main/antiban/antiban_tasks.luau"),
+    lib_module!("transports", "main/transports.luau"),
+    lib_module!("quests", "main/quests.luau"),
+    lib_module!("diaries", "main/diaries.luau"),
+    lib_module!("cs2", "utils/cs2.luau"),
     lib_module!("geometry", "utils/math/geometry.luau"),
     lib_module!("mouse", "utils/input/mouse.luau"),
     lib_module!("keyboard", "utils/input/keyboard.luau"),
@@ -1335,6 +1356,22 @@ pub fn run_with_modules(
         "antiban_config",
         lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::current_value()))?,
     )?;
+    // The transports (teleport spells, ...) the loader downloaded and parsed: `{ source, transports, version }`.
+    globals.set(
+        "transports",
+        lua.create_function(|lua, (): ()| to_lua(lua, &crate::transports::current_value()))?,
+    )?;
+    #[cfg(test)]
+    globals.set(
+        "test_set_transports",
+        lua.create_function(|_, json: String| {
+            crate::transports::set(
+                crate::transports::parse(&json)
+                    .ok_or_else(|| mlua::Error::RuntimeError("bad transports".into()))?,
+            );
+            Ok(())
+        })?,
+    )?;
     // The queued breaks and sleeps the user asked to skip once since the last call, as `{ kind, index }` (index from 0).
     globals.set(
         "antiban_skips",
@@ -1446,6 +1483,70 @@ pub fn run_with_modules(
         "enum_def",
         query(&lua, pid, |pid, id: i32| enum_def(pid, id))?,
     )?;
+    // Several files of one cache index at once, `cache_files(index, { { archive, file }, ... })`: a list with a string of bytes for each file that exists and `false` for each that doesn't.
+    globals.set(
+        "cache_files",
+        lua.create_function(
+            move |lua,
+                  (index, wanted): (u32, Vec<[i32; 2]>)|
+                  -> mlua::Result<(mlua::Value, Option<String>)> {
+                let Some(pid) = pid else {
+                    return Ok((mlua::Value::Nil, Some(NO_CLIENT.into())));
+                };
+                match cache_files(pid, index, &wanted) {
+                    Ok(files) => {
+                        let list = lua.create_table()?;
+                        for (i, file) in files.into_iter().enumerate() {
+                            list.set(
+                                i + 1,
+                                match file {
+                                    Some(bytes) => mlua::Value::String(lua.create_string(&bytes)?),
+                                    None => mlua::Value::Boolean(false),
+                                },
+                            )?;
+                        }
+                        Ok((mlua::Value::Table(list), None))
+                    }
+                    Err(error) => Ok((mlua::Value::Nil, Some(error))),
+                }
+            },
+        )?,
+    )?;
+    // One file of the client's cache, as a Lua string of its bytes (nil when it doesn't exist): `cache_file(index, archive, file)`.
+    globals.set(
+        "cache_file",
+        lua.create_function(
+            move |lua,
+                  (index, archive, file): (u32, i32, i32)|
+                  -> mlua::Result<(mlua::Value, Option<String>)> {
+                let Some(pid) = pid else {
+                    return Ok((mlua::Value::Nil, Some(NO_CLIENT.into())));
+                };
+                match cache_files(pid, index, &[[archive, file]]) {
+                    Ok(mut files) => match files.pop().flatten() {
+                        Some(bytes) => Ok((mlua::Value::String(lua.create_string(&bytes)?), None)),
+                        None => Ok((mlua::Value::Nil, None)),
+                    },
+                    Err(error) => Ok((mlua::Value::Nil, Some(error))),
+                }
+            },
+        )?,
+    )?;
+    // The landmass number of each `{ x, y, plane }` (0: none, or not the surface): tiles with the same number can be walked between.
+    globals.set(
+        "landmasses",
+        query(&lua, pid, |pid, points: Vec<mlua::Table>| {
+            let read = |t: &mlua::Table, field: &str| -> Result<i32, String> {
+                t.get::<i32>(field)
+                    .map_err(|e| format!("a point's {field}: {e}"))
+            };
+            let points = points
+                .iter()
+                .map(|t| Ok([read(t, "x")?, read(t, "y")?, read(t, "plane")?]))
+                .collect::<Result<Vec<[i32; 3]>, String>>()?;
+            landmasses(pid, &points)
+        })?,
+    )?;
     globals.set(
         "item_params",
         query(&lua, pid, |pid, ids: Vec<i32>| item_params(pid, &ids))?,
@@ -1528,6 +1629,11 @@ pub fn run_with_modules(
                     .collect::<Vec<_>>())
             },
         )?,
+    )?;
+    // How objects look to the player now, by id: a multi-state object (a farming patch with a grown tree, say) shows the form its varbit picks, with that form's name and options
+    globals.set(
+        "loc_shown",
+        query(&lua, pid, |pid, ids: Vec<u32>| loc_shown(pid, &ids))?,
     )?;
     globals.set(
         "cache_locs",
@@ -1636,6 +1742,11 @@ pub fn run_with_modules(
                         .get::<Option<u32>>("climb_cost")
                         .map_err(err)?
                         .unwrap_or(o.climb_cost);
+                    // the least (in tiles) an agility shortcut has to save over walking round
+                    o.shortcut_saving = t
+                        .get::<Option<f64>>("shortcut_saving")
+                        .map_err(err)?
+                        .map_or(o.shortcut_saving, |tiles| (tiles.max(0.0) * 10.0) as u32);
                     o.rnd = t.get::<Option<f64>>("rnd").map_err(err)?.unwrap_or(o.rnd);
                     o.seed = t.get::<Option<f64>>("seed").map_err(err)?.map(|s| s as u64);
                     if let Some(options) =
@@ -1643,17 +1754,11 @@ pub fn run_with_modules(
                     {
                         request.door_options = options;
                     }
-                    if let Some(options) = t
-                        .get::<Option<std::collections::BTreeMap<String, i32>>>("climb_options")
-                        .map_err(err)?
-                    {
-                        request.climb_options = options.into_iter().collect();
+                    if let Some(climbs) = t.get::<Option<bool>>("climbs").map_err(err)? {
+                        request.climbs = climbs;
                     }
-                    if let Some(options) = t
-                        .get::<Option<Vec<String>>>("portal_options")
-                        .map_err(err)?
-                    {
-                        request.portal_options = options;
+                    if let Some(keys) = t.get::<Option<Vec<String>>>("allow_climbs").map_err(err)? {
+                        request.allow_climbs = keys;
                     }
                     if let Some(names) =
                         t.get::<Option<Vec<String>>>("portal_names").map_err(err)?
@@ -2645,6 +2750,94 @@ mod tests {
              -- off: nothing is ever due\n\
              plan('{\"breaks_enabled\":false,\"sleeps_enabled\":false}')\n\
              assert(#A.breaks == 0 and #A.sleeps == 0 and not A.break_due())\n\
+             print('ok')",
+        );
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
+    }
+
+    // The only test that sets the transports, so it can't race another.
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn transports_come_from_the_loader_and_spell_names_split_into_option() {
+        let (lines, result) = run_lines(
+            "assert(transports().source == 'none' and #transports().transports == 0)\n\
+             test_set_transports('{\"source\":\"cache\",\"transports\":[{\"kind\":\"teleportation_spells\",\"destination\":{\"x\":3213,\"y\":3424,\"plane\":0},\"name\":\"Varrock Teleport\",\"duration\":4,\"skills\":[],\"quests\":[],\"varbits\":[{\"id\":4070,\"op\":\"=\",\"value\":0}],\"varps\":[],\"items\":\"\",\"consumable\":false}],\"items\":[{\"name\":\"COINS\",\"ids\":[995]},{\"name\":\"AXE\",\"ids\":[1351,1349]}]}')\n\
+             local data = transports()\n\
+             assert(data.source == 'cache' and data.version == 1 and #data.transports == 1)\n\
+             assert(data.transports[1].varbits[1].id == 4070 and data.transports[1].origin == nil)\n\
+             local T = require('transports')\n\
+             local a, ao = T.split('Varrock Teleport: Grand Exchange')\n\
+             assert(a == 'Varrock Teleport' and ao == 'Grand Exchange')\n\
+             local b, bo = T.split('Teleport to House (Inside)')\n\
+             assert(b == 'Teleport to House' and bo == 'Inside')\n\
+             local c, co = T.split('Falador Teleport')\n\
+             assert(c == 'Falador Teleport' and co == nil)\n\
+             assert(T.wilderness_level(3100, 3600) == 11 and T.wilderness_level(3200, 3200) == 0)\n\
+             local function need(...) local list = {} for _, s in ipairs({ ... }) do list[#list + 1] = { name = s[1], level = s[2] } end return { skills = list } end\n\
+             local have = { magic = 60, total = 1500, combat = 80 }\n\
+             assert(T.skills_met(need(), have))\n\
+             assert(T.skills_met(need({ 'Magic', 60 }), have) and not T.skills_met(need({ 'Magic', 61 }), have))\n\
+             assert(T.skills_met(need({ 'Total', 1500 }, { 'Combat', 70 }), have))\n\
+             assert(not T.skills_met(need({ 'Magic', 25 }, { 'Sailing', 1 }), have), 'an unknown skill is not met')\n\
+             assert(T.walk_ticks({ x = 0, y = 0 }, { x = 100, y = 40 }) == 60)\n\
+             -- every kind of transport is tried 3 times, then left out\n\
+             T.RETRY_PAUSE_MS = 0\n\
+             local calls = 0\n\
+             T.runners.spell = function() calls += 1 return false end\n\
+             local fake = { kind = 'spell', transport = { name = 'Fake Teleport' }, spell = 'Fake', ticks = 1, saved = 1 }\n\
+             assert(not T.failed_lately(fake))\n\
+             assert(not T.use(fake) and calls == 3, 'three attempts')\n\
+             assert(T.failed_lately(fake), 'then marked failed')\n\
+             calls = 0\n\
+             T.runners.charter = function() calls += 1 return calls == 2 end\n\
+             local ship = { kind = 'charter', transport = { name = '1: Somewhere', origin = { x = 1, y = 2, plane = 0 } }, spell = '', ticks = 1, saved = 1 }\n\
+             assert(T.use(ship) and calls == 2, 'stops at the first success')\n\
+             assert(not T.failed_lately(ship), 'a success is not marked')\n\
+             calls = 0\n\
+             T.runners.mushtree = function() calls += 1 return false end\n\
+             local ride = { kind = 'mushtree', transport = { name = '3. Sticky Swamp', origin = { x = 3764, y = 3879, plane = 1 } }, spell = '', ticks = 1, saved = 1 }\n\
+             assert(not T.use(ride) and calls == 3 and T.failed_lately(ride), 'a mushtree ride is tried 3 times, then left out')\n\
+             local menu = { { text = 'Brimhaven' }, { text = 'Rimmington' }, { text = 'No thanks' } }\n\
+             assert(T.dialogue_pick(menu, { 'brimhaven' }) == 'Brimhaven', 'the option that names the destination')\n\
+             assert(T.dialogue_pick({ { text = 'Yes please' }, { text = 'No' } }, { 'musa point' }) == 'Yes please', 'else a yes')\n\
+             assert(T.dialogue_pick({ { text = 'What is this place?' }, { text = 'Bye' } }, { 'musa point' }) == nil, 'else nothing')\n\
+             assert(T.dialogue_pick({ { text = 'Not now' } }, { 'no' }) == nil, 'a hint shorter than four letters is not matched')\n\
+             local coins = { items = 'COINS=2500' }\n\
+             local pay = { [995] = 2500 }\n\
+             assert(T.items_met(coins, pay) and not T.items_met(coins, { [995] = 2499 }) and not T.items_met(coins, {}))\n\
+             assert(T.items_met({ items = '' }, {}), 'no items needed')\n\
+             assert(T.items_met({ items = 'AXE=1' }, { [1351] = 1 }), 'a named group counts any of its ids')\n\
+             assert(T.items_met({ items = '1351=1&&995=10' }, { [1351] = 1, [995] = 10 }) and not T.items_met({ items = '1351=1&&995=10' }, { [1351] = 1 }))\n\
+             assert(T.items_met({ items = '1351=1||995=10' }, { [995] = 10 }) and not T.items_met({ items = '1351=1||995=10' }, {}))\n\
+             assert(not T.items_met({ items = 'HEADSLOT=0' }, {}) and not T.items_met({ items = 'UNLOCK_CANOE_AXE=1' }, {}), 'slots and unlocks are not counted')\n\
+             assert(T.items_met({ items = 'AXE=1|UNLOCK_CANOE_AXE=1' }, { [1351] = 1 }), 'an axe carried makes the unlock unnecessary')\n\
+             print('ok')",
+        );
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn cs2_scripts_and_database_rows_decode_and_bad_bytes_are_refused() {
+        let (lines, result) = run_lines(
+            "local Cs2 = require('cs2')\n\
+             -- a script named '' with `push 7; switch 0; get_varbit 99; return`, and one switch table { [5] = 1 }\n\
+             local code = '\\0' .. string.pack('>I2i4', 0, 7) .. string.pack('>I2i4', 60, 0) .. string.pack('>I2i4', 25, 99) .. string.pack('>I2B', 21, 0)\n\
+             local tables = string.char(1) .. string.pack('>I2', 1) .. string.pack('>i4i4', 5, 1)\n\
+             local bytes = code .. string.pack('>i4', 4) .. string.rep('\\0', 12) .. tables .. string.pack('>I2', #tables)\n\
+             local s = Cs2.script(bytes)\n\
+             assert(s and #s.instructions == 4, 'script')\n\
+             assert(s.instructions[3].op == Cs2.GET_VARBIT and s.instructions[3].value == 99)\n\
+             assert(s.tables[1][5] == 1)\n\
+             assert(Cs2.script('not a script at all, just text') == nil)\n\
+             assert(Cs2.script(string.sub(bytes, 1, #bytes - 5)) == nil)\n\
+             -- a row: table 0, columns 2 (a string) and 19 (an int)\n\
+             local row = '\\4\\0' .. '\\3\\50' .. string.char(2, 1, 36, 1) .. 'Demon Slayer\\0' .. string.char(19, 1, 0, 1) .. string.pack('>i4', 3) .. string.char(255, 0)\n\
+             local r = Cs2.dbrow(row)\n\
+             assert(r and r[2].values[1][1] == 'Demon Slayer' and r[19].values[1][1] == 3, 'row')\n\
+             assert(Cs2.dbrow('\\9\\9\\9') == nil and Cs2.dbrow('') == nil)\n\
              print('ok')",
         );
         assert!(result.is_ok(), "{result:?} {lines:?}");

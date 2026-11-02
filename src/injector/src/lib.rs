@@ -21,12 +21,14 @@ pub mod font;
 pub mod form;
 pub mod http;
 pub mod input_jobs;
+pub mod landmass;
 pub mod nav;
 pub mod pathfinding;
 pub mod projection;
 pub mod sandbox;
 pub mod scene_collision;
 pub mod scene_graph;
+pub mod transports;
 pub mod wind_mouse;
 pub use decode::state::MAX_VARPS;
 pub use decode::widgets::{SubInterface, Widget};
@@ -139,6 +141,14 @@ pub struct CacheLoc {
     pub shape: u8,
     pub rotation: u8,
     /// The right-click options it has, in menu order.
+    pub actions: Vec<String>,
+}
+
+/// An object as the player sees it now: a multi-state object (a farming patch, a door that opens) shows the form its varbit or varp picks. Empty for an id the cache doesn't know.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocView {
+    pub name: String,
+    /// The right-click options it has now, in menu order.
     pub actions: Vec<String>,
 }
 
@@ -323,15 +333,15 @@ pub use win::{
     chat_messages, clickable_locs, collision_area, connection, draw, draw_batch, draw_lines,
     enum_def, find_path, game_state, game_val_names, ground_items, in_instance, item_changes,
     item_changes_wait, item_container, item_containers, item_names, item_params, item_stackable,
-    list_clients, load, loc_model, locs, map_regions, memory_words, menu, menu_click, menu_layout,
-    menu_open, movement, nav_plan, npc_hitsplats, npc_model, npc_sizes, npc_words, npcs,
-    packet_layouts, packets, player_model, player_plane, player_words, players, project,
-    project_moved, projectiles, scene_collision, scene_route, scene_tiles, scene_tiles_next_frame,
-    screenshot, script_runs, selected_widget, server_tile, set_cursor, set_display_name,
-    set_total_xp, spot_anims, sub_interfaces, unload, varbit, varbit_def, varbits_of, varc,
-    varc_changes, varp_value, varps, wait_watchers, watch_client, widget, widget_children,
-    widget_dump, widget_tree, widget_words, world_debug, world_entities, world_movement,
-    world_select,
+    landmasses, list_clients, load, loc_model, loc_shown, locs, map_regions, memory_words, menu,
+    menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats, npc_model, npc_sizes,
+    npc_words, npcs, packet_layouts, packets, player_model, player_plane, player_words, players,
+    project, project_moved, projectiles, scene_collision, scene_route, scene_tiles,
+    scene_tiles_next_frame, screenshot, script_runs, selected_widget, server_tile, set_cursor,
+    set_display_name, set_total_xp, spot_anims, sub_interfaces, unload, varbit, varbit_def,
+    varbits_of, varc, varc_changes, varp_value, varps, wait_watchers, watch_client, widget,
+    widget_children, widget_dump, widget_tree, widget_words, world_debug, world_entities,
+    world_movement, world_select,
 };
 
 pub const MODULE_PREFIX: &str = "agent";

@@ -1,5 +1,25 @@
+/// The stack the program runs on. Scripts nest Lua calls with Rust functions that have frames of several hundred kilobytes (the collision and cache readers), and the process's own main thread has
+/// only a megabyte or two (less than that under Wine), which a deep call from a script overflowed ("thread 'main' has overflowed its stack"). Reserving address space costs nothing until it is used.
+#[cfg(windows)]
+const STACK_BYTES: usize = 256 << 20;
+
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
+    match std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(STACK_BYTES)
+        .spawn(run)
+    {
+        Ok(thread) => thread.join().unwrap_or(std::process::ExitCode::FAILURE),
+        Err(error) => {
+            eprintln!("Couldn't start the main thread: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run() -> std::process::ExitCode {
     use std::{
         io::{BufRead, Write},
         path::Path,
@@ -629,6 +649,13 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                     injector::antiban::parse(&line[injector::antiban::PREFIX.len()..])
                 {
                     injector::antiban::set(config);
+                }
+            }
+            line if line.starts_with(injector::transports::PREFIX) => {
+                if let Some(data) =
+                    injector::transports::parse(&line[injector::transports::PREFIX.len()..])
+                {
+                    injector::transports::set(data);
                 }
             }
             _ => break,

@@ -27,6 +27,7 @@ mod session;
 mod store;
 mod terminal;
 mod theme;
+mod transports;
 mod update;
 mod vars;
 mod whitelist;
@@ -36,6 +37,7 @@ mod xp;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    transports::start();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             // Keeps the saved settings, which eframe stores under the app id (the old window title).

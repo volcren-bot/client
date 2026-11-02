@@ -89,10 +89,11 @@ impl Script {
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
         let pins = format!(
-            "{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n",
             injector::form::PINS_PREFIX,
             injector::http::CAPABILITY_PREFIX,
-            injector::antiban::line(&settings.antiban)
+            injector::antiban::line(&settings.antiban),
+            crate::transports::line()
         );
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
         let files = if modules.is_empty() {

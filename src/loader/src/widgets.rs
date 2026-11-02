@@ -447,6 +447,7 @@ mod tests {
             scroll_y: 0,
             scroll_width: 0,
             scroll_height: 0,
+            action: None,
         }
     }
 

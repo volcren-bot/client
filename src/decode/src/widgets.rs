@@ -34,6 +34,9 @@ pub struct Widget {
     pub scroll_width: i32,
     #[serde(default)]
     pub scroll_height: i32,
+    /// the widget's first menu option ("Close", or the port's name on a map marker), read at fixed offsets (build a2636a01); nil when it has none
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 fn minus_one() -> i32 {
@@ -211,7 +214,32 @@ fn widget_at<M: Memory>(
         scroll_y: field(layout.scroll_x + 4)?,
         scroll_width: scroll(layout.scroll_width, 0)?,
         scroll_height: scroll(layout.scroll_width, 4)?,
+        action: action_at(tree.memory, component),
     })
+}
+
+/// How many option slots the widget has, and the pointer to its first option's text (a NUL-terminated string).
+const ACTION_COUNT: u64 = 0x2e0;
+const ACTION_TEXT: u64 = 0x2e8;
+const MAX_ACTION: usize = 128;
+
+fn action_at(memory: &impl Memory, component: u64) -> Option<String> {
+    let count = memory.i32(component + ACTION_COUNT)?;
+    if !(1..=10).contains(&count) {
+        return None;
+    }
+    let text = memory.ptr(component + ACTION_TEXT)?;
+    let mut bytes = [0u8; MAX_ACTION];
+    // a string near the end of a mapping may not fill the buffer: read what can be read, in halves
+    let mut len = MAX_ACTION;
+    while len > 0 && !memory.read(text, &mut bytes[..len]) {
+        len /= 2;
+    }
+    let end = bytes[..len].iter().position(|&b| b == 0)?;
+    // an option is plain text: anything else means the pointer isn't to one (some options are stored another way)
+    let text = &bytes[..end];
+    (end > 0 && text.iter().all(|&b| (0x20..0x7f).contains(&b)))
+        .then(|| String::from_utf8_lossy(text).into_owned())
 }
 
 const TEXT: i32 = 4;
@@ -783,6 +811,7 @@ mod tests {
             scroll_y: 100,
             scroll_width: 0,
             scroll_height: 5104,
+            action: None,
         };
         let scaled = widget.clone().scaled(1402.0 / 807.0);
         assert_eq!(

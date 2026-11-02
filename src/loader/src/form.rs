@@ -240,14 +240,15 @@ impl Form {
         });
     }
 
-    /// Whether the field's `visible_when` holds for the values now; a field that is hidden still keeps its value and is still sent.
+    /// Whether all the field's `visible_when` rules hold for the values now; a field that is hidden still keeps its value and is still sent.
     fn visible(field: &Value, values: &HashMap<String, FieldValue>) -> bool {
-        let Some((id, equals)) = spec_form::visible_when(field) else {
-            return true;
-        };
-        values
-            .get(id)
-            .is_some_and(|v| spec_form::matches(&collect_one(v), equals))
+        spec_form::visible_rules(field)
+            .into_iter()
+            .all(|(id, equals)| {
+                values
+                    .get(id)
+                    .is_some_and(|v| spec_form::matches(&collect_one(v), equals))
+            })
     }
 
     fn show_field(ui: &mut egui::Ui, field: &Value, values: &mut HashMap<String, FieldValue>) {
