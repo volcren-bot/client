@@ -2795,6 +2795,10 @@ mod tests {
              assert(T.use(ship) and calls == 2, 'stops at the first success')\n\
              assert(not T.failed_lately(ship), 'a success is not marked')\n\
              calls = 0\n\
+             T.runners.item = function() calls += 1 return false, true end\n\
+             local piece = { kind = 'item', transport = { name = 'Games necklace: Burthorpe' }, spell = 'Games necklace', option = 'Burthorpe', ticks = 1, saved = 1 }\n\
+             assert(not T.use(piece) and calls == 1 and T.failed_lately(piece), 'an item that is not offered is not tried again')\n\
+             calls = 0\n\
              T.runners.mushtree = function() calls += 1 return false end\n\
              local ride = { kind = 'mushtree', transport = { name = '3. Sticky Swamp', origin = { x = 3764, y = 3879, plane = 1 } }, spell = '', ticks = 1, saved = 1 }\n\
              assert(not T.use(ride) and calls == 3 and T.failed_lately(ride), 'a mushtree ride is tried 3 times, then left out')\n\

@@ -62,6 +62,15 @@ const FILES: &[File] = &[
         climbs: None,
     },
     File {
+        name: "teleportation_items",
+        path: "transports/teleportation_items.tsv",
+        kind: Kind::Transports,
+        bundled: include_str!("../data/transports/teleportation_items.tsv"),
+        keep: None,
+        permute: None,
+        climbs: None,
+    },
+    File {
         name: "teleportation_spells_home",
         path: "transports/teleportation_spells_home.tsv",
         kind: Kind::Transports,

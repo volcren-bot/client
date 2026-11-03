@@ -170,10 +170,11 @@ fn tile(text: &str) -> Result<Option<Tile>, String> {
     Ok(Some(Tile { x, y, plane }))
 }
 
+// "Max Total" and the like (the capes) are not levels: holding the cape proves them.
 fn skills(text: &str) -> Result<Vec<Skill>, String> {
     text.split(';')
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && !s.starts_with("Max "))
         .map(|s| {
             let (level, name) = s
                 .split_once(' ')
@@ -471,6 +472,22 @@ mod tests {
                 value: 1
             }
         );
+    }
+
+    #[test]
+    fn the_bundled_item_teleports_parse() {
+        let text = include_str!("../../loader/data/transports/teleportation_items.tsv");
+        let (rows, skipped) = parse_file("teleportation_items", text).unwrap();
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(rows.len() > 400);
+        assert!(rows.iter().all(|t| t.origin.is_none() && t.destination.is_some()));
+        let games = rows
+            .iter()
+            .find(|t| t.name == "Games necklace: Burthorpe")
+            .unwrap();
+        assert!(games.consumable);
+        assert!(games.items.contains("3853=1"));
+        assert_eq!(games.wilderness, Some(20));
     }
 
     #[test]
