@@ -3013,7 +3013,74 @@ impl LoaderApp {
         });
         // The entries are saved with the rest of the settings (`save`).
         self.whitelist_page.ui(ui, &mut self.http_whitelist);
+        self.transport_settings_ui(ui);
         });
+    }
+
+    fn transport_settings_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(12.0);
+        ui.strong("Transports");
+        ui.weak("What scripts may use to get around. A script that needs one that is off stops with an error saying so.");
+        let mut changed = false;
+        egui::Grid::new("transport_types")
+            .num_columns(2)
+            .show(ui, |ui| {
+                for (i, (name, label)) in injector::transports::TYPES.iter().enumerate() {
+                    let off = &mut self.settings.transports.off;
+                    let mut on = !off.iter().any(|o| o == name);
+                    if ui.checkbox(&mut on, *label).changed() {
+                        if on {
+                            off.retain(|o| o != name);
+                        } else {
+                            off.push((*name).to_owned());
+                        }
+                        changed = true;
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+        ui.add_space(6.0);
+        let data = crate::transports::status();
+        ui.label(format!("Data: {}", data.version));
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!data.busy, egui::Button::new("Check for update"))
+                .on_hover_text(
+                    "Asks for the newest data now. The loader also does this once a day.",
+                )
+                .clicked()
+            {
+                crate::transports::update_now();
+            }
+            if ui
+                .add_enabled(
+                    data.can_roll_back && !data.busy,
+                    egui::Button::new("Roll back"),
+                )
+                .on_hover_text(
+                    "Goes back to the version before this one, if this one causes trouble.",
+                )
+                .clicked()
+            {
+                crate::transports::roll_back_now();
+            }
+            if data.busy {
+                ui.spinner();
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        });
+        if !data.message.is_empty() {
+            ui.weak(&data.message);
+        }
+        if changed && let Some(script) = &mut self.script {
+            let settings = self.settings.transports.clone();
+            if let Err(error) = script.push_transport_settings(&settings) {
+                self.script_error(error);
+            }
+        }
     }
 
     fn clients_ui(&mut self, ui: &mut egui::Ui) {
@@ -3580,6 +3647,14 @@ impl LoaderApp {
                     let answer = self.accounts.pin_for(&hash);
                     if let Some(script) = &mut self.script
                         && let Err(error) = script.answer_pin(answer)
+                    {
+                        self.script_error(error);
+                    }
+                }
+                ScriptEvent::LampRequest(hash) => {
+                    let answer = self.accounts.lamp_skill_for(&hash);
+                    if let Some(script) = &mut self.script
+                        && let Err(error) = script.answer_lamp(answer)
                     {
                         self.script_error(error);
                     }

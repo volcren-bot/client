@@ -125,7 +125,15 @@ pub fn find_path(
     to: Tile,
     max_tiles: usize,
 ) -> Result<Vec<Tile>, PathError> {
-    find_path_with(world, plane, from, to, max_tiles, false)
+    find_path_with(
+        world,
+        plane,
+        from,
+        to,
+        max_tiles,
+        false,
+        &Default::default(),
+    )
 }
 
 /// `find_path`; with `doors` it goes through closed doors as well, each costing `DOOR_COST` more.
@@ -136,6 +144,7 @@ pub fn find_path_with(
     to: Tile,
     max_tiles: usize,
     doors: bool,
+    closed: &crate::nav::Closed,
 ) -> Result<Vec<Tile>, PathError> {
     for t in [from, to] {
         if !walkable(world, plane, t.0, t.1, BLOCKS, false) {
@@ -180,7 +189,10 @@ pub fn find_path_with(
         ] {
             let door = if can_step(world, plane, x, y, dx, dy) {
                 0
-            } else if doors && can_step_with(world, plane, x, y, dx, dy, true) {
+            } else if doors
+                && can_step_with(world, plane, x, y, dx, dy, true)
+                && !crate::nav::step_closed(closed, (x, y, plane), dx, dy)
+            {
                 DOOR_COST
             } else {
                 continue;
@@ -510,8 +522,16 @@ mod tests {
         world.set_square(0, region, Square::Tiles(tiles));
         let (bx, by) = (50 * 64, 50 * 64);
         assert!(find_path(&world, 0, (bx, by + 3), (bx + 1, by + 3), 100_000).is_err());
-        let path =
-            find_path_with(&world, 0, (bx, by + 3), (bx + 1, by + 3), 100_000, true).unwrap();
+        let path = find_path_with(
+            &world,
+            0,
+            (bx, by + 3),
+            (bx + 1, by + 3),
+            100_000,
+            true,
+            &Default::default(),
+        )
+        .unwrap();
         assert!(
             path.contains(&(bx, by)) && path.contains(&(bx + 1, by)),
             "{path:?}"

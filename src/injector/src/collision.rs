@@ -24,6 +24,8 @@ pub mod flag {
     pub const DOOR_WEST: u32 = 1 << 27;
     pub const DOOR_OBJECT: u32 = 1 << 28;
     pub const DOORS: u32 = 0x1f << 24;
+    // Not the client's, and nothing the walk checks: a tile above the ground with no floor, which only the landmasses leave out.
+    pub const NO_FLOOR: u32 = 1 << 29;
 
     /// The door bit of a straight wall's bit; 0 for a corner.
     pub fn door_of(wall: u32) -> u32 {
@@ -61,6 +63,8 @@ pub const DOOR_OPTION: &str = "open";
 
 const SETTING_BLOCKED: u8 = 1;
 const SETTING_BRIDGE: u8 = 2;
+// Not the game's: the tile has an overlay or an underlay.
+const SETTING_HAS_FLOOR: u8 = 0x80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocDef {
@@ -169,9 +173,12 @@ pub fn decode_terrain(data: &[u8]) -> Option<Box<Settings>> {
                             r.u8()?;
                             break;
                         }
-                        2..=49 => r.skip(2)?,
-                        op @ 50..=81 => *tile = (op - 49) as u8,
-                        _ => {}
+                        2..=49 => {
+                            r.skip(2)?;
+                            *tile |= SETTING_HAS_FLOOR;
+                        }
+                        op @ 50..=81 => *tile = *tile & SETTING_HAS_FLOOR | (op - 49) as u8,
+                        _ => *tile |= SETTING_HAS_FLOOR,
                     }
                 }
             }
@@ -321,19 +328,29 @@ fn decode_loc_with(data: &[u8], mut text: Option<&mut LocText>) -> Option<LocDef
                 let n = r.u8()? as usize;
                 r.skip(n * 4)?;
             }
-            op @ (77 | 92) => {
+            // 92 and 98 end on a default; 97 and 98 have three bytes to an id
+            op @ (77 | 92 | 97 | 98) => {
                 let id = |v: u16| (v != 0xffff).then_some(v);
                 let varbit = id(r.u16()?);
                 let varp = id(r.u16()?);
-                let default = if op == 92 {
-                    id(r.u16()?).map(u32::from)
+                let long = op >= 97;
+                let shown = |r: &mut Reader| -> Option<Option<u32>> {
+                    Some(if long {
+                        let v = (r.u8()? as u32) << 16 | r.u16()? as u32;
+                        (v != 0xff_ffff).then_some(v)
+                    } else {
+                        id(r.u16()?).map(u32::from)
+                    })
+                };
+                let default = if op == 92 || op == 98 {
+                    shown(&mut r)?
                 } else {
                     None
                 };
                 let n = r.u8()? as usize;
                 let mut ids = Vec::with_capacity(n + 2);
                 for _ in 0..=n {
-                    ids.push(id(r.u16()?).map(u32::from));
+                    ids.push(shown(&mut r)?);
                 }
                 ids.push(default);
                 if let Some(text) = text.as_deref_mut() {
@@ -392,6 +409,7 @@ pub struct Movement(pub u16);
 
 impl Movement {
     pub const BLOCKS: u16 = 0x100;
+    pub const NO_FLOOR: u16 = 0x4000;
     // the `flag::DOORS` bits, moved down
     const DOOR_SHIFT: u32 = 24 - 9;
 
@@ -420,6 +438,11 @@ impl Cell for Movement {
                 | doors
                 | if flags & flag::BLOCKED != 0 {
                     Self::BLOCKS
+                } else {
+                    0
+                }
+                | if flags & flag::NO_FLOOR != 0 {
+                    Self::NO_FLOOR
                 } else {
                     0
                 },
@@ -544,9 +567,22 @@ impl<T: Cell> WorldCollision<T> {
         for (plane, columns) in settings.iter().enumerate() {
             for (x, column) in columns.iter().enumerate() {
                 for (y, &setting) in column.iter().enumerate() {
+                    let walked = plane as i32 - bridge(x, y) as i32;
                     if setting & SETTING_BLOCKED != 0 {
-                        let walked = plane as i32 - bridge(x, y) as i32;
                         self.add(walked, base_x + x as i32, base_y + y as i32, flag::FLOOR);
+                    }
+                    // a bridge's tile is walked a plane lower, so the data of the plane above it is what is walked at this one
+                    let above = plane + bridge(x, y) as usize;
+                    let floored = settings
+                        .get(above)
+                        .is_some_and(|p| p[x][y] & SETTING_HAS_FLOOR != 0);
+                    if plane > 0 && !floored {
+                        self.add(
+                            plane as i32,
+                            base_x + x as i32,
+                            base_y + y as i32,
+                            flag::NO_FLOOR,
+                        );
                     }
                 }
             }
@@ -760,7 +796,7 @@ mod tests {
         // (0, 3, 4): an overlay (op 2 + u16) then settings 1; (1, 3, 4): bridge (settings 2).
         let data = terrain_with(&[((0, 3, 4), &[2, 0x0005, 50]), ((1, 3, 4), &[51])]);
         let settings = decode_terrain(&data).unwrap();
-        assert_eq!(settings[0][3][4], SETTING_BLOCKED);
+        assert_eq!(settings[0][3][4], SETTING_BLOCKED | SETTING_HAS_FLOOR);
         assert_eq!(settings[1][3][4], SETTING_BRIDGE);
         assert_eq!(settings[0][3][5], 0);
     }
@@ -881,6 +917,33 @@ mod tests {
             decode_loc(&not).map(|d| (d.interactive, d.door)),
             Some((false, false))
         );
+    }
+
+    #[test]
+    fn decodes_transforms_with_long_ids() {
+        // the Broken cart's form: op 97, no varbit, varp 116, ids [28930, none, 28931]
+        let data = [
+            97, 0xff, 0xff, 0, 116, 2, 0, 0x71, 2, 0xff, 0xff, 0xff, 0, 0x71, 3, 0,
+        ];
+        let (_, text) = decode_loc_text(&data).unwrap();
+        let t = text.transforms.unwrap();
+        assert_eq!((t.varbit, t.varp), (None, Some(116)));
+        assert_eq!(t.pick(Some(0)), Some(28930));
+        assert_eq!(t.pick(Some(1)), None);
+        assert_eq!(t.pick(Some(2)), Some(28931));
+    }
+
+    #[test]
+    fn decodes_transforms_with_long_ids_and_a_default() {
+        // a door's form: op 98, varbit 0x256a, default 14513, ids [14513, 34826]
+        let data = [
+            98, 0x25, 0x6a, 0xff, 0xff, 0, 0x38, 0xb1, 1, 0, 0x38, 0xb1, 0, 0x88, 0x0a, 0,
+        ];
+        let (_, text) = decode_loc_text(&data).unwrap();
+        let t = text.transforms.unwrap();
+        assert_eq!((t.varbit, t.varp), (Some(0x256a), None));
+        assert_eq!(t.pick(Some(1)), Some(34826));
+        assert_eq!(t.pick(Some(7)), Some(14513));
     }
 
     #[test]
@@ -1005,7 +1068,7 @@ mod tests {
             world.flags(0, bx + 10, by + 10),
             Some(flag::OBJECT | flag::OBJECT_PROJECTILE)
         );
-        assert_eq!(world.flags(1, bx + 10, by + 10), Some(0));
+        assert_eq!(world.flags(1, bx + 10, by + 10), Some(flag::NO_FLOOR));
         assert_eq!(world.flags(0, bx - 1, by), None);
     }
 

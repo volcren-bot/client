@@ -1,4 +1,4 @@
-//! The Accounts tab: saved game accounts (a label, the name hash, the bank pin), kept AES-256-GCM encrypted with a key in the OS keyring.
+//! The Accounts tab: saved game accounts (a label, the name hash, the bank pin, the lamp skill), kept AES-256-GCM encrypted with a key in the OS keyring.
 
 use std::path::PathBuf;
 
@@ -25,6 +25,33 @@ const INPUT_WIDTH: f32 = 300.0;
 const ROW_HEIGHT: f32 = 28.0;
 /// The least width of one of the list's text columns before the buttons stack to make room.
 const MIN_TEXT_WIDTH: f32 = 90.0;
+/// The skills a lamp can be spent on, as the lib's `Stats.Skill` names them.
+const LAMP_SKILLS: [&str; 24] = [
+    "Agility",
+    "Attack",
+    "Construction",
+    "Cooking",
+    "Crafting",
+    "Defence",
+    "Farming",
+    "Firemaking",
+    "Fishing",
+    "Fletching",
+    "Herblore",
+    "Hitpoints",
+    "Hunter",
+    "Magic",
+    "Mining",
+    "Prayer",
+    "Ranged",
+    "Runecraft",
+    "Sailing",
+    "Slayer",
+    "Smithing",
+    "Strength",
+    "Thieving",
+    "Woodcutting",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -32,6 +59,9 @@ pub struct Entry {
     /// `hash_name` of the account name.
     pub hash: String,
     pub pin: String,
+    /// What a random event's lamp is spent on, one of `LAMP_SKILLS`; empty keeps the lamp.
+    #[serde(default)]
+    pub lamp_skill: String,
 }
 
 /// SHA-256 of the account name as the client normalizes it, as lowercase hex, so "My Name" and the client's `my_name` hash the same.
@@ -243,6 +273,18 @@ impl Accounts {
             .map(|entry| entry.pin.clone()))
     }
 
+    /// The saved lamp skill of the account with this name hash, for `lamp_skill()`; `None` when it has none or there is no such account, `Err` while the file can't be read, and unsaved edits don't count.
+    pub fn lamp_skill_for(&self, hash: &str) -> Result<Option<String>, String> {
+        if let Some(why) = &self.locked {
+            return Err(format!("the saved accounts can't be read: {why}"));
+        }
+        Ok(self
+            .entries
+            .iter()
+            .find(|entry| entry.hash == hash && !entry.lamp_skill.is_empty())
+            .map(|entry| entry.lamp_skill.clone()))
+    }
+
     fn persist(&mut self) {
         self.error = store(&self.entries)
             .err()
@@ -272,6 +314,7 @@ impl Accounts {
             name: name.to_owned(),
             hash: hash_name(account),
             pin: draft.pin.clone(),
+            lamp_skill: String::new(),
         };
         self.entries.push(entry.clone());
         self.working.push(entry);
@@ -356,6 +399,7 @@ impl Accounts {
         let mut edit_start = None;
         let mut finished = None;
         let mut change_account = None;
+        let mut lamp_skill = None;
         let Self {
             entries,
             working,
@@ -378,14 +422,14 @@ impl Accounts {
         let button_size = egui::vec2(button_width, 0.0);
         let spacing = ui.spacing().item_spacing;
         let row_actions = 2.0 * button_width + spacing.x;
-        let stacked = ui.available_width() < 3.0 * MIN_TEXT_WIDTH + 4.0 * spacing.x + row_actions;
+        let stacked = ui.available_width() < 4.0 * MIN_TEXT_WIDTH + 5.0 * spacing.x + row_actions;
         let actions_width = if stacked { button_width } else { row_actions };
         let row_height = if stacked {
             ROW_HEIGHT.max(2.0 * ui.spacing().interact_size.y + spacing.y)
         } else {
             ROW_HEIGHT
         };
-        // The first three columns share what the buttons leave; the last one fits the buttons.
+        // The first four columns share what the buttons leave; the last one fits the buttons.
         egui_extras::TableBuilder::new(ui)
             .striped(true)
             // Cells inherit the page's top down layout otherwise, which leaves the buttons at the top of their row.
@@ -405,9 +449,14 @@ impl Accounts {
                     .at_least(MIN_TEXT_WIDTH)
                     .clip(true),
             )
+            .column(
+                egui_extras::Column::remainder()
+                    .at_least(MIN_TEXT_WIDTH)
+                    .clip(true),
+            )
             .column(egui_extras::Column::exact(actions_width))
             .header(ROW_HEIGHT, |mut header| {
-                for head in ["Name", "Account hash", "Bank pin", ""] {
+                for head in ["Name", "Account hash", "Bank pin", "Lamp skill", ""] {
                     header.col(|ui| {
                         ui.strong(head);
                     });
@@ -468,6 +517,29 @@ impl Accounts {
                         });
                     }
                     row.col(|ui| {
+                        let mut chosen = entry.lamp_skill.clone();
+                        let shown = if chosen.is_empty() {
+                            "None"
+                        } else {
+                            &entry.lamp_skill
+                        };
+                        egui::ComboBox::from_id_salt(("lamp_skill", index))
+                            .selected_text(shown)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut chosen, String::new(), "None");
+                                for skill in LAMP_SKILLS {
+                                    ui.selectable_value(&mut chosen, skill.to_owned(), skill);
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "What a random event's lamp is spent on. None keeps the lamp.",
+                            );
+                        if chosen != entry.lamp_skill {
+                            lamp_skill = Some((index, chosen));
+                        }
+                    });
+                    row.col(|ui| {
                         let armed = *deleting == Some(index);
                         let changed = entries.get(index) != Some(entry);
                         let buttons = |ui: &mut egui::Ui| {
@@ -502,6 +574,11 @@ impl Accounts {
                     });
                 });
             });
+        if let Some((index, skill)) = lamp_skill
+            && let Some(entry) = self.working.get_mut(index)
+        {
+            entry.lamp_skill = skill;
+        }
         match finished {
             Some(Some(edit)) => {
                 self.editing = None;
@@ -713,6 +790,7 @@ mod tests {
             name: "main".into(),
             hash: hash_name("a"),
             pin: "1234".into(),
+            lamp_skill: "Slayer".into(),
         }];
         let sealed = encode(&[7; 32], &entries).unwrap();
         assert!(
@@ -725,6 +803,32 @@ mod tests {
         *tampered.last_mut().unwrap() ^= 1;
         assert!(decode(&[7; 32], &tampered).is_err());
         assert!(decode(&[7; 32], &[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn a_file_from_before_lamp_skills_still_loads() {
+        let old = br#"[{"name":"main","hash":"abc","pin":"1234"}]"#;
+        let sealed = seal(&[7; 32], old).unwrap();
+        let entries = decode(&[7; 32], &sealed).unwrap();
+        assert_eq!(entries[0].lamp_skill, "");
+    }
+
+    #[test]
+    fn the_lamp_skill_comes_from_what_is_saved() {
+        let entry = |hash: &str, skill: &str| Entry {
+            name: "main".into(),
+            hash: hash.into(),
+            pin: "1234".into(),
+            lamp_skill: skill.into(),
+        };
+        let accounts = Accounts {
+            entries: vec![entry("set", "Slayer"), entry("unset", "")],
+            working: vec![entry("set", "Mining")],
+            ..Accounts::default()
+        };
+        assert_eq!(accounts.lamp_skill_for("set"), Ok(Some("Slayer".into())));
+        assert_eq!(accounts.lamp_skill_for("unset"), Ok(None));
+        assert_eq!(accounts.lamp_skill_for("nobody"), Ok(None));
     }
 
     #[test]

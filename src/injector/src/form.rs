@@ -8,6 +8,8 @@ pub const MODULES_PREFIX: &str = "\u{1e}MODULES ";
 pub const PINS_PREFIX: &str = "\u{1e}PINS";
 /// A line the injector writes for `bank_pin_enter()` with the account name hash; the loader answers on stdin with `pin_reply_line`.
 pub const PIN_REQUEST_PREFIX: &str = "\u{1e}PINREQ ";
+/// A line the injector writes for `lamp_skill()` with the account name hash; the loader answers on stdin with `lamp_reply_line`. Goes with `PINS_PREFIX`.
+pub const LAMP_REQUEST_PREFIX: &str = "\u{1e}LAMPREQ ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
 /// A line the loader writes to stdin when the user presses Update on the settings, with the form's values as JSON.
 pub const UPDATE_PREFIX: &str = "\u{1e}UPDATE ";
@@ -335,6 +337,32 @@ pub fn pin_reply_line(answer: &Result<Option<String>, String>) -> String {
     .to_string()
 }
 
+pub fn lamp_request_line(hash: &str) -> String {
+    format!("{LAMP_REQUEST_PREFIX}{hash}")
+}
+
+/// The loader's answer to a lamp request: the skill, `None` when the account has none set, or why it can't tell.
+pub fn lamp_reply_line(answer: &Result<Option<String>, String>) -> String {
+    match answer {
+        Ok(Some(skill)) => json!({ "skill": skill }),
+        Ok(None) => json!({ "none": true }),
+        Err(error) => json!({ "error": error }),
+    }
+    .to_string()
+}
+
+pub fn parse_lamp_reply(line: &str) -> Result<Option<String>, String> {
+    let reply: Value = serde_json::from_str(line.trim())
+        .map_err(|e| format!("bad lamp reply from the loader: {e}"))?;
+    if let Some(error) = reply.get("error").and_then(Value::as_str) {
+        return Err(error.to_owned());
+    }
+    Ok(reply
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
+}
+
 pub fn parse_pin_reply(line: &str) -> Result<Option<String>, String> {
     let reply: Value = serde_json::from_str(line.trim())
         .map_err(|e| format!("bad PIN reply from the loader: {e}"))?;
@@ -386,6 +414,18 @@ mod tests {
         let both =
             json!({ "visible_when": [{ "id": "a", "equals": 1 }, { "id": "b", "equals": 2 }] });
         assert_eq!(visible_rules(&both).len(), 2);
+    }
+
+    #[test]
+    fn lamp_replies_round_trip() {
+        for answer in [
+            Ok(Some("Slayer".to_owned())),
+            Ok(None),
+            Err("locked".to_owned()),
+        ] {
+            assert_eq!(parse_lamp_reply(&lamp_reply_line(&answer)), answer);
+        }
+        assert!(parse_lamp_reply("nonsense").is_err());
     }
 
     #[test]

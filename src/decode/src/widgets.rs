@@ -386,6 +386,9 @@ const DETAIL_LINE_HEIGHT: u64 = 0x188;
 const DETAIL_X_ALIGNMENT: u64 = 0x18c;
 const DETAIL_TEXT_SHADOWED: u64 = 0x194;
 const DETAIL_ITEM_ID: u64 = 0xb38;
+/// A component's model: its type (1 is a model id) and its id. Fixed offsets, like the `DETAIL_` ones.
+pub const MODEL_TYPE: u64 = 0xfc;
+pub const MODEL_ID: u64 = 0x100;
 const DETAIL_NO_CLICK_THROUGH: u64 = 0xb98;
 
 fn detail_at<M: Memory>(tree: &Tree<M>, component: u64) -> WidgetDetail {
@@ -424,6 +427,14 @@ fn detail_at<M: Memory>(tree: &Tree<M>, component: u64) -> WidgetDetail {
         item_id: int(DETAIL_ITEM_ID),
         item_quantity: int(DETAIL_ITEM_ID + 4),
     }
+}
+
+/// The model a component draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WidgetModel {
+    /// 1 is a model id; a component drawing no model has -1 as its `id`.
+    pub kind: i32,
+    pub id: i32,
 }
 
 /// A widget of the inspector's tree: a component of an interface (static) or a child a script made for one (dynamic).

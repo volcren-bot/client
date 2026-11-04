@@ -651,6 +651,13 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                     injector::antiban::set(config);
                 }
             }
+            line if line.starts_with(injector::transports::SETTINGS_PREFIX) => {
+                if let Some(settings) = injector::transports::parse_settings(
+                    &line[injector::transports::SETTINGS_PREFIX.len()..],
+                ) {
+                    injector::transports::set_settings(settings);
+                }
+            }
             line if line.starts_with(injector::transports::PREFIX) => {
                 if let Some(data) =
                     injector::transports::parse(&line[injector::transports::PREFIX.len()..])
@@ -709,6 +716,12 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                         if let Some(config) = injector::antiban::parse(payload) {
                             injector::antiban::set(config);
                         }
+                    } else if let Some(payload) =
+                        line.strip_prefix(injector::transports::SETTINGS_PREFIX)
+                    {
+                        if let Some(settings) = injector::transports::parse_settings(payload) {
+                            injector::transports::set_settings(settings);
+                        }
                     } else if let Some(payload) = line.strip_prefix(injector::antiban::SKIP_PREFIX)
                     {
                         if let Some(skip) = injector::antiban::parse_skip(payload) {
@@ -740,9 +753,13 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                     .map_err(|_| "the loader closed the script's input".to_owned())
             };
             if loader_has_pins {
-                let input = input.clone();
+                let pin_input = input.clone();
                 injector::bank_pin::set_lookup(Box::new(move |hash| {
-                    form::parse_pin_reply(&ask(&input, form::pin_request_line(hash))?)
+                    form::parse_pin_reply(&ask(&pin_input, form::pin_request_line(hash))?)
+                }));
+                let lamp_input = input.clone();
+                injector::lamp::set_lookup(Box::new(move |hash| {
+                    form::parse_lamp_reply(&ask(&lamp_input, form::lamp_request_line(hash))?)
                 }));
             }
             if loader_has_http {

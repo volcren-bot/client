@@ -143,6 +143,8 @@ The client keeps its item containers (inventory 93, equipment 94, bank 95, ...) 
 
 ## Component fields (`WidgetDetail`)
 
+A component's model is at 0xfc (type, 1 is a model id) and 0x100 (id), with its rotation at 0x11c/0x120 and zoom at 0x128: `decode::widgets::MODEL_TYPE` and `MODEL_ID`, read by `widget_model`. Found on the certer's quiz, whose three buttons hold models 8965, 8966 and 8967 in order.
+
 The inspector's extra fields are read at fixed offsets of the client's component object (`decode/src/widgets.rs`, `DETAIL_*`; the offsets in `InterfaceLayout` that the agent finds by rules are id, index, kind, position, parent, hidden, scroll, sprite, text colour, text and the dynamic children). The Java client's field order isn't kept by the native struct, so they were found by correlation, which works for any field the cache's interface definitions state:
 
 1. `injector widget-dump <pid> 1024` lists the first 1024 words of every open component; `injector cache-file <pid> 3 <group> <component> <out>` writes its definition from the cache (index 3, group = interface, file = component).
@@ -151,3 +153,7 @@ The inspector's extra fields are read at fixed offsets of the client's component
 
 Found on build a2636a01, by byte offset: content type 0x30, x/y/width/height modes 0x3c/0x40/0x44/0x48, original x/y/width/height 0x4c..0x58, relative x/y/width/height 0x5c..0x68, filled 0xa8 (byte), opacity 0xb0 (byte, 255 is invisible), sprite tiling 0xec (byte), font 0x150, line height 0x188, x and y alignment 0x18c/0x190, text shadowed 0x194 (byte), click mask 0x2b0 (three bytes of flags, not shown), item id 0xb38 and quantity 0xb3c (dynamic children only; matched against the inventory's slots, the quantity only seen as 1 and 0), no click through 0xb98 (byte, 99%). Width, height and their modes match the cache in only about 70%: scripts resize most of the resizable interface. The listeners are vectors (begin and end pointers; the load listener is at 0x358, mouse over 0x448); name, target verb, model fields (no open interface had a model), border type, drag settings and the item quantity mode were not found.
 
+## Objects and the scene's edge
+
+- **An object's transforms come in four forms.** Definition opcodes 77 and 92 have two-byte ids, and 97 and 98 are the same with three-byte ids. 92 and 98 end on a default id. An opcode the decoder doesn't know fails the whole definition with no error, and that object then has no collision in the world file and no options for the planner. Missing 97 and 98 hid 842 of 63,320 definitions, doors among them.
+- **The client doesn't fill the scene's outer rows.** They read as open ground, so the planner takes those tiles from the cache. Planning on them made false routes that vanished as the player came closer, and the walk went back and forth.

@@ -30,6 +30,8 @@ pub enum ScriptEvent {
     HttpRequest(String),
     /// `bank_pin_enter()` asks for the PIN saved for the account with this name hash; answer with `answer_pin`.
     PinRequest(String),
+    /// `lamp_skill()` asks for the lamp skill saved for the account with this name hash; answer with `answer_lamp`.
+    LampRequest(String),
     Finished {
         result: Result<(), String>,
         stopped: bool,
@@ -89,10 +91,11 @@ impl Script {
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
         let pins = format!(
-            "{}\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n{}\n",
             injector::form::PINS_PREFIX,
             injector::http::CAPABILITY_PREFIX,
             injector::antiban::line(&settings.antiban),
+            injector::transports::settings_line(&settings.transports),
             crate::transports::line()
         );
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
@@ -201,6 +204,17 @@ impl Script {
         self.reply(&injector::antiban::line(config), "breaks update")
     }
 
+    /// Sends the running script which types of transport are off, which it plans by from its next walk.
+    pub fn push_transport_settings(
+        &mut self,
+        settings: &injector::transports::Settings,
+    ) -> Result<(), String> {
+        self.reply(
+            &injector::transports::settings_line(settings),
+            "transports update",
+        )
+    }
+
     /// Asks the script to skip the next occurrence of break (or sleep) number `index` of the config, counting from 0.
     pub fn skip_next(&mut self, kind: &str, index: u32) -> Result<(), String> {
         self.reply(&injector::antiban::skip_line(kind, index), "skip")
@@ -209,6 +223,11 @@ impl Script {
     /// Tells the script's injector the PIN for the hash it asked about, `None` if no saved account has it, or why we can't say.
     pub fn answer_pin(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
         self.reply(&injector::form::pin_reply_line(&answer), "PIN request")
+    }
+
+    /// Tells the script's injector the lamp skill for the hash it asked about, `None` if there isn't one, or why we can't say.
+    pub fn answer_lamp(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
+        self.reply(&injector::form::lamp_reply_line(&answer), "lamp request")
     }
 
     /// Makes a script's `http_request` on a thread of its own if its host is whitelisted, and sends the response (or why there is none) back.
@@ -288,6 +307,9 @@ impl Script {
                 }
                 if let Some(hash) = line.strip_prefix(injector::form::PIN_REQUEST_PREFIX) {
                     return ScriptEvent::PinRequest(hash.trim().to_owned());
+                }
+                if let Some(hash) = line.strip_prefix(injector::form::LAMP_REQUEST_PREFIX) {
+                    return ScriptEvent::LampRequest(hash.trim().to_owned());
                 }
                 if let Some(payload) = line.strip_prefix(injector::form::BREAKS_PREFIX) {
                     return match injector::form::parse_breaks(payload) {
@@ -395,6 +417,7 @@ mod tests {
                         lines.push(format!("counters {}", counters.len()))
                     }
                     ScriptEvent::PinRequest(hash) => lines.push(format!("pin {hash}")),
+                    ScriptEvent::LampRequest(hash) => lines.push(format!("lamp {hash}")),
                     ScriptEvent::HttpRequest(payload) => lines.push(format!("http {payload}")),
                     ScriptEvent::Stats(experience, gold, _) => {
                         lines.push(format!("stats {experience} {gold}"))
@@ -450,6 +473,7 @@ mod tests {
                     | ScriptEvent::Breaks(..)
                     | ScriptEvent::Counters(..)
                     | ScriptEvent::PinRequest(..)
+                    | ScriptEvent::LampRequest(..)
                     | ScriptEvent::HttpRequest(..) => {}
                     ScriptEvent::Finished { .. } => {
                         panic!("the script ended before asking for a form")

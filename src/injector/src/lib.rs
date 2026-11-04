@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 8;
+pub const HOST_API: u32 = 9;
 pub use ipc::state::varp;
 
 pub mod antiban;
@@ -21,6 +21,7 @@ pub mod font;
 pub mod form;
 pub mod http;
 pub mod input_jobs;
+pub mod lamp;
 pub mod landmass;
 pub mod nav;
 pub mod pathfinding;
@@ -340,8 +341,8 @@ pub use win::{
     scene_tiles_next_frame, screenshot, script_runs, selected_widget, server_tile, set_cursor,
     set_display_name, set_total_xp, spot_anims, sub_interfaces, unload, varbit, varbit_def,
     varbits_of, varc, varc_changes, varp_value, varps, wait_watchers, watch_client, widget,
-    widget_children, widget_dump, widget_tree, widget_words, world_debug, world_entities,
-    world_movement, world_select,
+    widget_children, widget_dump, widget_model, widget_tree, widget_words, world_debug,
+    world_entities, world_movement, world_route, world_select,
 };
 
 pub const MODULE_PREFIX: &str = "agent";

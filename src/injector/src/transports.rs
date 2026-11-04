@@ -9,6 +9,68 @@ use serde_json::{Value, json};
 /// A line the loader writes to the script's stdin: the parsed transports as JSON. Sent before the script starts.
 pub const PREFIX: &str = "\u{1e}TRANSPORTS ";
 
+/// A line the loader writes to the script's stdin: which types of transport the user turned off. Sent before the script starts, and later at any time.
+pub const SETTINGS_PREFIX: &str = "\u{1e}TRANSPORT_SETTINGS ";
+
+/// The types of transport the user can turn off on the loader's Settings page: the name scripts know them by, and the label.
+pub const TYPES: &[(&str, &str)] = &[
+    ("spells", "Teleport spells"),
+    ("home_teleports", "Home teleports"),
+    ("minigames", "Minigame teleports"),
+    ("items", "Teleport items"),
+    ("quetzal_whistle", "Quetzal whistle"),
+    ("scroll_book", "Master scroll book"),
+    ("quetzals", "Quetzals"),
+    ("spirit_trees", "Spirit trees"),
+    ("gnome_gliders", "Gnome gliders"),
+    ("hot_air_balloons", "Hot air balloons"),
+    ("fairy_rings", "Fairy rings"),
+    ("magic_mushtrees", "Magic mushtrees"),
+    ("magic_carpets", "Magic carpets"),
+    ("canoes", "Canoes"),
+    ("portals", "Portals"),
+    ("wilderness_obelisks", "Wilderness obelisks"),
+    ("house", "Player's house"),
+    ("charter", "Charter ships"),
+    ("ride", "Boats, ships and carts"),
+    ("minecarts", "Lovakengj minecarts"),
+    ("gates", "Toll gates"),
+    ("levers", "Levers"),
+    ("shortcuts", "Agility shortcuts"),
+];
+
+/// Which types of transport are off, by the names in `TYPES`. All are on by default.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub off: Vec<String>,
+}
+
+static SETTINGS: std::sync::Mutex<Option<Settings>> = std::sync::Mutex::new(None);
+
+pub fn settings_line(settings: &Settings) -> String {
+    format!(
+        "{SETTINGS_PREFIX}{}",
+        serde_json::to_string(settings).expect("settings serialize")
+    )
+}
+
+pub fn parse_settings(payload: &str) -> Option<Settings> {
+    serde_json::from_str(payload.trim()).ok()
+}
+
+pub fn set_settings(settings: Settings) {
+    *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(settings);
+}
+
+pub fn current_settings() -> Settings {
+    SETTINGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
 /// A skill the player needs, like `25 Magic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
@@ -60,7 +122,7 @@ pub struct Transport {
     /// The `menuOption menuTarget objectID` column, as written (`Charter Trader Crewmember 1330`): what to click.
     #[serde(default)]
     pub menu: String,
-    /// The comment line above the row (without the `#`), which sometimes holds a requirement the columns can't, like `Port Phasmatys (varbit:217=7?ECTO_TOKEN=2)`.
+    /// The comment above the row when it states a requirement the columns can't, like `Port Phasmatys (varbit:217=7?ECTO_TOKEN=2)`; other comments are dropped.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
 }
@@ -87,31 +149,104 @@ pub struct Data {
     pub climbs: Vec<Transport>,
 }
 
-/// The kind of the climbs with requirements that the script gets to check.
+/// The kinds of the rows with requirements that the script gets to check: climbs, links, and shortcuts.
 pub const GATED_KIND: &str = "climb_gated";
+pub const LINK_GATED_KIND: &str = "link_gated";
 
-/// The kind of the agility shortcuts (hops over an obstacle on the same plane, mostly) and of those that the script gets to check: all of them ask for a level.
-pub const SHORTCUT_KIND: &str = "agility_shortcuts";
 pub const SHORTCUT_GATED_KIND: &str = "shortcut_gated";
 
-/// The longest hop (tiles) a shortcut may make: the file also holds doorways and course exits that teleport across the map, which a walk has no use for.
-pub const MAX_SHORTCUT_HOP: i32 = 40;
+/// The kind of the agility shortcuts (hops over an obstacle on the same plane, mostly): all of them ask for a level.
+pub const SHORTCUT_KIND: &str = "agility_shortcuts";
 
-/// Whether a row of the shortcuts file is one a walk can use: it has a click, and it hops no farther than `MAX_SHORTCUT_HOP` within one world (the surface or the underground).
+/// The longest hop (tiles, the underground over the surface) a shortcut may make: the file also holds an Agility Pyramid doorway and stairs that teleport across the map, which a walk has no use for.
+pub const MAX_SHORTCUT_HOP: i32 = 70;
+
+/// Whether a row of the shortcuts file is one a walk can use: it has a click, and it hops no farther than `MAX_SHORTCUT_HOP`.
 pub fn is_shortcut(t: &Transport) -> bool {
-    let (Some(o), Some(d)) = (t.origin, t.destination) else {
+    !t.menu.trim().is_empty()
+        && !t.menu.contains(" -> ")
+        && hop(t).is_some_and(|hop| hop <= MAX_SHORTCUT_HOP)
+}
+
+/// The menu option a row's menu starts with, "Climb-up" of "Climb-up Rope 51647". The data doesn't mark where it ends, and a few options are two words, the second of them lowercase like "Climb over Broken cart 28931".
+pub fn menu_option(menu: &str) -> Option<&str> {
+    const SECOND_WORDS: &[&str] = &["over", "on", "through", "up", "down", "to", "off", "in"];
+    let first = menu.split_whitespace().next()?;
+    let start = menu.find(first)?;
+    let rest = &menu[start + first.len()..];
+    match rest.split_whitespace().next() {
+        Some(second) if SECOND_WORDS.contains(&second) => {
+            let end = rest.find(second)? + second.len();
+            Some(&menu[start..start + first.len() + end])
+        }
+        _ => Some(first),
+    }
+}
+
+/// The longest hop (tiles) of a link on one plane: a stile, a log, a door that is an object. Longer ones are far hops.
+pub const MAX_LINK_HOP: i32 = 15;
+
+/// The longest hop (tiles, the underground over the surface) of a climb: farther ones don't fit in the planner's box with the walk around them.
+pub const MAX_CLIMB_HOP: i32 = 350;
+
+fn hop(t: &Transport) -> Option<i32> {
+    let (o, d) = (t.origin?, t.destination?);
+    let folded = |y: i32| {
+        if y >= crate::nav::UNDERGROUND {
+            y - crate::nav::UNDERGROUND
+        } else {
+            y
+        }
+    };
+    Some((o.x - d.x).abs().max((folded(o.y) - folded(d.y)).abs()))
+}
+
+/// Entrances a walk has no business taking: boss rooms, minigames, and ways that drop you somewhere with no choice.
+const LEFT_OUT: &[&str] = &[
+    "Enter Door of Dinh 29322",
+    "Channel Teleport Platform 36198",
+    "Use Spade -> Mole hill 12202",
+    "Enter Cave 678",
+    "Enter Centre of crop circle 24991",
+    "Teleport Mage of Zamorak 2581",
+    "Jump-into Whirlpool 25274",
+    "Slide Slope 5015",
+];
+
+/// Whether a row is an item used on an object: "Use Rope -> Boulder 5842". The script takes them as whole trips, since the planner can only click an object's own options.
+pub fn is_item_on(t: &Transport) -> bool {
+    t.origin.is_some()
+        && t.destination.is_some()
+        && t.menu.starts_with("Use ")
+        && t.menu.contains(" -> ")
+        && !LEFT_OUT.contains(&t.menu.trim())
+}
+
+/// Whether a row goes too far for the planner: a tunnel, a cart, a ladder to another part of the map. The script takes them as whole trips. "Join Castle Wars" puts you in a minigame's lobby.
+pub fn is_far_hop(t: &Transport) -> bool {
+    let Some(hop) = hop(t) else {
         return false;
     };
     !t.menu.trim().is_empty()
-        && (o.y >= crate::nav::UNDERGROUND) == (d.y >= crate::nav::UNDERGROUND)
-        && (o.x - d.x).abs().max((o.y - d.y).abs()) <= MAX_SHORTCUT_HOP
+        && !t.menu.starts_with("Pay-toll")
+        && !t.menu.contains(" -> ")
+        && !t.menu.starts_with("Join ")
+        && !LEFT_OUT.contains(&t.menu.trim())
+        && hop
+            > if changes_plane(t) {
+                MAX_CLIMB_HOP
+            } else {
+                MAX_LINK_HOP
+            }
 }
 
-/// The longest hop (tiles) of a link on one plane: a stile, a log, a door that is an object. Longer ones are boats, tunnels and teleports.
-pub const MAX_LINK_HOP: i32 = 15;
+/// Whether a row is a wall door that asks for something, a hop of one tile with "Open". Each row is one direction, and a guild's door often only asks on the way in.
+pub fn is_gated_door(t: &Transport) -> bool {
+    gated(t) && !changes_plane(t) && hop(t) == Some(1) && t.menu.starts_with("Open ")
+}
 
-/// Whether a row is a way across something the walk can't step over, on one plane in one world: a hop of 2 to `MAX_LINK_HOP` tiles with a click (a Tree Door, a stile, a log).
-/// A hop of one tile is a wall door, which the planner opens by taking its walls away; toll barriers are the script's, since they cost something.
+/// Whether a row is a way across something the walk can't step over, on one plane in one world: a hop of up to `MAX_LINK_HOP` tiles with a click (a Tree Door, a stile, a log, a web).
+/// A hop of one tile with "Open" is a wall door, which the planner opens by taking its walls away; toll barriers are the script's, since they cost something.
 pub fn is_link(t: &Transport) -> bool {
     let (Some(o), Some(d)) = (t.origin, t.destination) else {
         return false;
@@ -119,23 +254,52 @@ pub fn is_link(t: &Transport) -> bool {
     let hop = (o.x - d.x).abs().max((o.y - d.y).abs());
     o.plane == d.plane
         && (o.y >= crate::nav::UNDERGROUND) == (d.y >= crate::nav::UNDERGROUND)
-        && (2..=MAX_LINK_HOP).contains(&hop)
+        && (1..=MAX_LINK_HOP).contains(&hop)
+        && !(hop == 1 && t.menu.starts_with("Open "))
         && !t.menu.trim().is_empty()
         && !t.menu.starts_with("Pay-toll")
+        && !t.menu.contains(" -> ")
 }
 
-/// Whether a row is a climb of the planner's: it changes the plane or the world, or it is a link.
+/// Whether a row is the planner's: it changes the plane or the world and isn't too far, or it is a link, or a door that asks for something.
 pub fn is_climb(t: &Transport) -> bool {
-    changes_plane(t) || is_link(t)
+    (changes_plane(t) && !is_far_hop(t) && !t.menu.contains(" -> "))
+        || is_link(t)
+        || is_gated_door(t)
 }
 
-/// Whether a row asks for anything.
+/// The kind a row that asks for something goes to the script under.
+pub fn gated_kind(t: &Transport) -> &'static str {
+    if t.kind == SHORTCUT_KIND {
+        SHORTCUT_GATED_KIND
+    } else if is_link(t) || is_gated_door(t) {
+        LINK_GATED_KIND
+    } else {
+        GATED_KIND
+    }
+}
+
+/// Whether a tile is in the Wilderness, on the surface or below it.
+pub fn in_wilderness(x: i32, y: i32) -> bool {
+    (2944..3392).contains(&x) && ((3523..3968).contains(&y) || (9918..10368).contains(&y))
+}
+
+/// Whether a row starts or ends in the Wilderness, like the ditch: a walk uses those only if it starts or ends there itself.
+pub fn touches_wilderness(t: &Transport) -> bool {
+    [t.origin, t.destination]
+        .into_iter()
+        .flatten()
+        .any(|tile| in_wilderness(tile.x, tile.y))
+}
+
+/// Whether a row asks for anything. A comment above it that states a requirement counts: the script decides what it means.
 pub fn gated(t: &Transport) -> bool {
     !(t.skills.is_empty()
         && t.quests.is_empty()
         && t.varbits.is_empty()
         && t.varps.is_empty()
-        && t.items.is_empty())
+        && t.items.is_empty()
+        && t.note.is_empty())
 }
 
 /// Whether a row changes the plane, or goes into or out of the underground (the copy of the map 6,400 tiles north, entered by the same plane).
@@ -152,7 +316,10 @@ pub fn climb_key(t: &Transport) -> String {
         t.origin.expect("a climb has an origin"),
         t.destination.expect("a climb has a destination"),
     );
-    format!("{},{},{}>{},{},{}", o.x, o.y, o.plane, d.x, d.y, d.plane)
+    format!(
+        "{},{},{}>{},{},{}|{}",
+        o.x, o.y, o.plane, d.x, d.y, d.plane, t.menu
+    )
 }
 
 fn tile(text: &str) -> Result<Option<Tile>, String> {
@@ -237,7 +404,11 @@ pub fn parse_file(kind: &str, text: &str) -> Result<(Vec<Transport>, Vec<String>
     let mut note = String::new();
     for (n, line) in lines {
         if let Some(comment) = line.strip_prefix('#') {
-            note = comment.trim().to_owned();
+            note = if comment.contains('?') {
+                comment.trim().to_owned()
+            } else {
+                String::new()
+            };
             continue;
         }
         if line.trim().is_empty() {
@@ -283,49 +454,6 @@ pub fn parse_file(kind: &str, text: &str) -> Result<(Vec<Transport>, Vec<String>
         }
     }
     Ok((found, skipped))
-}
-
-/// Turns a file of separate starts and ends (the mushtrees, fairy rings, ...) into trips: every start paired with every end, except an end within `radius` tiles of the start on the same
-/// plane (that is the same place, or too close to be worth a trip). A start is a row with an origin and no destination, an end the opposite. Rows that are already complete trips stay as they are.
-/// A trip takes the click and the requirements of its start, plus the requirements of its end; its name, and its duration if the end has one, come from the end.
-pub fn expand_permutations(rows: Vec<Transport>, radius: i32) -> Vec<Transport> {
-    let (mut out, mut starts, mut ends) = (Vec::new(), Vec::new(), Vec::new());
-    for row in rows {
-        match (row.origin, row.destination) {
-            (Some(_), None) => starts.push(row),
-            (None, Some(_)) => ends.push(row),
-            _ => out.push(row),
-        }
-    }
-    for start in &starts {
-        let from = start.origin.expect("a start has an origin");
-        for end in &ends {
-            let to = end.destination.expect("an end has a destination");
-            if from.plane == to.plane && (from.x - to.x).abs().max((from.y - to.y).abs()) < radius {
-                continue;
-            }
-            let mut trip = start.clone();
-            trip.destination = Some(to);
-            trip.name.clone_from(&end.name);
-            if end.duration > 0 {
-                trip.duration = end.duration;
-            }
-            trip.wilderness = end.wilderness.or(start.wilderness);
-            trip.skills.extend(end.skills.iter().cloned());
-            trip.quests.extend(end.quests.iter().cloned());
-            trip.varbits.extend(end.varbits.iter().cloned());
-            trip.varps.extend(end.varps.iter().cloned());
-            if !end.items.is_empty() {
-                trip.items = if trip.items.is_empty() {
-                    end.items.clone()
-                } else {
-                    format!("{}&&{}", trip.items, end.items)
-                };
-            }
-            out.push(trip);
-        }
-    }
-    out
 }
 
 /// The named item groups of `item-variations.tsv`: `name`, then the comma-separated `ids` (the other columns, staves and off-hands, aren't needed). A row without a name or any id is skipped.
@@ -407,25 +535,16 @@ pub fn with_climbs<R>(f: impl FnOnce(&[Transport]) -> R) -> R {
     f(current.1.as_ref().map_or(&[], |d| d.climbs.as_slice()))
 }
 
-/// `{ source, transports, version }`: empty (source `none`) when the loader sent nothing.
+/// `{ source, transports, items, version }`, without the planner's climbs: empty (source `none`) when the loader sent nothing.
 pub fn current_value() -> Value {
     let current = lock();
-    // without the planner's climbs: thousands of rows the script never reads (and not copied here)
-    let data = current.1.as_ref().map_or_else(
-        || Data {
-            source: "none".into(),
-            ..Data::default()
-        },
-        |d| Data {
-            source: d.source.clone(),
-            transports: d.transports.clone(),
-            items: d.items.clone(),
-            climbs: Vec::new(),
-        },
-    );
-    let mut value = serde_json::to_value(data).unwrap_or_else(|_| json!({}));
-    value["version"] = json!(current.0);
-    value
+    let data = current.1.as_ref();
+    json!({
+        "source": data.map_or("none", |d| d.source.as_str()),
+        "transports": data.map_or(&[][..], |d| d.transports.as_slice()),
+        "items": data.map_or(&[][..], |d| d.items.as_slice()),
+        "version": current.0,
+    })
 }
 
 #[cfg(test)]
@@ -480,7 +599,10 @@ mod tests {
         let (rows, skipped) = parse_file("teleportation_items", text).unwrap();
         assert!(skipped.is_empty(), "{skipped:?}");
         assert!(rows.len() > 400);
-        assert!(rows.iter().all(|t| t.origin.is_none() && t.destination.is_some()));
+        assert!(
+            rows.iter()
+                .all(|t| t.origin.is_none() && t.destination.is_some())
+        );
         let games = rows
             .iter()
             .find(|t| t.name == "Games necklace: Burthorpe")
@@ -550,25 +672,49 @@ mod tests {
     }
 
     #[test]
-    fn starts_and_ends_become_trips() {
-        let text = "# Origin\tDestination\tmenuOption menuTarget objectID\tDuration\tDisplay info\n\
-1 1 0\t\tUse Tree 1\t\t\n\
-2 1 0\t\tUse Tree 1\t\t\n\
-50 50 0\t\tUse Tree 2\t\t\n\
-\t1 1 0\t\t6\t1. One\n\
-\t50 50 0\t\t6\t2. Two\n\
-5 5 0\t6 6 0\tWalk 3\t\tcomplete\n";
-        let (rows, skipped) = parse_file("magic_mushtrees", text).unwrap();
-        assert!(skipped.is_empty(), "{skipped:?}");
-        let trips = expand_permutations(rows, 5);
-        let to = |name: &str| trips.iter().filter(|t| t.name == name).count();
-        // the two starts at tree one go to tree two and not to tree one; the start at tree two goes to tree one
-        assert_eq!((to("1. One"), to("2. Two")), (1, 2));
-        assert_eq!(trips.len(), 4, "3 trips and the complete row");
-        let back = trips.iter().find(|t| t.name == "1. One").unwrap();
-        assert_eq!(back.menu, "Use Tree 2");
-        assert_eq!(back.duration, 6);
-        assert!(back.origin.is_some() && back.destination.is_some());
+    fn a_menu_option_can_be_two_words() {
+        assert_eq!(menu_option("Climb-up Rope 51647"), Some("Climb-up"));
+        assert_eq!(
+            menu_option("Climb over Broken cart 28931"),
+            Some("Climb over")
+        );
+        assert_eq!(
+            menu_option("Jump on Rubber cap mushroom 1"),
+            Some("Jump on")
+        );
+        assert_eq!(menu_option("Open trapdoor 5"), Some("Open"));
+        assert_eq!(menu_option("Open Tree Door 1967"), Some("Open"));
+        assert_eq!(menu_option(""), None);
+    }
+
+    #[test]
+    fn only_a_comment_with_a_requirement_is_kept_as_a_note() {
+        let text = "Origin\tDestination\tmenuOption menuTarget objectID\n# Stairs\n1 2 0\t1 2 1\tClimb-up Stairs 1\n# Toll (varbit:217=7?ECTO_TOKEN=2)\n3 4 0\t3 6 0\tPay-toll Barrier 2\n# Doors\n5 6 0\t5 8 0\tOpen Door 3\n";
+        let (rows, _) = parse_file("transports", text).unwrap();
+        assert_eq!(rows[0].note, "");
+        assert_eq!(rows[1].note, "Toll (varbit:217=7?ECTO_TOKEN=2)");
+        assert_eq!(rows[2].note, "", "a later comment ends it");
+    }
+
+    #[test]
+    fn a_gated_row_goes_to_the_script_under_its_own_kind() {
+        let text = "Origin\tDestination\tmenuOption menuTarget objectID\n1 2 0\t1 2 1\tClimb-up Stairs 1\n3 4 0\t3 6 0\tOpen Door 2\n";
+        let (rows, _) = parse_file("transports", text).unwrap();
+        assert_eq!(gated_kind(&rows[0]), GATED_KIND);
+        assert_eq!(gated_kind(&rows[1]), LINK_GATED_KIND);
+        let shortcut = Transport {
+            kind: SHORTCUT_KIND.into(),
+            ..rows[1].clone()
+        };
+        assert_eq!(gated_kind(&shortcut), SHORTCUT_GATED_KIND);
+    }
+
+    #[test]
+    fn the_ditch_touches_the_wilderness() {
+        let text = "Origin\tDestination\tmenuOption menuTarget objectID\n3100 3520 0\t3100 3523 0\tCross Wilderness Ditch 23271\n3100 3300 0\t3100 3303 0\tCross Stile 1\n";
+        let (rows, _) = parse_file("transports", text).unwrap();
+        assert!(touches_wilderness(&rows[0]) && !touches_wilderness(&rows[1]));
+        assert!(in_wilderness(3100, 10000) && !in_wilderness(3100, 3522));
     }
 
     #[test]

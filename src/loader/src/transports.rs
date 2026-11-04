@@ -1,21 +1,32 @@
-//! Downloads the transport data (teleport spells, charter ships, ...) once per run, keeps a local copy, and builds the line that gives it to scripts.
+//! The transport data (teleport spells, charter ships, ...): checks upstream once a day, keeps the last versions, and builds the line that gives it to scripts.
 //!
-//! Each file comes from the first source that works: the download, the copy kept from an earlier run, the copy bundled with the loader.
-//! A download replaces the kept copy only after it parses, so a bad answer (an error page, a half file) never damages it.
-//! Scripts never touch the network for this: the loader makes the request, to one fixed address, and the HTTP whitelist doesn't apply.
+//! A version is one upstream commit, kept in its own folder. A new one is used only after every file of it has downloaded and parsed, so a bad answer (an error page, a half file) never replaces a good version.
+//! With no version kept, or a kept file damaged, the copy bundled with the loader is used.
+//! Scripts never touch the network for this: the loader makes the requests, to fixed addresses, and the HTTP whitelist doesn't apply. A script keeps the data it started with.
 
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
-    time::Duration,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+use serde::{Deserialize, Serialize};
 
 use injector::transports::{self, Data, ItemName, Transport};
 
-/// The commit of Skretzo/shortest-path the files are taken from. Bump it together with `data/`.
-const COMMIT: &str = "4fd7d4a220c06781145dd7ba21e9a1e46ed0fc27";
+/// The commit of Skretzo/shortest-path that `data/` was taken from. Bump it together with `data/`.
+const BUNDLED_COMMIT: &str = "4fd7d4a220c06781145dd7ba21e9a1e46ed0fc27";
+const REPO: &str = "Skretzo/shortest-path";
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_FILE: u64 = 1 << 20;
+/// How often upstream is asked for a new version, and how often the loader looks whether it is time to. A failed check is tried again at the next look.
+const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const LOOK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How many versions are kept, the one in use among them. Rolling back past the last one lands on the bundled copy.
+const KEPT_VERSIONS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -33,12 +44,9 @@ struct File {
     kind: Kind,
     /// The copy bundled with the loader.
     bundled: &'static str,
-    /// Keeps only the rows of a transports file that this version can use (the file also lists stairs, doors and much else, which would only make the scripts' data big).
+    /// Keeps only the rows of a transports file that scripts can use.
     keep: Option<fn(&Transport) -> bool>,
-    /// For a file of separate starts and ends (the mushtrees): the radius, in tiles, under which an end is too close to its start to be a trip. Upstream's `transport-types.tsv` holds it; it is
-    /// written here because it is one number per type, and the type is named in this list anyway.
-    permute: Option<i32>,
-    /// Also takes the planner's climbs out of the file: the rows this accepts (every row that changes plane, or every shortcut a walk can use).
+    /// Also takes the planner's climbs out of the file.
     climbs: Option<fn(&Transport) -> bool>,
 }
 
@@ -47,195 +55,136 @@ fn is_toll(t: &Transport) -> bool {
     t.origin.is_some() && t.destination.is_some() && t.menu.starts_with("Pay-toll")
 }
 
+/// The rows of `transports.tsv` the script takes as whole trips.
+fn is_trip(t: &Transport) -> bool {
+    is_toll(t) || transports::is_far_hop(t) || transports::is_item_on(t)
+}
+
 /// Files whose bundled copy is always used: it differs from upstream's, which would replace it.
 const BUNDLED_ONLY: &[&str] = &["teleportation_levers"];
 
+macro_rules! transports_file {
+    ($name:literal) => {
+        transports_file!($name, None, None)
+    };
+    ($name:literal, $keep:expr, $climbs:expr) => {
+        File {
+            name: $name,
+            path: concat!("transports/", $name, ".tsv"),
+            kind: Kind::Transports,
+            bundled: include_str!(concat!("../data/transports/", $name, ".tsv")),
+            keep: $keep,
+            climbs: $climbs,
+        }
+    };
+}
+
 /// The files to load. An explicit list, so a stray file upstream is never read as a transport.
 const FILES: &[File] = &[
-    File {
-        name: "teleportation_spells",
-        path: "transports/teleportation_spells.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/teleportation_spells.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "teleportation_items",
-        path: "transports/teleportation_items.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/teleportation_items.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "teleportation_spells_home",
-        path: "transports/teleportation_spells_home.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/teleportation_spells_home.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "charter_ships",
-        path: "transports/charter_ships.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/charter_ships.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "magic_mushtrees",
-        path: "transports/magic_mushtrees.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/magic_mushtrees.tsv"),
-        keep: None,
-        permute: Some(5),
-        climbs: None,
-    },
-    File {
-        name: "quetzals",
-        path: "transports/quetzals.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/quetzals.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "spirit_trees",
-        path: "transports/spirit_trees.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/spirit_trees.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "gnome_gliders",
-        path: "transports/gnome_gliders.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/gnome_gliders.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "fairy_rings",
-        path: "transports/fairy_rings.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/fairy_rings.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "boats",
-        path: "transports/boats.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/boats.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "ships",
-        path: "transports/ships.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/ships.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "minecarts",
-        path: "transports/minecarts.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/minecarts.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
-    File {
-        name: "teleportation_levers",
-        path: "transports/teleportation_levers.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/teleportation_levers.tsv"),
-        keep: None,
-        permute: None,
-        climbs: None,
-    },
+    transports_file!("teleportation_spells"),
+    transports_file!("teleportation_items"),
+    transports_file!("teleportation_spells_home"),
+    transports_file!("teleportation_minigames"),
+    transports_file!("charter_ships"),
+    transports_file!("magic_mushtrees"),
+    transports_file!("quetzals"),
+    transports_file!("quetzal_whistle"),
+    transports_file!("spirit_trees"),
+    transports_file!("gnome_gliders"),
+    transports_file!("hot_air_balloons"),
+    transports_file!("fairy_rings"),
+    transports_file!("boats"),
+    transports_file!("ships"),
+    transports_file!("minecarts"),
+    transports_file!("magic_carpets"),
+    transports_file!("canoes"),
+    transports_file!("teleportation_portals"),
+    transports_file!("wilderness_obelisks"),
+    transports_file!("teleportation_portals_poh"),
+    transports_file!("teleportation_boxes"),
+    transports_file!("teleportation_levers"),
     File {
         name: "item-variations",
         path: "item-variations.tsv",
         kind: Kind::ItemNames,
         bundled: include_str!("../data/item-variations.tsv"),
         keep: None,
-        permute: None,
         climbs: None,
     },
-    File {
-        name: "transports",
-        path: "transports/transports.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/transports.tsv"),
-        keep: Some(is_toll),
-        permute: None,
-        climbs: Some(transports::is_climb),
-    },
-    File {
-        name: "agility_shortcuts",
-        path: "transports/agility_shortcuts.tsv",
-        kind: Kind::Transports,
-        bundled: include_str!("../data/transports/agility_shortcuts.tsv"),
-        // the script gets the rows through the copies that ask for something, and the planner has the rest
-        keep: Some(|_| false),
-        permute: None,
-        climbs: Some(transports::is_shortcut),
-    },
+    transports_file!("transports", Some(is_trip), Some(transports::is_climb)),
+    // the script gets only the copies that ask for something, and the planner has the rest
+    transports_file!(
+        "agility_shortcuts",
+        Some(transports::is_item_on),
+        Some(transports::is_shortcut)
+    ),
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Source {
-    Online,
-    Cache,
-    Bundled,
+/// One upstream commit that changed the data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Version {
+    commit: String,
+    date: String,
 }
 
-impl Source {
-    fn name(self) -> &'static str {
-        match self {
-            Source::Online => "online",
-            Source::Cache => "cache",
-            Source::Bundled => "bundled",
-        }
-    }
+/// What is kept, saved next to the versions' folders.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Versions {
+    /// The one in use first, then the older ones. Empty: the bundled copy.
+    kept: Vec<Version>,
+    /// Unix seconds of the last answer from upstream.
+    checked_at: u64,
+    /// A commit rolled back from: the daily check leaves it alone, the button doesn't.
+    skip: Option<String>,
 }
 
-fn url(file: &File) -> String {
-    format!(
-        "https://raw.githubusercontent.com/Skretzo/shortest-path/{COMMIT}/src/main/resources/{}",
-        file.path
-    )
+fn is_commit(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn cache_dir() -> Option<PathBuf> {
+fn short(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
+}
+
+fn root_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("com", "volcren", "Volcren")
         .map(|dirs| dirs.data_dir().join("transports"))
 }
 
-fn download(file: &File) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION")))
-        .build()
-        .into();
+fn read_versions(root: &Path) -> Versions {
+    std::fs::read_to_string(root.join("versions.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_versions(root: &Path, versions: &Versions) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(versions).map_err(|e| e.to_string())?;
+    write_file(&root.join("versions.json"), &text).map_err(|e| e.to_string())
+}
+
+/// The newest commit from the commits API's answer. The answer isn't trusted: the commit goes in a path and an address.
+fn parse_latest(body: &str) -> Result<Version, String> {
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let newest = value.get(0).ok_or("no commits in the answer")?;
+    let commit = newest["sha"].as_str().unwrap_or_default();
+    if !is_commit(commit) {
+        return Err(format!("not a commit: {commit:?}"));
+    }
+    Ok(Version {
+        commit: commit.to_owned(),
+        date: newest["commit"]["committer"]["date"]
+            .as_str()
+            .and_then(|d| d.get(..10))
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+fn get(agent: &ureq::Agent, url: &str) -> Result<String, String> {
     agent
-        .get(url(file))
+        .get(url)
         .call()
         .map_err(|e| e.to_string())?
         .body_mut()
@@ -243,6 +192,25 @@ fn download(file: &File) -> Result<String, String> {
         .limit(MAX_FILE)
         .read_to_string()
         .map_err(|e| e.to_string())
+}
+
+fn latest(agent: &ureq::Agent) -> Result<Version, String> {
+    parse_latest(&get(
+        agent,
+        &format!(
+            "https://api.github.com/repos/{REPO}/commits?sha=master&path=src/main/resources&per_page=1"
+        ),
+    )?)
+}
+
+fn download(agent: &ureq::Agent, commit: &str, file: &File) -> Result<String, String> {
+    get(
+        agent,
+        &format!(
+            "https://raw.githubusercontent.com/{REPO}/{commit}/src/main/resources/{}",
+            file.path
+        ),
+    )
 }
 
 /// What a file holds.
@@ -256,9 +224,9 @@ enum Parsed {
 fn validate(file: &File, text: &str) -> Result<Parsed, String> {
     match file.kind {
         Kind::Transports => {
-            let (mut rows, _) = transports::parse_file(file.name, text)?;
-            if let Some(radius) = file.permute {
-                rows = transports::expand_permutations(rows, radius);
+            let (mut rows, skipped) = transports::parse_file(file.name, text)?;
+            for why in skipped {
+                eprintln!("transports: skipped {why}");
             }
             // the climbs: all of them for the planner, and those that ask for something also for the script, which checks them
             let climbs: Vec<Transport> = match file.climbs {
@@ -274,17 +242,15 @@ fn validate(file: &File, text: &str) -> Result<Parsed, String> {
             if rows.is_empty() && climbs.is_empty() {
                 return Err(format!("{}: no rows", file.name));
             }
-            rows.extend(climbs.iter().filter(|t| transports::gated(t)).map(|t| {
-                let kind = if t.kind == transports::SHORTCUT_KIND {
-                    transports::SHORTCUT_GATED_KIND
-                } else {
-                    transports::GATED_KIND
-                };
-                Transport {
-                    kind: kind.into(),
-                    ..t.clone()
-                }
-            }));
+            rows.extend(
+                climbs
+                    .iter()
+                    .filter(|t| transports::gated(t))
+                    .map(|t| Transport {
+                        kind: transports::gated_kind(t).into(),
+                        ..t.clone()
+                    }),
+            );
             Ok(Parsed::Transports(rows, climbs))
         }
         Kind::ItemNames => {
@@ -298,63 +264,32 @@ fn validate(file: &File, text: &str) -> Result<Parsed, String> {
 }
 
 /// Writes next to the file and renames, so a crash never leaves half a file.
-fn store(dir: &Path, name: &str, text: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let temp = dir.join(format!("{name}.tsv.tmp"));
+fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let temp = path.with_extension("tmp");
     std::fs::write(&temp, text)?;
-    std::fs::rename(temp, dir.join(format!("{name}.tsv")))
+    std::fs::rename(temp, path)
 }
 
-/// Every file from its best source. `fetch` gets a file; `dir` is the kept copy.
-fn resolve(dir: Option<&Path>, fetch: impl Fn(&File) -> Result<String, String>) -> Data {
+/// The data of a version's folder, with the bundled copy for any file it lacks or that doesn't parse. `None`: all of it bundled.
+fn load(version: Option<(&Path, &str)>) -> Data {
     let mut data = Data::default();
-    let mut worst = Source::Online;
+    let mut whole = version.is_some();
     for file in FILES {
-        if BUNDLED_ONLY.contains(&file.name) {
-            let parsed = validate(file, file.bundled).expect("the bundled file parses");
-            if let Parsed::Transports(rows, climbs) = parsed {
-                data.transports.extend(rows);
-                data.climbs.extend(climbs);
-            }
-            continue;
+        let kept = version
+            .filter(|_| !BUNDLED_ONLY.contains(&file.name))
+            .and_then(|(dir, _)| {
+                std::fs::read_to_string(dir.join(format!("{}.tsv", file.name))).ok()
+            })
+            .and_then(|text| validate(file, &text).ok());
+        if kept.is_none() && version.is_some() && !BUNDLED_ONLY.contains(&file.name) {
+            eprintln!("transports: {}: using the bundled copy", file.name);
+            whole = false;
         }
-        let online =
-            fetch(file).and_then(|text| validate(file, &text).map(|parsed| (text, parsed)));
-        let (parsed, source) = match online {
-            Ok((text, parsed)) => {
-                if let Some(dir) = dir
-                    && let Err(e) = store(dir, file.name, &text)
-                {
-                    eprintln!("transports: couldn't keep {}: {e}", file.name);
-                }
-                (parsed, Source::Online)
-            }
-            Err(why) => {
-                let kept = dir
-                    .and_then(|dir| {
-                        std::fs::read_to_string(dir.join(format!("{}.tsv", file.name))).ok()
-                    })
-                    .and_then(|text| validate(file, &text).ok());
-                match kept {
-                    Some(parsed) => {
-                        eprintln!("transports: {}: {why}; using the kept copy", file.name);
-                        (parsed, Source::Cache)
-                    }
-                    None => {
-                        eprintln!("transports: {}: {why}; using the bundled copy", file.name);
-                        (
-                            validate(file, file.bundled).expect("the bundled file parses"),
-                            Source::Bundled,
-                        )
-                    }
-                }
-            }
-        };
-        worst = match (worst, source) {
-            (Source::Bundled, _) | (_, Source::Bundled) => Source::Bundled,
-            (Source::Cache, _) | (_, Source::Cache) => Source::Cache,
-            _ => Source::Online,
-        };
+        let parsed =
+            kept.unwrap_or_else(|| validate(file, file.bundled).expect("the bundled file parses"));
         match parsed {
             Parsed::Transports(rows, climbs) => {
                 data.transports.extend(rows);
@@ -363,39 +298,251 @@ fn resolve(dir: Option<&Path>, fetch: impl Fn(&File) -> Result<String, String>) 
             Parsed::ItemNames(names) => data.items = names,
         }
     }
-    data.source = worst.name().into();
+    data.source = match version {
+        Some((_, commit)) if whole => short(commit).to_owned(),
+        Some((_, commit)) => format!("{}, part bundled", short(commit)),
+        None => "bundled".to_owned(),
+    };
     data
 }
 
-static LOADED: Mutex<Option<Data>> = Mutex::new(None);
+/// The data of the version in use.
+fn load_current(root: Option<&Path>) -> Data {
+    let Some(root) = root else {
+        return load(None);
+    };
+    match read_versions(root).kept.first() {
+        Some(version) => load(Some((&root.join(&version.commit), &version.commit))),
+        None => load(None),
+    }
+}
 
-fn loaded() -> std::sync::MutexGuard<'static, Option<Data>> {
-    LOADED
+/// Removes the folders of versions no longer kept. Only folders named like a commit: nothing else in there is ours to remove.
+fn prune(root: &Path, versions: &Versions) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if is_commit(&name)
+            && !versions.kept.iter().any(|v| v.commit == name)
+            && let Err(e) = std::fs::remove_dir_all(entry.path())
+        {
+            eprintln!("transports: couldn't remove the version {name}: {e}");
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Checked {
+    UpToDate,
+    Skipped,
+    New(Version),
+}
+
+/// Asks upstream for its newest version, and takes it if every file downloads and parses. `by_hand` also takes one that was rolled back from.
+fn update(
+    root: &Path,
+    by_hand: bool,
+    now: u64,
+    newest: impl Fn() -> Result<Version, String>,
+    fetch: impl Fn(&str, &File) -> Result<String, String>,
+) -> Result<Checked, String> {
+    let mut versions = read_versions(root);
+    let new = newest()?;
+    versions.checked_at = now;
+    if versions
+        .kept
+        .first()
+        .is_some_and(|v| v.commit == new.commit)
+    {
+        write_versions(root, &versions)?;
+        return Ok(Checked::UpToDate);
+    }
+    if !by_hand && versions.skip.as_deref() == Some(&new.commit) {
+        write_versions(root, &versions)?;
+        return Ok(Checked::Skipped);
+    }
+    let mut texts = Vec::new();
+    for file in FILES.iter().filter(|f| !BUNDLED_ONLY.contains(&f.name)) {
+        let text = fetch(&new.commit, file).map_err(|e| format!("{}: {e}", file.name))?;
+        validate(file, &text).map_err(|e| format!("{}: {e}", file.name))?;
+        texts.push((file.name, text));
+    }
+    let dir = root.join(&new.commit);
+    for (name, text) in &texts {
+        write_file(&dir.join(format!("{name}.tsv")), text).map_err(|e| e.to_string())?;
+    }
+    versions.kept.insert(0, new.clone());
+    versions.kept.truncate(KEPT_VERSIONS);
+    versions.skip = None;
+    write_versions(root, &versions)?;
+    prune(root, &versions);
+    Ok(Checked::New(new))
+}
+
+/// Drops the version in use, so the one before it (or the bundled copy) takes over, and the daily check leaves it alone. What is in use now, or why it couldn't.
+fn roll_back(root: &Path) -> Result<String, String> {
+    let mut versions = read_versions(root);
+    if versions.kept.is_empty() {
+        return Err("already on the bundled data".to_owned());
+    }
+    let dropped = versions.kept.remove(0);
+    versions.skip = Some(dropped.commit);
+    write_versions(root, &versions)?;
+    prune(root, &versions);
+    Ok(versions
+        .kept
+        .first()
+        .map_or("the bundled data".to_owned(), |v| {
+            short(&v.commit).to_owned()
+        }))
+}
+
+/// What the Settings page shows.
+#[derive(Debug, Clone, Default)]
+pub struct Status {
+    /// The version in use, like `1a2b3c4 (2026-11-03)`, or `bundled (4fd7d4a)`.
+    pub version: String,
+    /// Unix seconds of the last answer from upstream; 0 for none.
+    pub checked_at: u64,
+    pub can_roll_back: bool,
+    pub busy: bool,
+    /// What the last button or check came to.
+    pub message: String,
+}
+
+/// The line built from the version in use, once it has been read.
+static LOADED: Mutex<Option<String>> = Mutex::new(None);
+static STATUS: Mutex<Option<Status>> = Mutex::new(None);
+static BUSY: AtomicBool = AtomicBool::new(false);
+
+fn lock<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
+    mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Starts the one download of this run, in the background. Call it once, when the loader starts.
-pub fn start() {
-    std::thread::spawn(|| {
-        let dir = cache_dir();
-        let data = resolve(dir.as_deref(), download);
-        eprintln!(
-            "transports: {} rows, {} item names ({})",
-            data.transports.len(),
-            data.items.len(),
-            data.source
-        );
-        *loaded() = Some(data);
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Reads the version in use again, for the scripts started from now on.
+fn reload(root: Option<&Path>, message: Option<String>) {
+    let data = load_current(root);
+    eprintln!(
+        "transports: {} rows, {} item names ({})",
+        data.transports.len(),
+        data.items.len(),
+        data.source
+    );
+    *lock(&LOADED) = Some(transports::line(&data));
+    let versions = root.map(read_versions).unwrap_or_default();
+    let mut status = lock(&STATUS);
+    let status = status.get_or_insert_with(Status::default);
+    status.version = versions.kept.first().map_or_else(
+        || format!("bundled ({})", short(BUNDLED_COMMIT)),
+        |v| format!("{} ({})", short(&v.commit), v.date),
+    );
+    status.checked_at = versions.checked_at;
+    status.can_roll_back = !versions.kept.is_empty();
+    if let Some(message) = message {
+        status.message = message;
+    }
+}
+
+fn check(root: &Path, by_hand: bool) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION")))
+        .build()
+        .into();
+    let message = match update(
+        root,
+        by_hand,
+        now(),
+        || latest(&agent),
+        |commit, file| download(&agent, commit, file),
+    ) {
+        Ok(Checked::New(version)) => format!(
+            "Updated to {}. Scripts started from now on use it.",
+            short(&version.commit)
+        ),
+        Ok(Checked::UpToDate) => "Already up to date.".to_owned(),
+        Ok(Checked::Skipped) => "The newest version is the one rolled back from.".to_owned(),
+        Err(why) => {
+            eprintln!("transports: update failed: {why}");
+            format!("Update failed, nothing changed: {why}")
+        }
+    };
+    reload(Some(root), Some(message));
+}
+
+/// Runs `job` on its own thread unless another one is running.
+fn spawn_job(job: impl FnOnce() + Send + 'static) {
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        job();
+        BUSY.store(false, Ordering::SeqCst);
     });
 }
 
-/// The line to give a starting script: the download if it has finished, else the kept or bundled copy. Never waits on the network.
+/// Reads the version in use, then checks upstream when a check is due, for as long as the loader runs. Call it once, when the loader starts.
+pub fn start() {
+    std::thread::spawn(|| {
+        let root = root_dir();
+        reload(root.as_deref(), None);
+        let Some(root) = root else { return };
+        loop {
+            let due =
+                now().saturating_sub(read_versions(&root).checked_at) >= CHECK_EVERY.as_secs();
+            if due && !BUSY.swap(true, Ordering::SeqCst) {
+                check(&root, false);
+                BUSY.store(false, Ordering::SeqCst);
+            }
+            std::thread::sleep(LOOK_EVERY);
+        }
+    });
+}
+
+/// The Settings page's update button: checks now, in the background.
+pub fn update_now() {
+    spawn_job(|| {
+        if let Some(root) = root_dir() {
+            check(&root, true);
+        }
+    });
+}
+
+/// The Settings page's rollback button, in the background.
+pub fn roll_back_now() {
+    spawn_job(|| {
+        let Some(root) = root_dir() else { return };
+        let message = match roll_back(&root) {
+            Ok(now) => format!("Rolled back to {now}. Scripts started from now on use it."),
+            Err(why) => format!("Couldn't roll back: {why}"),
+        };
+        reload(Some(&root), Some(message));
+    });
+}
+
+pub fn status() -> Status {
+    let mut status = lock(&STATUS).clone().unwrap_or_default();
+    status.busy = BUSY.load(Ordering::SeqCst);
+    status
+}
+
+/// The line to give a starting script. Never waits on the network.
 pub fn line() -> String {
-    let data = loaded()
-        .clone()
-        .unwrap_or_else(|| resolve(cache_dir().as_deref(), |_| Err("not downloaded yet".into())));
-    transports::line(&data)
+    if let Some(line) = lock(&LOADED).as_ref() {
+        return line.clone();
+    }
+    transports::line(&load_current(root_dir().as_deref()))
 }
 
 #[cfg(test)]
@@ -415,78 +562,226 @@ mod tests {
             Kind::Transports if file.keep.is_some() => {
                 "Origin\tDestination\tmenuOption menuTarget objectID\n1 2 0\t3 4 0\tPay-toll(2-Ecto) Energy Barrier 16105\n1 2 0\t3 4 0\tOpen Door 9398\n1 2 0\t1 2 1\tClimb-up Ladder 1\n".to_owned()
             }
-            Kind::Transports if file.permute.is_some() => {
-                "Origin\tDestination\tmenuOption menuTarget objectID\tDisplay info\n1 2 0\t\tUse Tree 1\t\n\t100 200 0\t\tone\n".to_owned()
-            }
             Kind::Transports => format!("Destination\tDisplay info\n1 2 0\t{} spell\n", file.name),
             Kind::ItemNames => "#name\tids\nCOINS\t995\n".to_owned(),
         }
-    }
-
-    fn spells() -> &'static File {
-        &FILES[0]
     }
 
     #[test]
     fn the_bundled_files_parse() {
         for file in FILES {
             assert!(validate(file, file.bundled).is_ok(), "{}", file.name);
+            if file.kind == Kind::Transports {
+                let (_, skipped) = transports::parse_file(file.name, file.bundled).unwrap();
+                assert!(skipped.is_empty(), "{}: {skipped:?}", file.name);
+            }
         }
     }
 
+    fn version(n: u8) -> Version {
+        Version {
+            commit: format!("{n:x}").repeat(40),
+            date: format!("2026-11-0{n}"),
+        }
+    }
+
+    fn take(root: &Path, n: u8) -> Result<Checked, String> {
+        update(
+            root,
+            false,
+            100,
+            || Ok(version(n)),
+            |_, file| Ok(good(file)),
+        )
+    }
+
+    fn commits(root: &Path) -> Vec<String> {
+        read_versions(root)
+            .kept
+            .into_iter()
+            .map(|v| v.commit)
+            .collect()
+    }
+
     #[test]
-    fn a_good_download_is_used_and_kept() {
-        let dir = temp("good");
-        let data = resolve(Some(&dir), |file| Ok(good(file)));
-        assert_eq!(data.source, "online");
-        assert_eq!(
-            data.transports.len(),
-            // one row per file but the shortcuts, which give the script only the copies that ask for something, and the bundled-only levers
-            FILES
-                .iter()
-                .filter(|f| {
-                    f.kind == Kind::Transports
-                        && f.name != "agility_shortcuts"
-                        && !BUNDLED_ONLY.contains(&f.name)
-                })
-                .count()
-                + data
-                    .transports
-                    .iter()
-                    .filter(|t| t.kind == "teleportation_levers")
-                    .count()
-        );
+    fn a_good_version_is_used_and_kept() {
+        let root = temp("good");
+        assert_eq!(take(&root, 1), Ok(Checked::New(version(1))));
+        let data = load_current(Some(&root));
+        assert_eq!(data.source, "1111111");
         let levers = |t: &&Transport| t.kind == "teleportation_levers";
-        assert_eq!(data.transports.iter().filter(levers).count(), 8);
-        assert!(
-            data.transports
-                .iter()
-                .any(|t| t.menu == "Edgeville Lever 1815")
+        assert_eq!(
+            data.transports.iter().filter(levers).count(),
+            8,
+            "always the bundled ones"
         );
         assert_eq!(data.items.len(), 1);
-        assert!(dir.join("teleportation_spells.tsv").exists());
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            root.join("1".repeat(40))
+                .join("teleportation_spells.tsv")
+                .exists()
+        );
+        assert_eq!(read_versions(&root).checked_at, 100);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn a_bad_download_keeps_the_good_copy() {
-        let dir = temp("bad");
-        resolve(Some(&dir), |file| Ok(good(file)));
-        let data = resolve(Some(&dir), |_| Ok("<html>rate limited</html>".into()));
-        assert_eq!(data.source, "cache");
-        let kept = std::fs::read_to_string(dir.join(format!("{}.tsv", spells().name))).unwrap();
-        assert!(kept.contains("teleportation_spells spell"));
-        let _ = std::fs::remove_dir_all(dir);
+    fn one_bad_file_keeps_the_version_in_use() {
+        let root = temp("bad");
+        take(&root, 1).unwrap();
+        let result = update(
+            &root,
+            false,
+            200,
+            || Ok(version(2)),
+            |_, file| {
+                if file.name == "boats" {
+                    Ok("<html>rate limited</html>".into())
+                } else {
+                    Ok(good(file))
+                }
+            },
+        );
+        assert!(result.is_err_and(|why| why.starts_with("boats")));
+        assert_eq!(commits(&root), [version(1).commit]);
+        assert!(
+            !root.join(version(2).commit).exists(),
+            "nothing of it is written"
+        );
+        assert_eq!(
+            read_versions(&root).checked_at,
+            100,
+            "and it is tried again soon"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn no_network_uses_the_cache_then_the_bundled_copy() {
-        let dir = temp("offline");
-        resolve(Some(&dir), |file| Ok(good(file)));
-        let offline = |_: &File| Err("no network".to_owned());
-        assert_eq!(resolve(Some(&dir), offline).source, "cache");
-        let _ = std::fs::remove_dir_all(&dir);
-        let data = resolve(Some(&dir), offline);
+    fn up_to_date_downloads_nothing() {
+        let root = temp("same");
+        take(&root, 1).unwrap();
+        let checked = update(
+            &root,
+            false,
+            300,
+            || Ok(version(1)),
+            |_, _| panic!("no download"),
+        );
+        assert_eq!(checked, Ok(Checked::UpToDate));
+        assert_eq!(read_versions(&root).checked_at, 300);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn three_versions_are_kept_and_older_folders_go() {
+        let root = temp("three");
+        std::fs::create_dir_all(root.join(BUNDLED_COMMIT)).unwrap();
+        std::fs::create_dir_all(root.join("mine")).unwrap();
+        for n in 1..=4 {
+            take(&root, n).unwrap();
+        }
+        assert_eq!(
+            commits(&root),
+            [version(4).commit, version(3).commit, version(2).commit]
+        );
+        assert!(!root.join(version(1).commit).exists());
+        assert!(
+            !root.join(BUNDLED_COMMIT).exists(),
+            "the old layout's folder"
+        );
+        assert!(
+            root.join("mine").exists(),
+            "not named like a commit, so not ours"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rolling_back_goes_to_the_one_before_and_the_daily_check_leaves_it_alone() {
+        let root = temp("back");
+        take(&root, 1).unwrap();
+        take(&root, 2).unwrap();
+        assert_eq!(roll_back(&root), Ok("1111111".to_owned()));
+        assert_eq!(load_current(Some(&root)).source, "1111111");
+        assert_eq!(take(&root, 2), Ok(Checked::Skipped));
+        assert_eq!(load_current(Some(&root)).source, "1111111");
+        assert_eq!(
+            take(&root, 3),
+            Ok(Checked::New(version(3))),
+            "a newer one is taken"
+        );
+        assert_eq!(roll_back(&root), Ok("1111111".to_owned()));
+        let by_hand = update(&root, true, 1, || Ok(version(3)), |_, file| Ok(good(file)));
+        assert_eq!(
+            by_hand,
+            Ok(Checked::New(version(3))),
+            "the button takes it again"
+        );
+        assert_eq!(roll_back(&root), Ok("1111111".to_owned()));
+        assert_eq!(roll_back(&root), Ok("the bundled data".to_owned()));
+        assert_eq!(load_current(Some(&root)).source, "bundled");
+        assert!(roll_back(&root).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_damaged_file_falls_back_to_the_bundled_copy() {
+        let root = temp("damaged");
+        take(&root, 1).unwrap();
+        std::fs::write(root.join(version(1).commit).join("boats.tsv"), "junk").unwrap();
+        let data = load_current(Some(&root));
+        assert_eq!(data.source, "1111111, part bundled");
+        assert!(data.transports.iter().any(|t| t.kind == "boats"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_answer_from_upstream_is_not_trusted() {
+        let good = r#"[{"sha":"4fd7d4a220c06781145dd7ba21e9a1e46ed0fc27","commit":{"committer":{"date":"2026-11-03T07:19:00Z"}}}]"#;
+        assert_eq!(
+            parse_latest(good),
+            Ok(Version {
+                commit: BUNDLED_COMMIT.to_owned(),
+                date: "2026-11-03".to_owned()
+            })
+        );
+        assert!(parse_latest(r#"[{"sha":"../../../etc"}]"#).is_err());
+        assert!(parse_latest("[]").is_err());
+        assert!(parse_latest("<html>").is_err());
+    }
+
+    #[test]
+    #[ignore = "reaches upstream"]
+    fn takes_the_real_newest_version() {
+        let root = temp("real");
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .user_agent("volcren-loader/test")
+            .build()
+            .into();
+        let checked = update(
+            &root,
+            true,
+            1,
+            || latest(&agent),
+            |c, f| download(&agent, c, f),
+        );
+        println!("{checked:?}");
+        let data = load_current(Some(&root));
+        println!(
+            "{} rows, {} climbs, {} items ({})",
+            data.transports.len(),
+            data.climbs.len(),
+            data.items.len(),
+            data.source
+        );
+        assert!(matches!(checked, Ok(Checked::New(_))), "{checked:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn with_no_version_everything_is_bundled() {
+        let data = load(None);
         assert_eq!(data.source, "bundled");
         assert!(data.transports.iter().any(|t| t.name == "Varrock Teleport"));
         assert!(data.transports.iter().any(|t| t.kind == "charter_ships"));
@@ -498,8 +793,37 @@ mod tests {
                 .count()
         };
         assert!(trips("boats") > 100 && trips("ships") > 30 && trips("minecarts") > 10);
+        assert_eq!(trips("magic_carpets"), 13);
+        assert_eq!(trips("canoes"), 45);
+        assert_eq!(trips("teleportation_portals"), 145);
+        assert_eq!(trips("teleportation_boxes"), 40);
+        assert_eq!(
+            data.transports
+                .iter()
+                .filter(|t| t.kind == "teleportation_minigames")
+                .count(),
+            253
+        );
+        let whistle: Vec<_> = data
+            .transports
+            .iter()
+            .filter(|t| t.kind == "quetzal_whistle")
+            .collect();
+        assert_eq!(whistle.len(), 14);
+        assert!(
+            whistle
+                .iter()
+                .all(|t| t.origin.is_none() && t.destination.is_some() && t.consumable)
+        );
         // the networks with separate starts and ends: sent as they are, the chooser pairs them
-        for kind in ["quetzals", "spirit_trees", "gnome_gliders", "fairy_rings"] {
+        for kind in [
+            "quetzals",
+            "spirit_trees",
+            "gnome_gliders",
+            "hot_air_balloons",
+            "fairy_rings",
+            "magic_mushtrees",
+        ] {
             let starts = data
                 .transports
                 .iter()
@@ -511,31 +835,28 @@ mod tests {
                 .filter(|t| t.kind == kind && t.origin.is_none() && t.destination.is_some())
                 .count();
             assert!(
-                starts > 5 && ends > 5,
+                starts > 5 && ends > 3,
                 "{kind}: {starts} starts, {ends} ends"
             );
         }
-        let rides: Vec<_> = data
-            .transports
-            .iter()
-            .filter(|t| t.kind == "magic_mushtrees")
-            .collect();
-        assert_eq!(
-            rides.len(),
-            8 * 3,
-            "two start tiles per tree, to each of the other three trees"
-        );
-        assert!(rides.iter().all(|t| t.origin.is_some()
-            && t.destination.is_some()
-            && t.menu.starts_with("Use Magic Mushtree")));
-        let barriers: Vec<_> = data
+        let trips: Vec<_> = data
             .transports
             .iter()
             .filter(|t| t.kind == "transports")
             .collect();
-        assert!(barriers.len() >= 12, "the barriers are kept");
+        let barriers = trips
+            .iter()
+            .filter(|t| t.menu.starts_with("Pay-toll"))
+            .count();
+        assert!(barriers >= 12, "the barriers are kept");
         assert!(
-            barriers.iter().all(|t| t.menu.starts_with("Pay-toll")),
+            trips.iter().any(|t| t.menu == "Board Travel cart 2230"),
+            "and the far hops"
+        );
+        assert!(
+            trips.iter().all(|t| t.menu.starts_with("Pay-toll")
+                || transports::is_far_hop(t)
+                || transports::is_item_on(t)),
             "and nothing else of that file"
         );
         // the planner's climbs: stairs, ladders, ropes and cave mouths, with exact planes (the rope near 1559,3046 goes from plane 0 to plane 2)
@@ -576,7 +897,7 @@ mod tests {
         let gated = data
             .transports
             .iter()
-            .filter(|t| t.kind == transports::GATED_KIND)
+            .filter(|t| t.kind == transports::GATED_KIND || t.kind == transports::LINK_GATED_KIND)
             .count();
         assert_eq!(
             gated,
@@ -623,24 +944,29 @@ mod tests {
         assert!(
             data.transports
                 .iter()
-                .all(|t| t.kind != transports::SHORTCUT_KIND),
-            "scripts get only the gated copies"
+                .all(|t| t.kind != transports::SHORTCUT_KIND || transports::is_item_on(t)),
+            "scripts get only the gated copies, and the items used on an object"
         );
         assert!(gated > 0 && gated < 1000, "{gated} gated climbs");
+        assert!(
+            data.transports
+                .iter()
+                .filter(|t| t.kind == transports::LINK_GATED_KIND)
+                .all(|t| transports::is_link(t) || transports::is_gated_door(t)),
+            "the links and doors the script checks"
+        );
         assert!(
             data.items
                 .iter()
                 .any(|i| i.name == "COINS" && i.ids == [995])
         );
-        assert_eq!(resolve(None, offline).source, "bundled");
     }
 
     #[test]
     fn an_empty_answer_does_not_replace_anything() {
-        let dir = temp("empty");
-        let data = resolve(Some(&dir), |_| Ok(String::new()));
-        assert_eq!(data.source, "bundled");
-        assert!(!dir.join("teleportation_spells.tsv").exists());
-        let _ = std::fs::remove_dir_all(dir);
+        let root = temp("empty");
+        assert!(update(&root, false, 1, || Ok(version(1)), |_, _| Ok(String::new())).is_err());
+        assert_eq!(load_current(Some(&root)).source, "bundled");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

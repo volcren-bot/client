@@ -160,7 +160,7 @@ fn enter_here(pid: u32, pace: &dyn Pace) -> Result<Outcome, String> {
         let Some(lookup) = lookup.as_mut() else {
             return Ok(Pin::None);
         };
-        let Some(name) = client.player_name()? else {
+        let Some(name) = client.account_name()? else {
             return Ok(Pin::Unavailable);
         };
         Ok(match lookup(&hash_name(&name)) {
@@ -194,7 +194,8 @@ trait Client {
     fn sub_interfaces(&self) -> Result<Option<Vec<SubInterface>>, String>;
     fn root_interface(&self) -> Result<Option<i32>, String>;
     /// The logged in player's name as the game shows it.
-    fn player_name(&self) -> Result<Option<String>, String>;
+    /// The logged in account's name, which a display name override never changes.
+    fn account_name(&self) -> Result<Option<String>, String>;
     fn mouse(&self) -> Option<(i32, i32)>;
     /// The id of the menu's first entry, which is what a click would pick.
     fn hovered(&self) -> Result<Option<i32>, String>;
@@ -225,8 +226,8 @@ impl Client for Live<'_> {
     fn root_interface(&self) -> Result<Option<i32>, String> {
         Ok(crate::game_state(self.pid)?.root_interface)
     }
-    fn player_name(&self) -> Result<Option<String>, String> {
-        Ok(crate::game_state(self.pid)?.player_name)
+    fn account_name(&self) -> Result<Option<String>, String> {
+        Ok(crate::game_state(self.pid)?.account_name)
     }
     fn mouse(&self) -> Option<(i32, i32)> {
         crate::connection(self.pid)
@@ -731,7 +732,7 @@ mod tests {
         fn root_interface(&self) -> Result<Option<i32>, String> {
             Ok(Some(161))
         }
-        fn player_name(&self) -> Result<Option<String>, String> {
+        fn account_name(&self) -> Result<Option<String>, String> {
             Ok(Some("Some Name".into()))
         }
         fn mouse(&self) -> Option<(i32, i32)> {

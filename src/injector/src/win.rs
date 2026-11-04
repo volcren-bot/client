@@ -1695,7 +1695,7 @@ pub fn world_collision(
 
 const WORLD_SQUARE_BATCH: usize = 16;
 // bump it when how the collision is worked out changes: the saved file is named after it
-const WORLD_FORMAT: u64 = 5;
+const WORLD_FORMAT: u64 = 8;
 
 // The key it was built for, and the process whose cache that key was read from: the cache only changes with a game update, so later calls for that process skip reading its indexes.
 type WorldMovement = Arc<crate::collision::WorldCollision<crate::collision::Movement>>;
@@ -1824,63 +1824,93 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
 }
 
 // The surface's landmasses, built once from the world collision and kept for the process.
-static LANDMASSES: Mutex<Option<((usize, u64), Arc<crate::landmass::Landmasses>)>> =
-    Mutex::new(None);
+static WORLD_MAP: Mutex<Option<KeptWorldMap>> = Mutex::new(None);
+type KeptWorldMap = ((usize, u64), Arc<crate::landmass::WorldMap>);
 
 /// How far (in tiles) from a point to look for a tile that has a landmass when the point itself has none (a loc stands on it).
 const LANDMASS_RADIUS: i32 = 3;
 
 /// The landmass number of each `[x, y, plane]` (0 for none or off the surface plane). Tiles with the same number can be walked between (doors open; no stairs or shortcuts).
 pub fn landmasses(pid: u32, points: &[[i32; 3]]) -> Result<Vec<u32>, String> {
-    let world = world_movement(pid)?;
-    // the world, and the transport data the always-open links come from
-    let id = (Arc::as_ptr(&world) as usize, crate::transports::version());
-    let masses = {
-        let mut cached = LANDMASSES.lock().unwrap_or_else(|e| e.into_inner());
-        match cached.as_ref().filter(|(key, _)| *key == id) {
-            Some((_, masses)) => masses.clone(),
-            None => {
-                let started = Instant::now();
-                let mut masses = crate::landmass::Landmasses::build(&world, 0);
-                // a way across that asks for nothing (a stile, a Tree Door) joins the landmasses on its two sides; those that ask for something are the script's to join
-                crate::transports::with_climbs(|all| {
-                    for t in all.iter().filter(|t| {
-                        crate::transports::is_link(t)
-                            && !crate::transports::gated(t)
-                            && t.origin
-                                .is_some_and(|o| o.plane == 0 && o.y < crate::nav::UNDERGROUND)
-                    }) {
-                        let (Some(o), Some(d)) = (t.origin, t.destination) else {
-                            continue;
-                        };
-                        let (a, b) = (
-                            masses.near(o.x, o.y, LANDMASS_RADIUS),
-                            masses.near(d.x, d.y, LANDMASS_RADIUS),
-                        );
-                        masses.join(a, b);
-                    }
-                });
-                let masses = Arc::new(masses);
-                eprintln!(
-                    "{} landmasses found in {:.1} s",
-                    masses.count,
-                    started.elapsed().as_secs_f32()
-                );
-                *cached = Some((id, masses.clone()));
-                masses
-            }
-        }
-    };
+    let map = world_map(pid)?;
     Ok(points
         .iter()
-        .map(|&[x, y, plane]| {
-            if plane == 0 {
-                masses.near(x, y, LANDMASS_RADIUS)
-            } else {
-                0
-            }
-        })
+        .map(|&[x, y, plane]| map.masses.near(x, y, plane, LANDMASS_RADIUS))
         .collect())
+}
+
+// The world's landmasses and the climbs between them, kept until the world or the transport data changes.
+fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
+    let world = world_movement(pid)?;
+    let id = (Arc::as_ptr(&world) as usize, crate::transports::version());
+    let mut kept = WORLD_MAP.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, map)) = kept.as_ref().filter(|(key, _)| *key == id) {
+        return Ok(map.clone());
+    }
+    let started = Instant::now();
+    let doors: Vec<(crate::nav::Point, crate::nav::Point)> =
+        crate::transports::with_climbs(|all| {
+            all.iter()
+                .filter(|t| crate::transports::is_gated_door(t))
+                .filter_map(|t| {
+                    let (o, d) = (t.origin?, t.destination?);
+                    Some(((o.x, o.y, o.plane), (d.x, d.y, d.plane)))
+                })
+                .collect()
+        });
+    let mut closed = crate::nav::Closed::default();
+    for &(o, d) in &doors {
+        closed.insert((o, (d.0 - o.0, d.1 - o.1)));
+        closed.insert((d, (o.0 - d.0, o.1 - d.1)));
+    }
+    let exits: Vec<_> = doors
+        .iter()
+        .filter(|&&(o, d)| !doors.contains(&(d, o)))
+        .map(|&(o, d)| (d, o))
+        .collect();
+    let masses = crate::landmass::Landmasses::build(&world, &closed);
+    let rows: Vec<_> = crate::transports::with_climbs(|all| {
+        all.iter()
+            .filter_map(|t| {
+                let (o, d) = (t.origin?, t.destination?);
+                let key = crate::transports::gated(t).then(|| crate::transports::climb_key(t));
+                Some((
+                    (o.x, o.y, o.plane),
+                    (d.x, d.y, d.plane),
+                    key,
+                    crate::transports::touches_wilderness(t),
+                ))
+            })
+            .collect()
+    });
+    let map = Arc::new(crate::landmass::WorldMap::new(
+        masses,
+        rows,
+        exits,
+        LANDMASS_RADIUS,
+    ));
+    eprintln!(
+        "{} landmasses found in {:.1} s",
+        map.masses.count,
+        started.elapsed().as_secs_f32()
+    );
+    *kept = Some((id, map.clone()));
+    Ok(map)
+}
+
+/// The way from `from` to `to` by walking and climbing, with the climbs that ask for something only if `allow_climbs` names them, and the Wilderness's only for a walk that starts or ends there.
+pub fn world_route(
+    pid: u32,
+    from: crate::nav::Point,
+    to: crate::nav::Point,
+    allow_climbs: &[String],
+) -> Result<crate::landmass::Route, String> {
+    let map = world_map(pid)?;
+    let allowed: std::collections::HashSet<&str> =
+        allow_climbs.iter().map(String::as_str).collect();
+    let wilderness = crate::transports::in_wilderness(from.0, from.1)
+        || crate::transports::in_wilderness(to.0, to.1);
+    Ok(map.route(from, to, &allowed, wilderness))
 }
 
 /// `max_tiles` caps how many tiles the search looks at (default `PATH_MAX_TILES`): a target that can't be reached would otherwise search every tile that can.
@@ -2055,14 +2085,31 @@ pub fn scene_route(
 }
 
 /// The transport data's ways of changing plane as the planner's rows, and the menu options they start with (any case, each once). Empty when the request turns climbs off.
-/// A row that asks for something is used only if the script allowed it (`Request::allow_climbs`).
-fn climb_rows(request: &crate::nav::Request) -> (Vec<crate::nav::ClimbRow>, Vec<String>) {
-    use crate::transports::{climb_key, gated, with_climbs};
-    if !request.climbs {
-        return (Vec::new(), Vec::new());
-    }
+/// A row that asks for something is used only if the script allowed it (`Request::allow_climbs`), and one in the Wilderness only if `wilderness` says the walk starts or ends there.
+fn climb_rows(
+    request: &crate::nav::Request,
+    wilderness: bool,
+) -> (Vec<crate::nav::ClimbRow>, Vec<String>, crate::nav::Closed) {
+    use crate::transports::{climb_key, gated, is_gated_door, touches_wilderness, with_climbs};
     let allowed: std::collections::HashSet<&str> =
         request.allow_climbs.iter().map(String::as_str).collect();
+    let usable = |t: &crate::transports::Transport| {
+        (!gated(t) || allowed.contains(climb_key(t).as_str()))
+            && (wilderness || !touches_wilderness(t))
+    };
+    // whatever the plan may climb, a door that asks for something stays shut unless the script found it has it
+    let closed = with_climbs(|all| {
+        all.iter()
+            .filter(|t| is_gated_door(t) && !usable(t))
+            .filter_map(|t| {
+                let (o, d) = (t.origin?, t.destination?);
+                Some(((o.x, o.y, o.plane), (d.x - o.x, d.y - o.y)))
+            })
+            .collect()
+    });
+    if !request.climbs {
+        return (Vec::new(), Vec::new(), closed);
+    }
     let mut options: Vec<String> = Vec::new();
     let rows = with_climbs(|all| {
         let mut rows = Vec::new();
@@ -2070,12 +2117,11 @@ fn climb_rows(request: &crate::nav::Request) -> (Vec<crate::nav::ClimbRow>, Vec<
             let (Some(o), Some(d)) = (t.origin, t.destination) else {
                 continue;
             };
-            if gated(t) && !allowed.contains(climb_key(t).as_str()) {
+            if !usable(t) {
                 continue;
             }
             // "Climb-up Rope 51647": the option, the loc's name, its id
-            let mut words = t.menu.split_whitespace();
-            let Some(option) = words.next() else {
+            let Some(option) = crate::transports::menu_option(&t.menu) else {
                 continue;
             };
             let id = t
@@ -2108,7 +2154,7 @@ fn climb_rows(request: &crate::nav::Request) -> (Vec<crate::nav::ClimbRow>, Vec<
         }
         rows
     });
-    (rows, options)
+    (rows, options, closed)
 }
 
 pub fn nav_plan(
@@ -2154,7 +2200,8 @@ pub fn nav_plan(
     } else {
         0
     };
-    let goal_across = !instance && (to.1 >= UNDERGROUND) != (shift != 0);
+    let across_to = |tile: crate::nav::Point| !instance && (tile.1 >= UNDERGROUND) != (shift != 0);
+    let goal_across = across_to(to);
     let folded = |y: i32| if y >= UNDERGROUND { y - UNDERGROUND } else { y };
     // the box: the scene, grown to the goal when the cache can fill the rest, else to a stop along the world path
     let scene_box = (
@@ -2188,34 +2235,70 @@ pub fn nav_plan(
         let (y1, y2) = trim((y1 - extra).max(0), y2 + extra);
         (x1, y1, x2, y2)
     };
+    let wilderness = crate::transports::in_wilderness(from.0, from.1)
+        || crate::transports::in_wilderness(to.0, to.1);
+    let climbs_of_request = climb_rows(request, wilderness);
+    let closed_doors = climbs_of_request.2.clone();
+    // a stop on the same plane and in the same world, as far along the world path to `target` as the box can reach
+    let stop_along = |target: crate::nav::Point| -> Result<Option<crate::nav::Point>, String> {
+        let world = world_movement(pid)?;
+        let path = crate::pathfinding::find_path_with(
+            &world,
+            target.2,
+            (from.0, from.1),
+            (target.0, target.1),
+            PATH_MAX_TILES,
+            true,
+            &closed_doors,
+        )
+        .unwrap_or_default();
+        Ok(path
+            .iter()
+            .rev()
+            .find(|&&(x, y)| fits(grown(scene_box, (x, y - shift))))
+            .map(|&(x, y)| (x, y, target.2)))
+    };
+    // toward the first climb on the way: past it when the box can hold both its ends, else to it, else along the walk to it
+    type Stop = (crate::nav::Point, (i32, i32, i32, i32));
+    let through = |o: crate::nav::Point, d: crate::nav::Point| -> Result<Option<Stop>, String> {
+        let at = |t: crate::nav::Point| (t.0, folded(t.1));
+        let both = grown(grown(scene_box, at(o)), at(d));
+        if fits(both) {
+            return Ok(Some((d, both)));
+        }
+        if fits(grown(scene_box, at(o))) {
+            return Ok(Some((o, grown(scene_box, at(o)))));
+        }
+        Ok(stop_along(o)?.map(|stop| (stop, grown(scene_box, (stop.0, folded(stop.1))))))
+    };
+    let route = |allow: &[String]| -> crate::landmass::Route {
+        if instance {
+            crate::landmass::Route::Unknown
+        } else {
+            world_route(pid, from, to, allow).unwrap_or(crate::landmass::Route::Unknown)
+        }
+    };
     let mut goal = to;
     let mut bounds = scene_box;
     if (goal_across || !in_scene(to.0, to.1, 0)) && !instance {
         if fits(grown(scene_box, (to.0, folded(to.1)))) {
             bounds = grown(scene_box, (to.0, folded(to.1)));
-        } else if from.2 == to.2 && !goal_across {
-            let world = world_movement(pid)?;
-            let path = crate::pathfinding::find_path_with(
-                &world,
-                to.2,
-                (from.0, from.1),
-                (to.0, to.1),
-                PATH_MAX_TILES,
-                true,
-            )
-            .unwrap_or_default();
-            if let Some(&(x, y)) = path
-                .iter()
-                .rev()
-                .find(|&&(x, y)| fits(grown(scene_box, (x, y - shift))))
-            {
-                goal = (x, y, to.2);
-                bounds = grown(scene_box, (x, y - shift));
+        } else if let crate::landmass::Route::Through(o, d) = route(&request.allow_climbs) {
+            if let Some((stop, wide)) = through(o, d)? {
+                goal = stop;
+                bounds = wide;
             }
+        } else if from.2 == to.2
+            && !goal_across
+            && let Some(stop) = stop_along(to)?
+        {
+            goal = stop;
+            bounds = grown(scene_box, (stop.0, stop.1 - shift));
         }
     }
+    let requested_climbs = request.allow_climbs.clone();
     // the transport data's ways of changing plane (the ones that ask for something only if the script found it can): their rows, and the menu options to look for on locs
-    let (rows, climb_options) = climb_rows(request);
+    let (rows, climb_options, closed) = climbs_of_request;
     let request = &crate::nav::Request {
         climb_options,
         ..request.clone()
@@ -2229,9 +2312,11 @@ pub fn nav_plan(
 
     // one go at planning. `across` also loads the other world and the cache's ladders, caves and the like all over the box (the scene's own are the live ones), so a plan can leave the world and come back to it
     let attempt = |across: bool,
-                   bounds: (i32, i32, i32, i32)|
+                   bounds: (i32, i32, i32, i32),
+                   goal: crate::nav::Point|
      -> Result<Option<crate::nav::Plan>, String> {
-        let regions = if instance || (bounds == scene_box && !across) {
+        // always the cache for what the scene doesn't hold: the client leaves its outer rows unfilled, which read as open ground
+        let regions = if instance {
             Vec::new()
         } else {
             let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
@@ -2298,13 +2383,6 @@ pub fn nav_plan(
             .cloned()
             .collect();
         let climbs = crate::nav::data_climbs(&flags, &climbables, &in_box, &request.door_options);
-        eprintln!(
-            "DBG attempt across={across} regions={} climbables={} climbs={} doors={}",
-            regions.len(),
-            climbables.len(),
-            climbs.len(),
-            doors.len()
-        );
         Ok(crate::nav::plan(
             &flags,
             bounds,
@@ -2313,23 +2391,24 @@ pub fn nav_plan(
             from,
             goal,
             &request.options,
+            &closed,
         ))
     };
-    eprintln!(
-        "DBG nav bounds={bounds:?} scene_box={scene_box:?} goal={goal:?} to={to:?} shift={shift} goal_across={goal_across} instance={instance}"
-    );
     // plans in `bounds`, and again through the other world when it falls short (a dungeon's exit, then another's entrance); the one that reaches the goal wins
-    let in_box = |bounds: (i32, i32, i32, i32)| -> Result<Option<crate::nav::Plan>, String> {
-        let mut plan = attempt(goal_across, bounds)?;
+    let in_box = |bounds: (i32, i32, i32, i32),
+                  goal: crate::nav::Point|
+     -> Result<Option<crate::nav::Plan>, String> {
+        let goal_across = across_to(goal);
+        let mut plan = attempt(goal_across, bounds, goal)?;
         if !goal_across && !instance && goal == to && plan.as_ref().is_none_or(|p| !p.reached) {
-            plan = match (attempt(true, bounds)?, plan) {
+            plan = match (attempt(true, bounds, goal)?, plan) {
                 (Some(through), first) if through.reached || first.is_none() => Some(through),
                 (_, first) => first,
             };
         }
         Ok(plan)
     };
-    let mut plan = in_box(bounds)?;
+    let mut plan = in_box(bounds, goal)?;
     // short of the goal: the way may leave the box (a city's exit past its edge), so try wider boxes, up to the most the cache can fill in one go
     if !instance && plan.as_ref().is_none_or(|p| !p.reached) {
         let mut last = bounds;
@@ -2339,14 +2418,25 @@ pub fn nav_plan(
                 continue;
             }
             last = wide;
-            eprintln!("DBG widening the box by {extra}: {wide:?}");
-            plan = match (in_box(wide)?, plan) {
+            plan = match (in_box(wide, goal)?, plan) {
                 (Some(wider), first) if wider.reached || first.is_none() => Some(wider),
                 (_, first) => first,
             };
             if plan.as_ref().is_some_and(|p| p.reached) {
                 break;
             }
+        }
+    }
+    // the goal fits a box but the way doesn't: toward the first climb on the way, wherever it is
+    if goal == to
+        && plan.as_ref().is_none_or(|p| !p.reached)
+        && let crate::landmass::Route::Through(o, d) = route(&requested_climbs)
+        && let Some((stop, wide)) = through(o, d)?
+    {
+        let toward = in_box(wide, stop)?;
+        if toward.as_ref().is_some_and(|p| p.reached) {
+            plan = toward;
+            goal = stop;
         }
     }
     let plan = plan.ok_or_else(|| {
@@ -2621,6 +2711,34 @@ pub fn widget(pid: u32, group: u16, child: u16) -> Result<Option<Widget>, String
     }
     let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
     Ok(worker::widget(&memory, &layout, group, child))
+}
+
+/// The model a component draws, read straight from memory; `None` when there is no such component.
+pub fn widget_model(
+    pid: u32,
+    group: u16,
+    child: u16,
+) -> Result<Option<decode::widgets::WidgetModel>, String> {
+    use decode::widgets::{MODEL_ID, MODEL_TYPE, WidgetModel};
+    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let layout = &layout.interfaces;
+    let Some(client) = memory.ptr(layout.module_base + layout.client as u64) else {
+        return Ok(None);
+    };
+    let Some(component) =
+        ipc::read::component(&memory, layout, client, (group as i32) << 16 | child as i32)
+    else {
+        return Ok(None);
+    };
+    Ok(
+        match (
+            memory.i32(component + MODEL_TYPE),
+            memory.i32(component + MODEL_ID),
+        ) {
+            (Some(kind), Some(id)) => Some(WidgetModel { kind, id }),
+            _ => None,
+        },
+    )
 }
 
 /// Every open interface with all of its components and their dynamic children, read straight from the client's memory.

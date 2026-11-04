@@ -32,6 +32,8 @@ pub struct Settings {
     pub lib_dir: String,
     /// The breaks and sleeps every script takes, sent to the script when it starts and when this changes.
     pub antiban: injector::antiban::Config,
+    /// The types of transport the user turned off, sent to the script when it starts and when this changes.
+    pub transports: injector::transports::Settings,
 }
 
 impl Default for Settings {
@@ -45,6 +47,7 @@ impl Default for Settings {
             helper: detect(&exe_dir, "injector.exe"),
             lib_dir: String::new(),
             antiban: Default::default(),
+            transports: Default::default(),
         }
     }
 }

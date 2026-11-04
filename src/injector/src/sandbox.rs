@@ -31,7 +31,7 @@ use crate::{
     npc_model, npc_sizes, npcs, player_model, player_plane, players, project, project_moved,
     projectiles, scene_collision, scene_route, selected_widget, send_input, send_input_with,
     server_tile, spot_anims, sub_interfaces, varbit, varc, varp_value, varps, wait_watchers,
-    widget, widget_children, world_select,
+    widget, widget_children, widget_model, world_route, world_select,
 };
 #[cfg(not(windows))]
 use offline::*;
@@ -123,6 +123,21 @@ mod offline {
         Err(NO_WIN32.into())
     }
     pub fn game_val_names(_: u32, _: u32, _: &[i32]) -> Result<Vec<Option<String>>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn world_route(
+        _: u32,
+        _: crate::nav::Point,
+        _: crate::nav::Point,
+        _: &[String],
+    ) -> Result<crate::landmass::Route, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn widget_model(
+        _: u32,
+        _: u16,
+        _: u16,
+    ) -> Result<Option<decode::widgets::WidgetModel>, String> {
         Err(NO_WIN32.into())
     }
     pub fn item_names(_: u32, _: &[i32]) -> Result<Vec<Option<String>>, String> {
@@ -687,6 +702,34 @@ fn overlay_arg(shape: &mlua::Table) -> mlua::Result<Overlay> {
     }
 }
 
+/// What `world_route` tells a script.
+#[derive(serde::Serialize)]
+struct WorldRoute {
+    known: bool,
+    reachable: bool,
+    from: Option<crate::nav::NavTile>,
+    to: Option<crate::nav::NavTile>,
+}
+
+impl From<crate::landmass::Route> for WorldRoute {
+    fn from(route: crate::landmass::Route) -> Self {
+        use crate::landmass::Route;
+        let tile = |(x, y, plane): crate::nav::Point| Some(crate::nav::NavTile { x, y, plane });
+        let (known, reachable, from, to) = match route {
+            Route::Unknown => (false, true, None, None),
+            Route::None => (true, false, None, None),
+            Route::Walk => (true, true, None, None),
+            Route::Through(from, to) => (true, true, tile(from), tile(to)),
+        };
+        Self {
+            known,
+            reachable,
+            from,
+            to,
+        }
+    }
+}
+
 #[cfg(feature = "embedded-lib")]
 macro_rules! lib_module {
     ($name:literal, $path:literal) => {
@@ -754,7 +797,23 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("spirittree", "main/interfaces/mainscreen/spirittree.luau"),
     lib_module!("minecart", "main/interfaces/mainscreen/minecart.luau"),
     lib_module!("gnomeglider", "main/interfaces/mainscreen/gnomeglider.luau"),
+    lib_module!("balloon", "main/interfaces/mainscreen/balloon.luau"),
+    lib_module!("obelisk", "main/interfaces/mainscreen/obelisk.luau"),
+    lib_module!("nexus", "main/interfaces/mainscreen/nexus.luau"),
+    lib_module!("house", "main/house.luau"),
+    lib_module!("mounted", "main/interfaces/mainscreen/mounted.luau"),
+    lib_module!("canoe", "main/interfaces/mainscreen/canoe.luau"),
     lib_module!("fairyring", "main/interfaces/mainscreen/fairyring.luau"),
+    lib_module!("certer", "main/interfaces/mainscreen/certer.luau"),
+    lib_module!("minigames", "main/interfaces/mainscreen/minigames.luau"),
+    lib_module!(
+        "jewellerybox",
+        "main/interfaces/mainscreen/jewellerybox.luau"
+    ),
+    lib_module!("lamp", "main/interfaces/mainscreen/lamp.luau"),
+    lib_module!("occult_altar", "main/occult_altar.luau"),
+    lib_module!("randoms", "main/antiban/randoms.luau"),
+    lib_module!("scrollbook", "main/interfaces/mainscreen/scrollbook.luau"),
     lib_module!("widgets", "main/interfaces/widgets.luau"),
     lib_module!("chatbox", "main/interfaces/chatbox/chatbox.luau"),
     lib_module!(
@@ -1168,6 +1227,14 @@ pub fn run_with_modules(
         "clock",
         lua.create_function(|_, (): ()| Ok(local_time_of_day()))?,
     )?;
+    globals.set(
+        "unix_time",
+        lua.create_function(|_, (): ()| {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64()))
+        })?,
+    )?;
 
     // Item change and packet callbacks; they run inside `sleep`, `wait_item_change` and `wait_packet`, not interrupting the script.
     let events = Rc::new(RefCell::new(Callbacks::default()));
@@ -1318,6 +1385,12 @@ pub fn run_with_modules(
         })?,
     )?;
     globals.set(
+        "widget_model",
+        query(&lua, pid, |pid, (group, child): (u16, u16)| {
+            widget_model(pid, group, child)
+        })?,
+    )?;
+    globals.set(
         "item_container",
         query(&lua, pid, |pid, id: i32| item_container(pid, id))?,
     )?;
@@ -1355,6 +1428,11 @@ pub fn run_with_modules(
     globals.set(
         "antiban_config",
         lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::current_value()))?,
+    )?;
+    // Which types of transport the user turned off in the loader: `{ off = { names } }`.
+    globals.set(
+        "transport_settings",
+        lua.create_function(|lua, (): ()| to_lua(lua, &crate::transports::current_settings()))?,
     )?;
     // The transports (teleport spells, ...) the loader downloaded and parsed: `{ source, transports, version }`.
     globals.set(
@@ -1546,6 +1624,25 @@ pub fn run_with_modules(
                 .collect::<Result<Vec<[i32; 3]>, String>>()?;
             landmasses(pid, &points)
         })?,
+    )?;
+    // Whether `to` can be reached from `from` by walking and climbing: `{ known, reachable, from, to }`, the last two being the first climb on the way when one is needed.
+    globals.set(
+        "world_route",
+        query(
+            &lua,
+            pid,
+            |pid, (from, to, allow): (mlua::Table, mlua::Table, Option<Vec<String>>)| {
+                let tile = |t: &mlua::Table| -> Result<crate::nav::Point, String> {
+                    let read = |field: &str| {
+                        t.get::<i32>(field)
+                            .map_err(|e| format!("a tile's {field}: {e}"))
+                    };
+                    Ok((read("x")?, read("y")?, read("plane")?))
+                };
+                let route = world_route(pid, tile(&from)?, tile(&to)?, &allow.unwrap_or_default())?;
+                Ok(WorldRoute::from(route))
+            },
+        )?,
     )?;
     globals.set(
         "item_params",
@@ -1864,6 +1961,16 @@ pub fn run_with_modules(
                     .map(crate::bank_pin::Outcome::name)
                     .map_err(mlua::Error::RuntimeError)
             }
+        })?,
+    )?;
+    // The skill the loader's Accounts page has set for spending this account's lamps. Needs no client.
+    globals.set(
+        "lamp_skill",
+        lua.create_function(|_, account: String| {
+            Ok(match crate::lamp::skill_for(&account) {
+                Ok(skill) => (skill, None),
+                Err(error) => (None, Some(error)),
+            })
         })?,
     )?;
     // Makes the request through the loader, which only reaches the hosts the user whitelisted. Needs no client.
@@ -2522,6 +2629,13 @@ mod tests {
     }
 
     #[test]
+    fn unix_time_is_seconds_since_the_epoch() {
+        let (lines, result) = run_lines("print(unix_time() > 1700000000 and unix_time() < 1e11)");
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(lines, vec!["true"]);
+    }
+
+    #[test]
     fn clock_is_local_seconds_since_midnight() {
         let (lines, result) = run_lines("local c = clock() print(c >= 0 and c < 86400)");
         assert_eq!(lines, ["true"]);
@@ -2799,8 +2913,8 @@ mod tests {
              local piece = { kind = 'item', transport = { name = 'Games necklace: Burthorpe' }, spell = 'Games necklace', option = 'Burthorpe', ticks = 1, saved = 1 }\n\
              assert(not T.use(piece) and calls == 1 and T.failed_lately(piece), 'an item that is not offered is not tried again')\n\
              calls = 0\n\
-             T.runners.mushtree = function() calls += 1 return false end\n\
-             local ride = { kind = 'mushtree', transport = { name = '3. Sticky Swamp', origin = { x = 3764, y = 3879, plane = 1 } }, spell = '', ticks = 1, saved = 1 }\n\
+             T.runners.magic_mushtrees = function() calls += 1 return false end\n\
+             local ride = { kind = 'magic_mushtrees', id = 'magic_mushtrees 3764,3879 Sticky Swamp', transport = { name = '3. Sticky Swamp', origin = { x = 3764, y = 3879, plane = 1 } }, spell = '', ticks = 1, saved = 1 }\n\
              assert(not T.use(ride) and calls == 3 and T.failed_lately(ride), 'a mushtree ride is tried 3 times, then left out')\n\
              local menu = { { text = 'Brimhaven' }, { text = 'Rimmington' }, { text = 'No thanks' } }\n\
              assert(T.dialogue_pick(menu, { 'brimhaven' }) == 'Brimhaven', 'the option that names the destination')\n\
@@ -2820,6 +2934,834 @@ mod tests {
         );
         assert!(result.is_ok(), "{result:?} {lines:?}");
         assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
+    }
+
+    // The game stood in for: rows, levels, what is held, and two landmasses split at x = 5000.
+    #[cfg(feature = "embedded-lib")]
+    const CHOOSER_STAGE: &str = r#"
+local Host = require('@lib/host')
+local T = require('@lib/main/transports')
+local Magic = require('@lib/main/interfaces/gametabs/magic')
+local Journal = require('@lib/main/interfaces/gametabs/journal')
+local Player = require('@lib/main/player')
+Player.position = function() return { x = 1, y = 1, plane = 0 } end
+Magic.spell = function(name) return name end
+Magic.can_cast = function() return true end
+Journal.is_quest_complete = function() return true end
+local function row(kind, name, origin, destination, more)
+    local t = { kind = kind, name = name, origin = origin, destination = destination, duration = 4, skills = {}, quests = {}, varbits = {}, varps = {}, items = '', consumable = false, menu = '' }
+    for k, v in pairs(more or {}) do t[k] = v end
+    return t
+end
+local function tile(x, y, plane) return { x = x, y = y, plane = plane or 0 } end
+local stage = { rows = {}, inventory = {}, worn = {}, plan_reaches = false, nav_plans = 0 }
+Host.transports = function() return { source = 'test', version = 1, transports = stage.rows, items = { { name = 'ROPE', ids = { 954 } }, { name = 'CROSSBOW', ids = { 837 } }, { name = 'MITH_GRAPPLE', ids = { 9419 } }, { name = 'AXE', ids = { 1351 } }, { name = 'COINS', ids = { 995 } } } } end
+Host.game_state = function() return { game_state = 30, skills = { { name = 'Magic', level = 60, real_level = 60 }, { name = 'Agility', level = 55, real_level = 50 } } } end
+Host.varbit = function() return 0 end
+Host.varp = function() return 0 end
+Host.item_container = function(id) return if id == T.INVENTORY then stage.inventory elseif id == T.WORN then stage.worn else {} end
+Host.landmasses = function(points)
+    local out = {}
+    for i, p in ipairs(points) do out[i] = if p.x >= 5000 then 2 else 1 end
+    return out
+end
+Host.nav_plan = function() stage.nav_plans += 1 return { reached = stage.plan_reaches, tiles = {}, actions = {} } end
+Host.world_route = function(a, b) return { known = true, reachable = (a.x >= 5000) == (b.x >= 5000) } end
+local home = tile(3000, 3000)
+local far = tile(3800, 3000)
+local island = tile(5400, 3000)
+"#;
+
+    #[cfg(feature = "embedded-lib")]
+    fn chooser_test(body: &str) {
+        let (lines, result) = run_lines(&format!("{CHOOSER_STAGE}\n{body}\nprint('ok')"));
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn the_chooser_walks_when_near_teleports_when_far_and_skips_unmet_rows() {
+        chooser_test(
+            r#"
+stage.rows = {
+    row('teleportation_spells', 'Good Teleport', nil, tile(3805, 3000)),
+    row('teleportation_spells', 'Too Hard Teleport', nil, tile(3800, 3001), { skills = { { name = 'Magic', level = 61 } } }),
+}
+assert(T.choose(home, tile(3010, 3000)) == nil, 'near: walk')
+local c = T.choose(home, far)
+assert(c and c.kind == 'spell' and c.spell == 'Good Teleport', 'far: the spell whose skills are met')
+assert(c.id == 'Good Teleport' and c.saved > 30)
+assert(T.choose(home, far, { exclude = { spells = true } }) == nil, 'a group can be excluded')
+assert(T.choose(home, far, { exclude = { ['Good Teleport'] = true } }) == nil, 'and a name')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn water_is_crossed_by_a_ship_and_a_goal_the_planner_reaches_is_walked() {
+        chooser_test(
+            r#"
+assert(T.choose(home, island) == nil, 'no way at all: nothing to choose')
+local ship = row('charter_ships', '1: Isle', tile(3010, 3000), tile(5401, 3000), { items = 'COINS=100' })
+stage.rows = { ship }
+assert(T.choose(home, island) == nil, 'the fare is not held')
+stage.inventory = { { id = 995, quantity = 100, slot = 0 } }
+local c = T.choose(home, island)
+assert(c and c.kind == 'charter' and c.transport.origin.x == 3010 and c.saved == 1e9, 'a ship across the water')
+assert(stage.nav_plans == 0, 'an island this far is not asked of the planner')
+local shore = tile(4990, 3000)
+local across = tile(5010, 3000)
+stage.plan_reaches = false
+assert(T.choose(shore, across) ~= nil and stage.nav_plans == 1, 'cut off and the planner agrees: the ship')
+stage.plan_reaches = true
+assert(T.choose(shore, across) == nil, 'cut off by landmass but the planner gets there: walk')
+"#,
+        );
+    }
+
+    const RANDOMS_STAGE: &str = r#"
+local Host = require('@lib/host')
+local ChatOptions = require('@lib/main/interfaces/chatbox/chat_options')
+local Lamp = require('@lib/main/interfaces/mainscreen/lamp')
+local Npcs = require('@lib/main/entities/npcs')
+local Randoms = require('@lib/main/antiban/randoms')
+local Tasks = require('@lib/main/antiban/antiban_tasks')
+Randoms.GENIE_SETTLE_MS = 0
+Randoms.GENIE_TIMEOUT_MS = 50
+Randoms.POLL_MS = 1
+local stage = { npcs = {}, inventory = {}, skill = nil, why = nil, talked = 0, used = nil, continued = 0, message = false, gives = true }
+local ME = 362
+Host.game_state = function() return { game_state = 30, player_name = 'Me', account_name = 'me' } end
+Host.players = function() return { { name = 'Other', index = 7 }, { name = 'Me', index = ME } } end
+Host.npcs = function() return stage.npcs end
+Host.item_container = function() return stage.inventory end
+Host.lamp_skill = function(account) assert(account == 'me') return stage.skill, stage.why end
+Npcs.interact = function(npc, option)
+    assert(option == 'Talk-to')
+    stage.talked += 1
+    if stage.gives then table.insert(stage.inventory, { id = Randoms.GENIE_LAMP, quantity = 1, slot = 0 }) end
+    return true
+end
+ChatOptions.contains_continue = function() return stage.message end
+ChatOptions.continue_chat = function() stage.continued += 1 stage.message = false return true end
+Lamp.use = function(skill, item) stage.used = skill assert(item == Randoms.GENIE_LAMP) return true end
+local function genie(player) return { id = Randoms.GENIE, index = 1, name = 'Genie', interacting_player = player } end
+"#;
+
+    #[cfg(feature = "embedded-lib")]
+    fn randoms_test(body: &str) {
+        let (lines, result) = run_lines(&format!("{RANDOMS_STAGE}\n{body}\nprint('ok')"));
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_random_event_is_only_handled_when_it_is_ours() {
+        randoms_test(
+            r#"
+assert(Randoms.handle() == false, 'nothing around')
+stage.npcs = { { id = 3106, index = 2, name = 'Man', interacting_player = ME } }
+assert(Randoms.handle() == false, 'an NPC that is no event')
+stage.npcs = { genie(7) }
+assert(Randoms.handle() == false and stage.talked == 0, "another player's genie")
+stage.npcs = { genie(-1) }
+assert(Randoms.handle() == false and stage.talked == 0, 'a genie talking to nobody')
+stage.npcs = { genie(ME) }
+Tasks.handle_randoms()
+assert(stage.talked == 1, 'the task handles ours')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn giles_is_handled_by_the_certers_quiz() {
+        randoms_test(
+            r#"
+local Certer = require('@lib/main/interfaces/mainscreen/certer')
+local opened, solved = 0, 0
+Certer.open = function(npc) assert(npc.id == Randoms.GILES) opened += 1 return true end
+Certer.solve = function() solved += 1 return true end
+stage.npcs = { { id = Randoms.GILES, index = 1, name = 'Giles', interacting_player = 7 } }
+assert(Randoms.handle() == false and opened == 0, "another player's Giles")
+stage.npcs[1].interacting_player = ME
+assert(Randoms.handle() == true and opened == 1 and solved == 1, 'ours is answered')
+for _, id in { Randoms.NILES, Randoms.MILES } do
+    stage.npcs[1].id = id
+    Certer.open = function(npc) assert(npc.id == id) opened += 1 return true end
+    assert(Randoms.handle() == true and opened >= 2, 'and so are the other certers')
+end
+Certer.solve = function() return false, 'no answer fits the picture' end
+assert(Randoms.handle() == false, 'and it says so when it could not be')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn the_certers_answer_comes_from_the_pictures_model() {
+        let (lines, result) = run_lines(
+            r#"
+local Host = require('@lib/host')
+local Toplevel = require('@lib/main/interfaces/mainscreen/toplevel')
+Toplevel.is_open = function() return true end
+local model = 8833
+local texts = { 'A helmet.', 'A fish.', 'A bowl.' }
+Host.widget_model = function(group, child) assert(group == 184 and child == 7) return { kind = 1, id = model } end
+Host.widget = function(_, child)
+    if child >= 1 and child <= 3 then return { text = texts[child], hidden = false } end
+    if child >= 8 and child <= 10 then return { hidden = false } end
+end
+local Certer = require('@lib/main/interfaces/mainscreen/certer')
+assert(Certer.correct().letter == 'A', 'armour is the helmet')
+model = 8829
+assert(Certer.correct().letter == 'B', 'food is the fish')
+model = 8834
+assert(Certer.correct() == nil, 'nothing fits a jewel: no guess')
+model = 1
+assert(Certer.correct() == nil and Certer.category() == nil, 'an unknown picture: no guess')
+texts = { 'A ring.', 'A necklace.', 'A bowl.' }
+model = 8834
+assert(Certer.correct() == nil, 'two fit: no guess')
+texts = { 'A string.', 'A ring.', 'A bowl.' }
+assert(Certer.correct().letter == 'B', 'a word, not part of one')
+print('ok')
+"#,
+        );
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn the_genies_lamp_goes_on_the_accounts_skill_or_is_kept() {
+        randoms_test(
+            r#"
+stage.npcs = { genie(ME) }
+stage.skill = 'Slayer'
+stage.message = true
+assert(Randoms.handle() == true and stage.used == 'Slayer' and stage.continued == 1, 'spent, after the dialogue')
+stage.used, stage.skill = nil, nil
+assert(Randoms.handle() == true and stage.used == nil, 'no skill set: the lamp is kept')
+stage.skill = 'Nonsense'
+assert(Randoms.handle() == true and stage.used == nil, 'an unknown skill: kept')
+stage.skill, stage.why = nil, 'locked'
+assert(Randoms.handle() == true and stage.used == nil, 'the loader cannot say: kept')
+stage.why, stage.gives, stage.skill = nil, false, 'Slayer'
+assert(Randoms.handle() == false and stage.used == nil, 'no lamp came')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn carpets_are_preferred_and_free_with_the_desert_hard_diary() {
+        chooser_test(
+            r#"
+local Diaries = require('@lib/main/diaries')
+local hard = false
+Diaries.tier = function(region, tier) assert(region == 'desert' and tier == 'hard') return hard end
+stage.rows = { row('magic_carpets', '1: Oasis', tile(3000, 3000), tile(3060, 3000), { menu = 'Travel Rug Merchant 17', duration = 30, items = 'COINS=200' }) }
+local oasis = tile(3060, 3000)
+assert(T.choose(home, oasis) == nil, 'no fare and no diary')
+hard = true
+local c = T.choose(home, oasis)
+assert(c and c.transport.kind == 'magic_carpets', 'the diary makes it free')
+hard = false
+stage.inventory = { { id = 995, quantity = 200, slot = 0 } }
+c = T.choose(home, oasis)
+assert(c and c.saved < T.MIN_SAVING_TICKS, 'the fare will do, and it needs less than the usual saving')
+assert(T.choose(home, oasis, { min_saving_ticks = 30 }) == nil, 'unless a plan asks for one')
+assert(T.choose(home, tile(3015, 3000)) == nil, 'a short walk is still walked')
+assert(T.choose(home, oasis, { exclude = { ride = true } }) == nil, 'and it can be left out')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn types_the_user_turned_off_are_left_out_and_can_be_required() {
+        chooser_test(
+            r#"
+stage.rows = {
+    row('teleportation_spells', 'Good Teleport', nil, far),
+    row('teleportation_spells_home', 'Lumbridge Home Teleport', nil, tile(3900, 3000)),
+}
+local off = {}
+Host.transport_settings = function() return { off = off } end
+assert(T.is_enabled('spells'))
+assert(T.choose(home, far) ~= nil, 'on')
+off = { 'spells' }
+assert(not T.is_enabled('spells') and T.is_enabled('home_teleports'))
+assert(T.choose(home, far, { exclude = { ['Lumbridge Home Teleport'] = true } }) == nil, 'off')
+assert(T.choose(home, tile(3900, 3000)) ~= nil, 'home teleports are their own type')
+local ok, why = pcall(T.require_enabled, 'spells')
+assert(not ok and string.find(tostring(why), 'turned off', 1, true), 'a script that needs it stops')
+assert(pcall(T.require_enabled, 'home_teleports'), 'and one that is on is fine')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_goal_with_no_way_stops_the_walk() {
+        chooser_test(
+            r#"
+local Walker = require('@lib/main/walker')
+Walker.here = function() return home end
+local walked = 0
+stage.plan_reaches = false
+local ok, why = pcall(Walker.walk, island, { plane = 0 })
+assert(not ok and string.find(tostring(why), 'no way from', 1, true), 'it raises, naming the tiles: ' .. tostring(why))
+assert(T.walkable(home, far), 'a way on foot is fine')
+assert(not T.walkable(home, island), 'and none is not')
+stage.plan_reaches = true
+assert(T.walkable(home, tile(5010, 3000)) == false, 'too far for the planner to say otherwise')
+local shore = tile(4990, 3000)
+assert(T.walkable(shore, tile(5010, 3000)), 'the planner can find a close way the map misses')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_comments_requirement_binds_by_its_variable_and_unlocks_are_read() {
+        chooser_test(
+            r#"
+local vars = {}
+Host.varbit = function(id) return vars[id] or 0 end
+local karamja = 'Karamja (varbit:4566=0?COINS=200)'
+local toll = 'Port Phasmatys (varbit:217=7?ECTO_TOKEN=2)'
+local stage_rows = {
+    row('link_gated', '', tile(5100, 3000), tile(5110, 3000), { note = karamja }),
+    row('link_gated', '', tile(5120, 3000), tile(5130, 3000), { note = karamja, items = 'COINS=200' }),
+    row('link_gated', '', tile(3010, 3000), tile(3020, 3000), { note = toll }),
+    row('link_gated', '', tile(3030, 3000), tile(3040, 3000)),
+    row('link_gated', '', tile(3050, 3000), tile(3060, 3000), { note = 'What (questpoints>5?COINS=1)' }),
+    row('link_gated', '', tile(3070, 3000), tile(3080, 3000), { items = 'UNLOCK_KARAMJA_ELITE=1||6306=100' }),
+    row('link_gated', '', tile(3090, 3000), tile(3100, 3000), { items = '6570=1|UNLOCK_MOR_UL_REK=1' }),
+    row('link_gated', '', tile(3110, 3000), tile(3120, 3000), { items = 'UNLOCK_CANOE_AXE=1' }),
+}
+stage.rows = stage_rows
+local function allowed()
+    local keys = {}
+    for _, k in ipairs(T.allowed_climbs()) do keys[string.match(k, '^[^|]+')] = true end
+    return function(x) return keys[x .. ',3000,0>' .. (x + 10) .. ',3000,0'] == true end
+end
+local has = allowed()
+assert(has(5100), 'a free row beside paying ones is not bound')
+assert(not has(5120), 'the paying row owes its coins before the diary')
+assert(not has(3010), 'when no row names them the comment binds every row')
+assert(has(3030), 'a row with no comment is unaffected')
+assert(not has(3050), 'a form that cannot be read is left out')
+assert(not has(3070) and not has(3090), 'unlocks not met')
+vars[4566] = 1
+vars[217] = 8
+vars[5646] = 1
+T.VALID_FOR_MS = -1
+has = allowed()
+assert(has(5120), 'the elite diary makes the cart free, with no coins held')
+assert(has(3010), 'the quest passed, the toll is free')
+assert(has(3070), 'the Karamja unlock reads the diary')
+assert(has(3090), 'and the guard gave permission')
+assert(not has(3110), 'an unlock with nothing to read stays unmet')
+vars[217] = 7
+has = allowed()
+assert(not has(3010), 'at the value it is still owed')
+assert(T.items_met({ items = 'ECTO_TOKEN=25|UNLOCK_DRAGONTOOTH=1' }, {}), 'taken as met until refused')
+assert(not T.items_met({ items = '13393=1&UNLOCK_XERICS_HONOUR=1' }, {}), 'and the talisman is still needed')
+assert(T.items_met({ items = '13393=1&UNLOCK_XERICS_HONOUR=1' }, { [13393] = 1 }))
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_far_hop_is_a_trip_with_its_requirements() {
+        chooser_test(
+            r#"
+local cart = row('transports', '', home, far, { menu = 'Board Travel cart 2230', items = 'COINS=200', note = 'Karamja (varbit:4566=0?COINS=200)' })
+local toll = row('transports', '', tile(3010, 3000), tile(3010, 3002), { menu = 'Pay-toll(2-Ecto) Energy Barrier 16105', note = 'Port Phasmatys (varbit:217=7?ECTO_TOKEN=2)' })
+stage.rows = { cart, toll }
+local vars = {}
+Host.varbit = function(id) return vars[id] or 0 end
+assert(T.choose(home, far) == nil, 'the fare is owed')
+vars[4566] = 1
+T.VALID_FOR_MS = -1
+local c = T.choose(home, far)
+assert(c and c.kind == 'ride', 'a trip, free with the diary')
+assert(T.choose(home, far, { exclude = { passages = true } }) == nil, 'a script can leave them out')
+assert(T.runners[c.kind] == T.runners.ride)
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_way_out_through_a_one_way_door_is_a_walk() {
+        chooser_test(
+            r#"
+local inside, outside = tile(4990, 3000), tile(5010, 3000)
+stage.rows = { row('teleportation_spells', 'Good Teleport', nil, outside) }
+local way_out = true
+Host.world_route = function() return { known = true, reachable = way_out } end
+assert(T.choose(inside, outside) == nil, 'the map says it can be walked, and walking is shorter')
+way_out = false
+assert(T.choose(inside, outside) ~= nil, 'with no way on foot the spell is the way')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn an_item_on_an_object_needs_the_item_and_climbs_put_on_what_they_need() {
+        chooser_test(
+            r#"
+local rope = row('agility_shortcuts', '', home, far, { menu = 'Use Rope -> Boulder 5842', items = 'ROPE=1', duration = 4 })
+local grapple = row('shortcut_gated', '', tile(3010, 3000), tile(3016, 3000), { menu = 'Grapple Rocks 17042', items = 'CROSSBOW=1&MITH_GRAPPLE=1' })
+stage.rows = { rope, grapple }
+assert(T.choose(home, far) == nil, 'no rope')
+stage.inventory = { { id = 954, quantity = 1, slot = 0 } }
+local c = T.choose(home, far)
+assert(c and c.kind == 'item_on', 'with one it is a trip')
+assert(T.runners.item_on ~= nil)
+local Inventory = require('@lib/main/interfaces/gametabs/inventory')
+local Minimenu = require('@lib/main/interfaces/minimenu')
+Inventory.hover_slot = function() end
+Minimenu.entries = function() return { { option = 'Wield' }, { option = 'Drop' } } end
+local worn_now = {}
+Inventory.interact_slot = function(slot, option)
+    assert(option == 'Wield', option)
+    for i, item in ipairs(stage.inventory) do
+        if item.slot == slot then table.insert(worn_now, table.remove(stage.inventory, i)) break end
+    end
+    stage.worn = worn_now
+    return true
+end
+stage.inventory = { { id = 837, quantity = 1, slot = 3 }, { id = 9419, quantity = 1, slot = 4 } }
+T.VALID_FOR_MS = -1
+local grappling = '3010,3000,0>3016,3000,0|Grapple Rocks 17042'
+local climbing = '3010,3000,0>3016,3000,0|Climb Rocks 62423'
+local function allowed(key) return table.find(T.allowed_climbs(), key) ~= nil end
+assert(allowed(grappling), 'a row of its own')
+assert(T.wear_for_climb(tile(3010, 3000), tile(3016, 3000), 'Grapple'), 'both put on')
+assert(#worn_now == 2 and #stage.inventory == 0)
+assert(T.wear_for_climb(tile(3010, 3000), tile(3016, 3000), 'Grapple'), 'already worn')
+assert(T.wear_for_climb(tile(1, 1), tile(2, 2), 'Climb'), 'a climb that needs nothing')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_row_that_needs_nothing_put_on_wins_on_the_same_tiles() {
+        chooser_test(
+            r#"
+local a, b = tile(3010, 3000), tile(3016, 3000)
+stage.rows = {
+    row('shortcut_gated', '', a, b, { menu = 'Grapple Rocks 17042', items = 'CROSSBOW=1&MITH_GRAPPLE=1' }),
+    row('shortcut_gated', '', a, b, { menu = 'Climb Rocks 62423', skills = { { name = 'Agility', level = 52 } } }),
+}
+stage.inventory = { { id = 837, quantity = 1, slot = 3 }, { id = 9419, quantity = 1, slot = 4 } }
+local grappling, climbing = '3010,3000,0>3016,3000,0|Grapple Rocks 17042', '3010,3000,0>3016,3000,0|Climb Rocks 62423'
+local function allowed(key) return table.find(T.allowed_climbs(), key) ~= nil end
+T.VALID_FOR_MS = -1
+assert(allowed(grappling) and not allowed(climbing), 'too low for the climb: the grapple')
+local levels = T.levels
+T.levels = function(real) local have = levels(real) have.agility = 60 return have end
+assert(allowed(climbing) and not allowed(grappling), 'high enough: the climb, with no gear swapped')
+stage.inventory = {}
+assert(allowed(climbing), 'and with no grapple held')
+T.levels = levels
+assert(#T.allowed_climbs() == 0, 'with neither there is no way')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn portals_are_trips_but_not_the_house_or_the_pvp_arena() {
+        chooser_test(
+            r#"
+stage.rows = { row('teleportation_portals', '', home, tile(1858, 7051), { menu = 'Home Portal 15478' }) }
+assert(T.choose(home, far) == nil, 'the house leads nowhere on its own')
+"#,
+        );
+        chooser_test(
+            r#"
+stage.rows = { row('teleportation_portals', '', home, far, { menu = 'Enter Free-for-all portal 26645' }) }
+assert(T.choose(home, far) == nil, 'the arena')
+"#,
+        );
+        chooser_test(
+            r#"
+stage.rows = { row('teleportation_portals', '', home, far, { menu = 'Enter Soul Wars Portal 40474' }) }
+local c = T.choose(home, far)
+assert(c and c.kind == 'ride', 'a portal is a trip')
+assert(T.choose(home, far, { exclude = { portals = true } }) == nil, 'a script can leave them out')
+Host.transport_settings = function() return { off = { 'portals' } } end
+assert(T.choose(home, far) == nil, 'and so can the user')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn obelisks_need_the_diary_and_the_wilderness() {
+        chooser_test(
+            r#"
+local Diaries = require('@lib/main/diaries')
+local here, there = tile(3156, 3620), tile(3307, 3916)
+local start = row('wilderness_obelisks', '', tile(3155, 3620), nil, { menu = 'Activate Obelisk 14829' })
+stage.rows = { start, row('wilderness_obelisks', '6: Level 50 Wilderness', nil, there) }
+local hard = false
+Diaries.tier = function() return hard end
+assert(T.choose(here, there) == nil, 'without the diary the landing is random')
+hard = true
+T.VALID_FOR_MS = -1
+local c = T.choose(here, there)
+assert(c and c.kind == 'wilderness_obelisks' and c.transport.label == 'Level 50 Wilderness', 'with it, a trip')
+assert(T.choose(home, there) == nil, 'from safety, no')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn the_house_is_a_place_on_the_way_and_what_is_missing_is_dropped() {
+        chooser_test(
+            r#"
+local scene = {}
+Host.locs = function(plane) return if plane == 0 then scene else {} end
+local House = require('@lib/main/house')
+local inside = tile(1858, 7051)
+local tablet = row('teleportation_items', 'Teleport to House tablet: Inside the house', nil, inside, { items = '8013=1', consumable = true })
+local barrows = row('teleportation_portals_poh', 'Barrows Portal', inside, far, { menu = 'Enter Barrows Portal 37591' })
+local chest = row('teleportation_boxes', 'E: Fishing Guild', inside, tile(3000, 2100), { menu = 'Teleport Menu Fancy Jewellery Box 37501' })
+local beast = row('teleportation_boxes', '7: Corporeal Beast', inside, tile(3000, 1200), { menu = 'Teleport Menu Basic Jewellery Box 37492' })
+local glory = row('teleportation_boxes', 'Edgeville', inside, tile(3000, 500), { menu = 'Edgeville Amulet of Glory 13523' })
+stage.rows = { tablet, barrows, chest, beast, glory }
+stage.inventory = { { id = 8013, quantity = 1, slot = 0 } }
+local vars = {}
+Host.varbit = function(id) return vars[id] or 0 end
+assert(T.choose(home, far) == nil, 'nothing says a Nexus is built')
+assert(T.choose(home, tile(3000, 500)) == nil, 'and nothing can say a glory is, before a visit')
+vars[House.NEXUS_VARBIT] = 1
+local c = T.choose(home, far)
+assert(c and c.kind == 'item', 'the tablet first')
+Host.in_instance = function() return true end
+local function built(id, name) return { id = id, name = name, x = 11670, y = 5270, plane = 0, clickable = true, size_x = 1, size_y = 1 } end
+scene = { built(House.EXIT_PORTAL, 'Portal'), built(33410, 'Portal Nexus') }
+assert(House.inside())
+local from_inside = tile(11675, 5277)
+c = T.choose(from_inside, far)
+assert(c and c.kind == 'house' and c.option == 'Barrows' and c.spell == 'nexus', 'then the Nexus, whatever the tile inside')
+assert(T.choose(from_inside, tile(11680, 5280)) == nil, 'a goal in the house is a walk')
+vars[House.BOX_VARBIT] = 27
+c = T.choose(from_inside, tile(3000, 2100))
+assert(c == nil or c.spell ~= 'box', 'a visit beats the variable: no box seen')
+c = T.choose(from_inside, tile(3000, 500))
+assert(c == nil or c.spell ~= 'glory', 'nor a glory')
+table.insert(scene, built(29156, 'Ornate Jewellery Box'))
+table.insert(scene, built(13523, 'Amulet of Glory'))
+c = T.choose(from_inside, tile(3000, 2100))
+assert(c and c.kind == 'house' and c.option == 'Fishing Guild' and c.spell == 'box', 'the box, with the label bare')
+c = T.choose(from_inside, tile(3000, 1200))
+assert(c == nil or c.option ~= 'Corporeal Beast', 'not a boss room')
+c = T.choose(from_inside, tile(3000, 500))
+assert(c and c.kind == 'house' and c.spell == 'glory' and c.option == 'Edgeville', 'and the glory it now sees')
+local Nexus = require('@lib/main/interfaces/mainscreen/nexus')
+Nexus.open = function() return true end
+Nexus.find = function() return nil end
+Nexus.close = function() return true end
+c = T.choose(from_inside, far)
+local ok, final = T.house(c)
+assert(not ok and final, 'not in this Nexus')
+c = T.choose(from_inside, far)
+assert(c == nil or c.option ~= 'Barrows', 'so it is left out')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_house_ring_and_tree_count_once_a_visit_has_shown_them() {
+        chooser_test(
+            r#"
+local scene = {}
+Host.locs = function(plane) return if plane == 0 then scene else {} end
+local House = require('@lib/main/house')
+local inside = tile(1858, 7051)
+local Fairyring = require('@lib/main/interfaces/mainscreen/fairyring')
+Fairyring.can_use = function() return true end
+stage.rows = {
+    row('teleportation_items', 'Teleport to House tablet: Inside the house', nil, inside, { items = '8013=1', consumable = true }),
+    row('fairy_rings', '', inside, nil, { menu = 'Configure Fairy ring 29228' }),
+    row('fairy_rings', 'A I Q', nil, far),
+    row('fairy_rings', 'D I Q', nil, inside),
+    row('fairy_rings', '', home, nil, { menu = 'Configure Fairy ring 29495' }),
+    row('spirit_trees', '', inside, nil, { menu = 'Travel Spirit Tree 29227' }),
+    row('spirit_trees', 'A: Hosidius', nil, tile(3000, 500)),
+    row('spirit_trees', 'C: Your house', nil, inside),
+}
+stage.inventory = { { id = 8013, quantity = 1, slot = 0 } }
+Host.varbit = function() return 0 end
+local before = T.choose(home, far, { exclude = { fairy_rings = true } })
+assert(before == nil, 'no visit yet: no ring to teleport in for, even holding a tablet')
+local c_tree = T.choose(home, tile(3000, 500), { exclude = { fairy_rings = true } })
+assert(c_tree == nil, 'nor a tree')
+Host.in_instance = function() return true end
+local function built(id, name) return { id = id, name = name, x = 11670, y = 5270, plane = 0, clickable = true, size_x = 1, size_y = 1 } end
+scene = { built(House.EXIT_PORTAL, 'Portal') }
+local here = tile(11675, 5277)
+assert(T.choose(here, far) == nil, 'no ring seen')
+assert(T.choose(here, tile(3000, 500)) == nil, 'no tree seen')
+scene = { built(House.EXIT_PORTAL, 'Portal'), built(29229, 'Spiritual Fairy Tree') }
+local c = T.choose(here, far)
+assert(c and c.kind == 'fairy_rings' and c.transport.label == 'AIQ', 'the one tree is a ring')
+c = T.choose(here, tile(3000, 500))
+assert(c and c.kind == 'spirit_trees' and c.transport.label == 'Hosidius', 'and a tree, with the label bare')
+Host.in_instance = function() return false end
+c = T.choose(home, inside)
+assert(c and c.kind == 'fairy_rings' and c.transport.label == 'DIQ', 'a ring underfoot goes into the house once it is known')
+c = T.choose(home, tile(3000, 500), { exclude = { fairy_rings = true } })
+assert(c and c.kind == 'item', 'from outside a visit makes a tablet and the tree a way')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn the_ferox_enclave_can_be_a_goal_but_not_a_way_through_the_wilderness() {
+        chooser_test(
+            r#"
+local enclave = tile(3150, 3635)
+stage.rows = { row('teleportation_spells', 'Good Teleport', nil, enclave) }
+assert(T.in_ferox(3150, 3635) and not T.in_ferox(3150, 3700))
+assert(T.choose(home, enclave) ~= nil, 'to go to the Enclave')
+assert(T.choose(home, tile(3148, 3630)) ~= nil, 'or inside it')
+assert(T.choose(home, tile(3150, 3660)) == nil, 'a goal north of it is the Wilderness')
+assert(T.choose(home, tile(3100, 3500)) == nil, 'and it is no way through to somewhere else')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn canoes_are_dropped_when_a_station_says_there_is_no_axe() {
+        chooser_test(
+            r#"
+local Canoe = require('@lib/main/interfaces/mainscreen/canoe')
+local Log_row = row('canoes', 'The Clock Tower', tile(3000, 3000), far, { skills = { { name = 'Woodcutting', level = 27 } }, duration = 30 })
+stage.rows = { Log_row }
+Player.position = function() return tile(3000, 3000) end
+Host.game_state = function() return { game_state = 30, skills = { { name = 'Woodcutting', level = 60, real_level = 60 } } } end
+assert(Canoe.kind_for_level(12) == 'Log' and Canoe.kind_for_level(27) == 'Dugout')
+assert(Canoe.kind_for_level(42) == 'Stable dugout' and Canoe.kind_for_level(57) == 'Waka' and Canoe.kind_for_level(nil) == 'Waka')
+local c = T.choose(home, far)
+assert(c and c.kind == 'canoe', 'with no axe held, one is assumed to be kept')
+local kind
+Canoe.travel = function(place, k) kind = k return false, Canoe.NO_AXE end
+local ok, final = T.canoe(c)
+assert(not ok and final, 'pointless to try again')
+assert(kind == 'Dugout', 'the smallest for the trip')
+assert(T.choose(home, far) == nil, 'the station said there is none')
+stage.inventory = { { id = 1351, quantity = 1, slot = 0 } }
+c = T.choose(home, far)
+assert(c ~= nil, 'an axe held brings them back')
+assert(not select(1, T.canoe(c)), 'but it may be too high a level')
+assert(T.choose(home, far) == nil, 'and then the same axe does not bring them back')
+stage.inventory = {}
+assert(T.choose(home, far) ~= nil, 'with the axes changed, one may have gone to a keeper')
+assert(T.choose(home, far, { exclude = { canoes = true } }) == nil, 'and a script can leave them out')
+Host.transport_settings = function() return { off = { 'canoes' } } end
+assert(T.choose(home, far) == nil, 'and so can the user')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn balloons_need_a_log_held_or_stored() {
+        chooser_test(
+            r#"
+local Balloon = require('@lib/main/interfaces/mainscreen/balloon')
+local chat = {}
+Host.chat_messages = function() return chat end
+assert(next(Balloon.stored()) == nil, 'nothing said yet')
+chat = { { text = 'This crate currently contains 30 logs, 12 oak logs and 3 yew logs.' } }
+local s = Balloon.stored()
+assert(s['logs'] == 30 and s['oak logs'] == 12 and s['yew logs'] == 3, 'the crate says')
+assert(s['magic logs'] == 0 and s['willow logs'] == 0, 'and a kind it leaves out is none')
+chat = {
+    { text = 'This crate currently contains 30 logs and 30 magic logs.' },
+    { text = 'You have 29 sets of Magic logs left in storage.' },
+    { text = 'You board the balloon and fly to the Gnome Stronghold.' },
+}
+s = Balloon.stored()
+assert(s['magic logs'] == 29 and s['logs'] == 30, 'a flight since then is newer')
+assert(Balloon.has_log('Grand Tree') and Balloon.has_log('Entrana'), 'in storage')
+assert(not Balloon.has_log('Varrock'), 'no willow logs anywhere')
+stage.inventory = { { id = 1519, quantity = 1, slot = 0 } }
+assert(Balloon.has_log('Varrock'), 'but one held will do')
+stage.inventory = {}
+local basket = { menu = 'Use Basket 19129', varbits = { { id = 2869, op = '=', value = 1 } } }
+stage.rows = {
+    row('hot_air_balloons', '', tile(3010, 3000), nil, basket),
+    row('hot_air_balloons', 'Grand Tree', nil, tile(3800, 3000)),
+    row('hot_air_balloons', 'Varrock', nil, tile(3000, 2200)),
+}
+Host.varbit = function(id) return if id == 2869 then 1 else 0 end
+assert(T.choose(home, far) == nil, 'a stored log is not counted on')
+stage.inventory = { { id = 1513, quantity = 1, slot = 0 } }
+local c = T.choose(home, far)
+assert(c and c.kind == 'hot_air_balloons' and c.transport.label == 'Grand Tree', 'one held is')
+assert(T.choose(home, tile(3000, 2200)) == nil, 'and only for its own place')
+stage.inventory = {}
+T.BALLOON_STORAGE = true
+c = T.choose(home, far)
+assert(c and c.transport.label == 'Grand Tree', 'a script can count on storage')
+assert(T.choose(home, tile(3000, 2200)) == nil, 'and still not a kind said to be gone')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn minigame_teleports_wait_for_their_cooldown() {
+        chooser_test(
+            r#"
+local cooldown = { { id = 888, op = '@', value = 20 } }
+stage.rows = {
+    row('teleportation_minigames', 'Castle Wars Minigame Teleport', nil, tile(3800, 3000), { varps = cooldown }),
+    row('teleportation_minigames', 'Rat Pits Minigame Teleport: 2. Varrock', nil, tile(3000, 2200), { varps = cooldown }),
+    row('teleportation_minigames', 'Clan Wars Minigame Teleport', nil, tile(3150, 3635), { varps = cooldown }),
+}
+local c = T.choose(home, far)
+assert(c and c.kind == 'minigame' and c.spell == 'Castle Wars' and c.option == nil, 'off cooldown')
+c = T.choose(home, tile(3000, 2200))
+assert(c and c.spell == 'Rat Pits' and c.option == 'Varrock', 'the activity and which pit')
+assert(T.choose(home, far, { exclude = { minigames = true } }) == nil, 'a group can be excluded')
+assert(T.choose(home, far, { exclude = { ['Castle Wars'] = true } }) == nil, 'and an activity')
+assert(T.choose(home, tile(3150, 3640)) == nil, 'nothing into the wilderness')
+Host.varp = function() return math.floor(Host.unix_time() / 60) - 5 end
+assert(T.choose(home, far) == nil, 'used 5 minutes ago')
+Host.varp = function() return math.floor(Host.unix_time() / 60) - 21 end
+assert(T.choose(home, far) ~= nil, 'and again after 20')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn the_wilderness_is_only_entered_when_asked() {
+        chooser_test(
+            r#"
+local deep = tile(3153, 3923)
+stage.rows = {
+    row('teleportation_spells', 'Wild Teleport', nil, tile(3100, 3700)),
+    row('teleportation_levers', '', deep, tile(2560, 3000), { menu = 'Ardougne Lever 1815' }),
+    row('teleportation_levers', '', tile(3000, 3010), tile(3154, 3924), { menu = 'Pull Lever 26761' }),
+}
+assert(T.choose(tile(3160, 3400), tile(2560, 3010)) == nil, 'no walking to a lever deep in the wilderness')
+assert(T.choose(tile(3000, 3000), tile(3160, 3930)) == nil, 'no spell or lever into it')
+local c = T.choose(tile(3150, 3920), tile(2560, 3010))
+assert(c and c.kind == 'lever' and c.transport.menu == 'Ardougne Lever 1815', 'but one that gets us out when we are in it')
+local inside = T.choose(tile(3100, 3530), tile(3100, 3705))
+assert(inside and inside.kind == 'spell', 'moving within it once we are in it')
+assert(T.choose(tile(3000, 3600), tile(3160, 3930), { exclude = { spells = true } }) == nil, 'no walking out to a lever that leads back in')
+assert(T.choose(tile(3000, 3000), tile(3160, 3930)) == nil, 'not from safety')
+assert(T.choose(tile(3000, 3000), tile(3160, 3930), { wilderness = true }) ~= nil, 'one plan can ask for it')
+T.WILDERNESS = true
+assert(T.choose(tile(3000, 3000), tile(3160, 3930)) ~= nil, 'or every plan')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn items_count_when_worn() {
+        chooser_test(
+            r#"
+stage.rows = {
+    row('teleportation_items', 'Ring: Far', nil, tile(3801, 3000), { items = '2552=1' }),
+}
+assert(T.choose(home, far) == nil, 'not held')
+stage.worn = { { id = 2552, quantity = 1, slot = 12 } }
+local c = T.choose(home, far)
+assert(c and c.kind == 'item' and c.spell == 'Ring' and c.option == 'Far', 'a worn ring counts')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn gated_rows_are_told_to_the_planner_and_ways_across_join_landmasses() {
+        chooser_test(
+            r#"
+local chop = row('climb_gated', '', tile(1, 1), tile(1, 1, 1), { items = 'AXE=1' })
+local stile = row('link_gated', '', tile(4999, 3000), tile(5001, 3000), { items = 'AXE=1' })
+local hop = row('shortcut_gated', '', tile(4999, 3100), tile(5001, 3100), { skills = { { name = 'Agility', level = 55 } } })
+local wild_hop = row('shortcut_gated', '', tile(3100, 3600), tile(3100, 3610), { skills = { { name = 'Agility', level = 1 } } })
+stage.rows = { chop, stile, hop, wild_hop, row('teleportation_spells', 'Isle Teleport', nil, tile(5001, 3010)) }
+local from, to = tile(4900, 3000), tile(5060, 3000)
+assert(#T.allowed_climbs() == 0, 'no axe yet, and the shortcut is judged on the real level')
+assert(T.choose(from, to) ~= nil, 'no way across yet: the spell')
+T.VALID_FOR_MS = 0
+stage.worn = { { id = 1351, quantity = 1, slot = 3 } }
+local keys = {}
+for _, k in ipairs(T.allowed_climbs()) do keys[string.match(k, '^[^|]+')] = true end
+assert(keys['1,1,0>1,1,1'] and keys['4999,3000,0>5001,3000,0'], 'a worn axe counts for gated rows')
+assert(not keys['4999,3100,0>5001,3100,0'], 'a boost does not count for a shortcut')
+assert(not keys['3100,3600,0>3100,3610,0'], 'and a shortcut in the wilderness never does')
+T.MIN_SAVING_TICKS = 1000
+assert(T.choose(from, to) == nil, 'the stile joins the landmasses: walking is possible')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_network_pairs_its_starts_with_its_ends() {
+        chooser_test(
+            r#"
+stage.rows = {
+    row('quetzals', '', tile(3005, 3000), nil, { menu = 'Travel Quetzal 13350' }),
+    row('quetzals', '', tile(3006, 3000), nil, { menu = 'Travel Quetzal 13350' }),
+    row('quetzals', '1: Here', nil, tile(3004, 3000), { duration = 6 }),
+    row('quetzals', '2: Far', nil, tile(3800, 3000), { duration = 6 }),
+    row('quetzals', '3: Quest', nil, tile(3801, 3000), { duration = 1, varbits = { { id = 1, op = '=', value = 9 } } }),
+}
+local c = T.choose(home, far)
+assert(c and c.kind == 'quetzals', 'by the network')
+assert(c.transport.label == 'Far' and c.transport.origin.x == 3005, 'the first start of the structure, the end whose test holds')
+assert(c.id == 'quetzals 3005,3000 Far')
+T.RETRY_PAUSE_MS = 0
+T.runners.quetzals = function() return false end
+assert(not T.use(c) and T.failed_lately(c))
+assert(T.choose(home, far) == nil, 'a failed trip is out of the next plan')
+"#,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn a_retry_never_repeats_a_trip_that_landed_late() {
+        chooser_test(
+            r#"
+local at = tile(100, 100)
+Player.position = function() return at end
+T.RETRY_PAUSE_MS = 0
+local calls = 0
+T.runners.item = function() calls += 1 at = tile(3800, 3000) return false end
+local piece = { kind = 'item', id = 'piece', transport = { name = 'Piece', destination = tile(3800, 3000) }, spell = 'Piece', ticks = 1, saved = 1 }
+assert(T.use(piece) and calls == 1, 'landed during the pause: no second charge')
+assert(not T.failed_lately(piece))
+"#,
+        );
     }
 
     #[test]

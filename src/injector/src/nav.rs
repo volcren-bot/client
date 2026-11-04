@@ -460,7 +460,25 @@ fn shortcut_extra(climb: &Climb, options: &Options) -> u32 {
         .map_or(0, |ticks| options.shortcut_saving + ticks * 17)
 }
 
+/// The steps across doors the player can't use, each a tile and the way out of it. A door has one wall for both ways, and a guild's often only asks on the way in, so its walls can't say this.
+pub type Closed = std::collections::HashSet<(Point, (i32, i32))>;
+
+/// Whether a step crosses a closed one, also diagonally past it.
+pub fn step_closed(closed: &Closed, (x, y, plane): Point, dx: i32, dy: i32) -> bool {
+    let shut = |x: i32, y: i32, dx: i32, dy: i32| closed.contains(&((x, y, plane), (dx, dy)));
+    !closed.is_empty()
+        && if dx != 0 && dy != 0 {
+            shut(x, y, dx, 0)
+                || shut(x, y, 0, dy)
+                || shut(x + dx, y, 0, dy)
+                || shut(x, y + dy, dx, 0)
+        } else {
+            shut(x, y, dx, dy)
+        }
+}
+
 /// Plans from `from` to `to` inside `bounds` (x1, y1, x2, y2) on every plane, with the underground planned together with the surface.
+#[allow(clippy::too_many_arguments)]
 pub fn plan(
     flags: Flags,
     bounds: (i32, i32, i32, i32),
@@ -469,8 +487,13 @@ pub fn plan(
     from: Point,
     to: Point,
     options: &Options,
+    closed: &Closed,
 ) -> Option<Plan> {
     let (from, to) = (fold(from), fold(to));
+    let closed: Closed = closed
+        .iter()
+        .map(|&(tile, step)| (fold(tile), step))
+        .collect();
     let (x1, y1, x2, y2) = bounds;
     let (w, h) = (x2 - x1 + 1, y2 - y1 + 1);
     if w <= 0 || h <= 0 {
@@ -574,7 +597,10 @@ pub fn plan(
         let through = |x: i32, y: i32| open(x, y, plane);
         for (dx, dy) in DIRECTIONS {
             let (nx, ny) = (x + dx, y + dy);
-            if !inside(nx, ny, plane) || !step_open(&through, x, y, dx, dy) {
+            if !inside(nx, ny, plane)
+                || !step_open(&through, x, y, dx, dy)
+                || step_closed(&closed, here, dx, dy)
+            {
                 continue;
             }
             let step = if dx != 0 && dy != 0 {
@@ -758,6 +784,7 @@ mod tests {
             (0, 1, 0),
             (6, 1, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.reached);
@@ -779,6 +806,7 @@ mod tests {
             (0, 1, 0),
             (6, 1, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(!stuck.reached);
@@ -801,6 +829,7 @@ mod tests {
             (0, 1, 0),
             (6, 1, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.reached && plan.actions.is_empty());
@@ -825,6 +854,7 @@ mod tests {
             (2, 2, 0),
             (4, 2, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert_eq!(plan.actions.len(), 1);
@@ -842,9 +872,30 @@ mod tests {
             (3, 1, 0),
             (4, 1, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.actions.is_empty(), "{plan:?}");
+    }
+
+    #[test]
+    fn a_step_can_be_closed_one_way_and_diagonally() {
+        let mut closed = Closed::default();
+        closed.insert(((5, 5, 0), (1, 0)));
+        assert!(step_closed(&closed, (5, 5, 0), 1, 0));
+        assert!(
+            !step_closed(&closed, (6, 5, 0), -1, 0),
+            "the way back is free"
+        );
+        assert!(
+            step_closed(&closed, (5, 5, 0), 1, 1),
+            "past it, from its tile"
+        );
+        assert!(
+            step_closed(&closed, (5, 4, 0), 1, 1),
+            "and into the row beyond"
+        );
+        assert!(!step_closed(&closed, (5, 5, 1), 1, 0), "another plane");
     }
 
     #[test]
@@ -893,6 +944,7 @@ mod tests {
             (0, 1, 0),
             (1, 1, 1),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.reached);
@@ -1042,6 +1094,7 @@ mod tests {
             (0, 0, 0),
             (8, 3, 0),
             &options,
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.reached);
@@ -1057,6 +1110,7 @@ mod tests {
                 seed: Some(1),
                 ..Options::default()
             },
+            &Closed::default(),
         )
         .unwrap();
         let b = super::plan(
@@ -1070,6 +1124,7 @@ mod tests {
                 seed: Some(1),
                 ..Options::default()
             },
+            &Closed::default(),
         )
         .unwrap();
         assert_eq!(a, b);
@@ -1141,6 +1196,7 @@ mod tests {
             (0, 1, 0),
             (1, 1 + UNDERGROUND, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.reached);
@@ -1158,6 +1214,7 @@ mod tests {
             (1, 1 + UNDERGROUND, 0),
             (0, 1, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(back.reached);
@@ -1205,6 +1262,7 @@ mod tests {
             (3, 1 + UNDERGROUND, 0),
             (7, 1 + UNDERGROUND, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(plan.reached);
@@ -1254,6 +1312,7 @@ mod tests {
             (2, 0, 0),
             (0, 1, 2),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(up.reached);
@@ -1267,6 +1326,7 @@ mod tests {
             (0, 1, 2),
             (2, 0, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert!(down.reached);
@@ -1396,6 +1456,7 @@ mod tests {
                 (2, 2, 0),
                 (4, 2, 0),
                 &options,
+                &Closed::default(),
             )
             .unwrap()
         };
@@ -1427,6 +1488,7 @@ mod tests {
             (2, 2, 0),
             (4, 2, 0),
             &Options::default(),
+            &Closed::default(),
         )
         .unwrap();
         assert_eq!(free.actions.len(), 1);
