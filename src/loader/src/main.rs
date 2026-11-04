@@ -8,6 +8,7 @@ mod breaks;
 mod counters;
 #[cfg(test)]
 mod fake_api;
+mod feedback;
 #[cfg(test)]
 mod flow_tests;
 mod fold;

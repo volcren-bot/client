@@ -10,7 +10,8 @@ use super::{
     config::Config,
     error::{ApiError, ErrorBody},
     models::{
-        Ended, Heartbeat, Me, Redeemed, Removed, ScriptList, StartedSession, Stats, StoreScript,
+        Ended, Heartbeat, Me, RecentSession, RecentSessions, Redeemed, Removed, Report, Reported,
+        Scored, ScriptList, StartedSession, Stats, StoreScript,
     },
 };
 
@@ -310,6 +311,31 @@ impl Api {
             &format!("/launcher/sessions/{session_id}/end"),
             &[],
             Some(&serde_json::json!({})),
+        )
+    }
+
+    /// The account's sessions of the last 24 hours, newest first.
+    pub fn recent_sessions(&self) -> Result<Vec<RecentSession>, ApiError> {
+        self.call::<RecentSessions>("GET", "/launcher/sessions", &[], None::<&()>)
+            .map(|list| list.sessions)
+    }
+
+    /// Scores the session's script 1 to 10; the account's earlier score of it is replaced.
+    pub fn score_session(&self, session_id: &str, score: u8) -> Result<Scored, ApiError> {
+        self.call(
+            "POST",
+            &format!("/launcher/sessions/{session_id}/score"),
+            &[],
+            Some(&serde_json::json!({ "score": score })),
+        )
+    }
+
+    pub fn report_session(&self, session_id: &str, report: &Report) -> Result<Reported, ApiError> {
+        self.call(
+            "POST",
+            &format!("/launcher/sessions/{session_id}/report"),
+            &[],
+            Some(report),
         )
     }
 }

@@ -36,6 +36,8 @@ pub struct Settings {
     pub antiban: injector::antiban::Config,
     /// The types of transport the user turned off, sent to the script when it starts and when this changes.
     pub transports: injector::transports::Settings,
+    /// Whether a bug report carries the OS, Wine, CPU, memory and GPU besides the versions.
+    pub include_system_info: bool,
 }
 
 impl Default for Settings {
@@ -50,6 +52,7 @@ impl Default for Settings {
             lib_dir: String::new(),
             antiban: Default::default(),
             transports: Default::default(),
+            include_system_info: true,
         }
     }
 }

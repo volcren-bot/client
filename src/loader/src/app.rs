@@ -17,8 +17,9 @@ use loader::backend::{self, Scan, Settings, Target};
 use crate::account::{self, Auth};
 use crate::api::{
     Api, ApiError, Config, Heartbeat, Me, Redeemed, Removed, Stats, StoreScript,
-    models::{API_VERSION, Ended},
+    models::{API_VERSION, Ended, RecentSession, Scored},
 };
+use crate::feedback;
 use crate::highlight::Highlighter;
 use crate::script::{Script, ScriptEvent};
 use crate::session::{self, Beat, Prepared, Verdict};
@@ -131,6 +132,18 @@ enum Event {
     },
     SessionEnded(Result<Ended, ApiError>),
     Update(Result<Option<Release>, String>),
+    /// The sessions of the last 24 hours, for the Feedback page.
+    RecentSessions(Result<Vec<RecentSession>, ApiError>),
+    Scored {
+        session_id: String,
+        result: Result<Scored, ApiError>,
+    },
+    Reported {
+        session_id: String,
+        result: Result<(), String>,
+    },
+    /// Whether the store run that just ended was kept for bug reports.
+    RunKept(Result<(), String>),
 }
 
 /// A store script that is running, and the session that is billing it.
@@ -141,6 +154,8 @@ struct StoreRun {
     beat: Beat,
     /// The script is being stopped for a reason already reported; the end of the session follows its exit.
     stopping: bool,
+    /// The lib the script runs against, named in bug reports.
+    lib_version: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -153,6 +168,7 @@ enum Tab {
     Development,
     Terminal,
     Accounts,
+    Feedback,
     Settings,
 }
 
@@ -863,6 +879,11 @@ impl Log {
         self.revision += 1;
     }
 
+    /// Every line kept, oldest first, for a bug report.
+    fn texts(&self) -> Vec<String> {
+        self.lines.iter().map(|line| line.text.clone()).collect()
+    }
+
     fn set_filter(&mut self, filter: Option<usize>) {
         if self.filter == filter {
             return;
@@ -957,6 +978,8 @@ enum ToolsTab {
     Prayer,
     Xp,
     Breaks,
+    /// Score the running store script or report a bug on it.
+    Feedback,
 }
 
 /// The sub tabs of the Breaks tab.
@@ -1053,6 +1076,12 @@ pub struct LoaderApp {
     run_ended: Option<std::time::Instant>,
     tools_tab: ToolsTab,
     breaks_tab: BreaksTab,
+    /// The account names the running client showed, taken out of what a bug report sends.
+    run_names: Vec<String>,
+    /// The Feedback page's sessions and drafts.
+    feedback: feedback::Page,
+    /// The renderer eframe draws with, for a bug report's system info.
+    gpu: Option<String>,
     /// The client the XP tracker reads while the script runs, when one was chosen.
     xp_target: Option<Target>,
     xp_next: std::time::Instant,
@@ -1079,6 +1108,10 @@ impl LoaderApp {
 
         let (tx, rx) = channel();
         let config = Config::from_env();
+        let gpu = cc.wgpu_render_state.as_ref().map(|state| {
+            let info = state.adapter.get_info();
+            format!("{} ({:?}, {})", info.name, info.backend, info.driver)
+        });
         let mut app = Self {
             settings,
             tab: Tab::Clients,
@@ -1162,12 +1195,16 @@ impl LoaderApp {
                 .and_then(|s| eframe::get_value(s, LAYOUTS_KEY))
                 .unwrap_or_default(),
             editors: Default::default(),
+            run_names: Vec::new(),
+            feedback: feedback::Page::default(),
+            gpu,
             loader_log: Log::default(),
             log_job: None,
             tx,
             rx,
         };
         app.scan(&cc.egui_ctx);
+        thread::spawn(feedback::prune);
         app.restore_sign_in(&cc.egui_ctx);
         app.api_job(&cc.egui_ctx, |api| Event::Update(update::check(&api)));
         app
@@ -1271,6 +1308,7 @@ impl LoaderApp {
         self.breaks.reset();
         self.antiban_sent = self.settings.antiban.clone();
         self.counters.reset();
+        self.run_names.clear();
         self.run_started = Some(std::time::Instant::now());
         self.run_ended = None;
         self.xp_target = target;
@@ -1435,6 +1473,184 @@ impl LoaderApp {
         }
     }
 
+    /// The Feedback page: the sessions of the last 24 hours, to score their scripts or report bugs on them.
+    fn feedback_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.heading("Feedback");
+        if self.auth.me().is_none() {
+            ui.label("Sign in to score scripts and report bugs.");
+            return;
+        }
+        self.fetch_sessions_if_stale(&ctx);
+        let running = self.store_run.as_ref().map(|run| run.session_id.clone());
+        let actions = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.feedback.ui(
+                    ui,
+                    &mut self.settings.include_system_info,
+                    running.as_deref(),
+                )
+            })
+            .inner;
+        self.apply_feedback_actions(&ctx, actions);
+    }
+
+    /// The Feedback tab of a running store script: the same controls, for this run only.
+    fn run_feedback_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(session_id) = self.store_run.as_ref().map(|run| run.session_id.clone()) else {
+            return;
+        };
+        self.fetch_sessions_if_stale(&ctx);
+        let Some(session) = self
+            .feedback
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .cloned()
+        else {
+            ui.label(
+                egui::RichText::new(if self.feedback.loading {
+                    "Loading…"
+                } else {
+                    "This run isn't listed yet; it is once the server has it."
+                })
+                .weak(),
+            );
+            if let Some(error) = &self.feedback.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            return;
+        };
+        let draft = self.feedback.draft(&session_id);
+        let actions =
+            feedback::session_ui(ui, &session, draft, &mut self.settings.include_system_info);
+        self.apply_feedback_actions(&ctx, actions);
+    }
+
+    fn fetch_sessions_if_stale(&mut self, ctx: &egui::Context) {
+        if self.feedback.stale(Instant::now()) {
+            self.fetch_sessions(ctx);
+        }
+    }
+
+    fn fetch_sessions(&mut self, ctx: &egui::Context) {
+        self.feedback.loading = true;
+        self.api_job(ctx, |api| Event::RecentSessions(api.recent_sessions()));
+    }
+
+    fn apply_feedback_actions(&mut self, ctx: &egui::Context, actions: Vec<feedback::Action>) {
+        for action in actions {
+            match action {
+                feedback::Action::Refresh => self.fetch_sessions(ctx),
+                feedback::Action::Score { session_id, score } => self.api_job(ctx, move |api| {
+                    let result = api.score_session(&session_id, score);
+                    Event::Scored { session_id, result }
+                }),
+                feedback::Action::Report {
+                    session_id,
+                    description,
+                } => self.send_report(ctx, session_id, description),
+            }
+        }
+    }
+
+    /// The versions a bug report names: the agent in the client the script runs on (or the loader's own copy), the running store script's lib, and the GPU.
+    fn versions(&self) -> feedback::Versions {
+        feedback::Versions {
+            agent: self
+                .xp_target
+                .as_ref()
+                .and_then(|t| t.client.version.clone())
+                .or_else(|| self.dll_version.clone()),
+            lib: self.store_run.as_ref().map(|run| run.lib_version.clone()),
+            gpu: self.gpu.clone(),
+        }
+    }
+
+    /// The client the running script was started on, while its agent is loaded.
+    fn loaded_xp_target(&self) -> Option<Target> {
+        self.xp_target.clone().filter(|t| t.client.loaded.is_some())
+    }
+
+    /// Sends a bug report: the running script's log and the client's state now, or the record kept when an earlier run ended.
+    fn send_report(&mut self, ctx: &egui::Context, session_id: String, description: String) {
+        let diagnostics =
+            feedback::diagnostics(&self.versions(), self.settings.include_system_info);
+        let (tx, ctx, api, settings) = (
+            self.tx.clone(),
+            ctx.clone(),
+            self.api.clone(),
+            self.settings.clone(),
+        );
+        let running = self
+            .store_run
+            .as_ref()
+            .is_some_and(|run| run.session_id == session_id);
+        let live = running.then(|| {
+            (
+                self.script_log.texts(),
+                self.run_names.clone(),
+                self.loaded_xp_target(),
+            )
+        });
+        thread::spawn(move || {
+            let report = match live {
+                Some((log, mut names, target)) => {
+                    let snapshot = target
+                        .and_then(|target| feedback::read_snapshot(&target, &settings, &mut names));
+                    feedback::report(description, &log, &names, snapshot, diagnostics)
+                }
+                None => {
+                    let record = feedback::load_record(&session_id);
+                    crate::api::models::Report {
+                        description,
+                        log: record
+                            .as_ref()
+                            .map(|r| r.log.clone())
+                            .filter(|log| !log.is_empty()),
+                        snapshot: record.and_then(|r| r.snapshot),
+                        diagnostics,
+                    }
+                }
+            };
+            let result = api
+                .report_session(&session_id, &report)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(Event::Reported { session_id, result });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Keeps the store run that is ending, sealed on disk, so it can still be reported from the Feedback page for 24 hours.
+    fn keep_run_record(&mut self, ctx: &egui::Context) {
+        let Some(run) = &self.store_run else {
+            return;
+        };
+        let (session_id, title) = (run.session_id.clone(), run.title.clone());
+        let (log, mut names, target) = (
+            self.script_log.texts(),
+            self.run_names.clone(),
+            self.loaded_xp_target(),
+        );
+        self.feedback.fetched_at = None;
+        self.background(ctx, move |settings| {
+            let snapshot =
+                target.and_then(|target| feedback::read_snapshot(&target, &settings, &mut names));
+            let log = feedback::scrub(&feedback::tail(&log, feedback::MAX_LOG_BYTES), &names);
+            let record = feedback::Record {
+                session_id,
+                title,
+                log,
+                snapshot,
+                ended_at: feedback::now_secs(),
+            };
+            Event::RunKept(feedback::store_record(&record))
+        });
+    }
+
     /// The name of the script that is running, a store script's title or the editor's file: the page that replaces Scripts and Editor.
     fn running_title(&self) -> Option<String> {
         match &self.store_run {
@@ -1465,6 +1681,7 @@ impl LoaderApp {
             (Tab::Development, "\u{f188}", "development".to_owned()),
             (Tab::Terminal, "\u{f120}", "terminal".to_owned()),
             (Tab::Accounts, "\u{f007}", "accounts".to_owned()),
+            (Tab::Feedback, "\u{f075}", "feedback".to_owned()),
             (Tab::Settings, "\u{f013}", "settings".to_owned()),
         ])
         .collect::<Vec<_>>();
@@ -2853,6 +3070,13 @@ impl LoaderApp {
                 Event::XpState(result) => {
                     self.xp_reading = false;
                     self.xp_next = std::time::Instant::now() + XP_READ_EVERY;
+                    if let Ok(state) = &result {
+                        for name in feedback::names_of(state) {
+                            if !self.run_names.contains(&name) {
+                                self.run_names.push(name);
+                            }
+                        }
+                    }
                     // a failed or empty read (logged out, client closing) is skipped; the baseline stays
                     let skills = result.ok().and_then(|state| state.skills).filter(|skills| skills.iter().any(|s| s.xp > 0));
                     if let Some(skills) = skills.filter(|_| self.script.as_ref().is_some_and(Script::is_running)) {
@@ -2862,6 +3086,17 @@ impl LoaderApp {
                             .collect();
                         self.xp.update(skills, self.run_time());
                     }
+                }
+                Event::RecentSessions(result) => self
+                    .feedback
+                    .finish(result.map_err(|e| e.to_string()), Instant::now()),
+                Event::Scored { session_id, result } => self
+                    .feedback
+                    .scored(&session_id, result.map(|s| s.score).map_err(|e| e.to_string())),
+                Event::Reported { session_id, result } => self.feedback.reported(&session_id, result),
+                Event::RunKept(Ok(())) => {}
+                Event::RunKept(Err(error)) => {
+                    self.error(format!("Couldn't keep the run for bug reports: {error}"))
                 }
                 Event::Packets { pid, result } => self.packets.finish(pid, Instant::now(), result),
                 Event::PacketLayouts { pid, result } => self.packets.finish_layouts(pid, result),
@@ -3771,6 +4006,7 @@ impl LoaderApp {
                 } => self.script_error(format!("Script failed: {error}")),
             }
             if finished {
+                self.keep_run_record(ctx);
                 self.run_ended = Some(std::time::Instant::now());
                 self.end_store_session(ctx);
             }
@@ -3913,6 +4149,7 @@ impl LoaderApp {
         if (self.tools_tab == ToolsTab::Equipment && !has_equipment)
             || (self.tools_tab == ToolsTab::Inventory && !has_inventory)
             || (self.tools_tab == ToolsTab::Prayer && !has_prayer)
+            || (self.tools_tab == ToolsTab::Feedback && self.store_run.is_none())
         {
             self.tools_tab = ToolsTab::Settings;
         }
@@ -3929,6 +4166,9 @@ impl LoaderApp {
             }
             crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
             crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
+            if self.store_run.is_some() {
+                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Feedback, "Feedback");
+            }
         });
         let (line, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
@@ -4020,6 +4260,7 @@ impl LoaderApp {
                     }
                     ToolsTab::Xp => self.xp_tracker_ui(ui),
                     ToolsTab::Breaks => self.breaks_ui(ui),
+                    ToolsTab::Feedback => self.run_feedback_ui(ui),
                 })
             });
         if let Some((kind, quick)) = read {
@@ -4299,7 +4540,9 @@ impl LoaderApp {
                     title: title.to_owned(),
                     beat: Beat::new(std::time::Instant::now(), interval),
                     stopping: false,
+                    lib_version: prepared.lib_version.clone(),
                 });
+                self.feedback.fetched_at = None;
                 self.run_was_local = false;
                 self.tab = Tab::Running;
                 self.sidebar_open = false;
@@ -5776,6 +6019,7 @@ impl eframe::App for LoaderApp {
                 Tab::Development => self.development_ui(ui),
                 Tab::Terminal => self.terminal_ui(ui),
                 Tab::Accounts => self.accounts_ui(ui),
+                Tab::Feedback => self.feedback_ui(ui),
                 Tab::Settings => self.settings_ui(ui),
             }
         });

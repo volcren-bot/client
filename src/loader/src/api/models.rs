@@ -182,6 +182,51 @@ pub struct Ended {
     pub charged: i64,
 }
 
+/// A session of the last 24 hours, as `GET /launcher/sessions` lists them: what can be scored or reported.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RecentSession {
+    pub session_id: String,
+    pub script_id: String,
+    pub title: String,
+    pub url: String,
+    pub revision: i64,
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    /// The account's score of the script, on any of its sessions.
+    #[serde(default)]
+    pub score: Option<u8>,
+    /// How many bug reports the account sent on this session.
+    #[serde(default)]
+    pub reports: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct RecentSessions {
+    pub sessions: Vec<RecentSession>,
+}
+
+/// A bug report, as `POST /launcher/sessions/:id/report` takes it. The log and snapshot have the account names taken out already.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Report {
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<serde_json::Value>,
+    pub diagnostics: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Scored {
+    pub score: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Reported {
+    pub report_id: String,
+}
+
 /// Why a session ended, as the UI says it.
 pub fn end_reason_message(reason: Option<&str>) -> &'static str {
     match reason {

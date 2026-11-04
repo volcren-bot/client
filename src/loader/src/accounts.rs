@@ -88,7 +88,7 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
 }
 
 /// `nonce || ciphertext || tag`, with a fresh random nonce.
-fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
     let sealing = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|e| e.to_string())?);
     let mut nonce = [0u8; NONCE_LEN];
     SystemRandom::new()
@@ -107,7 +107,7 @@ fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn open(key: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn open(key: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
     if sealed.len() < NONCE_LEN {
         return None;
     }
@@ -143,7 +143,7 @@ fn path() -> Option<PathBuf> {
 }
 
 /// The encryption key from the keyring; made and stored on first use.
-fn key(create: bool) -> Result<Option<[u8; 32]>, String> {
+pub(crate) fn key(create: bool) -> Result<Option<[u8; 32]>, String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(text) => unhex(&text)

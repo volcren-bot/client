@@ -36,7 +36,8 @@ Around the loader sits the Volcren backend:
    |
    +------ /launcher/* (Bearer token) ----------------> Volcren API (api/)
    |         me, scripts, start session,                   |  service_role
-   |         heartbeat (+ stats), end session              v
+   |         heartbeat (+ stats), end session,             v
+   |         recent sessions, score, bug report
    |                                                    Postgres: payments.*_session, stats.report_session
    |
    +------ signed URLs: script files ------------------> private `scripts` bucket

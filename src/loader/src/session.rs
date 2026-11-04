@@ -112,6 +112,8 @@ pub struct Prepared {
     pub modules: Vec<(String, String)>,
     /// Something the user should know before the script runs, such as an outdated loader.
     pub warning: Option<String>,
+    /// The lib the script runs against, for bug reports.
+    pub lib_version: String,
 }
 
 /// Starts a session and makes its files available, ending the session if that fails; a community script runs only if its revision is `warned`.
@@ -153,6 +155,7 @@ pub fn prepare_warned(
                 source,
                 modules,
                 warning: lib.warning,
+                lib_version: lib.version,
             })
         }
         Err(error) => {
