@@ -136,7 +136,19 @@ pub fn parse_update(payload: &str) -> Option<Value> {
 
 pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
 
-pub const KINDS: [&str; 6] = ["label", "check", "number", "text", "choice", "list"];
+pub const KINDS: [&str; 9] = [
+    "label",
+    "check",
+    "number",
+    "text",
+    "choice",
+    "list",
+    "equipment",
+    "inventory",
+    "prayer",
+];
+/// The kinds whose value is a layout the loader keeps per script: the script gets the chosen one, or nil.
+pub const LAYOUT_KINDS: [&str; 3] = ["equipment", "inventory", "prayer"];
 
 pub fn fields(spec: &Value) -> &[Value] {
     spec.get("fields")
@@ -251,6 +263,7 @@ pub fn default_value(field: &Value) -> Option<Value> {
     let given = field.get("default").cloned();
     match kind(field) {
         "label" => None,
+        k if LAYOUT_KINDS.contains(&k) => None,
         "check" => Some(json!(given.and_then(|v| v.as_bool()).unwrap_or(false))),
         "number" => Some(
             given

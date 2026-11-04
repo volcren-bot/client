@@ -2,10 +2,11 @@ use ipc::{
     read::{self, Memory},
     state::{
         cache_kind, cache_status, CacheReply, CacheRequest, CACHE_BATCH, CACHE_DATA_SIZE,
-        CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM,
+        CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, ITEM_ICON_HEIGHT, ITEM_ICON_ID_MASK,
+        ITEM_ICON_SHOW_COUNT, ITEM_ICON_WIDTH,
     },
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::{
     items::{game_vals, release, Reader, BUFFER_DATA, BUFFER_LENGTH},
@@ -18,6 +19,44 @@ const INDEX_SEARCH: i64 = 0x200;
 const INDEX_ID: u64 = 0x10;
 const ENTRY_HASHED: usize = 0x18;
 const MAX_ENTRIES: u64 = 1 << 20;
+
+/// The client's item icon builder: `(out, id, quantity, border, shadow, text mode, noted, width, height, text)`, see `offsets::find_item_icon`.
+type IconBuilder = unsafe extern "system" fn(
+    *mut [u64; 2],
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    u8,
+    i32,
+    i32,
+    *const u8,
+) -> *mut [u64; 2];
+
+static ICON_BUILDER: OnceLock<IconBuilder> = OnceLock::new();
+
+/// What the inventory draws its items with: a one pixel border, the shadow, the number drawn or not.
+const ICON_BORDER: i32 = 1;
+const ICON_SHADOW: i32 = 0x30_2020;
+const ICON_TEXT_OFF: i32 = 0;
+const ICON_TEXT_COUNT: i32 = 1;
+/// The client's string: 0x17 inline bytes and a last byte holding the room left, so this is the empty string.
+const EMPTY_TEXT: [u8; 0x18] = {
+    let mut text = [0u8; 0x18];
+    text[0x17] = 0x17;
+    text
+};
+/// The sprite the builder returns: its pixel count and the pixels, `0xAARRGGBB` words.
+const SPRITE_COUNT: u64 = 0x0;
+const SPRITE_PIXELS: u64 = 0x10;
+const ICON_BYTES: usize = (ITEM_ICON_WIDTH * ITEM_ICON_HEIGHT * 4) as usize;
+const MAX_ITEM_ID: i32 = 1 << 16;
+
+pub unsafe fn set_item_icon(module_base: u64, rva: u32) {
+    let builder: IconBuilder = std::mem::transmute((module_base + rva as u64) as *const ());
+    let _ = ICON_BUILDER.set(builder);
+}
 
 fn shared() -> Option<Arc<Mapping>> {
     LAYOUT_MAP.get().and_then(|map| map.memory())
@@ -39,13 +78,21 @@ pub fn on_request() {
 }
 
 fn fill(reply: &mut CacheReply, request: &CacheRequest) -> i32 {
-    if request.kind == cache_kind::FILES && request.count as usize > CACHE_BATCH {
+    if matches!(request.kind, cache_kind::FILES | cache_kind::ITEM_ICONS)
+        && request.count as usize > CACHE_BATCH
+    {
         return cache_status::TOO_MANY;
     }
     if on_other_thread() {
         return cache_status::OTHER_THREAD;
     }
     let memory = OwnMemory;
+    if request.kind == cache_kind::ITEM_ICONS {
+        return match ICON_BUILDER.get() {
+            Some(&builder) => unsafe { draw_icons(&memory, builder, request, reply) },
+            None => cache_status::NOT_FOUND,
+        };
+    }
     let Some(&(reader, rule)) = game_vals() else {
         return cache_status::NOT_FOUND;
     };
@@ -238,6 +285,70 @@ unsafe fn read_files(
             }
             (Some(_), Some(_)) => full = true,
             _ => slot.length = CACHE_FILE_MISSING,
+        }
+        release(control);
+    }
+    cache_status::OK
+}
+
+/// Draws each requested item through the client's icon builder, which caches them as the inventory's own draws do, and copies the pixels out.
+unsafe fn draw_icons(
+    memory: &OwnMemory,
+    builder: IconBuilder,
+    request: &CacheRequest,
+    reply: &mut CacheReply,
+) -> i32 {
+    let count = request.count as usize;
+    reply.count = count as u32;
+    let mut full = false;
+    for (slot, &[id, quantity]) in reply.files[..count].iter_mut().zip(&request.files[..count]) {
+        slot.offset = reply.used;
+        slot.length = CACHE_FILE_NO_ROOM;
+        if full {
+            continue;
+        }
+        if ICON_BYTES > CACHE_DATA_SIZE - reply.used as usize {
+            full = true;
+            continue;
+        }
+        let text = if id & ITEM_ICON_SHOW_COUNT != 0 {
+            ICON_TEXT_COUNT
+        } else {
+            ICON_TEXT_OFF
+        };
+        let id = id & ITEM_ICON_ID_MASK;
+        // the lookup gives a default definition for an id past the last item, which would draw as a stray icon
+        if !(0..MAX_ITEM_ID).contains(&id) {
+            slot.length = CACHE_FILE_MISSING;
+            continue;
+        }
+        let mut out = [0u64; 2];
+        builder(
+            &mut out,
+            id,
+            quantity,
+            ICON_BORDER,
+            ICON_SHADOW,
+            text,
+            0,
+            ITEM_ICON_WIDTH as i32,
+            ITEM_ICON_HEIGHT as i32,
+            EMPTY_TEXT.as_ptr(),
+        );
+        let [control, sprite] = out;
+        let pixels = (sprite != 0)
+            .then(|| memory.u64(sprite + SPRITE_COUNT))
+            .flatten()
+            .filter(|&count| count == (ITEM_ICON_WIDTH * ITEM_ICON_HEIGHT) as u64)
+            .and_then(|_| memory.ptr(sprite + SPRITE_PIXELS));
+        let at = reply.used as usize;
+        let copied =
+            pixels.is_some_and(|pixels| memory.read(pixels, &mut reply.data[at..at + ICON_BYTES]));
+        if copied {
+            slot.length = ICON_BYTES as i32;
+            reply.used += ICON_BYTES as u32;
+        } else {
+            slot.length = CACHE_FILE_MISSING;
         }
         release(control);
     }

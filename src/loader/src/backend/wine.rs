@@ -304,6 +304,28 @@ pub fn varps(target: &Target, settings: &Settings) -> Result<Option<Vec<i32>>, S
     )
 }
 
+pub fn varbit(target: &Target, settings: &Settings, id: i32) -> Result<Option<i32>, String> {
+    let helper = helper(settings)?;
+    run(
+        &target.location,
+        &helper,
+        &["varbit", &target.client.pid.to_string(), &id.to_string()],
+    )
+}
+
+pub fn enum_def(
+    target: &Target,
+    settings: &Settings,
+    id: i32,
+) -> Result<Option<injector::config::EnumDef>, String> {
+    let helper = helper(settings)?;
+    run(
+        &target.location,
+        &helper,
+        &["enum", &target.client.pid.to_string(), &id.to_string()],
+    )
+}
+
 pub fn varp(target: &Target, settings: &Settings, id: usize) -> Result<Option<i32>, String> {
     let helper = helper(settings)?;
     run(
@@ -401,6 +423,42 @@ pub fn item_stackable(
     let helper = helper(settings)?;
     let pid = target.client.pid.to_string();
     let mut args = vec!["item-stackable", pid.as_str()];
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    args.extend(ids.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
+}
+
+pub fn item_icons(
+    target: &Target,
+    settings: &Settings,
+    icons: &[injector::ItemIconRequest],
+) -> Result<Vec<Option<injector::Image>>, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec!["item-icons", pid.as_str()];
+    let icons: Vec<String> = icons
+        .iter()
+        .map(|icon| {
+            format!(
+                "{}:{}:{}",
+                icon.id,
+                icon.quantity,
+                u8::from(icon.show_count)
+            )
+        })
+        .collect();
+    args.extend(icons.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
+}
+
+pub fn sprites(
+    target: &Target,
+    settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<Option<injector::Image>>, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec!["sprites", pid.as_str()];
     let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
     args.extend(ids.iter().map(String::as_str));
     run(&target.location, &helper, &args)

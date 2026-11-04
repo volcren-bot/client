@@ -71,6 +71,18 @@ pub fn varps(target: &Target, _settings: &Settings) -> Result<Option<Vec<i32>>, 
     injector::varps(target.client.pid)
 }
 
+pub fn varbit(target: &Target, _settings: &Settings, id: i32) -> Result<Option<i32>, String> {
+    injector::varbit(target.client.pid, id)
+}
+
+pub fn enum_def(
+    target: &Target,
+    _settings: &Settings,
+    id: i32,
+) -> Result<Option<injector::config::EnumDef>, String> {
+    injector::enum_def(target.client.pid, id)
+}
+
 pub fn varp(target: &Target, _settings: &Settings, id: usize) -> Result<Option<i32>, String> {
     injector::varp_value(target.client.pid, id)
 }
@@ -118,6 +130,22 @@ pub fn item_stackable(
     ids: &[i32],
 ) -> Result<Vec<Option<bool>>, String> {
     injector::item_stackable(target.client.pid, ids)
+}
+
+pub fn item_icons(
+    target: &Target,
+    _settings: &Settings,
+    icons: &[injector::ItemIconRequest],
+) -> Result<Vec<Option<injector::Image>>, String> {
+    injector::item_icons(target.client.pid, icons)
+}
+
+pub fn sprites(
+    target: &Target,
+    _settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<Option<injector::Image>>, String> {
+    injector::sprites(target.client.pid, ids)
 }
 
 /// One read of the item log is at most `ITEM_CHANGES_PER_READ` changes; with nothing new it blocks up to `wait`.

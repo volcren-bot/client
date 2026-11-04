@@ -12,9 +12,8 @@ use crate::{
 
 pub const MAX_VARPS: usize = 8192;
 const MAX_SKILLS: u32 = 64;
-fn position(memory: &impl Memory, layout: &Layout) -> Option<Position> {
+fn position(memory: &impl Memory, layout: &Layout, view: u64, player: u64) -> Option<Position> {
     let p = &layout.player;
-    let (view, player) = local_player(memory, layout)?;
     let local_x = memory.i32(player + p.local_x as u64)?;
     let local_y = memory.i32(player + p.local_x as u64 + 4)?;
     let base_x = memory.i32(view + p.base_x as u64)?;
@@ -87,14 +86,12 @@ pub fn total_xp(memory: &impl Memory, layout: &Layout) -> Option<i64> {
     Some(skills.iter().map(|s| s.xp.max(0) as i64).sum())
 }
 
-fn player_name(memory: &impl Memory, layout: &Layout) -> Option<String> {
-    let name = local_name_object(memory, layout)?;
+fn player_name(memory: &impl Memory, name: u64) -> Option<String> {
     Some(read_string(memory, name)?.replace('\u{a0}', " ")).filter(|name| !name.is_empty())
 }
 
 /// The logged in account's normalized name (lowercase, spaces as `_`), which the display name override never touches.
-fn account_name(memory: &impl Memory, layout: &Layout) -> Option<String> {
-    let object = local_name_object(memory, layout)?;
+fn account_name(memory: &impl Memory, object: u64) -> Option<String> {
     Some(read_string(memory, object + NAME_CLEAN)?.replace('\u{a0}', " "))
         .filter(|name| !name.is_empty())
 }
@@ -173,14 +170,19 @@ fn minimap(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Minimap
     (2..=8).contains(&zoom).then_some(Minimap { zoom })
 }
 
-fn destination(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Tile> {
+fn destination(
+    memory: &impl Memory,
+    layout: &Layout,
+    client: u64,
+    player: Option<(u64, u64)>,
+) -> Option<Tile> {
     let object = memory.ptr(client + layout.minimap.object as u64)?;
     let at = object + layout.minimap.destination as u64;
     let (x, y) = (memory.i32(at)?, memory.i32(at + 4)?);
     if x == 0 && y == 0 {
         return None;
     }
-    let (view, _) = local_player(memory, layout)?;
+    let (view, _) = player?;
     let base = view + layout.player.base_x as u64;
     Some(Tile {
         x: memory.i32(base)? + x,
@@ -238,11 +240,16 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
             ))
         })
         .flatten();
+    let player = local_player(memory, layout);
+    let name_object = (logged_in && layout.has(part::WORLD))
+        .then(|| memory.ptr(player?.1 + layout.world.player_name as u64))
+        .flatten();
+    let root = root_interface(memory, layout, state);
 
     GameState {
-        position: position(memory, layout),
-        player_name: player_name(memory, layout),
-        account_name: account_name(memory, layout),
+        position: player.and_then(|(view, player)| position(memory, layout, view, player)),
+        player_name: name_object.and_then(|name| player_name(memory, name)),
+        account_name: name_object.and_then(|object| account_name(memory, object)),
         game_state: state,
         skills: (logged_in && layout.has(part::SKILLS))
             .then(|| skills(memory, layout, client))
@@ -254,25 +261,18 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
         login: (on_login_screen && layout.has(part::LOGIN))
             .then(|| login(memory, layout, ui.map_or(1.0, |(_, _, scale)| scale)))
             .flatten(),
-        root_interface: root_interface(memory, layout, state),
+        root_interface: root,
         ui_scale: ui.map(|(_, _, scale)| scale),
         run_energy: run_energy.map(|(energy, _)| energy),
         weight: run_energy.map(|(_, weight)| weight),
         camera: (logged_in && layout.has(part::CAMERA))
-            .then(|| {
-                camera(
-                    memory,
-                    layout,
-                    client,
-                    root_interface(memory, layout, state),
-                )
-            })
+            .then(|| camera(memory, layout, client, root))
             .flatten(),
         minimap: (logged_in && layout.has(part::MINIMAP))
             .then(|| minimap(memory, layout, client))
             .flatten(),
         destination: (logged_in && layout.has(part::MINIMAP | part::DESTINATION))
-            .then(|| destination(memory, layout, client))
+            .then(|| destination(memory, layout, client, player))
             .flatten(),
     }
 }

@@ -93,6 +93,13 @@ enum Event {
         pid: u32,
         result: Result<crate::inventory::Poll, String>,
     },
+    /// Item icons a client drew for the icon store.
+    Icons(Result<Vec<(crate::icons::Key, Option<injector::Image>)>, String>),
+    /// What the selected client holds, for a layout editor's "Read from client".
+    LayoutRead {
+        kind: crate::layouts::Kind,
+        result: Result<crate::layouts::Read, String>,
+    },
     /// A read of the open interfaces for the widget inspector.
     Widgets {
         pid: u32,
@@ -442,6 +449,8 @@ impl Drop for TilesWorker {
 
 const SCRIPT_KEY: &str = "script";
 const FORMS_KEY: &str = "forms";
+/// Every script's equipment and inventory layouts, by form title.
+const LAYOUTS_KEY: &str = "layouts";
 const CURSOR_KEY: &str = "cursor";
 const CONFIRMED_KEY: &str = "community_confirmed";
 /// The hosts the user added to the HTTP whitelist (the built-in ones are not stored).
@@ -942,6 +951,9 @@ fn line_tag(text: &str) -> Option<&str> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolsTab {
     Settings,
+    Equipment,
+    Inventory,
+    Prayer,
     Xp,
     Breaks,
 }
@@ -1042,6 +1054,12 @@ pub struct LoaderApp {
     xp_target: Option<Target>,
     xp_next: std::time::Instant,
     xp_reading: bool,
+    /// Item icons drawn by a client, for the inspectors and the layout editors.
+    icons: crate::icons::Icons,
+    /// Every script's saved equipment and inventory layouts, by form title.
+    layouts: crate::layouts::AllLayouts,
+    /// The Equipment and Inventory tabs of the running script's page.
+    editors: crate::layouts::Editors,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
@@ -1131,6 +1149,12 @@ impl LoaderApp {
             xp_target: None,
             xp_next: std::time::Instant::now(),
             xp_reading: false,
+            icons: Default::default(),
+            layouts: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, LAYOUTS_KEY))
+                .unwrap_or_default(),
+            editors: Default::default(),
             loader_log: Log::default(),
             log_job: None,
             tx,
@@ -1253,9 +1277,13 @@ impl LoaderApp {
         }
         // the run time on screen ticks every second
         ctx.request_repaint_after(Duration::from_secs(1));
-        let Some(target) = self.xp_target.clone().filter(|t| t.client.loaded.is_some()) else {
+        if self
+            .xp_target
+            .as_ref()
+            .is_none_or(|t| t.client.loaded.is_none())
+        {
             return;
-        };
+        }
         let now = std::time::Instant::now();
         if self.xp_reading || now < self.xp_next {
             ctx.request_repaint_after(
@@ -1265,6 +1293,9 @@ impl LoaderApp {
             );
             return;
         }
+        let Some(target) = self.xp_target.clone() else {
+            return;
+        };
         self.xp_reading = true;
         self.background(ctx, move |settings| {
             Event::XpState(backend::state(&target, &settings))
@@ -2026,6 +2057,7 @@ impl LoaderApp {
     fn inventory_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
         let inspector = &mut self.inventory;
+        let icons = &mut self.icons;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut inspector.enabled, "Enable");
             if ui
@@ -2043,7 +2075,7 @@ impl LoaderApp {
             Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
             None => ui.label("Select a client with agent loaded in the Clients tab."),
         };
-        if let Some(error) = &inspector.error {
+        if let Some(error) = inspector.error.iter().chain(&icons.error).next() {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
         ui.separator();
@@ -2076,13 +2108,53 @@ impl LoaderApp {
                 .id_salt("inventory_items")
                 .auto_shrink([false, false])
                 .show(&mut columns[1], |ui| match inspector.picked() {
-                    Some((snapshot, before)) => inventory_items_ui(ui, inspector, snapshot, before),
+                    Some((snapshot, before)) => {
+                        inventory_items_ui(ui, inspector, icons, snapshot, before)
+                    }
                     None => {
                         ui.weak("Pick a tick to see the items.");
                     }
                 });
         });
         inspector.selected = picked;
+    }
+
+    /// Asks the selected client to draw the icons the UI showed without one, a batch at a time.
+    fn poll_icons(&mut self, ctx: &egui::Context) {
+        if !self.icons.due() {
+            return;
+        }
+        let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else {
+            return;
+        };
+        let batch = self.icons.start();
+        self.background(ctx, move |settings| {
+            let read = || -> Result<Vec<(crate::icons::Key, Option<injector::Image>)>, String> {
+                let mut pictures = Vec::new();
+                if !batch.items.is_empty() {
+                    let images = backend::item_icons(&target, &settings, &batch.items)?;
+                    pictures.extend(
+                        batch
+                            .items
+                            .iter()
+                            .map(|r| crate::icons::Key::Item(*r))
+                            .zip(images),
+                    );
+                }
+                if !batch.sprites.is_empty() {
+                    let images = backend::sprites(&target, &settings, &batch.sprites)?;
+                    pictures.extend(
+                        batch
+                            .sprites
+                            .iter()
+                            .map(|id| crate::icons::Key::Sprite(*id))
+                            .zip(images),
+                    );
+                }
+                Ok(pictures)
+            };
+            Event::Icons(read())
+        });
     }
 
     // The Script Inspector tab of the Development page: a log of the scripts the client runs for events while Enable is on.
@@ -2596,6 +2668,8 @@ impl LoaderApp {
                     | Event::Vars { .. }
                     | Event::ScriptRuns { .. }
                     | Event::Inventory { .. }
+                    | Event::Icons(_)
+                    | Event::LayoutRead { .. }
                     | Event::Widgets { .. }
                     | Event::WidgetMouse { .. }
             ) {
@@ -2787,6 +2861,21 @@ impl LoaderApp {
                 Event::ScriptNames(result) => self.script_inspector.finish_names(result),
                 Event::ScriptRuns { pid, result } => self.script_inspector.finish(pid, Instant::now(), result),
                 Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
+                Event::Icons(result) => self.icons.finish(ctx, result),
+                Event::LayoutRead { kind, result } => match kind {
+                    crate::layouts::Kind::Equipment => self
+                        .editors
+                        .equipment
+                        .finish_read(result, crate::layouts::apply_equipment),
+                    crate::layouts::Kind::Inventory => self
+                        .editors
+                        .inventory
+                        .finish_read(result, crate::layouts::apply_inventory),
+                    crate::layouts::Kind::Prayer => self
+                        .editors
+                        .prayer
+                        .finish_read(result, crate::layouts::apply_prayers),
+                },
                 Event::Widgets { pid, result } => self.widgets.finish(pid, result),
                 Event::WidgetMouse { pid, result } => {
                     self.widgets.mouse_done();
@@ -3634,6 +3723,7 @@ impl LoaderApp {
                         spec,
                         self.remembered_forms.get(&title),
                     ));
+                    self.editors = Default::default();
                     ctx.request_repaint();
                 }
                 // Only a store run has a session to send them to; stats from a local run are dropped.
@@ -3693,9 +3783,9 @@ impl LoaderApp {
         let answer = match outcome {
             crate::form::Outcome::Open => return,
             crate::form::Outcome::Submitted(values) => {
-                if let (serde_json::Value::Object(map), Some(form)) = (&values, &self.form) {
+                if let Some(form) = &self.form {
                     self.remembered_forms
-                        .insert(form.title.clone(), map.clone());
+                        .insert(form.title.clone(), form.remembered());
                 }
                 self.form_sent = Some(values.clone());
                 Some(values)
@@ -3717,13 +3807,11 @@ impl LoaderApp {
         let Some(form) = &self.form else {
             return;
         };
-        let crate::form::Outcome::Submitted(values) = form.submitted() else {
+        let crate::form::Outcome::Submitted(values) = form.submitted(self.script_layouts()) else {
             return;
         };
-        if let serde_json::Value::Object(map) = &values {
-            self.remembered_forms
-                .insert(form.title.clone(), map.clone());
-        }
+        self.remembered_forms
+            .insert(form.title.clone(), form.remembered());
         if let Some(script) = &mut self.script {
             match script.push_update(&values) {
                 Ok(()) => {
@@ -3748,11 +3836,12 @@ impl LoaderApp {
         let waiting = self.form.is_some() && self.form_sent.is_none();
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
+        let layouts = self.script_layouts().clone();
         ui.horizontal_wrapped(|ui| {
             if self.form_sent.is_some() {
                 // the script has its settings: the same button sends it changes, once there are some
                 let changed = self.form.as_ref().is_some_and(|f| {
-                    matches!(f.submitted(), crate::form::Outcome::Submitted(v) if Some(&v) != self.form_sent.as_ref())
+                    matches!(f.submitted(&layouts), crate::form::Outcome::Submitted(v) if Some(&v) != self.form_sent.as_ref())
                 });
                 update = ui
                     .add_enabled(running && !stopping && changed, egui::Button::new("Update"))
@@ -3763,7 +3852,7 @@ impl LoaderApp {
                 if ui.add_enabled(waiting, egui::Button::new(start)).clicked()
                     && let Some(form) = &self.form
                 {
-                    outcome = form.submitted();
+                    outcome = form.submitted(&layouts);
                 }
             }
             if ui
@@ -3802,8 +3891,35 @@ impl LoaderApp {
         }
         ui.add_space(8.0);
         ui.spacing_mut().item_spacing.y = 0.0;
+        let has_equipment = self
+            .form
+            .as_ref()
+            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Equipment));
+        let has_inventory = self
+            .form
+            .as_ref()
+            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Inventory));
+        let has_prayer = self
+            .form
+            .as_ref()
+            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Prayer));
+        if (self.tools_tab == ToolsTab::Equipment && !has_equipment)
+            || (self.tools_tab == ToolsTab::Inventory && !has_inventory)
+            || (self.tools_tab == ToolsTab::Prayer && !has_prayer)
+        {
+            self.tools_tab = ToolsTab::Settings;
+        }
         ui.horizontal_wrapped(|ui| {
             crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Settings, "Settings");
+            if has_equipment {
+                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Equipment, "Equipment");
+            }
+            if has_inventory {
+                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Inventory, "Inventory");
+            }
+            if has_prayer {
+                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Prayer, "Prayer");
+            }
             crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
             crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
         });
@@ -3816,18 +3932,258 @@ impl LoaderApp {
         );
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.add_space(8.0);
-        crate::theme::tab_content(ui, |ui| match self.tools_tab {
-            ToolsTab::Settings => match &mut self.form {
-                Some(form) => {
-                    ui.label(egui::RichText::new(&form.title).strong());
-                    form.show_inline(ui);
+        let can_read = self
+            .selected_target()
+            .is_some_and(|t| t.client.loaded.is_some());
+        // layouts are kept by the form's title, which is what the Settings picker reads them by
+        let form_title = self
+            .form
+            .as_ref()
+            .map(|form| form.title.clone())
+            .unwrap_or_default();
+        let mut read: Option<(crate::layouts::Kind, bool)> = None;
+        egui::ScrollArea::both()
+            .min_scrolled_height(0.0)
+            .id_salt(("tools_tab", self.tools_tab as u8))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                crate::theme::tab_content(ui, |ui| match self.tools_tab {
+                    ToolsTab::Settings => match &mut self.form {
+                        Some(form) => {
+                            ui.label(egui::RichText::new(&form.title).strong());
+                            form.show_inline(ui, &layouts);
+                        }
+                        None => {
+                            ui.label(
+                                egui::RichText::new("The script isn't asking for settings.").weak(),
+                            );
+                        }
+                    },
+                    ToolsTab::Equipment => {
+                        let saved = self.layouts.entry(form_title.clone()).or_default();
+                        if crate::layouts::equipment_ui(
+                            ui,
+                            &mut self.editors.equipment,
+                            &mut saved.equipment,
+                            &mut self.icons,
+                            can_read,
+                        ) == Some(crate::layouts::Action::Read)
+                        {
+                            read = Some((crate::layouts::Kind::Equipment, false));
+                        }
+                    }
+                    ToolsTab::Inventory => {
+                        let saved = self.layouts.entry(form_title.clone()).or_default();
+                        if crate::layouts::inventory_ui(
+                            ui,
+                            &mut self.editors.inventory,
+                            &mut saved.inventory,
+                            &mut self.icons,
+                            can_read,
+                        ) == Some(crate::layouts::Action::Read)
+                        {
+                            read = Some((crate::layouts::Kind::Inventory, false));
+                        }
+                    }
+                    ToolsTab::Prayer => {
+                        let saved = self.layouts.entry(form_title.clone()).or_default();
+                        // the Prayer level, from the XP tracker's reads while the script runs
+                        let level = self
+                            .xp
+                            .rows()
+                            .into_iter()
+                            .find(|row| row.name == "Prayer")
+                            .and_then(|row| u32::try_from(row.level).ok());
+                        match crate::layouts::prayer_ui(
+                            ui,
+                            &mut self.editors.prayer,
+                            &mut saved.prayer,
+                            &mut self.icons,
+                            can_read,
+                            level,
+                        ) {
+                            Some(crate::layouts::Action::Read) => {
+                                read = Some((crate::layouts::Kind::Prayer, false))
+                            }
+                            Some(crate::layouts::Action::ReadQuick) => {
+                                read = Some((crate::layouts::Kind::Prayer, true))
+                            }
+                            None => {}
+                        }
+                    }
+                    ToolsTab::Xp => self.xp_tracker_ui(ui),
+                    ToolsTab::Breaks => self.breaks_ui(ui),
+                })
+            });
+        if let Some((kind, quick)) = read {
+            self.read_layout(ui.ctx(), kind, quick);
+        }
+    }
+
+    /// The saved layouts of the script whose form is open; an empty set when no form is.
+    fn script_layouts(&self) -> &crate::layouts::ScriptLayouts {
+        static EMPTY: std::sync::LazyLock<crate::layouts::ScriptLayouts> =
+            std::sync::LazyLock::new(Default::default);
+        self.form
+            .as_ref()
+            .and_then(|form| self.layouts.get(&form.title))
+            .unwrap_or(&EMPTY)
+    }
+
+    /// Reads the selected client's worn items, inventory (with the rune pouch's runes) or prayers (on, or with `quick` the quick selection) for the editor of `kind`.
+    fn read_layout(&mut self, ctx: &egui::Context, kind: crate::layouts::Kind, quick: bool) {
+        use crate::layouts::{self, Kind, Read};
+        let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else {
+            self.editors.equipment.reading = false;
+            self.editors.inventory.reading = false;
+            self.editors.prayer.reading = false;
+            return;
+        };
+        self.background(ctx, move |settings| {
+            let read = || -> Result<Read, String> {
+                let container = match kind {
+                    Kind::Equipment => 94,
+                    Kind::Inventory => 93,
+                    Kind::Prayer => {
+                        let mut keys = Vec::new();
+                        if quick {
+                            let mask = backend::varbit(
+                                &target,
+                                &settings,
+                                layouts::QUICK_SELECTED_VARBIT,
+                            )?
+                            .ok_or("the client has no quick prayer selection")?;
+                            // an upgrade shares its base's bit: the bit means the upgrade once it is unlocked
+                            let selected: Vec<&layouts::PrayerInfo> = layouts::PRAYERS
+                                .iter()
+                                .filter(|p| mask >> p.quick_bit & 1 == 1)
+                                .collect();
+                            let mut unlocked = Vec::new();
+                            for p in &selected {
+                                if let Some(unlock) = p.unlock
+                                    && backend::varbit(&target, &settings, unlock)? == Some(1)
+                                {
+                                    unlocked.push(p.key);
+                                }
+                            }
+                            for p in selected {
+                                let replaced = layouts::PRAYERS.iter().any(|u| {
+                                    u.replaces == Some(p.key) && unlocked.contains(&u.key)
+                                });
+                                let locked_upgrade =
+                                    p.replaces.is_some() && !unlocked.contains(&p.key);
+                                if !replaced && !locked_upgrade {
+                                    keys.push(p.key.to_owned());
+                                }
+                            }
+                        } else {
+                            for p in &layouts::PRAYERS {
+                                if backend::varbit(&target, &settings, p.varbit)? == Some(1) {
+                                    keys.push(p.key.to_owned());
+                                }
+                            }
+                        }
+                        return Ok(Read::Prayers(keys));
+                    }
+                };
+                let items = backend::item_container(&target, &settings, container)?
+                    .ok_or("the client holds no such container")?;
+                let describe = |ids: &[i32]| -> Result<crate::layouts::Described, String> {
+                    let mut ids: Vec<i32> = ids.iter().copied().filter(|&id| id >= 0).collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    if ids.is_empty() {
+                        return Ok(Default::default());
+                    }
+                    let names = backend::item_names(&target, &settings, &ids)?;
+                    let stacks = backend::item_stackable(&target, &settings, &ids)?;
+                    Ok((
+                        ids.iter()
+                            .zip(names)
+                            .filter_map(|(id, name)| Some((*id, name?)))
+                            .collect(),
+                        ids.iter()
+                            .zip(stacks)
+                            .filter_map(|(id, stacks)| Some((*id, stacks?)))
+                            .collect(),
+                    ))
+                };
+                let ids: Vec<i32> = items.iter().map(|item| item.id).collect();
+                let (names, stackable) = describe(&ids)?;
+                let slots = layouts::items_of(&items, &names, &stackable);
+                match kind {
+                    Kind::Prayer => unreachable!("read above"),
+                    Kind::Equipment => Ok(Read::Equipment {
+                        // the combat tab offers autocast for staves and powered staves, by the weapon's category
+                        autocast: backend::varbit(
+                            &target,
+                            &settings,
+                            layouts::WEAPON_CATEGORY_VARBIT,
+                        )?
+                        .is_some_and(|category| {
+                            layouts::AUTOCAST_WEAPON_CATEGORIES.contains(&category)
+                        }),
+                        slots: slots
+                            .into_iter()
+                            .map(|item| {
+                                item.map_or(
+                                    layouts::EquipmentSlot::Empty,
+                                    layouts::EquipmentSlot::Item,
+                                )
+                            })
+                            .collect(),
+                    }),
+                    Kind::Inventory => {
+                        let has_pouch = slots.iter().flatten().any(layouts::Item::is_rune_pouch);
+                        let pouch = if has_pouch {
+                            let runes =
+                                backend::enum_def(&target, &settings, layouts::POUCH_RUNES_ENUM)?
+                                    .ok_or("the cache has no rune pouch enum")?;
+                            let mut held = Vec::new();
+                            for (rune, amount) in layouts::POUCH_RUNE_VARBITS
+                                .iter()
+                                .zip(layouts::POUCH_AMOUNT_VARBITS)
+                            {
+                                let index =
+                                    backend::varbit(&target, &settings, *rune)?.unwrap_or(0);
+                                let amount =
+                                    backend::varbit(&target, &settings, amount)?.unwrap_or(0);
+                                let id =
+                                    runes.entries.iter().find(|e| e.key == index).and_then(|e| {
+                                        match &e.value {
+                                            injector::config::Value::Int(id) => {
+                                                i32::try_from(*id).ok()
+                                            }
+                                            injector::config::Value::Str(_) => None,
+                                        }
+                                    });
+                                if let Some(id) = id.filter(|&id| id > 0 && amount > 0) {
+                                    held.push((id, amount));
+                                }
+                            }
+                            let ids: Vec<i32> = held.iter().map(|(id, _)| *id).collect();
+                            let (names, _) = describe(&ids)?;
+                            Some(
+                                held.into_iter()
+                                    .map(|(id, quantity)| layouts::Item {
+                                        id,
+                                        quantity,
+                                        name: names.get(&id).cloned().unwrap_or_default(),
+                                        stackable: true,
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        };
+                        Ok(Read::Inventory { slots, pouch })
+                    }
                 }
-                None => {
-                    ui.label(egui::RichText::new("The script isn't asking for settings.").weak());
-                }
-            },
-            ToolsTab::Xp => self.xp_tracker_ui(ui),
-            ToolsTab::Breaks => self.breaks_ui(ui),
+            };
+            Event::LayoutRead {
+                kind,
+                result: read(),
+            }
         });
     }
 
@@ -4667,54 +5023,50 @@ impl LoaderApp {
             thousands(self.xp.total())
         ));
         let rows = self.xp.rows();
-        egui::ScrollArea::both()
-            .min_scrolled_height(0.0)
-            .id_salt("xp_rows")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if rows.is_empty() {
-                    ui.weak("No experience gained yet.");
-                } else {
-                    egui::Grid::new("xp_grid")
-                        .num_columns(5)
-                        .spacing([12.0, 2.0])
-                        .show(ui, |ui| {
-                            for head in ["Skill", "Gained", "XP/hr", "Level", "To level"] {
-                                ui.weak(head);
-                            }
+        ui.vertical(|ui| {
+            if rows.is_empty() {
+                ui.weak("No experience gained yet.");
+            } else {
+                egui::Grid::new("xp_grid")
+                    .num_columns(5)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for head in ["Skill", "Gained", "XP/hr", "Level", "To level"] {
+                            ui.weak(head);
+                        }
+                        ui.end_row();
+                        for row in &rows {
+                            ui.label(&row.name);
+                            ui.label(thousands(row.gained));
+                            ui.label(row.per_hour.map_or("-".into(), thousands));
+                            ui.label(row.level.to_string());
+                            ui.label(row.to_level.map_or("-".into(), duration));
                             ui.end_row();
-                            for row in &rows {
-                                ui.label(&row.name);
-                                ui.label(thousands(row.gained));
-                                ui.label(row.per_hour.map_or("-".into(), thousands));
-                                ui.label(row.level.to_string());
-                                ui.label(row.to_level.map_or("-".into(), duration));
-                                ui.end_row();
-                            }
-                        });
-                }
-                let counters = self.counters.rows();
-                if !counters.is_empty() {
-                    ui.add_space(6.0);
-                    ui.separator();
-                    egui::Grid::new("counters_grid")
-                        .num_columns(4)
-                        .spacing([12.0, 2.0])
-                        .show(ui, |ui| {
-                            for head in ["", "Total", "Per hour", ""] {
-                                ui.weak(head);
-                            }
+                        }
+                    });
+            }
+            let counters = self.counters.rows();
+            if !counters.is_empty() {
+                ui.add_space(6.0);
+                ui.separator();
+                egui::Grid::new("counters_grid")
+                    .num_columns(4)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for head in ["", "Total", "Per hour", ""] {
+                            ui.weak(head);
+                        }
+                        ui.end_row();
+                        for row in &counters {
+                            ui.label(&row.label);
+                            ui.label(number(row.total));
+                            ui.label(row.per_hour.map_or("-".into(), number));
+                            ui.label(row.ratio.as_deref().unwrap_or(""));
                             ui.end_row();
-                            for row in &counters {
-                                ui.label(&row.label);
-                                ui.label(number(row.total));
-                                ui.label(row.per_hour.map_or("-".into(), number));
-                                ui.label(row.ratio.as_deref().unwrap_or(""));
-                                ui.end_row();
-                            }
-                        });
-                }
-            });
+                        }
+                    });
+            }
+        });
     }
 
     fn breaks_ui(&mut self, ui: &mut egui::Ui) {
@@ -4722,110 +5074,106 @@ impl LoaderApp {
         let running = self.script.as_ref().is_some_and(Script::is_running);
         let mut skip: Option<(&'static str, u32)> = None;
         let mut update = false;
-        egui::ScrollArea::both()
-            .min_scrolled_height(0.0)
-            .id_salt("breaks_rows")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                crate::breaks::header(ui);
-                ui.add_space(4.0);
-                // the panel sits right under its tabs
-                let spacing = ui.spacing().item_spacing.y;
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.horizontal(|ui| {
-                    crate::theme::tab_value(ui, &mut self.breaks_tab, BreaksTab::Breaks, "Breaks");
-                    crate::theme::tab_value(ui, &mut self.breaks_tab, BreaksTab::Sleeps, "Sleeps");
-                });
-                let sleeps = self.breaks_tab == BreaksTab::Sleeps;
-                crate::theme::tab_panel(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = spacing;
-                    if sleeps {
-                        crate::breaks::sleeps_editor(ui, &mut self.settings.antiban);
-                    } else {
-                        crate::breaks::breaks_editor(ui, &mut self.settings.antiban);
-                    }
-                });
+        ui.vertical(|ui| {
+            crate::breaks::header(ui);
+            ui.add_space(4.0);
+            // the panel sits right under its tabs
+            let spacing = ui.spacing().item_spacing.y;
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.horizontal(|ui| {
+                crate::theme::tab_value(ui, &mut self.breaks_tab, BreaksTab::Breaks, "Breaks");
+                crate::theme::tab_value(ui, &mut self.breaks_tab, BreaksTab::Sleeps, "Sleeps");
+            });
+            let sleeps = self.breaks_tab == BreaksTab::Sleeps;
+            crate::theme::tab_panel(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = spacing;
-                ui.add_space(6.0);
-                let valid = self.settings.antiban.validate();
-                if let Err(why) = &valid {
-                    ui.colored_label(egui::Color32::LIGHT_RED, why);
-                }
-                if running {
-                    let dirty = self.settings.antiban != self.antiban_sent;
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        update = ui
-                            .add_enabled(dirty && valid.is_ok(), egui::Button::new("Update"))
-                            .on_hover_text("Send these to the running script")
-                            .clicked();
-                        if dirty {
-                            ui.weak("Not sent to the script yet");
-                        }
-                    });
-                    ui.add_space(6.0);
+                if sleeps {
+                    crate::breaks::sleeps_editor(ui, &mut self.settings.antiban);
                 } else {
-                    ui.weak("Used by the scripts you start. It is saved as you edit.");
-                    return;
-                }
-                // the schedule only exists while a script runs, counting down every second
-                let Some(view) = self.breaks.view(std::time::Instant::now()) else {
-                    ui.add_space(6.0);
-                    ui.weak("The script hasn't reported any breaks yet.");
-                    return;
-                };
-                ui.ctx().request_repaint_after(Duration::from_secs(1));
-                ui.separator();
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("Queued").strong());
-                ui.add_space(4.0);
-                if let Some(active) = &view.active {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "On a {} · {} left",
-                            active.kind,
-                            duration(active.remaining)
-                        ))
-                        .strong(),
-                    );
-                }
-                if !sleeps && !view.breaks.is_empty() {
-                    ui.add_space(4.0);
-                    egui::Grid::new("breaks_grid")
-                        .num_columns(3)
-                        .spacing([12.0, 2.0])
-                        .show(ui, |ui| {
-                            for row in &view.breaks {
-                                ui.label(format!("in {}", duration(row.remaining)));
-                                ui.label(format!("~{}", duration(row.length)));
-                                if ui.small_button("Skip next").clicked() {
-                                    skip = Some(("break", row.index));
-                                }
-                                ui.end_row();
-                            }
-                        });
-                }
-                if sleeps && !view.sleeps.is_empty() {
-                    ui.add_space(4.0);
-                    egui::Grid::new("sleeps_grid")
-                        .num_columns(4)
-                        .spacing([12.0, 2.0])
-                        .show(ui, |ui| {
-                            for row in &view.sleeps {
-                                ui.label(row.at.map_or("-".into(), clock));
-                                ui.label(format!("in {}", duration(row.remaining)));
-                                ui.label(format!("~{}", duration(row.length)));
-                                if ui.small_button("Skip next").clicked() {
-                                    skip = Some(("sleep", row.index));
-                                }
-                                ui.end_row();
-                            }
-                        });
-                }
-                if (sleeps && view.sleeps.is_empty()) || (!sleeps && view.breaks.is_empty()) {
-                    ui.weak("Nothing is scheduled.");
+                    crate::breaks::breaks_editor(ui, &mut self.settings.antiban);
                 }
             });
+            ui.spacing_mut().item_spacing.y = spacing;
+            ui.add_space(6.0);
+            let valid = self.settings.antiban.validate();
+            if let Err(why) = &valid {
+                ui.colored_label(egui::Color32::LIGHT_RED, why);
+            }
+            if running {
+                let dirty = self.settings.antiban != self.antiban_sent;
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    update = ui
+                        .add_enabled(dirty && valid.is_ok(), egui::Button::new("Update"))
+                        .on_hover_text("Send these to the running script")
+                        .clicked();
+                    if dirty {
+                        ui.weak("Not sent to the script yet");
+                    }
+                });
+                ui.add_space(6.0);
+            } else {
+                ui.weak("Used by the scripts you start. It is saved as you edit.");
+                return;
+            }
+            // the schedule only exists while a script runs, counting down every second
+            let Some(view) = self.breaks.view(std::time::Instant::now()) else {
+                ui.add_space(6.0);
+                ui.weak("The script hasn't reported any breaks yet.");
+                return;
+            };
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Queued").strong());
+            ui.add_space(4.0);
+            if let Some(active) = &view.active {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "On a {} · {} left",
+                        active.kind,
+                        duration(active.remaining)
+                    ))
+                    .strong(),
+                );
+            }
+            if !sleeps && !view.breaks.is_empty() {
+                ui.add_space(4.0);
+                egui::Grid::new("breaks_grid")
+                    .num_columns(3)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for row in &view.breaks {
+                            ui.label(format!("in {}", duration(row.remaining)));
+                            ui.label(format!("~{}", duration(row.length)));
+                            if ui.small_button("Skip next").clicked() {
+                                skip = Some(("break", row.index));
+                            }
+                            ui.end_row();
+                        }
+                    });
+            }
+            if sleeps && !view.sleeps.is_empty() {
+                ui.add_space(4.0);
+                egui::Grid::new("sleeps_grid")
+                    .num_columns(4)
+                    .spacing([12.0, 2.0])
+                    .show(ui, |ui| {
+                        for row in &view.sleeps {
+                            ui.label(row.at.map_or("-".into(), clock));
+                            ui.label(format!("in {}", duration(row.remaining)));
+                            ui.label(format!("~{}", duration(row.length)));
+                            if ui.small_button("Skip next").clicked() {
+                                skip = Some(("sleep", row.index));
+                            }
+                            ui.end_row();
+                        }
+                    });
+            }
+            if (sleeps && view.sleeps.is_empty()) || (!sleeps && view.breaks.is_empty()) {
+                ui.weak("Nothing is scheduled.");
+            }
+        });
         if update && let Some(script) = &mut self.script {
             let config = self.settings.antiban.clone();
             match script.push_antiban(&config) {
@@ -5203,6 +5551,7 @@ impl eframe::App for LoaderApp {
         self.poll_vars(&ctx);
         self.poll_script_log(&ctx);
         self.poll_inventory(&ctx);
+        self.poll_icons(&ctx);
         self.poll_widget_mouse(&ctx);
 
         let window = ctx.content_rect();
@@ -5398,6 +5747,7 @@ impl eframe::App for LoaderApp {
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
         eframe::set_value(storage, SCRIPT_KEY, &self.script_file);
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
+        eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
         eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
         eframe::set_value(storage, HTTP_WHITELIST_KEY, &self.http_whitelist.user());
@@ -5431,14 +5781,23 @@ impl eframe::App for LoaderApp {
 fn inventory_items_ui(
     ui: &mut egui::Ui,
     inspector: &crate::inventory::Inspector,
+    icons: &mut crate::icons::Icons,
     snapshot: &crate::inventory::Snapshot,
     before: Option<&crate::inventory::Snapshot>,
 ) {
-    let line = |ui: &mut egui::Ui, id: i32, quantity: i32, color: egui::Color32| {
-        ui.colored_label(
-            color,
-            format!("{} x{quantity}  (id {id})", inspector.item_name(id)),
-        );
+    let mut icon = |ui: &mut egui::Ui, id: i32, quantity: i32| {
+        let key = crate::icons::Key::item(id, quantity, inspector.is_stackable(id));
+        let texture = icons.texture(ui.ctx(), key);
+        crate::icons::slot(ui, texture, inspector.item_name(id))
+    };
+    let mut line = |ui: &mut egui::Ui, id: i32, quantity: i32, color: egui::Color32| {
+        ui.horizontal(|ui| {
+            icon(ui, id, quantity);
+            ui.colored_label(
+                color,
+                format!("{} x{quantity}  (id {id})", inspector.item_name(id)),
+            );
+        });
     };
     if let Some(before) = before {
         let (added, removed) = crate::inventory::compare(&before.items, &snapshot.items, |id| {
@@ -5458,19 +5817,33 @@ fn inventory_items_ui(
         }
     }
     ui.strong("Items in Container:");
-    for item in &snapshot.items {
-        if item.id < 0 {
-            ui.weak(format!("{:>3}  EMPTY", item.slot));
-        } else {
-            ui.label(format!(
-                "{:>3}  {} x{}  (id {})",
-                item.slot,
-                inspector.item_name(item.id),
-                item.quantity,
-                item.id
-            ));
-        }
-    }
+    // the inventory is 4 slots wide; other containers fill the width
+    let columns = if snapshot.items.len() == 28 {
+        4
+    } else {
+        ((ui.available_width() / (crate::icons::SLOT_SIZE.x + 8.0)) as usize).max(1)
+    };
+    egui::Grid::new("inventory_slots")
+        .spacing(egui::vec2(8.0, 6.0))
+        .show(ui, |ui| {
+            for (i, item) in snapshot.items.iter().enumerate() {
+                if item.id < 0 {
+                    crate::icons::slot(ui, None, "")
+                        .on_hover_text(format!("Slot {}: empty", item.slot));
+                } else {
+                    icon(ui, item.id, item.quantity).on_hover_text(format!(
+                        "Slot {}: {} x{}  (id {})",
+                        item.slot,
+                        inspector.item_name(item.id),
+                        item.quantity,
+                        item.id
+                    ));
+                }
+                if (i + 1) % columns == 0 {
+                    ui.end_row();
+                }
+            }
+        });
 }
 
 // One node of the widget tree and, when it is open, its children. Hidden widgets are left out when the inspector hides them.

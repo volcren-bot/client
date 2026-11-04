@@ -114,9 +114,7 @@ unsafe fn write_text(target: *mut [u8; TEXT_SIZE], text: &[u8]) -> u8 {
 }
 
 unsafe fn read_text(source: *const [u8; TEXT_SIZE], stored: u8) -> Vec<u8> {
-    (0..(stored as usize).min(TEXT_SIZE))
-        .map(|i| read_volatile(addr_of!((*source)[i])))
-        .collect()
+    read_volatile(source)[..(stored as usize).min(TEXT_SIZE)].to_vec()
 }
 
 /// Appends a change; `log` must point to an initialised `Log`.

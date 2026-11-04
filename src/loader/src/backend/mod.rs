@@ -7,20 +7,22 @@ use serde::{Deserialize, Serialize};
 mod native;
 #[cfg(windows)]
 pub use native::{
-    Location, connection, console, draw, game_val_names, input, item_changes, item_container,
-    item_containers, item_names, item_stackable, load, npcs, packet_layouts, packets, players,
-    scan, scene_tiles_next_frame, script_command, script_runs, set_cursor, set_display_name,
-    shutdown, state, unload, varbits_of, varc, varc_changes, varp, varps, widget, widget_tree,
+    Location, connection, console, draw, enum_def, game_val_names, input, item_changes,
+    item_container, item_containers, item_icons, item_names, item_stackable, load, npcs,
+    packet_layouts, packets, players, scan, scene_tiles_next_frame, script_command, script_runs,
+    set_cursor, set_display_name, shutdown, sprites, state, unload, varbit, varbits_of, varc,
+    varc_changes, varp, varps, widget, widget_tree,
 };
 
 #[cfg(not(windows))]
 mod wine;
 #[cfg(not(windows))]
 pub use wine::{
-    Location, connection, console, draw, game_val_names, input, item_changes, item_container,
-    item_containers, item_names, item_stackable, load, npcs, packet_layouts, packets, players,
-    scan, scene_tiles_next_frame, script_command, script_runs, set_cursor, set_display_name,
-    shutdown, state, unload, varbits_of, varc, varc_changes, varp, varps, widget, widget_tree,
+    Location, connection, console, draw, enum_def, game_val_names, input, item_changes,
+    item_container, item_containers, item_icons, item_names, item_stackable, load, npcs,
+    packet_layouts, packets, players, scan, scene_tiles_next_frame, script_command, script_runs,
+    set_cursor, set_display_name, shutdown, sprites, state, unload, varbit, varbits_of, varc,
+    varc_changes, varp, varps, widget, widget_tree,
 };
 
 #[derive(Clone, Serialize, Deserialize)]

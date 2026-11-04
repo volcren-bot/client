@@ -490,10 +490,6 @@ pub fn plan(
     closed: &Closed,
 ) -> Option<Plan> {
     let (from, to) = (fold(from), fold(to));
-    let closed: Closed = closed
-        .iter()
-        .map(|&(tile, step)| (fold(tile), step))
-        .collect();
     let (x1, y1, x2, y2) = bounds;
     let (w, h) = (x2 - x1 + 1, y2 - y1 + 1);
     if w <= 0 || h <= 0 {
@@ -502,6 +498,12 @@ pub fn plan(
     let inside = |x: i32, y: i32, plane: i32| {
         (x1..=x2).contains(&x) && (y1..=y2).contains(&y) && (0..PLANES * WORLDS).contains(&plane)
     };
+    // steps are only probed inside the box, so what lies outside can never match
+    let closed: Closed = closed
+        .iter()
+        .map(|&(tile, step)| (fold(tile), step))
+        .filter(|&((x, y, plane), _)| inside(x, y, plane))
+        .collect();
     let index = |x: i32, y: i32, plane: i32| ((plane * w + (x - x1)) * h + (y - y1)) as usize;
     let point = |i: usize| {
         let i = i as i32;
@@ -526,16 +528,19 @@ pub fn plan(
             }
         }
     }
-    let mut climbs_at: std::collections::HashMap<usize, Vec<u32>> =
-        std::collections::HashMap::new();
+    // which climbs a tile reaches: the tile's list in `climb_lists`, plus one (0 = none), like `door_at`
+    let mut climb_at = vec![0u32; size];
+    let mut climb_lists: Vec<Vec<u32>> = Vec::new();
     for (n, climb) in climbs.iter().enumerate() {
         for &(x, y) in &climb.reach {
             let (x, y, plane) = fold((x, y, climb.loc.plane));
             if inside(x, y, plane) {
-                climbs_at
-                    .entry(index(x, y, plane))
-                    .or_default()
-                    .push(n as u32);
+                let i = index(x, y, plane);
+                if climb_at[i] == 0 {
+                    climb_lists.push(Vec::new());
+                    climb_at[i] = climb_lists.len() as u32;
+                }
+                climb_lists[climb_at[i] as usize - 1].push(n as u32);
             }
         }
     }
@@ -622,8 +627,8 @@ pub fn plan(
                 relax(next, step + options.door_cost, DOOR | (door - 1), &mut heap);
             }
         }
-        if let Some(list) = climbs_at.get(&at) {
-            for &n in list {
+        if climb_at[at] != 0 {
+            for &n in &climb_lists[climb_at[at] as usize - 1] {
                 let climb = &climbs[n as usize];
                 for &land in &climb.lands {
                     let (lx, ly, lplane) = fold((land.0, land.1, climb.to_plane));

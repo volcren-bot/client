@@ -460,10 +460,7 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
         limit,
         |at, slot| {
             let stored = (read_volatile(addr_of!((*slot).stored)) as usize).min(PAYLOAD_SIZE);
-            let mut payload = Vec::with_capacity(stored);
-            for i in 0..stored {
-                payload.push(read_volatile(addr_of!((*slot).payload[i])));
-            }
+            let payload = read_volatile(addr_of!((*slot).payload))[..stored].to_vec();
             Entry {
                 sequence: at,
                 time_ms: read_volatile(addr_of!((*slot).time_ms)),

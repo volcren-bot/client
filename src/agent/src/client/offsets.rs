@@ -7,6 +7,7 @@ mod actor_path;
 mod camera;
 mod chat;
 mod ground_items;
+mod item_icon;
 mod item_setter;
 mod items;
 mod local_projection;
@@ -29,6 +30,7 @@ pub use actor_path::find_actor_path;
 pub use camera::find_camera;
 pub use chat::find_chat;
 pub use ground_items::{find_ground_items, find_item_pile};
+pub use item_icon::find_item_icon;
 pub use item_setter::find_item_setter;
 pub use items::{find_game_vals, find_obj_type_lookup, CacheTable, GameVals, ObjTypeLookup};
 pub use local_projection::find_local_projection;
@@ -1064,13 +1066,46 @@ fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
     found
 }
 
+/// The login screen drawer checks "logging in" twice over: `cmp dword [client + game_state], 20; je; cmp dword [rip + screen], 20`, the game state and then the login screen's own index against `LOGGING_IN`. The global of the second compare is the screen index.
+fn login_screen_compares(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
+    const LOGGING_IN: u64 = 20;
+    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
+        .into_iter()
+        .collect();
+    instrs
+        .windows(3)
+        .filter_map(|w| {
+            let [state, jump, screen] = w else {
+                return None;
+            };
+            let compares_state = state.mnemonic() == Mnemonic::Cmp
+                && state.op0_kind() == OpKind::Memory
+                && state.memory_size() == iced_x86::MemorySize::UInt32
+                && state.memory_base() != Register::None
+                && state.memory_base() != Register::RIP
+                && state.memory_index() == Register::None
+                && state.memory_displacement64() == game_state as u64
+                && state.immediate(1) == LOGGING_IN;
+            let compares_screen = screen.mnemonic() == Mnemonic::Cmp
+                && screen.op0_kind() == OpKind::Memory
+                && screen.memory_size() == iced_x86::MemorySize::UInt32
+                && screen.is_ip_rel_memory_operand()
+                && screen.immediate(1) == LOGGING_IN;
+            (compares_state && jump.mnemonic() == Mnemonic::Je && compares_screen)
+                .then(|| screen.ip_rel_memory_address() as u32)
+        })
+        .collect()
+}
+
 pub fn find_login_panel(pe: &Pe, game_state: u32) -> Result<LoginPanel, ScanError> {
     let (mut panel_x_candidates, mut screen_candidates, mut y_candidates) =
         (Vec::new(), Vec::new(), Vec::new());
     for &(begin, end) in &pe.functions {
         let code = pe.bytes(begin, end);
         panel_x_candidates.extend(panel_x_write(code, begin));
+        // two shapes name the screen index: the gated read older builds have, and the double compare with "logging in"
         screen_candidates.extend(login_state_reads(code, begin, game_state));
+        screen_candidates.extend(login_screen_compares(code, begin, game_state));
         y_candidates.extend(login_y_write(code, begin));
     }
 

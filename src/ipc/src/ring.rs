@@ -64,6 +64,8 @@ pub unsafe fn read_since<S: Slot, E>(
         page.dropped += oldest - at;
         at = oldest;
     }
+    page.entries
+        .reserve_exact(limit.min((written - at) as usize));
 
     while at < written && page.entries.len() < limit {
         let slot = entries.add(at as usize % count);

@@ -938,7 +938,16 @@ pub mod cache_kind {
     pub const FILES: u32 = 0;
     pub const ARCHIVES: u32 = 1;
     pub const ARCHIVE_FILES: u32 = 2;
+    /// Item icons drawn by the client's own icon builder: each `files` entry is `[id | flags, quantity]`, each reply file the icon's `ITEM_ICON_WIDTH * ITEM_ICON_HEIGHT` pixels as `0xAARRGGBB` little endian words.
+    pub const ITEM_ICONS: u32 = 3;
 }
+
+/// The size of an item icon, the one the client draws in its inventory.
+pub const ITEM_ICON_WIDTH: u32 = 36;
+pub const ITEM_ICON_HEIGHT: u32 = 32;
+/// Set in the id word of an `ITEM_ICONS` request to draw the quantity on the icon, as the inventory does for a stackable item.
+pub const ITEM_ICON_SHOW_COUNT: i32 = 1 << 24;
+pub const ITEM_ICON_ID_MASK: i32 = ITEM_ICON_SHOW_COUNT - 1;
 
 pub mod cache_status {
     pub const OK: i32 = 1;

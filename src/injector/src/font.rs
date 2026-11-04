@@ -102,17 +102,20 @@ impl Font {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Frame {
-    width: i32,
-    height: i32,
-    offset_x: i32,
-    offset_y: i32,
-    max_height: i32,
-    alpha: Vec<u8>,
+pub struct Frame {
+    pub width: i32,
+    pub height: i32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub max_height: i32,
+    /// One byte per pixel, row by row. 255 is opaque, 0 is transparent.
+    pub alpha: Vec<u8>,
+    /// Four bytes per pixel, row by row: the palette colour with the alpha above.
+    pub rgba: Vec<u8>,
 }
 
-/// Reads the sprite archive's frames, keeping only coverage (which pixels are drawn), index 0 transparent unless the frame has alpha.
-fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
+/// The frames of a sprite archive from the cache (index `SPRITES_INDEX`, one archive per sprite id), as the client draws them.
+pub fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
     let short = || "sprite archive is truncated".to_string();
     let u8_at = |at: usize| data.get(at).copied().ok_or_else(short);
     let u16_at = |at: usize| Ok::<u16, String>(u16::from_be_bytes([u8_at(at)?, u8_at(at + 1)?]));
@@ -130,6 +133,16 @@ fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
     let offsets_y = column(header + 5 + count * 2);
     let widths = column(header + 5 + count * 4);
     let heights = column(header + 5 + count * 6);
+    // the palette sits right before the header; colour 0 is the transparent index
+    let palette_len = u8_at(header + 4)? as usize + 1;
+    let palette_at = header
+        .checked_sub((palette_len - 1) * 3)
+        .ok_or_else(short)?;
+    let mut palette = vec![[0u8; 3]; palette_len];
+    for (i, colour) in palette.iter_mut().enumerate().skip(1) {
+        let at = palette_at + (i - 1) * 3;
+        *colour = [u8_at(at)?, u8_at(at + 1)?, u8_at(at + 2)?];
+    }
 
     let mut frames = Vec::with_capacity(count);
     let mut at = 0;
@@ -159,13 +172,22 @@ fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
         } else {
             None
         };
-        let alpha = indices
+        let alpha: Vec<u8> = indices
             .iter()
             .enumerate()
             .map(|(j, &index)| match (index, &alphas) {
                 (0, Some(alphas)) => alphas[j],
                 (0, None) => 0,
+                (_, Some(alphas)) => alphas[j],
                 _ => 255,
+            })
+            .collect();
+        let rgba = indices
+            .iter()
+            .zip(&alpha)
+            .flat_map(|(&index, &a)| {
+                let [r, g, b] = palette.get(index as usize).copied().unwrap_or_default();
+                [r, g, b, a]
             })
             .collect();
         frames.push(Frame {
@@ -175,6 +197,7 @@ fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
             offset_y: offsets_y[i],
             max_height: height,
             alpha,
+            rgba,
         });
     }
     Ok(frames)

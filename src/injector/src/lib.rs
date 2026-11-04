@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 9;
+pub const HOST_API: u32 = 10;
 pub use ipc::state::varp;
 
 pub mod antiban;
@@ -315,6 +315,56 @@ pub struct ItemPage {
 /// Pass this as `since` to `item_changes` to get no changes, only `next`: the point to read from for what happens from now on.
 pub const ITEM_CHANGES_NOW: u64 = u64::MAX;
 
+/// An item icon to draw: the item at a quantity, with the number drawn on it or not (the inventory draws it for stackable items).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ItemIconRequest {
+    pub id: i32,
+    pub quantity: i32,
+    pub show_count: bool,
+}
+
+/// A picture from the client: an item's icon as its inventory draws it, or a sprite of the cache; `width * height` RGBA pixels as hex (alpha 0 where transparent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: String,
+}
+
+/// Lowercase hex, two digits per byte.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = Vec::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        hex.push(DIGITS[usize::from(byte >> 4)]);
+        hex.push(DIGITS[usize::from(byte & 0xf)]);
+    }
+    String::from_utf8(hex).expect("hex digits are ASCII")
+}
+
+impl Image {
+    pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Self {
+        Self {
+            width,
+            height,
+            rgba: hex_lower(rgba),
+        }
+    }
+
+    pub fn pixels(&self) -> Option<Vec<u8>> {
+        let bytes = self.rgba.as_bytes();
+        if bytes.len() != (self.width * self.height * 4) as usize * 2 {
+            return None;
+        }
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+            .collect()
+    }
+}
+
 pub use decode::chat::ChatMessage;
 pub use decode::widgets::{TreeWidget, WidgetDetail, WidgetTree};
 pub use decode::world::{GroundItem, Hitsplat, Item, Npc, Player, Projectile, SpotAnim};
@@ -333,16 +383,16 @@ pub use win::{
     ItemWatcher, PacketWatcher, cache_archive_files, cache_archives, cache_files, cache_locs,
     chat_messages, clickable_locs, collision_area, connection, draw, draw_batch, draw_lines,
     enum_def, find_path, game_state, game_val_names, ground_items, in_instance, item_changes,
-    item_changes_wait, item_container, item_containers, item_names, item_params, item_stackable,
-    landmasses, list_clients, load, loc_model, loc_shown, locs, map_regions, memory_words, menu,
-    menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats, npc_model, npc_sizes,
-    npc_words, npcs, packet_layouts, packets, player_model, player_plane, player_words, players,
-    project, project_moved, projectiles, scene_collision, scene_route, scene_tiles,
-    scene_tiles_next_frame, screenshot, script_runs, selected_widget, server_tile, set_cursor,
-    set_display_name, set_total_xp, spot_anims, sub_interfaces, unload, varbit, varbit_def,
-    varbits_of, varc, varc_changes, varp_value, varps, wait_watchers, watch_client, widget,
-    widget_children, widget_dump, widget_model, widget_tree, widget_words, world_debug,
-    world_entities, world_movement, world_route, world_select,
+    item_changes_wait, item_container, item_containers, item_icons, item_names, item_params,
+    item_stackable, landmasses, list_clients, load, loc_model, loc_shown, locs, map_regions,
+    memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
+    npc_model, npc_sizes, npc_words, npcs, packet_layouts, packets, player_model, player_plane,
+    player_words, players, project, project_moved, projectiles, scene_collision, scene_route,
+    scene_tiles, scene_tiles_next_frame, screenshot, script_runs, selected_widget, server_tile,
+    set_cursor, set_display_name, set_total_xp, spot_anims, sprites, sub_interfaces, unload,
+    varbit, varbit_def, varbits_of, varc, varc_changes, varp_value, varps, wait_watchers,
+    watch_client, widget, widget_children, widget_dump, widget_model, widget_tree, widget_words,
+    world_debug, world_entities, world_movement, world_route, world_select,
 };
 
 pub const MODULE_PREFIX: &str = "agent";

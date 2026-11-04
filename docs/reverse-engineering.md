@@ -141,6 +141,15 @@ The client keeps its item containers (inventory 93, equipment 94, bank 95, ...) 
 - Removing a container (Java `ItemContainer.ai`) is a separate function the agent does not hook: the log never says a container went away, only that a later write made it again (`old_known` false).
 - Verified live on a2636a01 with an unequip/equip: both containers' writes were logged in the same tick.
 
+## Item icons (`offsets/item_icon.rs`, `client/cache.rs`)
+
+The client draws an item's inventory icon with one function (Java `ItemComposition.bf`/`getSprite`), `0x1406016c0` on the build of 2026-11-02: `(out: &mut [control, sprite], id, quantity, border, shadow, text mode, noted: byte, width, height, text: &string)`, the first four in `rcx`, `edx`, `r8d`, `r9d` and the rest on the stack. It looks the definition up, picks the count variant (coins, arrows), renders the model with the rasterizer into a fresh sprite, outlines it (`border` 1 or 2), shadows it, draws the number when `text mode` is 1 (the Java client's mode 2, "when stackable", is decided by the native caller; mode 2 draws the `text` given) and, unless `noted`, keeps the sprite in the client's own icon cache keyed by all of that, so our calls cost what the inventory's own draws cost. The agent calls it with border 1, shadow `0x302020`, 36 x 32 and an empty string: what the inventory shows.
+
+- **Finding it**: the stack number builder (`0x602790`) is the one function that names all three colours `<col=ffff00>`, `<col=ffffff>`, `<col=00ff80>` (yellow below 100000, white thousands below 10 million, green millions) and compares with both thresholds. Its only caller is a chunk (`.pdata` entry with chained unwind info) of the builder, so `chunk_root` gives the entry, checked by its prologue homing `r8d` and `r9d`. The three callers of the builder are the component drawer (twice) and the item-on-cursor drawer.
+- **The string**: 0x18 bytes, 0x17 inline characters and a last byte holding the room left (top bit set: heap, pointer at +0 and length at +8). The empty string is all zero with the last byte `0x17`.
+- **The sprite**: a shared pointer pair (control block, object; released like the item definition's). The object has its pixel count at `+0` and its pixels at `+0x10`, `0xAARRGGBB` words, 0 where transparent; the builder multiplies the colours by the alpha and sets it to 255 before returning. A count other than width x height is treated as no icon.
+- The definition lookup takes any id (one past the last item gives a default definition, drawn as a stray icon), so the agent refuses ids outside `0..65536`.
+
 ## Component fields (`WidgetDetail`)
 
 A component's model is at 0xfc (type, 1 is a model id) and 0x100 (id), with its rotation at 0x11c/0x120 and zoom at 0x128: `decode::widgets::MODEL_TYPE` and `MODEL_ID`, read by `widget_model`. Found on the certer's quiz, whose three buttons hold models 8965, 8966 and 8967 in order.

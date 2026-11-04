@@ -165,25 +165,25 @@ unsafe extern "system" fn set_object(varcs: *mut c_void, index: i32, variant: *c
             let Ok(mut strings) = STRINGS.lock() else {
                 return;
             };
-            let old = strings
-                .get_or_insert_with(HashMap::new)
-                .insert(index, (text.clone(), length));
-            if old
-                .as_ref()
+            let strings = strings.get_or_insert_with(HashMap::new);
+            if strings
+                .get(&index)
                 .is_some_and(|(old_text, old_length)| *old_text == text && *old_length == length)
             {
                 return;
             }
-            let (old_text, old_length) = old.clone().unzip();
+            let old = strings.insert(index, (text, length));
+            let old_known = old.is_some();
+            let (old_text, old_length) = old.unzip();
             log(&Change {
                 index,
                 kind: kind::STRING,
-                old_known: old.is_some(),
+                old_known,
                 old_int: 0,
                 new_int: 0,
                 old_text: old_text.as_deref().unwrap_or(&[]),
                 old_length: old_length.unwrap_or(0),
-                new_text: &text,
+                new_text: &strings[&index].0,
                 new_length: length,
             });
         }));

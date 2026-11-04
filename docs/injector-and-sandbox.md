@@ -50,6 +50,8 @@ injector varc-changes <pid> <since>                varc log from sequence number
 injector item-changes <pid> <since> [wait ms]      item log from sequence number <since> (0: oldest kept; 18446744073709551615 reads nothing and returns the current `next`); with nothing new it blocks up to [wait ms] (at most 5000) for the agent to log a change: `{changes, next, dropped}`; each change is one container slot write that changed it: tick, container, slot, old and new item and quantity, and whether the container existed before
 injector containers <pid>                          every item container the client holds, by id: `[[id, [{slot, id, quantity}]]]`
 injector item-stackable <pid> <id>...              whether each item stacks, from its definition
+injector item-icons <pid> <id[:quantity[:1]]>...   each item's icon as the client's inventory draws it (36 x 32 RGBA pixels as hex), at that quantity, with the number drawn on it when the third part is 1; drawn by the client itself, so it needs the agent and costs a frame
+injector sprites <pid> <id>...                     the first frame of each sprite of the cache (index 8: prayer, spell and other interface icons), RGBA pixels as hex, decoded with the font code's sprite reader (`font::decode_sprites`)
 injector widget-tree <pid>                        every open interface for the widget inspector: `{root, sub_interfaces, widgets}`, each widget a component of an open group or a dynamic child (with the component it hangs off); read straight from memory (about two seconds under Wine for 7000 widgets)
 injector widget-words <pid> <group> <child> <index|-1> <count>   debug: the first <count> 4-byte words of a component (or of its dynamic child <index>) with its address
 injector widget-dump <pid> <count>                 debug: the first <count> words of every component of the open interfaces and of their dynamic children: `[[id, index, [words]]]`
@@ -63,7 +65,7 @@ injector serve                                     JSON-lines server (the loader
 
 - Queries and actions return `(result, err)`.
 - `connection` and `game_state` raise instead ("no client selected", "agent isn't loaded in the client"); `run <pid>` exits at startup when the agent is missing or on another protocol, so scripts never see a nil connection.
-- `time()` is ms since start, `clock()` seconds since local midnight, `unix_time()` seconds since the Unix epoch; `form(spec)` shows a settings dialog (defaults when no handler).
+- `time()` is ms since start, `clock()` seconds since local midnight, `unix_time()` seconds since the Unix epoch; `form(spec)` shows a settings dialog (defaults when no handler); the kinds are `form::KINDS`, of which `equipment`, `inventory` and `prayer` (`LAYOUT_KINDS`, `HOST_API` 10) have no default and get their value, a layout the loader keeps per script, or null, from the loader (see [loader-gui.md](loader-gui.md)).
 - `report_stats(experience, gold, custom?)` writes a `form::STATS_PREFIX` line (`\u{1e}STATS {json}`) through the print sink; the loader sums these between heartbeats and sends them to the API. Experience must be 0 or more; values are rounded to integers. Outside a store run the loader drops them. The gains are since the last call, not totals; runtime is measured by the loader, never reported by the script.
 
 ### HTTP

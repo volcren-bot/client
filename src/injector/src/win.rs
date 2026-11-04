@@ -67,11 +67,12 @@ use ipc::{
     shared_memory_name,
     state::{
         CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, CacheReply, CacheRequest,
-        GameValRequest, ITEM_NAME_BATCH, ItemNameRequest, LAYOUT_SIZE, Layout, LayoutMemory,
-        LayoutView, LocsReply, ModelRequest, NamesReply, PROJECT_BATCH, ProjectRequest, ReadError,
-        Shared, TotalXpRequest, WorkerRequest, cache_kind, cache_status, game_state::LOGGED_IN,
-        item_name_status, loc_status, menu_status, model_status, model_target, name_status, part,
-        project_status, state_memory_name, total_xp_status, worker_kind, worker_status,
+        GameValRequest, ITEM_ICON_HEIGHT, ITEM_ICON_SHOW_COUNT, ITEM_ICON_WIDTH, ITEM_NAME_BATCH,
+        ItemNameRequest, LAYOUT_SIZE, Layout, LayoutMemory, LayoutView, LocsReply, ModelRequest,
+        NamesReply, PROJECT_BATCH, ProjectRequest, ReadError, Shared, TotalXpRequest,
+        WorkerRequest, cache_kind, cache_status, game_state::LOGGED_IN, item_name_status,
+        loc_status, menu_status, model_status, model_target, name_status, part, project_status,
+        state_memory_name, total_xp_status, worker_kind, worker_status,
     },
     unload_event_name,
     varc_log::{self, varc_log_memory_name},
@@ -79,8 +80,9 @@ use ipc::{
 };
 
 use crate::{
-    CONNECT_TIMEOUT, Client, Connection, DisplayName, GameState, LoadReport, MODULE_PREFIX,
-    Overlay, Position, Rgba, TotalXp, UNLOAD_TIMEOUT, Widget, dll_version,
+    CONNECT_TIMEOUT, Client, Connection, DisplayName, GameState, Image, ItemIconRequest,
+    LoadReport, MODULE_PREFIX, Overlay, Position, Rgba, TotalXp, UNLOAD_TIMEOUT, Widget,
+    dll_version,
     projection::{self, Failure, Terrain, Via},
     state,
     widgets::{Memory, SubInterface},
@@ -1261,6 +1263,87 @@ pub fn item_params(
         .collect()
 }
 
+/// Each item's icon, drawn by the client itself on its game thread (`cache_kind::ITEM_ICONS`); none for an item the client can't draw.
+pub fn item_icons(pid: u32, icons: &[ItemIconRequest]) -> Result<Vec<Option<Image>>, String> {
+    reader(pid, 0, "")?;
+    let mut out: Vec<Option<Image>> = vec![None; icons.len()];
+    let mut next = 0;
+    while next < icons.len() {
+        let batch = &icons[next..(next + CACHE_BATCH).min(icons.len())];
+        let mut request = CacheRequest {
+            kind: cache_kind::ITEM_ICONS,
+            count: batch.len() as u32,
+            ..Default::default()
+        };
+        for (slot, icon) in request.files.iter_mut().zip(batch) {
+            let flags = if icon.show_count {
+                ITEM_ICON_SHOW_COUNT
+            } else {
+                0
+            };
+            *slot = [icon.id | flags, icon.quantity];
+        }
+        let reply = cache_request(pid, &request)?;
+        let mut done = 0;
+        for (i, file) in reply.files[..batch.len()].iter().enumerate() {
+            match file.length {
+                CACHE_FILE_NO_ROOM => break,
+                CACHE_FILE_MISSING => {}
+                length => {
+                    let start = file.offset as usize;
+                    out[next + i] = reply
+                        .data
+                        .get(start..start + length as usize)
+                        .map(icon_from_argb);
+                }
+            }
+            done = i + 1;
+        }
+        if done == 0 {
+            return Err("the agent had no room for an item icon".into());
+        }
+        next += done;
+    }
+    Ok(out)
+}
+
+/// The client's `0xAARRGGBB` words as an RGBA image; a word of 0 is a transparent pixel.
+fn icon_from_argb(words: &[u8]) -> Image {
+    let mut rgba = Vec::with_capacity(words.len());
+    for word in words.as_chunks::<4>().0 {
+        let argb = u32::from_le_bytes(*word);
+        if argb == 0 {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            rgba.extend_from_slice(&[
+                (argb >> 16) as u8,
+                (argb >> 8) as u8,
+                argb as u8,
+                (argb >> 24) as u8,
+            ]);
+        }
+    }
+    Image::from_rgba(ITEM_ICON_WIDTH, ITEM_ICON_HEIGHT, &rgba)
+}
+
+/// The first frame of each sprite of the cache (the interface icons: prayers, spells, ...); none for an id the cache doesn't have.
+pub fn sprites(pid: u32, ids: &[i32]) -> Result<Vec<Option<Image>>, String> {
+    let files: Vec<[i32; 2]> = ids.iter().map(|&id| [id, 0]).collect();
+    let archives = cache_files(pid, crate::font::SPRITES_INDEX, &files)?;
+    Ok(archives
+        .into_iter()
+        .map(|data| {
+            let frames = crate::font::decode_sprites(&data?).ok()?;
+            let frame = frames.into_iter().next()?;
+            Some(Image::from_rgba(
+                u32::try_from(frame.width).ok()?,
+                u32::try_from(frame.height).ok()?,
+                &frame.rgba,
+            ))
+        })
+        .collect())
+}
+
 /// Whether each item stacks, from its definition.
 pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String> {
     let files = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?;
@@ -2111,6 +2194,11 @@ fn climb_rows(
         return (Vec::new(), Vec::new(), closed);
     }
     let mut options: Vec<String> = Vec::new();
+    let portal_names: Vec<String> = request
+        .portal_names
+        .iter()
+        .map(|p| p.to_lowercase())
+        .collect();
     let rows = with_climbs(|all| {
         let mut rows = Vec::new();
         for t in all {
@@ -2133,15 +2221,14 @@ fn climb_rows(
                 options.push(option.to_owned());
             }
             // the loc's name is what lies between the option and the id; a trapdoor or manhole is opened first
-            let words: Vec<&str> = t.menu.split_whitespace().collect();
-            let name = words
-                .get(1..words.len().saturating_sub(1))
-                .map_or(String::new(), |w| w.join(" "))
-                .to_lowercase();
-            let portal = request
-                .portal_names
-                .iter()
-                .any(|p| name.contains(&p.to_lowercase()));
+            let portal = !portal_names.is_empty() && {
+                let words: Vec<&str> = t.menu.split_whitespace().collect();
+                let name = words
+                    .get(1..words.len().saturating_sub(1))
+                    .map_or(String::new(), |w| w.join(" "))
+                    .to_lowercase();
+                portal_names.iter().any(|p| name.contains(p))
+            };
             rows.push(crate::nav::ClimbRow {
                 origin: (o.x, o.y, o.plane),
                 destination: (d.x, d.y, d.plane),
@@ -3177,11 +3264,7 @@ pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, 
                 sent: entry.direction == direction::SENT,
                 opcode: entry.opcode,
                 length: entry.length,
-                payload: entry
-                    .payload
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
+                payload: crate::hex_lower(&entry.payload),
             })
             .collect(),
     })

@@ -48,13 +48,13 @@ use super::offsets::{
     find_collision_maps, find_component_fields, find_component_invalidate, find_component_sprite,
     find_decoration_layout, find_destination, find_game_object_layout, find_game_state,
     find_game_vals, find_ground_items, find_instance_flag, find_interfaces, find_item_containers,
-    find_item_pile, find_item_setter, find_loc_configs, find_loc_names, find_local_player,
-    find_local_projection, find_login_panel, find_menu, find_menu_click, find_menu_layout,
-    find_menu_open, find_minimap, find_model_faces, find_model_vertices, find_npc_model,
-    find_obj_type_lookup, find_packet_layouts, find_packets, find_projectiles, find_projection,
-    find_run_energy, find_scene, find_script_runs, find_selection, find_skills, find_spot_anims,
-    find_tick_count, find_varc_setters, find_varcs, find_varps, find_world_select, Pe, ScanError,
-    World,
+    find_item_icon, find_item_pile, find_item_setter, find_loc_configs, find_loc_names,
+    find_local_player, find_local_projection, find_login_panel, find_menu, find_menu_click,
+    find_menu_layout, find_menu_open, find_minimap, find_model_faces, find_model_vertices,
+    find_npc_model, find_obj_type_lookup, find_packet_layouts, find_packets, find_projectiles,
+    find_projection, find_run_energy, find_scene, find_script_runs, find_selection, find_skills,
+    find_spot_anims, find_tick_count, find_varc_setters, find_varcs, find_varps, find_world_select,
+    Pe, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
 use super::unload::HookCall;
@@ -955,6 +955,9 @@ unsafe fn find_offsets() {
             containers,
             player.zip(tick_count).map(|(p, offset)| (p.client, offset)),
         );
+    }
+    if let Some(builder) = found("Item icon builder", find_item_icon(pe)) {
+        super::cache::set_item_icon(module_base, builder);
     }
     if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(pe)) {
         super::items::set_lookup(module_base, rule);
