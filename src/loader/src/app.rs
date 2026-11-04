@@ -448,6 +448,7 @@ impl Drop for TilesWorker {
 }
 
 const SCRIPT_KEY: &str = "script";
+const LAST_SCRIPT_KEY: &str = "last_script";
 const FORMS_KEY: &str = "forms";
 /// Every script's equipment and inventory layouts, by form title.
 const LAYOUTS_KEY: &str = "layouts";
@@ -991,6 +992,8 @@ pub struct LoaderApp {
     varp: usize,
     varps: Option<Vec<i32>>,
     script_file: ScriptFile,
+    /// The file the editor last opened or saved as, for the Open last button.
+    last_script: Option<String>,
     find: Find,
     highlighter: Highlighter,
     fold: crate::fold::Folds,
@@ -1087,6 +1090,10 @@ impl LoaderApp {
             script_file: load_default_script()
                 .or_else(|| cc.storage.and_then(|s| eframe::get_value(s, SCRIPT_KEY)))
                 .unwrap_or_default(),
+            last_script: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, LAST_SCRIPT_KEY))
+                .flatten(),
             find: Find::default(),
             highlighter: Highlighter::default(),
             fold: crate::fold::Folds::default(),
@@ -4208,19 +4215,36 @@ impl LoaderApp {
         {
             dialog = dialog.set_directory(dir);
         }
-        let Some(path) = dialog.pick_file() else {
+        if let Some(path) = dialog.pick_file() {
+            self.open_path(&path);
+        }
+    }
+
+    fn open_last_script(&mut self) {
+        let Some(path) = self.last_script.clone() else {
             return;
         };
-        match std::fs::read_to_string(&path) {
+        self.open_path(std::path::Path::new(&path));
+    }
+
+    /// Opens a file in the editor; one that can't be read is reported, and forgotten as the last file.
+    fn open_path(&mut self, path: &std::path::Path) {
+        match std::fs::read_to_string(path) {
             Ok(text) => {
                 self.script_file = ScriptFile {
                     path: path.display().to_string(),
                     disk: Some(text.clone()),
                     text,
                 };
+                self.last_script = Some(self.script_file.path.clone());
                 self.info(format!("Opened {}.", path.display()));
             }
-            Err(error) => self.error(format!("Cannot open {}: {error}", path.display())),
+            Err(error) => {
+                if self.last_script.as_deref() == path.to_str() {
+                    self.last_script = None;
+                }
+                self.error(format!("Cannot open {}: {error}", path.display()));
+            }
         }
     }
 
@@ -4393,6 +4417,7 @@ impl LoaderApp {
             return;
         };
         self.script_file.path = path.display().to_string();
+        self.last_script = Some(self.script_file.path.clone());
         self.save_script();
     }
 
@@ -4405,6 +4430,18 @@ impl LoaderApp {
             .clicked()
         {
             self.open_script();
+        }
+        let last = self.last_script.clone();
+        if ui
+            .add_enabled(
+                !running && last.is_some(),
+                egui::Button::new("Open last").min_size(egui::vec2(width, 0.0)),
+            )
+            .on_hover_text(last.as_deref().unwrap_or("No file has been opened yet."))
+            .on_disabled_hover_text("No file has been opened yet.")
+            .clicked()
+        {
+            self.open_last_script();
         }
         if ui
             .add_enabled(
@@ -4499,12 +4536,13 @@ impl LoaderApp {
                 "Resume",
                 "Stop",
                 "Open…",
+                "Open last",
                 "Save",
                 "Save as…",
             ],
         );
-        let group_width = 3.0 * button_width + 2.0 * ui.spacing().item_spacing.x;
-        let (run_width, file_width) = (group_width, group_width);
+        let run_width = 3.0 * button_width + 2.0 * ui.spacing().item_spacing.x;
+        let file_width = 4.0 * button_width + 3.0 * ui.spacing().item_spacing.x;
         let gap = 16.0;
         let available = ui.available_width();
         if run_width + gap + file_width <= available {
@@ -5746,6 +5784,7 @@ impl eframe::App for LoaderApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
         eframe::set_value(storage, SCRIPT_KEY, &self.script_file);
+        eframe::set_value(storage, LAST_SCRIPT_KEY, &self.last_script);
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
         eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);

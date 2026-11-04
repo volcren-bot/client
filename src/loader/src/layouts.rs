@@ -456,10 +456,19 @@ pub const AUTOCAST_SPELLS: [SpellInfo; 48] = [
     ),
     spell(58, "undead_grasp", "Undead Grasp", 79, 1269, Book::Arceuus),
 ];
-pub const SPELL_COLUMNS: usize = 8;
 /// The weapon categories (varbit 357) whose combat tab offers autocast: staves, powered staves and the Tumeken's shadow kind.
 pub const AUTOCAST_WEAPON_CATEGORIES: [i32; 3] = [18, 21, 22];
 pub const WEAPON_CATEGORY_VARBIT: i32 = 357;
+
+/// The column a spell is listed in: its element or family (Wind, Smoke, Grasp), or Other for the standard book's god and utility spells.
+fn spell_column(info: &SpellInfo) -> &'static str {
+    let first = info.name.split(' ').next().unwrap_or(info.name);
+    match info.book {
+        Book::Arceuus => info.name.rsplit(' ').next().unwrap_or(info.name),
+        Book::Standard if !["Wind", "Water", "Earth", "Fire"].contains(&first) => "Other",
+        _ => first,
+    }
+}
 
 pub fn spell_info(key: &str) -> Option<&'static SpellInfo> {
     AUTOCAST_SPELLS.iter().find(|s| s.key == key)
@@ -803,40 +812,47 @@ impl<L: Layout> Editor<L> {
     /// The layout dropdown, the name, Save, Duplicate and Remove.
     fn header(&mut self, ui: &mut egui::Ui, saved: &mut Vec<L>) {
         let mut open: Option<Option<usize>> = None;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Layout:");
-            let current = self
-                .index
-                .and_then(|i| saved.get(i))
-                .map_or(NEW_LAYOUT, |l| l.name());
-            egui::ComboBox::from_id_salt((L::KIND.field_kind(), "layout_picker"))
-                .selected_text(current)
-                .show_ui(ui, |ui| {
-                    for (i, layout) in saved.iter().enumerate() {
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.label("Layout:");
+                let current = self
+                    .index
+                    .and_then(|i| saved.get(i))
+                    .map_or(NEW_LAYOUT, |l| l.name());
+                egui::ComboBox::from_id_salt((L::KIND.field_kind(), "layout_picker"))
+                    .width(PICKER_WIDTH)
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (i, layout) in saved.iter().enumerate() {
+                            if ui
+                                .selectable_label(self.index == Some(i), layout.name())
+                                .clicked()
+                            {
+                                open = Some(Some(i));
+                            }
+                        }
                         if ui
-                            .selectable_label(self.index == Some(i), layout.name())
+                            .selectable_label(self.index.is_none(), NEW_LAYOUT)
                             .clicked()
                         {
-                            open = Some(Some(i));
+                            open = Some(None);
                         }
-                    }
-                    if ui
-                        .selectable_label(self.index.is_none(), NEW_LAYOUT)
-                        .clicked()
-                    {
-                        open = Some(None);
-                    }
-                });
-            ui.label("Name:");
-            let mut name = self.draft.name().to_owned();
-            if ui
-                .add(egui::TextEdit::singleline(&mut name).desired_width(160.0))
-                .changed()
-            {
-                self.draft.set_name(name);
-            }
+                    });
+            });
+            ui.vertical(|ui| {
+                ui.label("Name:");
+                let mut name = self.draft.name().to_owned();
+                if ui
+                    .add(egui::TextEdit::singleline(&mut name).desired_width(NAME_WIDTH))
+                    .changed()
+                {
+                    self.draft.set_name(name);
+                }
+            });
         });
-        ui.horizontal_wrapped(|ui| {
+        ui.add_space(4.0);
+        let button = (COLUMN_WIDTH - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+        ui.horizontal(|ui| {
             let name = self.draft.name().trim().to_owned();
             let taken = saved
                 .iter()
@@ -844,7 +860,10 @@ impl<L: Layout> Editor<L> {
                 .any(|(i, l)| Some(i) != self.index && l.name() == name);
             let can_save = !name.is_empty() && !taken && self.dirty(saved);
             if ui
-                .add_enabled(can_save, egui::Button::new("Save"))
+                .add_enabled(
+                    can_save,
+                    egui::Button::new("Save").min_size(egui::vec2(button, 0.0)),
+                )
                 .on_disabled_hover_text(if taken {
                     "Another layout has this name."
                 } else if name.is_empty() {
@@ -864,7 +883,10 @@ impl<L: Layout> Editor<L> {
                 }
             }
             if ui
-                .add_enabled(self.index.is_some(), egui::Button::new("Duplicate"))
+                .add_enabled(
+                    self.index.is_some(),
+                    egui::Button::new("Duplicate").min_size(egui::vec2(button, 0.0)),
+                )
                 .clicked()
                 && let Some(i) = self.index
             {
@@ -874,7 +896,10 @@ impl<L: Layout> Editor<L> {
                 open = Some(Some(saved.len() - 1));
             }
             if ui
-                .add_enabled(self.index.is_some(), egui::Button::new("Remove"))
+                .add_enabled(
+                    self.index.is_some(),
+                    egui::Button::new("Remove").min_size(egui::vec2(button, 0.0)),
+                )
                 .clicked()
                 && let Some(i) = self.index
             {
@@ -902,7 +927,7 @@ impl<L: Layout> Editor<L> {
         ui.vertical(|ui| {
             ui.set_width(COLUMN_WIDTH);
             if let Some(hint) = hint {
-                ui.weak(hint);
+                ui.vertical_centered(|ui| ui.weak(hint));
             }
             ui.vertical_centered_justified(|ui| {
                 let read = ui
@@ -956,8 +981,30 @@ const fn grid_width(columns: usize, cell: f32, gap: f32) -> f32 {
 
 const PRAYER_CELL: f32 = 42.0;
 const PRAYER_GAP: f32 = 4.0;
-/// The width every tab's hint, buttons and grid share: the prayer book's, the widest grid.
-const COLUMN_WIDTH: f32 = grid_width(PRAYER_COLUMNS, PRAYER_CELL, PRAYER_GAP);
+const PICKER_WIDTH: f32 = 100.0;
+const NAME_WIDTH: f32 = 160.0;
+
+/// The width every tab's header, hint and buttons share (the layout dropdown and the name box side by side); the grids centre in it.
+const COLUMN_WIDTH: f32 = PICKER_WIDTH + 8.0 + NAME_WIDTH;
+
+/// Runs `add` in a column of `COLUMN_WIDTH` centred in the tab.
+fn centered_column<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    centered_width(ui, COLUMN_WIDTH, add)
+}
+
+/// Runs `add` in a column of `width` centred in the tab.
+fn centered_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let pad = ((ui.available_width() - width) / 2.0 - ui.spacing().item_spacing.x).max(0.0);
+    ui.horizontal_top(|ui| {
+        ui.add_space(pad);
+        ui.vertical(|ui| {
+            ui.set_width(width);
+            add(ui)
+        })
+        .inner
+    })
+    .inner
+}
 
 /// Draws one slot: the item's icon, or what an empty slot means; selected slots get the accent border.
 fn slot_ui(
@@ -1023,17 +1070,15 @@ fn item_hover(item: &Item) -> String {
 
 /// The amount of a stackable item, editable; a non stackable one is always one.
 fn amount_ui(ui: &mut egui::Ui, item: &mut Item) {
-    ui.horizontal(|ui| {
-        ui.label(format!("{}  (id {})", item.name, item.id));
-        if item.stackable {
-            ui.label("Amount:");
-            ui.add(
-                egui::DragValue::new(&mut item.quantity)
-                    .range(1..=i32::MAX)
-                    .speed(1.0),
-            );
-        }
-    });
+    ui.label(format!("{}  (id {})", item.name, item.id));
+    if item.stackable {
+        ui.label("Amount:");
+        ui.add(
+            egui::DragValue::new(&mut item.quantity)
+                .range(1..=i32::MAX)
+                .speed(1.0),
+        );
+    }
 }
 
 /// The Equipment tab: the worn items grid as the game lays it out, read from a client, with each slot's meaning editable.
@@ -1048,93 +1093,118 @@ pub fn equipment_ui(
     let gap = 6.0;
     let width = grid_width(3, cell.x, gap);
     let margin = (COLUMN_WIDTH - width) / 2.0;
-    editor.header(ui, saved);
-    ui.add_space(6.0);
-    let hint = "Right-click an item to empty its slot.";
-    let action = editor.read_ui(ui, Some(hint), can_read, false);
-    ui.add_space(6.0);
-    ui.horizontal_top(|ui| {
-        ui.add_space(margin);
-        let (grid, _) = ui.allocate_exact_size(
-            egui::vec2(width, 5.0 * cell.y + 4.0 * gap),
-            egui::Sense::hover(),
-        );
-        for &(slot, column, row) in &EQUIPMENT_CELLS {
-            let min =
-                grid.min + egui::vec2(column as f32 * (cell.x + gap), row as f32 * (cell.y + gap));
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(egui::Rect::from_min_size(min, cell))
-                    .layout(egui::Layout::left_to_right(egui::Align::Min)),
-            );
-            let name = EQUIPMENT_SLOTS
-                .iter()
-                .find(|(s, _)| *s == slot)
-                .map_or("", |(_, name)| name);
-            let (item, text, hover) = match editor.draft.slot(slot) {
-                EquipmentSlot::Item(item) => {
-                    (Some(item), "", format!("{name}: {}", item_hover(item)))
-                }
-                EquipmentSlot::Empty => (None, "", format!("{name}: must be empty.")),
-                EquipmentSlot::Any => (
-                    None,
-                    "any",
-                    format!("{name}: anything or nothing may be worn."),
-                ),
-            };
-            let response = slot_ui(
-                &mut child,
-                icons,
-                item,
-                text,
-                editor.selected == Some(slot),
-                egui::Sense::click(),
-            )
-            .on_hover_text(hover);
-            if response.clicked() {
-                editor.selected = Some(slot);
-            }
-            if response.secondary_clicked() {
-                editor.selected = Some(slot);
-                *editor.draft.slot_mut(slot) = EquipmentSlot::Empty;
-            }
+    let mut action = None;
+    let mut part = |ui: &mut egui::Ui, spells: bool| {
+        if spells {
+            spell_ui(ui, &mut editor.draft, icons);
+            return;
         }
-        ui.add_space(margin + 12.0);
-        ui.vertical(|ui| {
-            if let Some(slot) = editor.selected {
-                let name = EQUIPMENT_SLOTS
-                    .iter()
-                    .find(|(s, _)| *s == slot)
-                    .map_or("", |(_, name)| name);
-                ui.strong(name);
-                match editor.draft.slot_mut(slot) {
-                    EquipmentSlot::Item(item) => amount_ui(ui, item),
-                    state => {
-                        const EMPTY: &str = "Must be empty";
-                        const ANY: &str = "Any";
-                        egui::ComboBox::from_id_salt("equipment_slot_mode")
-                            .selected_text(if *state == EquipmentSlot::Any {
-                                ANY
-                            } else {
-                                EMPTY
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(state, EquipmentSlot::Empty, EMPTY);
-                                ui.selectable_value(state, EquipmentSlot::Any, ANY);
-                            });
+        {
+            ui.set_width(COLUMN_WIDTH);
+            editor.header(ui, saved);
+            ui.add_space(6.0);
+            let hint = "Right-click to empty.";
+            action = editor.read_ui(ui, Some(hint), can_read, false);
+            ui.add_space(6.0);
+            ui.horizontal_top(|ui| {
+                ui.add_space(margin);
+                let (grid, _) = ui.allocate_exact_size(
+                    egui::vec2(width, 5.0 * cell.y + 4.0 * gap),
+                    egui::Sense::hover(),
+                );
+                for &(slot, column, row) in &EQUIPMENT_CELLS {
+                    let min = grid.min
+                        + egui::vec2(column as f32 * (cell.x + gap), row as f32 * (cell.y + gap));
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(egui::Rect::from_min_size(min, cell))
+                            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+                    );
+                    let name = EQUIPMENT_SLOTS
+                        .iter()
+                        .find(|(s, _)| *s == slot)
+                        .map_or("", |(_, name)| name);
+                    let (item, text, hover) = match editor.draft.slot(slot) {
+                        EquipmentSlot::Item(item) => {
+                            (Some(item), "", format!("{name}: {}", item_hover(item)))
+                        }
+                        EquipmentSlot::Empty => (None, "", format!("{name}: must be empty.")),
+                        EquipmentSlot::Any => (
+                            None,
+                            "any",
+                            format!("{name}: anything or nothing may be worn."),
+                        ),
+                    };
+                    let response = slot_ui(
+                        &mut child,
+                        icons,
+                        item,
+                        text,
+                        editor.selected == Some(slot),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_text(hover);
+                    if response.clicked() {
+                        editor.selected = Some(slot);
+                    }
+                    if response.secondary_clicked() {
+                        editor.selected = Some(slot);
+                        *editor.draft.slot_mut(slot) = EquipmentSlot::Empty;
                     }
                 }
-            }
+            });
+            ui.add_space(6.0);
+            ui.vertical_centered(|ui| {
+                if let Some(slot) = editor.selected {
+                    let name = EQUIPMENT_SLOTS
+                        .iter()
+                        .find(|(s, _)| *s == slot)
+                        .map_or("", |(_, name)| name);
+                    ui.strong(name);
+                    match editor.draft.slot_mut(slot) {
+                        EquipmentSlot::Item(item) => amount_ui(ui, item),
+                        state => {
+                            const EMPTY: &str = "Must be empty";
+                            const ANY: &str = "Any";
+                            egui::ComboBox::from_id_salt("equipment_slot_mode")
+                                .selected_text(if *state == EquipmentSlot::Any {
+                                    ANY
+                                } else {
+                                    EMPTY
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(state, EquipmentSlot::Empty, EMPTY);
+                                    ui.selectable_value(state, EquipmentSlot::Any, ANY);
+                                });
+                        }
+                    }
+                }
+            });
+        }
+    };
+    let gap = 24.0;
+    if ui.available_width() >= COLUMN_WIDTH + gap + COLUMN_WIDTH {
+        centered_width(ui, COLUMN_WIDTH + gap + COLUMN_WIDTH, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| part(ui, false));
+                ui.add_space(gap);
+                ui.vertical(|ui| part(ui, true));
+            });
         });
-    });
-    ui.add_space(10.0);
-    spell_ui(ui, &mut editor.draft, icons);
+    } else {
+        centered_width(ui, COLUMN_WIDTH, |ui| part(ui, false));
+        ui.add_space(gap);
+        centered_width(ui, COLUMN_WIDTH, |ui| part(ui, true));
+    }
     action
 }
 
 /// The spell of an equipment layout: the autocast spell when the weapon read from the client offered autocast, else a spell the
-/// script casts by hand. The three books with combat spells are shown in the game's autocast order; a click picks or unpicks one.
+/// script casts by hand. A dropdown picks the spellbook (the picked spell's book to start with) and only that book's combat spells
+/// are shown, in the game's autocast order; a click picks or unpicks one.
 fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
+    let width = COLUMN_WIDTH;
+    ui.set_width(width);
     ui.strong(if draft.autocast {
         "Autocast"
     } else {
@@ -1147,14 +1217,39 @@ fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
     });
     let cell = egui::vec2(30.0, 30.0);
     let mut clicked: Option<&'static str> = None;
-    for book in [Book::Standard, Book::Ancient, Book::Arceuus] {
-        ui.add_space(4.0);
-        ui.label(book.label());
-        egui::Grid::new(("spell_grid", book.key()))
-            .spacing(egui::vec2(3.0, 3.0))
-            .show(ui, |ui| {
-                let mut shown = 0;
-                for info in AUTOCAST_SPELLS.iter().filter(|s| s.book == book) {
+    let book_id = egui::Id::new("spell_book");
+    let mut book = ui
+        .data(|d| d.get_temp::<Book>(book_id))
+        .or_else(|| draft.spell.as_deref().and_then(spell_info).map(|s| s.book))
+        .unwrap_or(Book::Standard);
+    ui.add_space(4.0);
+    egui::ComboBox::from_id_salt("spell_book_mode")
+        .width(width)
+        .selected_text(book.label())
+        .show_ui(ui, |ui| {
+            for option in [Book::Standard, Book::Ancient, Book::Arceuus] {
+                ui.selectable_value(&mut book, option, option.label());
+            }
+        });
+    ui.data_mut(|d| d.insert_temp(book_id, book));
+    ui.add_space(4.0);
+    let mut columns: Vec<(&str, Vec<&SpellInfo>)> = Vec::new();
+    for info in AUTOCAST_SPELLS.iter().filter(|s| s.book == book) {
+        let column = spell_column(info);
+        match columns.iter_mut().find(|(name, _)| *name == column) {
+            Some((_, spells)) => spells.push(info),
+            None => columns.push((column, vec![info])),
+        }
+    }
+    for (_, spells) in &mut columns {
+        spells.sort_by_key(|s| s.level);
+    }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+        ui.add_space(((width - grid_width(columns.len(), cell.x, 3.0)) / 2.0 - 3.0).max(0.0));
+        for (_, spells) in &columns {
+            ui.vertical(|ui| {
+                for info in spells {
                     let on = draft.spell.as_deref() == Some(info.key);
                     let (rect, response) = ui.allocate_exact_size(cell, egui::Sense::click());
                     if ui.is_rect_visible(rect) {
@@ -1197,13 +1292,10 @@ fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
                     {
                         clicked = Some(info.key);
                     }
-                    shown += 1;
-                    if shown % SPELL_COLUMNS == 0 {
-                        ui.end_row();
-                    }
                 }
             });
-    }
+        }
+    });
     if let Some(key) = clicked {
         draft.spell = if draft.spell.as_deref() == Some(key) {
             None
@@ -1232,78 +1324,90 @@ pub fn inventory_ui(
 ) -> Option<Action> {
     let gap = 6.0;
     let margin = (COLUMN_WIDTH - grid_width(INVENTORY_COLUMNS, SLOT_SIZE.x + 8.0, gap)) / 2.0;
-    editor.header(ui, saved);
-    ui.add_space(6.0);
-    let hint = "Drag an item to move it. Right-click an item to empty its slot.";
-    let action = editor.read_ui(ui, Some(hint), can_read, false);
-    ui.add_space(6.0);
-    let mut moved: Option<(usize, usize)> = None;
-    ui.horizontal_top(|ui| {
-        ui.add_space(margin);
-        egui::Grid::new("inventory_layout_grid")
-            .spacing(egui::vec2(gap, gap))
-            .show(ui, |ui| {
-                for slot in 0..INVENTORY_SIZE {
-                    let item = editor.draft.slots.get(slot).and_then(Option::as_ref);
-                    let selected = editor.selected == Some(slot) && !editor.selected_in_pouch;
-                    let response = match item {
-                        Some(item) => {
-                            let hover = item_hover(item);
-                            ui.dnd_drag_source(
-                                egui::Id::new(("inventory_layout_slot", slot)),
-                                slot,
-                                |ui| {
-                                    slot_ui(
-                                        ui,
-                                        icons,
-                                        Some(item),
-                                        "",
-                                        selected,
-                                        egui::Sense::click_and_drag(),
-                                    )
-                                    .on_hover_text(hover)
-                                },
-                            )
-                            .inner
+    centered_column(ui, |ui| {
+        editor.header(ui, saved);
+        ui.add_space(6.0);
+        let hint = "Drag to move.\nRight-click to empty.";
+        let action = editor.read_ui(ui, Some(hint), can_read, false);
+        ui.add_space(6.0);
+        let mut moved: Option<(usize, usize)> = None;
+        ui.horizontal_top(|ui| {
+            ui.add_space(margin);
+            egui::Grid::new("inventory_layout_grid")
+                .spacing(egui::vec2(gap, gap))
+                .show(ui, |ui| {
+                    for slot in 0..INVENTORY_SIZE {
+                        let item = editor.draft.slots.get(slot).and_then(Option::as_ref);
+                        let selected = editor.selected == Some(slot) && !editor.selected_in_pouch;
+                        let response = match item {
+                            Some(item) => {
+                                let response = slot_ui(
+                                    ui,
+                                    icons,
+                                    Some(item),
+                                    "",
+                                    selected,
+                                    egui::Sense::click_and_drag(),
+                                )
+                                .on_hover_text(item_hover(item));
+                                if response.drag_started() {
+                                    egui::DragAndDrop::set_payload(ui.ctx(), slot);
+                                }
+                                if response.dragged() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                    if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                                        egui::Area::new(egui::Id::new("inventory_layout_ghost"))
+                                            .order(egui::Order::Tooltip)
+                                            .interactable(false)
+                                            .fixed_pos(
+                                                pos - (SLOT_SIZE + egui::vec2(8.0, 8.0)) / 2.0,
+                                            )
+                                            .show(ui.ctx(), |ui| {
+                                                slot_ui(
+                                                    ui,
+                                                    icons,
+                                                    Some(item),
+                                                    "",
+                                                    true,
+                                                    egui::Sense::hover(),
+                                                );
+                                            });
+                                    }
+                                }
+                                response
+                            }
+                            None => slot_ui(ui, icons, None, "", selected, egui::Sense::click())
+                                .on_hover_text(format!("Slot {slot}: empty")),
+                        };
+                        if let Some(from) = response.dnd_release_payload::<usize>()
+                            && *from != slot
+                        {
+                            moved = Some((*from, slot));
                         }
-                        None => slot_ui(ui, icons, None, "", selected, egui::Sense::click())
-                            .on_hover_text(format!("Slot {slot}: empty")),
-                    };
-                    if let Some(from) = response.dnd_release_payload::<usize>()
-                        && *from != slot
-                    {
-                        moved = Some((*from, slot));
+                        if response.clicked() {
+                            editor.selected = Some(slot);
+                            editor.selected_in_pouch = false;
+                        }
+                        if response.secondary_clicked() {
+                            *editor.draft.slot_mut(slot) = None;
+                            editor.selected = Some(slot);
+                            editor.selected_in_pouch = false;
+                        }
+                        if (slot + 1) % INVENTORY_COLUMNS == 0 {
+                            ui.end_row();
+                        }
                     }
-                    if response.clicked() {
-                        editor.selected = Some(slot);
-                        editor.selected_in_pouch = false;
-                    }
-                    if response.secondary_clicked() {
-                        *editor.draft.slot_mut(slot) = None;
-                        editor.selected = Some(slot);
-                        editor.selected_in_pouch = false;
-                    }
-                    if (slot + 1) % INVENTORY_COLUMNS == 0 {
-                        ui.end_row();
-                    }
-                }
-            });
-        ui.add_space(margin + 12.0);
-        ui.vertical(|ui| {
-            if let Some(slot) = editor.selected.filter(|_| !editor.selected_in_pouch) {
-                ui.strong(format!("Slot {slot}"));
-                match editor.draft.slot_mut(slot) {
-                    Some(item) => amount_ui(ui, item),
-                    None => {
-                        ui.label("Empty.");
-                    }
-                }
-            }
+                });
+        });
+        ui.add_space(6.0);
+        ui.vertical_centered(|ui| {
             if editor.draft.pouch.is_some() || editor.draft.holds_pouch() {
-                ui.add_space(10.0);
                 ui.strong("Rune pouch");
                 let runes = editor.draft.pouch.get_or_insert_with(Vec::new);
+                let spacing = ui.spacing().item_spacing.x;
+                let row = grid_width(POUCH_SIZE, SLOT_SIZE.x + 8.0, spacing);
                 ui.horizontal(|ui| {
+                    ui.add_space(((COLUMN_WIDTH - row) / 2.0 - spacing).max(0.0));
                     for i in 0..POUCH_SIZE {
                         let selected = editor.selected == Some(i) && editor.selected_in_pouch;
                         let response =
@@ -1329,17 +1433,27 @@ pub fn inventory_ui(
                     amount_ui(ui, rune);
                 }
                 ui.weak("Read from client fills it from the pouch's contents.");
+                ui.add_space(10.0);
+            }
+            if let Some(slot) = editor.selected.filter(|_| !editor.selected_in_pouch) {
+                ui.strong(format!("Slot {slot}"));
+                match editor.draft.slot_mut(slot) {
+                    Some(item) => amount_ui(ui, item),
+                    None => {
+                        ui.label("Empty.");
+                    }
+                }
             }
         });
-    });
-    if let Some((from, to)) = moved {
-        editor.draft.slot_mut(from);
-        editor.draft.slot_mut(to);
-        editor.draft.slots.swap(from, to);
-        editor.selected = Some(to);
-        editor.selected_in_pouch = false;
-    }
-    action
+        if let Some((from, to)) = moved {
+            editor.draft.slot_mut(from);
+            editor.draft.slot_mut(to);
+            editor.draft.slots.swap(from, to);
+            editor.selected = Some(to);
+            editor.selected_in_pouch = false;
+        }
+        action
+    })
 }
 
 /// The Prayer tab: the prayer book as the tab lays it out; clicking a prayer puts it in the layout and takes out the ones it can't be
@@ -1353,92 +1467,99 @@ pub fn prayer_ui(
     prayer_level: Option<u32>,
 ) -> Option<Action> {
     let cell = egui::Vec2::splat(PRAYER_CELL);
-    editor.header(ui, saved);
-    ui.add_space(6.0);
-    let action = editor.read_ui(ui, None, can_read, true);
-    ui.add_space(6.0);
-    let mut toggled: Option<&'static str> = None;
-    egui::Grid::new("prayer_layout_grid")
-        .spacing(egui::Vec2::splat(PRAYER_GAP))
-        .show(ui, |ui| {
-            for (i, info) in PRAYERS.iter().enumerate() {
-                let on = editor.draft.has(info.key);
-                let too_high = prayer_level.is_some_and(|level| level < info.level);
-                let (rect, response) = ui.allocate_exact_size(cell, egui::Sense::click());
-                if ui.is_rect_visible(rect) {
-                    let visuals = ui.style().interact(&response);
-                    let fill = if on {
-                        theme::BLUE.linear_multiply(0.35)
-                    } else {
-                        visuals.weak_bg_fill
-                    };
-                    let stroke = if on {
-                        egui::Stroke::new(1.5, theme::BLUE)
-                    } else {
-                        visuals.bg_stroke
-                    };
-                    ui.painter()
-                        .rect(rect, 4.0, fill, stroke, egui::StrokeKind::Inside);
-                    let tint = if too_high {
-                        egui::Color32::from_white_alpha(90)
-                    } else {
-                        egui::Color32::WHITE
-                    };
-                    match icons.texture(ui.ctx(), Key::Sprite(info.sprite)) {
-                        Some(texture) => {
-                            let size = texture.size_vec2().min(cell - egui::vec2(6.0, 6.0));
-                            egui::Image::from_texture(texture)
-                                .tint(tint)
-                                .paint_at(ui, egui::Rect::from_center_size(rect.center(), size));
+    centered_column(ui, |ui| {
+        editor.header(ui, saved);
+        ui.add_space(6.0);
+        let action = editor.read_ui(ui, None, can_read, true);
+        ui.add_space(6.0);
+        let mut toggled: Option<&'static str> = None;
+        let margin = (COLUMN_WIDTH - grid_width(PRAYER_COLUMNS, PRAYER_CELL, PRAYER_GAP)) / 2.0;
+        ui.horizontal_top(|ui| {
+            ui.add_space(margin);
+            egui::Grid::new("prayer_layout_grid")
+                .spacing(egui::Vec2::splat(PRAYER_GAP))
+                .show(ui, |ui| {
+                    for (i, info) in PRAYERS.iter().enumerate() {
+                        let on = editor.draft.has(info.key);
+                        let too_high = prayer_level.is_some_and(|level| level < info.level);
+                        let (rect, response) = ui.allocate_exact_size(cell, egui::Sense::click());
+                        if ui.is_rect_visible(rect) {
+                            let visuals = ui.style().interact(&response);
+                            let fill = if on {
+                                theme::BLUE.linear_multiply(0.35)
+                            } else {
+                                visuals.weak_bg_fill
+                            };
+                            let stroke = if on {
+                                egui::Stroke::new(1.5, theme::BLUE)
+                            } else {
+                                visuals.bg_stroke
+                            };
+                            ui.painter()
+                                .rect(rect, 4.0, fill, stroke, egui::StrokeKind::Inside);
+                            let tint = if too_high {
+                                egui::Color32::from_white_alpha(90)
+                            } else {
+                                egui::Color32::WHITE
+                            };
+                            match icons.texture(ui.ctx(), Key::Sprite(info.sprite)) {
+                                Some(texture) => {
+                                    let size = texture.size_vec2().min(cell - egui::vec2(6.0, 6.0));
+                                    egui::Image::from_texture(texture).tint(tint).paint_at(
+                                        ui,
+                                        egui::Rect::from_center_size(rect.center(), size),
+                                    );
+                                }
+                                None => {
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        info.name
+                                            .split(' ')
+                                            .map(|w| w.chars().next().unwrap_or(' '))
+                                            .collect::<String>(),
+                                        egui::TextStyle::Small.resolve(ui.style()),
+                                        ui.visuals().weak_text_color(),
+                                    );
+                                }
+                            }
                         }
-                        None => {
-                            ui.painter().text(
-                                rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                info.name
-                                    .split(' ')
-                                    .map(|w| w.chars().next().unwrap_or(' '))
-                                    .collect::<String>(),
-                                egui::TextStyle::Small.resolve(ui.style()),
-                                ui.visuals().weak_text_color(),
-                            );
+                        let hover = if too_high {
+                            format!(
+                                "{} (level {}, above the client's {})",
+                                info.name,
+                                info.level,
+                                prayer_level.unwrap_or(0)
+                            )
+                        } else {
+                            format!("{} (level {})", info.name, info.level)
+                        };
+                        if response.on_hover_text(hover).clicked() {
+                            toggled = Some(info.key);
+                        }
+                        if (i + 1) % PRAYER_COLUMNS == 0 {
+                            ui.end_row();
                         }
                     }
-                }
-                let hover = if too_high {
-                    format!(
-                        "{} (level {}, above the client's {})",
-                        info.name,
-                        info.level,
-                        prayer_level.unwrap_or(0)
-                    )
-                } else {
-                    format!("{} (level {})", info.name, info.level)
-                };
-                if response.on_hover_text(hover).clicked() {
-                    toggled = Some(info.key);
-                }
-                if (i + 1) % PRAYER_COLUMNS == 0 {
-                    ui.end_row();
-                }
-            }
+                });
         });
-    if let Some(key) = toggled {
-        editor.draft.toggle(key);
-    }
-    ui.add_space(6.0);
-    let names: Vec<&str> = editor
-        .draft
-        .prayers
-        .iter()
-        .filter_map(|k| prayer_info(k).map(|p| p.name))
-        .collect();
-    if names.is_empty() {
-        ui.weak("No prayers: click them in the book, or read the ones on in the client.");
-    } else {
-        ui.label(names.join(", "));
-    }
-    action
+        if let Some(key) = toggled {
+            editor.draft.toggle(key);
+        }
+        ui.add_space(6.0);
+        let names: Vec<&str> = editor
+            .draft
+            .prayers
+            .iter()
+            .filter_map(|k| prayer_info(k).map(|p| p.name))
+            .collect();
+        if names.is_empty() {
+            ui.weak("No prayers: click them in the book, or read the ones on in the client.");
+        } else {
+            ui.label(names.join(", "));
+        }
+        action
+    })
 }
 
 /// Puts what a client read into a prayer draft.
