@@ -2013,7 +2013,7 @@ impl LoaderApp {
                         .on_hover_text("What the scripts running from this loader cost an hour, prices and extra-session fees together.");
                 }
                 crate::theme::credits(ui, egui::RichText::new(balance), "")
-                    .on_hover_text("Your credits. 1 credit is 1 EUR.");
+                    .on_hover_text("Your credits.");
                 ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
             }
             Auth::SigningIn(cancel) => {
