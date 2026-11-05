@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 12;
+pub const HOST_API: u32 = 13;
 pub use ipc::state::varp;
 
 pub mod antiban;
@@ -126,6 +126,8 @@ pub struct EntityModel {
     pub hull: Vec<[f32; 2]>,
     pub face_count: u32,
     pub faces: Vec<[[f32; 2]; 3]>,
+    /// for an NPC type's model: how many frames its animation has (0 without one)
+    pub frame_count: u32,
 }
 
 /// A loc placed on the map in the game cache, whether or not its map square is loaded.
@@ -386,11 +388,11 @@ pub use win::{
     item_changes_wait, item_container, item_containers, item_icons, item_names, item_params,
     item_stackable, landmasses, list_clients, load, loc_model, loc_shown, locs, map_regions,
     memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
-    npc_model, npc_sizes, npc_words, npcs, packet_layouts, packets, player_model, player_plane,
-    player_words, players, project, project_moved, projectiles, scene_collision, scene_route,
-    scene_tiles, scene_tiles_next_frame, screenshot, script_runs, selected_widget, server_tile,
-    set_cursor, set_display_name, set_total_xp, spot_anims, sprites, sub_interfaces, unload,
-    varbit, varbit_def, varbits_of, varc, varc_changes, varp_value, varps, wait_watchers,
+    npc_model, npc_sizes, npc_type_model, npc_words, npcs, packet_layouts, packets, player_model,
+    player_plane, player_words, players, project, project_moved, projectiles, scene_collision,
+    scene_route, scene_tiles, scene_tiles_next_frame, screenshot, script_runs, selected_widget,
+    server_tile, set_cursor, set_display_name, set_total_xp, spot_anims, sprites, sub_interfaces,
+    unload, varbit, varbit_def, varbits_of, varc, varc_changes, varp_value, varps, wait_watchers,
     watch_client, widget, widget_children, widget_dump, widget_model, widget_tree, widget_words,
     world_debug, world_entities, world_movement, world_route, world_select,
 };

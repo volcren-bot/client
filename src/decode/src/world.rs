@@ -129,6 +129,42 @@ pub struct Npc {
     // the actor it is interacting with (fighting, facing after a talk): an NPC index or a player index, -1 for the other kind or for none
     pub interacting_npc: i32,
     pub interacting_player: i32,
+    // the head icons the server set on it (an overhead prayer, ...), at most 8; empty for none
+    pub head_icons: Vec<HeadIcon>,
+}
+
+// An NPC's head icon: a sprite of a sprite archive (440 is the prayer icons, `headicons_prayer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadIcon {
+    pub archive: i32,
+    pub sprite: i32,
+}
+
+const MAX_HEAD_ICONS: u64 = 8;
+
+// The pairs of the head icon object's two `std::vector<int>`s, archives at 0 and sprites further on, leaving out unset
+// slots (-1); nothing when a vector doesn't look like one.
+fn head_icons(memory: &impl Memory, layout: &WorldLayout, object: u64) -> Vec<HeadIcon> {
+    let vector = |at: u64| -> Option<Vec<i32>> {
+        let (begin, end) = (memory.ptr(at)?, memory.ptr(at + 8)?);
+        let count = end.checked_sub(begin)? / 4;
+        if begin == 0 || count > MAX_HEAD_ICONS {
+            return None;
+        }
+        memory.i32s(begin, count as usize)
+    };
+    let (Some(archives), Some(sprites)) = (
+        vector(object),
+        vector(object + layout.head_icon_sprites as u64),
+    ) else {
+        return Vec::new();
+    };
+    archives
+        .into_iter()
+        .zip(sprites)
+        .filter(|&(archive, sprite)| archive >= 0 && sprite >= 0)
+        .map(|(archive, sprite)| HeadIcon { archive, sprite })
+        .collect()
 }
 
 // Byte offsets in an actor: model height, pose animation, and a pointer to the spot animation node (kind at 0x8, id at 0x20).
@@ -444,6 +480,7 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
             &[
                 (layout.npc_definition as u64, 8),
                 (layout.npc_name_override as u64, 24),
+                (layout.npc_head_icons as u64, 8),
             ],
         ),
     );
@@ -470,6 +507,12 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
             .unwrap_or_default();
         let (animation, height, pose, graphic) = actor_fields(m, layout, npc);
         let (interacting_npc, interacting_player) = interacting(m, npc);
+        let head_icons = (layout.npc_head_icons != 0)
+            .then(|| m.ptr(npc + layout.npc_head_icons as u64))
+            .flatten()
+            .filter(|&object| object != 0)
+            .map(|object| head_icons(memory, layout, object))
+            .unwrap_or_default();
         npcs.push(Npc {
             index,
             id,
@@ -484,6 +527,7 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
             graphic,
             interacting_npc,
             interacting_player,
+            head_icons,
         });
     }
     Some(npcs)
@@ -1029,6 +1073,8 @@ mod tests {
         varc_kind: 0x28,
         run_energy: 0x34e0,
         weight: 0x34e4,
+        npc_head_icons: 0x760,
+        head_icon_sprites: 0x48,
         reserved: 0,
     };
     const CLIENT: u64 = 0x10_0000;
@@ -1236,7 +1282,8 @@ mod tests {
                 pose: -1,
                 graphic: -1,
                 interacting_npc: -1,
-                interacting_player: -1
+                interacting_player: -1,
+                head_icons: Vec::new(),
             }
         );
         assert_eq!(
@@ -1292,6 +1339,7 @@ mod tests {
             &[
                 (LAYOUT.npc_definition as u64, 8),
                 (LAYOUT.npc_name_override as u64, 24),
+                (LAYOUT.npc_head_icons as u64, 8),
             ],
         );
         let player_span = actor_span(

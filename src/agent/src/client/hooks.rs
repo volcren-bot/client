@@ -51,10 +51,10 @@ use super::offsets::{
     find_item_icon, find_item_pile, find_item_setter, find_loc_configs, find_loc_names,
     find_local_player, find_local_projection, find_login_panel, find_menu, find_menu_click,
     find_menu_layout, find_menu_open, find_minimap, find_model_faces, find_model_vertices,
-    find_npc_model, find_obj_type_lookup, find_packet_layouts, find_packets, find_projectiles,
-    find_projection, find_run_energy, find_scene, find_script_runs, find_selection, find_skills,
-    find_spot_anims, find_tick_count, find_varc_setters, find_varcs, find_varps, find_world_select,
-    Pe, ScanError, World,
+    find_npc_head_icons, find_npc_model, find_obj_type_lookup, find_packet_layouts, find_packets,
+    find_projectiles, find_projection, find_run_energy, find_scene, find_script_runs,
+    find_selection, find_skills, find_spot_anims, find_tick_count, find_type_models,
+    find_varc_setters, find_varcs, find_varps, find_world_select, Pe, ScanError, World,
 };
 use super::state::{LayoutMap, LAYOUT_MAP};
 use super::unload::HookCall;
@@ -884,6 +884,7 @@ unsafe fn find_offsets() {
             instance_flag: flag,
         };
     }
+    let head_icons = found("NPC head icons", find_npc_head_icons(pe));
     if let Some(w) = world {
         layout.found |= part::WORLD;
         layout.world = WorldLayout {
@@ -914,6 +915,8 @@ unsafe fn find_offsets() {
             varc_kind: w.varcs.kind,
             run_energy: w.run_energy.energy,
             weight: w.run_energy.weight,
+            npc_head_icons: head_icons.map_or(0, |h| h.field),
+            head_icon_sprites: head_icons.map_or(0, |h| h.sprites),
             reserved: 0,
         };
     }
@@ -959,7 +962,8 @@ unsafe fn find_offsets() {
     if let Some(builder) = found("Item icon builder", find_item_icon(pe)) {
         super::cache::set_item_icon(module_base, builder);
     }
-    if let Some(rule) = found("Item definition lookup", find_obj_type_lookup(pe)) {
+    let item_lookup = found("Item definition lookup", find_obj_type_lookup(pe));
+    if let Some(rule) = item_lookup {
         super::items::set_lookup(module_base, rule);
         if let Some(game_vals) =
             player.and_then(|p| found("Game vals", find_game_vals(pe, p.client, &rule)))
@@ -1029,6 +1033,14 @@ unsafe fn find_offsets() {
                 orientation,
                 height,
             );
+        }
+        if let (Some(lookup), Some(w)) = (item_lookup, world) {
+            if let Some(types) = found(
+                "Type models",
+                find_type_models(pe, lookup.function, rule.get_model, w.names.npc_definition),
+            ) {
+                super::model::set_type_models(types);
+            }
         }
     }
     set_found(

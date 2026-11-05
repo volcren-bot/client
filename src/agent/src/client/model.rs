@@ -13,7 +13,7 @@ use ipc::{
 };
 
 use super::{
-    offsets::{ActorOrientation, ModelFaces, ModelVertices, NpcModel},
+    offsets::{ActorOrientation, ModelFaces, ModelVertices, NpcModel, TypeModels},
     own::{on_other_thread, OwnMemory, LAYOUT},
     projection::Scene,
     state::{Mapping, LAYOUT_MAP},
@@ -33,6 +33,21 @@ struct Rules {
 }
 
 static RULES: OnceLock<Rules> = OnceLock::new();
+static TYPES: OnceLock<TypeModels> = OnceLock::new();
+
+// `(out, id)`: a definition as a {control, object} pair
+type Lookup = unsafe extern "system" fn(*mut [u64; 2], i32) -> *mut [u64; 2];
+// `NpcType::getModel(npc, out, seq, frame, seq2, frame2, overrides)`
+type NpcGetModel =
+    unsafe extern "system" fn(u64, *mut [u64; 2], u64, i32, u64, i32, u64) -> *mut [u64; 2];
+type IsSkeletal = unsafe extern "system" fn(u64) -> u8;
+
+// NPC and animation ids the definition lookups are asked about; any other gets a default definition
+const MAX_TYPE_ID: i32 = 0x10000;
+
+pub fn set_type_models(types: TypeModels) {
+    let _ = TYPES.set(types);
+}
 
 const MAX_VERTICES: usize = 20_000;
 const MAX_FACES: usize = 40_000;
@@ -480,6 +495,106 @@ fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> i32 {
     )
 }
 
+// A definition looked up by id; released when dropped.
+struct Pair([u64; 2]);
+
+impl Pair {
+    unsafe fn lookup(rva: u32, id: i32) -> Option<Self> {
+        let rules = RULES.get()?;
+        let lookup: Lookup = std::mem::transmute((rules.module_base + rva as u64) as *const ());
+        let mut pair = Pair([0; 2]);
+        lookup(&mut pair.0, id);
+        (pair.0[1] != 0).then_some(pair)
+    }
+
+    fn object(&self) -> u64 {
+        self.0[1]
+    }
+}
+
+impl Drop for Pair {
+    fn drop(&mut self) {
+        unsafe { release(self.0[0]) };
+    }
+}
+
+// The animation's frame count when `frame` is one of its frames. Skeletal animations aren't supported: their frames
+// come another way, and a frame past the end must never reach the client, which indexes the frames without checking.
+unsafe fn checked_frames(types: &TypeModels, rules: &Rules, seq: &Pair, frame: i32) -> Option<u32> {
+    let memory = OwnMemory;
+    let skeletal: IsSkeletal =
+        std::mem::transmute((rules.module_base + types.seq_skeletal as u64) as *const ());
+    if skeletal(seq.object()) != 0 {
+        return None;
+    }
+    let count = memory.i32(seq.object() + types.seq_frame_count as u64)?;
+    let frames = memory.ptr(seq.object() + types.seq_frames as u64)?;
+    (count > 0 && frames != 0 && frame >= 0 && frame < count).then_some(count as u32)
+}
+
+fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
+    let (Some(types), Some(rules)) = (TYPES.get(), RULES.get()) else {
+        return model_status::NOT_FOUND;
+    };
+    if !(0..MAX_TYPE_ID).contains(&request.type_id) {
+        return model_status::NO_NPC;
+    }
+    let scene = match Scene::current() {
+        Ok(scene) => scene,
+        Err(status) => return scene_status(status),
+    };
+    let Some(npc) = (unsafe { Pair::lookup(types.npc_lookup, request.type_id) }) else {
+        return model_status::NO_NPC;
+    };
+    let mut frame_count = 0;
+    let seq = if request.animation >= 0 {
+        if request.animation >= MAX_TYPE_ID {
+            return model_status::BAD_ANIMATION;
+        }
+        let Some(seq) = (unsafe { Pair::lookup(types.seq_lookup, request.animation) }) else {
+            return model_status::BAD_ANIMATION;
+        };
+        match unsafe { checked_frames(types, rules, &seq, request.frame) } {
+            Some(count) => frame_count = count,
+            None => return model_status::BAD_ANIMATION,
+        }
+        Some(seq)
+    } else {
+        None
+    };
+    let get_model: NpcGetModel = unsafe {
+        std::mem::transmute((rules.module_base + types.npc_get_model as u64) as *const ())
+    };
+    let mut model = Pair([0; 2]);
+    unsafe {
+        get_model(
+            npc.object(),
+            &mut model.0,
+            seq.as_ref().map_or(0, Pair::object),
+            if seq.is_some() { request.frame } else { -1 },
+            0,
+            -1,
+            0,
+        )
+    };
+    if model.object() == 0 {
+        return model_status::NO_MODEL;
+    }
+    let (x, y) = (request.fine_x, request.fine_y);
+    let at = Placement {
+        x,
+        y,
+        height: scene.ground(x, y),
+        orientation: request.orientation,
+    };
+    let Some(projected) = project(&scene, rules, model.object(), &at) else {
+        return model_status::NO_MODEL;
+    };
+    write(reply, &[projected], request.orientation);
+    reply.frame_count = frame_count;
+    model_status::OK
+}
+
 fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
     match super::scene::loc_renderables(
         request.loc_kind as u8,
@@ -505,6 +620,7 @@ pub fn on_request() {
         reply.corner_count = 0;
         reply.hull_count = 0;
         reply.face_count = 0;
+        reply.frame_count = 0;
         reply.status = if RULES.get().is_none() || LAYOUT.get().is_none() {
             model_status::NOT_FOUND
         } else if on_other_thread() {
@@ -517,6 +633,8 @@ pub fn on_request() {
             model_status::NOT_IN_GAME
         } else if request.target == model_target::LOC {
             loc_request(reply, &request)
+        } else if request.target == model_target::NPC_TYPE {
+            npc_type_request(reply, &request)
         } else {
             actor_request(reply, request.target, request.index)
         };

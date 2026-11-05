@@ -204,6 +204,10 @@ pub struct WorldLayout {
     pub weight: u32,
     // the NPC actor's animation id (-1 when none), `Npc::animation`
     pub npc_animation: u32,
+    // the NPC's pointer to the head icons the server set (0 when the rule failed), and where the sprite vector starts in
+    // that object (the archive vector is at 0): `Npc::head_icons`
+    pub npc_head_icons: u32,
+    pub head_icon_sprites: u32,
     pub reserved: u32,
 }
 
@@ -778,6 +782,8 @@ pub mod model_status {
     pub const NOT_IN_GAME: i32 = -4;
     pub const NO_NPC: i32 = -5;
     pub const NO_MODEL: i32 = -6;
+    /// an `NPC_TYPE` request's animation doesn't exist, is skeletal (not supported yet) or has no such frame
+    pub const BAD_ANIMATION: i32 = -7;
 }
 
 pub const MODEL_HULL: usize = 128;
@@ -787,6 +793,8 @@ pub mod model_target {
     pub const NPC: u32 = 0;
     pub const LOC: u32 = 1;
     pub const PLAYER: u32 = 2;
+    /// an NPC type's model built by the client, posed at a frame of an animation, at a place in the scene
+    pub const NPC_TYPE: u32 = 3;
 }
 
 #[repr(C)]
@@ -798,6 +806,13 @@ pub struct ModelRequest {
     pub loc_x: i32,
     pub loc_y: i32,
     pub loc_id: i32,
+    /// `NPC_TYPE`: the NPC id, the animation (-1 for none) and its frame, and where: local fine x and y and the orientation
+    pub type_id: i32,
+    pub animation: i32,
+    pub frame: i32,
+    pub fine_x: i32,
+    pub fine_y: i32,
+    pub orientation: i32,
 }
 
 pub mod loc_status {
@@ -911,6 +926,8 @@ pub struct ModelReply {
     pub corner_count: u32,
     pub hull_count: u32,
     pub face_count: u32,
+    /// `NPC_TYPE`: how many frames the animation has (0 without one)
+    pub frame_count: u32,
     pub corners: [[f32; 2]; 8],
     pub hull: [[f32; 2]; MODEL_HULL],
     pub faces: [[[f32; 2]; 3]; MODEL_FACES],
@@ -927,6 +944,7 @@ impl Default for ModelReply {
             corner_count: 0,
             hull_count: 0,
             face_count: 0,
+            frame_count: 0,
             corners: [[0.0; 2]; 8],
             hull: [[0.0; 2]; MODEL_HULL],
             faces: [[[0.0; 2]; 3]; MODEL_FACES],
@@ -1779,7 +1797,7 @@ mod tests {
         assert_eq!(size_of::<LoginLayout>(), 5 * 4);
         assert_eq!(size_of::<InterfaceLayout>(), 8 + 22 * 4);
         // 27 u32s after the u64 module base, padded to 8 bytes
-        assert_eq!(size_of::<WorldLayout>(), 120);
+        assert_eq!(size_of::<WorldLayout>(), 128);
         assert_eq!(size_of::<WorldSelectLayout>(), 14 * 4);
         assert_eq!(offset_of!(Layout, interfaces), 16 + 16 + 24 + 16 + 20 + 4);
         assert_eq!(size_of::<NameRequest>(), 8 + 48);
@@ -1797,7 +1815,7 @@ mod tests {
         assert_eq!(size_of::<PathLayout>(), 4 * 4);
         assert_eq!(
             offset_of!(LayoutMemory, request_sequence),
-            8 + 96 + 96 + 120 + 56 + 28 + 96 + 16 + 40 + 8 + 4 + 96 + 32 + 16
+            8 + 96 + 96 + 128 + 56 + 28 + 96 + 16 + 40 + 8 + 4 + 96 + 32 + 16
         );
         let entry = MENU_OPTION_SIZE + MENU_TARGET_SIZE + 20;
         assert_eq!(size_of::<MenuEntryInfo>(), entry);
@@ -1825,7 +1843,7 @@ mod tests {
         );
         assert_eq!(
             size_of::<ModelReply>(),
-            32 + 8 * 8 + MODEL_HULL * 8 + MODEL_FACES * 24
+            36 + 8 * 8 + MODEL_HULL * 8 + MODEL_FACES * 24
         );
     }
 

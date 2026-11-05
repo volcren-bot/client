@@ -47,7 +47,7 @@ pub(super) fn whole_function(pe: &Pe, begin: u32, max: u32) -> Vec<Instruction> 
     instrs
 }
 
-fn field_load(i: &Instruction, field: u32) -> Option<Register> {
+pub(super) fn field_load(i: &Instruction, field: u32) -> Option<Register> {
     (i.mnemonic() == Mnemonic::Mov
         && i.op0_kind() == OpKind::Register
         && i.op0_register().size() == 8
@@ -175,8 +175,12 @@ fn bounds_cylinder(instrs: &[Instruction], height: u32, bounds_slot: u32) -> Opt
         .map(|i| (i.memory_base(), i.memory_displacement64() as u32))
         .collect();
     let (base, x) = pointer_loads.windows(3).find_map(|w| {
-        (w[0].0 == w[1].0 && w[1].0 == w[2].0 && w[1].1 == w[0].1 + 0x18 && w[2].1 == w[0].1 + 0x30)
-            .then_some(w[0])
+        // negative displacements read as huge offsets, so the sums are checked
+        (w[0].0 == w[1].0
+            && w[1].0 == w[2].0
+            && w[0].1.checked_add(0x18) == Some(w[1].1)
+            && w[0].1.checked_add(0x30) == Some(w[2].1))
+        .then_some(w[0])
     })?;
     let count = instrs.iter().find_map(|i| {
         (i.mnemonic() == Mnemonic::Mov

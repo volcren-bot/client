@@ -966,8 +966,13 @@ fn model(pid: u32, request: ModelRequest) -> Result<Option<crate::EntityModel>, 
             hull: reply.hull[..(reply.hull_count as usize).min(reply.hull.len())].to_vec(),
             face_count: reply.face_count,
             faces: reply.faces[..(reply.face_count as usize).min(reply.faces.len())].to_vec(),
+            frame_count: reply.frame_count,
         })),
         model_status::NO_NPC | model_status::NO_MODEL => Ok(None),
+        model_status::BAD_ANIMATION => Err(format!(
+            "animation {} has no frame {} (or is skeletal, which isn't supported)",
+            request.animation, request.frame
+        )),
         model_status::NOT_IN_GAME => Err("not logged in".into()),
         model_status::NOT_FOUND => Err("agent didn't find the client's models".into()),
         model_status::OTHER_THREAD => {
@@ -983,6 +988,30 @@ pub fn npc_model(pid: u32, npc_index: i32) -> Result<Option<crate::EntityModel>,
         ModelRequest {
             index: npc_index,
             target: model_target::NPC,
+            ..Default::default()
+        },
+    )
+}
+
+/// The client builds NPC type `id`'s model posed at `frame` of `animation` (-1 for none), placed at local fine x and y.
+pub fn npc_type_model(
+    pid: u32,
+    id: i32,
+    animation: i32,
+    frame: i32,
+    fine: (i32, i32),
+    orientation: i32,
+) -> Result<Option<crate::EntityModel>, String> {
+    model(
+        pid,
+        ModelRequest {
+            target: model_target::NPC_TYPE,
+            type_id: id,
+            animation,
+            frame,
+            fine_x: fine.0,
+            fine_y: fine.1,
+            orientation,
             ..Default::default()
         },
     )

@@ -28,10 +28,10 @@ use crate::{
     draw_batch, draw_lines, enum_def, find_path, game_state, game_val_names, ground_items,
     in_instance, item_container, item_names, item_params, landmasses, loc_model, loc_shown, locs,
     map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
-    npc_model, npc_sizes, npcs, player_model, player_plane, players, project, project_moved,
-    projectiles, scene_collision, scene_route, selected_widget, send_input, send_input_with,
-    server_tile, spot_anims, sub_interfaces, varbit, varc, varp_value, varps, wait_watchers,
-    widget, widget_children, widget_model, world_route, world_select,
+    npc_model, npc_sizes, npc_type_model, npcs, player_model, player_plane, players, project,
+    project_moved, projectiles, scene_collision, scene_route, selected_widget, send_input,
+    send_input_with, server_tile, spot_anims, sub_interfaces, varbit, varc, varp_value, varps,
+    wait_watchers, widget, widget_children, widget_model, world_route, world_select,
 };
 #[cfg(not(windows))]
 use offline::*;
@@ -259,6 +259,16 @@ mod offline {
     ) -> Result<crate::nav::NavPlan, String> {
         Err(NO_WIN32.into())
     }
+    pub fn npc_type_model(
+        _: u32,
+        _: i32,
+        _: i32,
+        _: i32,
+        _: (i32, i32),
+        _: i32,
+    ) -> Result<Option<EntityModel>, String> {
+        Err(NO_WIN32.into())
+    }
     pub fn player_model(_: u32, _: i32) -> Result<Option<EntityModel>, String> {
         Err(NO_WIN32.into())
     }
@@ -311,6 +321,7 @@ struct ScriptModel {
     corners: Vec<ScreenPoint>,
     hull: Vec<ScreenPoint>,
     faces: Vec<[ScreenPoint; 3]>,
+    frame_count: u32,
 }
 
 fn script_model(m: crate::EntityModel) -> ScriptModel {
@@ -331,6 +342,7 @@ fn script_model(m: crate::EntityModel) -> ScriptModel {
             .into_iter()
             .map(|face| face.map(|[x, y]| ScreenPoint { x, y }))
             .collect(),
+        frame_count: m.frame_count,
     }
 }
 
@@ -766,6 +778,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("inventory", "main/interfaces/gametabs/inventory.luau"),
     lib_module!("wornitems", "main/interfaces/gametabs/wornitems.luau"),
     lib_module!("side_panels", "main/interfaces/gametabs/side_panels.luau"),
+    lib_module!("combat_achievements", "main/combat_achievements.luau"),
     lib_module!("magic", "main/interfaces/gametabs/magic.luau"),
     lib_module!("journal", "main/interfaces/gametabs/journal.luau"),
     lib_module!("prayer", "main/interfaces/gametabs/prayer.luau"),
@@ -1901,6 +1914,27 @@ pub fn run_with_modules(
             )?
             .map(script_model))
         })?,
+    )?;
+    globals.set(
+        "npc_type_model",
+        query(
+            &lua,
+            pid,
+            |pid,
+             (id, animation, frame, fine_x, fine_y, orientation): (
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+            )| {
+                Ok(
+                    npc_type_model(pid, id, animation, frame, (fine_x, fine_y), orientation)?
+                        .map(script_model),
+                )
+            },
+        )?,
     )?;
     globals.set("players", query(&lua, pid, |pid, (): ()| players(pid))?)?;
     globals.set(

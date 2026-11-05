@@ -23,6 +23,7 @@ mod scene_loader;
 mod script_runs;
 mod scripts;
 mod spot_anims;
+mod types;
 mod values;
 mod varc_setters;
 mod world_select;
@@ -58,9 +59,10 @@ pub use scripts::{
     find_component_fields, find_component_invalidate, find_component_sprite, ComponentInvalidate,
 };
 pub use spot_anims::find_spot_anims;
+pub use types::{find_type_models, TypeModels};
 pub use values::{
     find_actor_lists, find_actor_names, find_appearance_decoder, find_item_containers,
-    find_run_energy, find_varcs, AppearanceDecoder, ItemContainers, World,
+    find_npc_head_icons, find_run_energy, find_varcs, AppearanceDecoder, ItemContainers, World,
 };
 pub use varc_setters::{find_varc_setters, VarcSetters, VARIANT_KIND, VARIANT_STRING};
 pub use world_select::find_world_select;
@@ -1067,6 +1069,14 @@ fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
 }
 
 /// The login screen drawer checks "logging in" twice over: `cmp dword [client + game_state], 20; je; cmp dword [rip + screen], 20`, the game state and then the login screen's own index against `LOGGING_IN`. The global of the second compare is the screen index.
+// A compare whose second operand is this immediate (a `cmp [x], reg` has none, and reading it panics).
+fn compares_immediate(i: &Instruction, value: u64) -> bool {
+    matches!(
+        i.op1_kind(),
+        OpKind::Immediate8to32 | OpKind::Immediate32 | OpKind::Immediate8
+    ) && i.immediate(1) == value
+}
+
 fn login_screen_compares(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
     const LOGGING_IN: u64 = 20;
     let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
@@ -1085,12 +1095,12 @@ fn login_screen_compares(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
                 && state.memory_base() != Register::RIP
                 && state.memory_index() == Register::None
                 && state.memory_displacement64() == game_state as u64
-                && state.immediate(1) == LOGGING_IN;
+                && compares_immediate(state, LOGGING_IN);
             let compares_screen = screen.mnemonic() == Mnemonic::Cmp
                 && screen.op0_kind() == OpKind::Memory
                 && screen.memory_size() == iced_x86::MemorySize::UInt32
                 && screen.is_ip_rel_memory_operand()
-                && screen.immediate(1) == LOGGING_IN;
+                && compares_immediate(screen, LOGGING_IN);
             (compares_state && jump.mnemonic() == Mnemonic::Je && compares_screen)
                 .then(|| screen.ip_rel_memory_address() as u32)
         })
@@ -2018,6 +2028,43 @@ mod tests {
     }
 
     #[test]
+    fn finds_npc_head_icons_in_archived_builds() {
+        for_each_archived_build(|build, pe| {
+            let icons = find_npc_head_icons(pe).unwrap_or_else(|error| {
+                panic!("NPC head icons not found in {}: {error:?}", build.display())
+            });
+            println!("{}: {icons:x?}", build.display());
+            assert_eq!(
+                (icons.field, icons.sprites),
+                (0x760, 0x48),
+                "{}",
+                build.display()
+            );
+        });
+    }
+
+    #[test]
+    fn finds_type_models_in_archived_builds() {
+        for_each_archived_build(|build, pe| {
+            let lookup = find_obj_type_lookup(pe).expect("item definition lookup");
+            let names = find_actor_names(pe).expect("actor names");
+            let model = find_npc_model(pe, names.npc_definition).expect("NPC model");
+            let types =
+                find_type_models(pe, lookup.function, model.get_model, names.npc_definition)
+                    .unwrap_or_else(|error| {
+                        panic!("type models not found in {}: {error:?}", build.display())
+                    });
+            println!("{}: {types:x?}", build.display());
+            assert_eq!(
+                (types.seq_frame_count, types.seq_frames),
+                (0x48, 0x50),
+                "{}",
+                build.display()
+            );
+        });
+    }
+
+    #[test]
     fn finds_instance_flag_in_archived_builds() {
         for_each_archived_build(|build, pe| {
             let flag = find_instance_flag(pe).unwrap_or_else(|error| {
@@ -2250,6 +2297,18 @@ mod tests {
                         )
                     });
                 println!("{}: animation height {height:x}", build.display());
+                let types =
+                    find_type_models(pe, lookup.function, model.get_model, names.npc_definition)
+                        .unwrap_or_else(|error| {
+                            panic!("type models not found in {}: {error:?}", build.display())
+                        });
+                println!("{}: {types:x?}", build.display());
+                assert_eq!(
+                    (types.seq_frame_count, types.seq_frames),
+                    (0x48, 0x50),
+                    "{}",
+                    build.display()
+                );
             }
             let scene = find_scene(pe).unwrap_or_else(|error| {
                 panic!("scene not found in {}: {error:?}", build.display())

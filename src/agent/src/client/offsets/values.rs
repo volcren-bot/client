@@ -516,3 +516,77 @@ pub struct World {
     pub player: LocalPlayer,
     pub actor: ActorPosition,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NpcHeadIcons {
+    /// the NPC's pointer to the head icons the server set (null for none)
+    pub field: u32,
+    /// where in that object the sprite vector starts; the archive vector is at 0, both `std::vector<int>`
+    pub sprites: u32,
+}
+
+// The function clearing an NPC's head icons: it loads the field, zeroes it, destroys the sprite vector and then the
+// archive vector with one call, and frees the object, which is twice the sprite vector's offset in size.
+pub fn find_npc_head_icons(pe: &Pe) -> Result<NpcHeadIcons, ScanError> {
+    let mut found = Vec::new();
+    for &(begin, end) in &pe.functions {
+        if end - begin > 0x80 {
+            continue;
+        }
+        let instrs: Vec<Instruction> =
+            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
+                .into_iter()
+                .collect();
+        for w in instrs.windows(9) {
+            let [load, test, je, zero, lea, destroy, back, destroy_again, size] = w else {
+                continue;
+            };
+            let Some(field) = load_from(load, Register::RCX) else {
+                continue;
+            };
+            let object = load.op0_register();
+            let zeroes = zero.mnemonic() == Mnemonic::Mov
+                && zero.op0_kind() == OpKind::Memory
+                && zero.memory_base() == Register::RCX
+                && zero.memory_index() == Register::None
+                && zero.memory_displacement64() == field as u64
+                && matches!(
+                    zero.op1_kind(),
+                    OpKind::Immediate32to64 | OpKind::Immediate32
+                )
+                && zero.immediate(1) == 0;
+            let same_call = destroy.mnemonic() == Mnemonic::Call
+                && destroy.op0_kind() == OpKind::NearBranch64
+                && destroy_again.mnemonic() == Mnemonic::Call
+                && destroy_again.op0_kind() == OpKind::NearBranch64
+                && destroy.near_branch_target() == destroy_again.near_branch_target();
+            let sprites = (lea.mnemonic() == Mnemonic::Lea
+                && lea.op0_register() == Register::RCX
+                && lea.memory_base() == object
+                && lea.memory_index() == Register::None)
+                .then(|| lea.memory_displacement64() as u32);
+            let back_to_object = back.mnemonic() == Mnemonic::Mov
+                && back.op0_register() == Register::RCX
+                && back.op1_kind() == OpKind::Register
+                && back.op1_register() == object;
+            let frees_both = size.mnemonic() == Mnemonic::Mov
+                && size.op0_register() == Register::EDX
+                && size.op1_kind() == OpKind::Immediate32;
+            if object.size() == 8
+                && test.mnemonic() == Mnemonic::Test
+                && test.op0_register() == object
+                && je.mnemonic() == Mnemonic::Je
+                && zeroes
+                && same_call
+                && back_to_object
+                && frees_both
+            {
+                if let Some(sprites) = sprites.filter(|&s| size.immediate(1) == 2 * s as u64) {
+                    found.push((field, sprites));
+                }
+            }
+        }
+    }
+    let (field, sprites) = one(found)?;
+    Ok(NpcHeadIcons { field, sprites })
+}

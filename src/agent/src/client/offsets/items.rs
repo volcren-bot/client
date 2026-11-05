@@ -152,7 +152,7 @@ pub struct CacheTable {
 
 const OBJ_ARCHIVE: u64 = 10;
 
-fn cache_reader(pe: &Pe, lookup: u32) -> Option<u32> {
+pub(super) fn cache_reader(pe: &Pe, lookup: u32) -> Option<u32> {
     let instrs = decode_at(pe, lookup, 120);
     let at = instrs.iter().position(|i| {
         i.mnemonic() == Mnemonic::Mov
