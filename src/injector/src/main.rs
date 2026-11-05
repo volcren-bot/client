@@ -593,7 +593,9 @@ fn run() -> std::process::ExitCode {
         eprintln!(
             "       injector button <pid> left|right|middle down|up | scroll <pid> <notches> | key <pid> <vk> down|up"
         );
-        eprintln!("       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms>");
+        eprintln!(
+            "       injector wind_mouse <pid> <x> <y> <speed> <wind> <gravity> <timeout ms> <pace>"
+        );
         eprintln!(
             "       injector overlay <pid> rect <x1> <y1> <x2> <y2> <r> <g> <b> <a> | overlay <pid> clear"
         );

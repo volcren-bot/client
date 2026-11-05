@@ -50,6 +50,7 @@ const MOUSE: wind_mouse::Options = wind_mouse::Options {
     wind: 5.0,
     gravity: 10.0,
     timeout_ms: 15000,
+    pace: 1.0,
 };
 const CLICK_HOLD_MS: (f64, f64) = (40.0, 220.0);
 const KEY_HOLD_MS: (f64, f64) = (30.0, 60.0);

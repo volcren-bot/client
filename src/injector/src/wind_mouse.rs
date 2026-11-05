@@ -29,6 +29,8 @@ pub struct Options {
     pub wind: f64,
     pub gravity: f64,
     pub timeout_ms: u32,
+    /// Divides the wait between the points of a move: 1.2 moves 20% faster along the same path.
+    pub pace: f64,
 }
 
 impl Default for Options {
@@ -38,6 +40,7 @@ impl Default for Options {
             wind: 6.0,
             gravity: 9.0,
             timeout_ms: 10_000,
+            pace: 1.0,
         }
     }
 }
@@ -122,6 +125,7 @@ struct WindMouse<P, S> {
     speed: f64,
     wind: f64,
     gravity: f64,
+    pace: f64,
     timeout_ms: u32,
 
     x: f64,
@@ -161,6 +165,7 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
             speed: clamp(options.speed, 2.0, 30.0),
             wind: clamp(options.wind, 0.0, 15.0),
             gravity: clamp(options.gravity, 1.0, 30.0),
+            pace: clamp(options.pace, 0.25, 4.0),
             timeout_ms: options.timeout_ms.min(MAX_TIMEOUT_MS),
             x: start.0,
             y: start.1,
@@ -226,8 +231,10 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
 
         let move_time = (100.0 + 14.0 * self.total_dist.sqrt() / (self.speed / 10.0))
             * self.rng.range(0.78, 1.22);
-        self.gap = self.rng.range(6.0, 9.0);
-        let n = (move_time / self.gap).round().max(3.0);
+        let gap = self.rng.range(6.0, 9.0);
+        let n = (move_time / gap).round().max(3.0);
+        // the same path, every step of it sooner
+        self.gap = gap / self.pace;
         self.max_step = (self.total_dist / n / 0.80).min(self.total_dist * 0.5);
 
         self.arc_scale = clamp(2.8 * self.wind / self.gravity, 0.4, 2.5);
@@ -415,6 +422,7 @@ mod tests {
         wind: 6.0,
         gravity: 9.0,
         timeout_ms: 10_000,
+        pace: 1.0,
     };
 
     fn points(
@@ -492,6 +500,38 @@ mod tests {
             per_point >= 5.0,
             "{per_point} ms per point over {} points",
             posted.len()
+        );
+    }
+
+    #[test]
+    fn pace_divides_the_move_time() {
+        // nothing really sleeps, so each wait asked for runs from the start: the last is the move's length
+        let slept_ms = |pace: f64| {
+            let options = Options { pace, ..FAST };
+            let mut total = 0.0;
+            for _ in 0..200 {
+                let mut slept = Duration::ZERO;
+                let result = run_with(
+                    Some((0.0, 0.0)),
+                    (300, 200),
+                    &options,
+                    |_, _| Ok(()),
+                    |duration| {
+                        slept = slept.max(duration);
+                        true
+                    },
+                );
+                assert!(result.is_ok(), "{result:?}");
+                total += slept.as_secs_f64() * 1000.0;
+            }
+            total / 200.0
+        };
+        let normal = slept_ms(1.0);
+        let faster = slept_ms(1.25);
+        let ratio = faster / normal;
+        assert!(
+            (0.72..0.88).contains(&ratio),
+            "{normal} ms at pace 1, {faster} ms at pace 1.25"
         );
     }
 

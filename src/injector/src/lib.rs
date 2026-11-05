@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 11;
+pub const HOST_API: u32 = 12;
 pub use ipc::state::varp;
 
 pub mod antiban;
@@ -555,6 +555,7 @@ impl Input {
                 options.wind.to_string(),
                 options.gravity.to_string(),
                 options.timeout_ms.to_string(),
+                options.pace.to_string(),
             ],
             Self::Click {
                 button,
@@ -611,7 +612,17 @@ impl Input {
                     })
                 })(),
             ),
-            ["wind_mouse", pid, x, y, speed, wind, gravity, timeout_ms] => parse(
+            [
+                "wind_mouse",
+                pid,
+                x,
+                y,
+                speed,
+                wind,
+                gravity,
+                timeout_ms,
+                pace,
+            ] => parse(
                 pid,
                 (|| {
                     let options = wind_mouse::Options {
@@ -621,6 +632,7 @@ impl Input {
                         timeout_ms: timeout_ms
                             .parse()
                             .map_err(|_| format!("Invalid timeout: {timeout_ms}"))?,
+                        pace: real(pace)?,
                     };
                     Ok(Self::WindMouse {
                         x: number(x)?,
@@ -959,6 +971,7 @@ mod tests {
                     wind: 0.1,
                     gravity: 9.0,
                     timeout_ms: 2500,
+                    pace: 1.25,
                 },
             },
             Input::Click {

@@ -1944,6 +1944,7 @@ pub fn run_with_modules(
             opts.timeout_ms = options
                 .get::<Option<u32>>("timeout")?
                 .unwrap_or(opts.timeout_ms);
+            opts.pace = options.get::<Option<f64>>("pace")?.unwrap_or(opts.pace);
         }
         Ok(Input::WindMouse {
             x,
