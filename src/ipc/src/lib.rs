@@ -77,6 +77,11 @@ pub fn worker_mutex_name(pid: u32) -> String {
     format!("AGENT_WORKER_{pid}")
 }
 
+/// Held by whoever has a request in the slot of a window message (`input::*_MESSAGE`), from writing it to reading the answer. The agent only answers a slot's newest request, so askers take turns.
+pub fn request_mutex_name(pid: u32, message: u32) -> String {
+    format!("AGENT_REQUEST_{pid}_{message}")
+}
+
 pub mod input {
     pub const OPEN_CONSOLE_MESSAGE: u32 = 0x0400 + 1;
     pub const MODIFIERS_MESSAGE: u32 = 0x0400 + 3;

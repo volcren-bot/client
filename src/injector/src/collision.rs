@@ -454,6 +454,8 @@ impl Cell for Movement {
 pub enum Square<T> {
     Missing,
     Open,
+    /// Every tile holds this: an upper plane's square with no floor anywhere, which most of them are.
+    Same(T),
     Tiles(Box<[T; TILES]>),
 }
 
@@ -483,6 +485,15 @@ fn square_index(x: i32, y: i32) -> Option<(usize, usize)> {
     ))
 }
 
+// A square whose tiles all hold `value`.
+fn same<T: Cell>(value: T) -> Square<T> {
+    if value == T::default() {
+        Square::Open
+    } else {
+        Square::Same(value)
+    }
+}
+
 impl<T: Cell> WorldCollision<T> {
     pub fn flags(&self, plane: i32, x: i32, y: i32) -> Option<T> {
         let squares = self.planes.get(usize::try_from(plane).ok()?)?;
@@ -490,6 +501,7 @@ impl<T: Cell> WorldCollision<T> {
         match &squares[square] {
             Square::Missing => None,
             Square::Open => Some(T::default()),
+            Square::Same(value) => Some(*value),
             Square::Tiles(tiles) => Some(tiles[tile]),
         }
     }
@@ -529,8 +541,10 @@ impl<T: Cell> WorldCollision<T> {
             return;
         };
         let square = &mut squares[square];
-        if let Square::Open = square {
-            *square = Square::Tiles(Box::new([T::default(); TILES]));
+        match square {
+            Square::Open => *square = Square::Tiles(Box::new([T::default(); TILES])),
+            Square::Same(value) => *square = Square::Tiles(Box::new([*value; TILES])),
+            _ => {}
         }
         if let Square::Tiles(tiles) = square {
             tiles[tile] = tiles[tile].with(flags);
@@ -546,9 +560,9 @@ impl<T: Cell> WorldCollision<T> {
         for squares in &mut self.planes {
             for square in squares.iter_mut() {
                 if let Square::Tiles(tiles) = square
-                    && tiles.iter().all(|t| *t == T::default())
+                    && tiles.iter().all(|t| *t == tiles[0])
                 {
-                    *square = Square::Open;
+                    *square = same(tiles[0]);
                 }
             }
         }
@@ -709,13 +723,20 @@ impl WorldCollision<Movement> {
             for (region, square) in squares.iter().enumerate() {
                 let tiles = match square {
                     Square::Missing => continue,
-                    Square::Open => None,
+                    Square::Open | Square::Same(_) => None,
                     Square::Tiles(tiles) => Some(tiles),
                 };
                 out.push(plane as u8);
                 out.extend_from_slice(&(region as u16).to_le_bytes());
                 let Some(tiles) = tiles else {
-                    out.push(OPEN);
+                    // a square of one value is one run of the whole square
+                    if let Square::Same(value) = square {
+                        out.push(TILES_RLE);
+                        out.extend_from_slice(&(TILES as u16).to_le_bytes());
+                        out.extend_from_slice(&value.0.to_le_bytes());
+                    } else {
+                        out.push(OPEN);
+                    }
                     continue;
                 };
                 out.push(TILES_RLE);
@@ -750,15 +771,22 @@ impl WorldCollision<Movement> {
             let square = match r.u8()? {
                 OPEN => Square::Open,
                 TILES_RLE => {
-                    let mut tiles = Box::new([Movement::default(); TILES]);
-                    let mut at = 0;
-                    while at < TILES {
-                        let run = le16(&mut r)? as usize;
-                        let value = Movement(le16(&mut r)?);
-                        tiles.get_mut(at..at + run)?.fill(value);
-                        at += run.max(1);
+                    let run = le16(&mut r)? as usize;
+                    let value = Movement(le16(&mut r)?);
+                    if run == TILES {
+                        same(value)
+                    } else {
+                        let mut tiles = Box::new([Movement::default(); TILES]);
+                        tiles.get_mut(..run)?.fill(value);
+                        let mut at = run.max(1);
+                        while at < TILES {
+                            let run = le16(&mut r)? as usize;
+                            let value = Movement(le16(&mut r)?);
+                            tiles.get_mut(at..at + run)?.fill(value);
+                            at += run.max(1);
+                        }
+                        Square::Tiles(tiles)
                     }
-                    Square::Tiles(tiles)
                 }
                 _ => return None,
             };
@@ -1089,5 +1117,31 @@ mod tests {
         );
         assert_eq!(back.flags(0, 51 * 64, 50 * 64), Some(Movement(0)));
         assert_eq!(back.flags(0, 52 * 64, 50 * 64), None);
+    }
+
+    #[test]
+    fn a_square_of_one_value_is_kept_as_that_value() {
+        let region = region_id(50, 50);
+        let mut world = WorldCollision::<Movement>::default();
+        world.add_square(region);
+        // an upper plane with no floor anywhere, as most are
+        for x in 0..64 {
+            for y in 0..64 {
+                world.add(1, 50 * 64 + x, 50 * 64 + y, flag::NO_FLOOR);
+            }
+        }
+        world.shrink();
+        let no_floor = Movement::default().with(flag::NO_FLOOR);
+        assert!(matches!(world.square(1, region), Square::Same(v) if *v == no_floor));
+        assert_eq!(world.flags(1, 50 * 64 + 9, 50 * 64 + 9), Some(no_floor));
+
+        let back = WorldCollision::from_bytes(&world.to_bytes(7), 7).unwrap();
+        assert!(matches!(back.square(1, region), Square::Same(v) if *v == no_floor));
+        assert!(matches!(back.square(0, region), Square::Open));
+
+        // a tile that differs makes it a square of tiles again, the rest keeping the value
+        world.add(1, 50 * 64, 50 * 64, flag::WALL_EAST);
+        assert!(matches!(world.square(1, region), Square::Tiles(_)));
+        assert_eq!(world.flags(1, 50 * 64 + 9, 50 * 64 + 9), Some(no_floor));
     }
 }

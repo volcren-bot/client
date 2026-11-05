@@ -782,6 +782,8 @@ pub enum Read {
 #[derive(Debug, Clone, Default)]
 pub struct Editor<L> {
     pub index: Option<usize>,
+    /// The name the open layout is saved under, which finds it again when the list changes under the editor.
+    opened: Option<String>,
     pub draft: L,
     pub selected: Option<usize>,
     /// The selected slot is in the rune pouch, not the inventory.
@@ -809,10 +811,24 @@ pub enum Action {
 
 const NEW_LAYOUT: &str = "New layout";
 
+/// A name for a copy of the layout `name` that no saved layout has: "X copy", then "X copy 2" and up.
+fn copy_name<L: Layout>(saved: &[L], name: &str) -> String {
+    let free = |candidate: &str| saved.iter().all(|l| l.name() != candidate);
+    let first = format!("{name} copy");
+    if free(&first) {
+        return first;
+    }
+    (2..)
+        .map(|n| format!("{first} {n}"))
+        .find(|candidate| free(candidate))
+        .unwrap_or(first)
+}
+
 impl<L: Layout> Editor<L> {
     /// Opens the saved layout at `index`, or a new one.
     fn open(&mut self, saved: &[L], index: Option<usize>) {
         self.index = index.filter(|&i| i < saved.len());
+        self.opened = self.index.map(|i| saved[i].name().to_owned());
         self.draft = self.index.map(|i| saved[i].clone()).unwrap_or_default();
         self.selected = None;
         self.selected_in_pouch = false;
@@ -835,8 +851,20 @@ impl<L: Layout> Editor<L> {
         self.index.and_then(|i| saved.get(i)) != Some(&self.draft)
     }
 
+    /// Points `index` at the open layout in `saved`, which another run of the same script may have changed: a layout that moved is found by its name, and one that is gone leaves the draft as a new layout.
+    fn follow(&mut self, saved: &[L]) {
+        self.index = self
+            .opened
+            .as_deref()
+            .and_then(|name| saved.iter().position(|l| l.name() == name));
+        if self.index.is_none() {
+            self.opened = None;
+        }
+    }
+
     /// The layout dropdown, the name, Save, Duplicate and Remove.
     fn header(&mut self, ui: &mut egui::Ui, saved: &mut Vec<L>) {
+        self.follow(saved);
         let mut open: Option<Option<usize>> = None;
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -907,6 +935,7 @@ impl<L: Layout> Editor<L> {
                         self.index = Some(saved.len() - 1);
                     }
                 }
+                self.opened = Some(name);
             }
             if ui
                 .add_enabled(
@@ -917,7 +946,7 @@ impl<L: Layout> Editor<L> {
                 && let Some(i) = self.index
             {
                 let mut copy = saved[i].clone();
-                copy.set_name(format!("{} copy", copy.name()));
+                copy.set_name(copy_name(saved, copy.name()));
                 saved.push(copy);
                 open = Some(Some(saved.len() - 1));
             }
@@ -1839,6 +1868,43 @@ mod tests {
             }),
             ["A", ""]
         );
+    }
+
+    #[test]
+    fn the_editor_follows_its_layout_when_the_list_changes_under_it() {
+        let named = |name: &str| Equipment {
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut saved = vec![named("A"), named("B"), named("C")];
+        let mut editor: Editor<Equipment> = Editor::default();
+        editor.open(&saved, Some(2));
+
+        // another run of the script removed a layout before it: the open one moved
+        saved.remove(0);
+        editor.follow(&saved);
+        assert_eq!(editor.index, Some(1));
+
+        // and then the open one itself: the draft is a new layout, never another one's
+        saved.remove(1);
+        editor.follow(&saved);
+        assert_eq!(editor.index, None);
+        assert_eq!(editor.draft.name, "C");
+        assert!(editor.dirty(&saved));
+    }
+
+    #[test]
+    fn a_copy_gets_a_name_no_layout_has() {
+        let named = |name: &str| Equipment {
+            name: name.into(),
+            ..Default::default()
+        };
+        let mut saved = vec![named("X")];
+        assert_eq!(copy_name(&saved, "X"), "X copy");
+        saved.push(named("X copy"));
+        assert_eq!(copy_name(&saved, "X"), "X copy 2");
+        saved.push(named("X copy 2"));
+        assert_eq!(copy_name(&saved, "X"), "X copy 3");
     }
 
     #[test]

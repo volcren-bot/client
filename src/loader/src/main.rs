@@ -44,7 +44,11 @@ fn main() -> eframe::Result {
     if update::finish_if_asked() {
         return Ok(());
     }
-    update::cleanup();
+    let instance = update::Instance::hold();
+    // another open loader may be in the middle of its own update
+    if instance.alone() {
+        update::cleanup();
+    }
     transports::start();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -57,7 +61,7 @@ fn main() -> eframe::Result {
     let result = eframe::run_native(
         "Volcren",
         options,
-        Box::new(|cc| Ok(Box::new(app::LoaderApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(app::LoaderApp::new(cc, instance)))),
     );
     #[cfg(not(windows))]
     update::relaunch_after_exit();

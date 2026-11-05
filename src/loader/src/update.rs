@@ -4,7 +4,7 @@ use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -96,11 +96,70 @@ pub struct Available {
     pub kind: Kind,
 }
 
-/// A download's progress, written by the worker and read by the banner.
+/// A download's progress, written by the worker and read by the banner, and the banner's word to the worker that it was skipped.
 #[derive(Default)]
 pub struct Progress {
     pub done: AtomicU64,
     pub total: AtomicU64,
+    cancelled: AtomicBool,
+}
+
+const CANCELLED: &str = "The update was skipped.";
+
+impl Progress {
+    /// Stops the download at its next chunk; nothing it downloaded is kept.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            Err(CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Held by every loader while it is open. An update replaces the files other open loaders run from, so it only installs for the only one.
+pub struct Instance(Option<fs::File>);
+
+impl Instance {
+    /// Takes this loader's share of the lock in the data folder. With no data folder there is nothing to hold, and the loader counts as the only one.
+    pub fn hold() -> Self {
+        let path = directories::ProjectDirs::from("com", "volcren", "Volcren")
+            .map(|dirs| dirs.data_dir().join("loader.lock"));
+        path.map_or(Self(None), |path| Self::at(&path))
+    }
+
+    fn at(path: &Path) -> Self {
+        let file = path
+            .parent()
+            .and_then(|dir| fs::create_dir_all(dir).ok())
+            .and_then(|()| {
+                fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(path)
+                    .ok()
+            });
+        if let Some(file) = &file {
+            let _ = file.lock_shared();
+        }
+        Self(file)
+    }
+
+    /// Whether no other loader is open.
+    pub fn alone(&self) -> bool {
+        let Some(file) = &self.0 else { return true };
+        // a share of the lock can't be traded up in place: let go, try for all of it, and take the share back
+        let _ = file.unlock();
+        let alone = file.try_lock().is_ok();
+        let _ = file.unlock();
+        let _ = file.lock_shared();
+        alone
+    }
 }
 
 pub fn bucket_url(api: &Api, path: &str) -> String {
@@ -230,6 +289,9 @@ fn package_name(path: &str) -> Result<&str, String> {
     }
 }
 
+/// Numbers the downloads of this process, so a skipped one that is still stopping and the next never write the same file.
+static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
+
 /// Streams a package to `dir`, returning its path once its size and sha256 match the signed manifest.
 fn download(
     api: &Api,
@@ -240,8 +302,12 @@ fn download(
 ) -> Result<PathBuf, String> {
     let name = package_name(&file.path)?;
     fs::create_dir_all(dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
-    let partial = dir.join(format!("{name}.part"));
-    let result = fetch(api, file, &partial, progress, repaint);
+    let partial = dir.join(format!(
+        "{name}.{}-{}.part",
+        std::process::id(),
+        DOWNLOADS.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = fetch(api, file, &partial, progress, repaint).and_then(|()| progress.check());
     if result.is_err() {
         let _ = fs::remove_file(&partial);
         return result.map(|()| PathBuf::new());
@@ -295,6 +361,7 @@ fn fetch(
         if read == 0 {
             break;
         }
+        progress.check()?;
         hash.update(&buffer[..read]);
         output
             .write_all(&buffer[..read])
@@ -525,6 +592,34 @@ pub(crate) mod tests {
         let path = download(&api(&server.url), &file, &dir, &progress, &|| {}).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"the package");
         assert_eq!(progress.done.load(Ordering::Relaxed), 11);
+    }
+
+    #[test]
+    fn a_skipped_download_keeps_nothing() {
+        let server = FakeServer::start(|_, _| Reply::bytes(b"the package".to_vec()));
+        let dir = temp_dir("skipped");
+        let file = File {
+            path: "1/a.tar.gz".into(),
+            sha256: sha256(b"the package"),
+        };
+        let progress = Progress::default();
+        progress.cancel();
+        let result = download(&api(&server.url), &file, &dir, &progress, &|| {});
+        assert_eq!(result.unwrap_err(), CANCELLED);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_loader_is_alone_only_while_no_other_holds_the_lock() {
+        let path = temp_dir("instance").join("loader.lock");
+        let first = Instance::at(&path);
+        assert!(first.alone());
+        let second = Instance::at(&path);
+        assert!(!first.alone());
+        assert!(!second.alone());
+        drop(second);
+        assert!(first.alone(), "asking doesn't give up the share");
+        assert!(first.alone());
     }
 
     #[test]

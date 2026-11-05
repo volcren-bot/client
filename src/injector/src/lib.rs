@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 10;
+pub const HOST_API: u32 = 11;
 pub use ipc::state::varp;
 
 pub mod antiban;

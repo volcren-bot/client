@@ -58,15 +58,14 @@ impl Landmasses {
         closed: &crate::nav::Closed,
         count: &mut u32,
     ) -> Vec<Option<Box<[u32; TILES]>>> {
+        // a square's labels are made when its first tile gets one: most squares of the upper planes have nowhere to stand
         let mut squares: Vec<Option<Box<[u32; TILES]>>> = (0..SQUARES).map(|_| None).collect();
-        for (region, square) in squares.iter_mut().enumerate() {
-            if !matches!(world.square(plane as usize, region as u32), Square::Missing) {
-                *square = Some(Box::new([0; TILES]));
-            }
-        }
+        let label_at = |squares: &[Option<Box<[u32; TILES]>>], square: usize, tile: usize| {
+            squares[square].as_ref().map_or(0, |labels| labels[tile])
+        };
         let mut stack: Vec<(i32, i32)> = Vec::new();
         for region in 0..SQUARES {
-            if squares[region].is_none() {
+            if matches!(world.square(plane as usize, region as u32), Square::Missing) {
                 continue;
             }
             let (rx, ry) = (
@@ -77,13 +76,11 @@ impl Landmasses {
                 for dy in 0..REGION_SIZE {
                     let (x, y) = (rx + dx, ry + dy);
                     let tile = (dx * REGION_SIZE + dy) as usize;
-                    if squares[region].as_ref().is_some_and(|s| s[tile] != 0)
-                        || !standable(world, plane, x, y)
-                    {
+                    if label_at(&squares, region, tile) != 0 || !standable(world, plane, x, y) {
                         continue;
                     }
                     *count += 1;
-                    squares[region].as_mut().expect("checked")[tile] = *count;
+                    squares[region].get_or_insert_with(|| Box::new([0; TILES]))[tile] = *count;
                     stack.push((x, y));
                     while let Some((x, y)) = stack.pop() {
                         for (sx, sy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -91,17 +88,15 @@ impl Landmasses {
                             let Some((square, index)) = square_of(nx, ny) else {
                                 continue;
                             };
-                            let Some(labels) = squares[square].as_mut() else {
-                                continue;
-                            };
-                            if labels[index] != 0
+                            if label_at(&squares, square, index) != 0
                                 || !standable(world, plane, nx, ny)
                                 || !can_step_with(world, plane, x, y, sx, sy, true)
                                 || closed.contains(&((x, y, plane), (sx, sy)))
                             {
                                 continue;
                             }
-                            labels[index] = *count;
+                            squares[square].get_or_insert_with(|| Box::new([0; TILES]))[index] =
+                                *count;
                             stack.push((nx, ny));
                         }
                     }

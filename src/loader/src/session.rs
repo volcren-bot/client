@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -10,13 +11,16 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{
     Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript,
-    models::{Quote, credits_text, end_reason_message},
+    models::{Ended, Me, Quote, credits_text, end_reason_message},
 };
 use crate::libs;
+use crate::script::Process;
 
 /// The server ends a session after 5 minutes without a heartbeat, so the script is stopped before that.
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(4 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// How soon a kept session notices its script has exited.
+const WATCH_EVERY: Duration = Duration::from_millis(250);
 const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
 
 /// The cache folder: each revision is `<script id>_<revision>` in it, with the shared `lib` beside them.
@@ -123,24 +127,32 @@ pub fn prepare(api: &Api, script: &StoreScript, warned: Option<i64>) -> Result<P
     prepare_warned(api, script, &root, warned)
 }
 
+/// What starting the script would cost, with the account as the server has it now: the balance the loader holds goes stale on a top-up.
+pub fn quote(api: &Api, script_id: &str) -> Result<(Me, Quote), ApiError> {
+    let me = api.me()?;
+    Ok((me, api.quote(script_id)?))
+}
+
 /// Ends a run's old session, so it isn't counted, and asks what a new one would cost. `None` when the script is no longer listed for the account.
 pub fn restart_quote(
     api: &Api,
     old_session: &str,
     script_id: &str,
     community: bool,
-) -> Result<Option<(StoreScript, Quote)>, ApiError> {
+) -> Result<Option<(Me, StoreScript, Quote)>, ApiError> {
     // repeating the end is safe, and it covers one still on its way or one that failed
     let _ = api.end_session(old_session);
+    let me = api.me()?;
+    // only testers may ask for the community list; everyone else's community scripts are in the default one
     let Some(script) = api
-        .scripts("", "", community)?
+        .scripts("", "", community && me.can_browse_community())?
         .into_iter()
         .find(|s| s.id == script_id)
     else {
         return Ok(None);
     };
     let quote = api.quote(script_id)?;
-    Ok(Some((script, quote)))
+    Ok(Some((me, script, quote)))
 }
 
 /// Why a start can't go ahead at this quote.
@@ -313,13 +325,54 @@ pub enum Verdict {
     },
 }
 
+/// What `keep` tells the app, which may not draw a frame for a long time.
+#[derive(Debug)]
+pub enum Kept {
+    /// The server's answer to a heartbeat.
+    Beat(Heartbeat),
+    /// The script was killed for this reason. `sign_out` is set when the account itself is gone.
+    Stop { reason: String, sign_out: bool },
+    /// The script exited, and this is how ending the session went. Always the last event.
+    Ended(Result<Ended, ApiError>),
+}
+
+/// Keeps the session of a running script until the script exits, then ends it: heartbeats with the script's stats, and killing the script when the server or a lost connection says to. Blocks, so give it a thread: none of this may depend on the UI drawing frames, which stop while the window is hidden.
+pub fn keep(
+    api: &Api,
+    session_id: &str,
+    process: &Process,
+    interval: Duration,
+    report: impl Fn(Kept),
+) {
+    let mut beat = Beat::new(Instant::now(), interval);
+    let mut stopping = false;
+    while !process.exited() {
+        if stopping || !beat.due(Instant::now()) {
+            thread::sleep(WATCH_EVERY);
+            continue;
+        }
+        let stats = process.take_stats();
+        beat.report(stats.experience, stats.gold, &stats.custom);
+        let sent = beat.take(Instant::now());
+        let result = api.heartbeat(session_id, sent.as_ref());
+        if let Ok(answer) = &result {
+            report(Kept::Beat(answer.clone()));
+        }
+        if let Verdict::Stop { reason, sign_out } = beat.on_result(Instant::now(), sent, result) {
+            process.stop();
+            stopping = true;
+            report(Kept::Stop { reason, sign_out });
+        }
+    }
+    report(Kept::Ended(api.end_session(session_id)));
+}
+
 /// The heartbeat timer of one running store script. It owns no clock: callers pass `now`, so tests can drive it.
 pub struct Beat {
     interval: Duration,
     next_due: Instant,
     last_ok: Instant,
     last_taken: Instant,
-    in_flight: bool,
     failures: u32,
     pending: Stats,
 }
@@ -331,18 +384,13 @@ impl Beat {
             next_due: now + interval,
             last_ok: now,
             last_taken: now,
-            in_flight: false,
             failures: 0,
             pending: Stats::default(),
         }
     }
 
     pub fn due(&self, now: Instant) -> bool {
-        !self.in_flight && now >= self.next_due
-    }
-
-    pub fn next_due(&self) -> Instant {
-        self.next_due
+        now >= self.next_due
     }
 
     /// Stats the script reported since the last heartbeat.
@@ -352,7 +400,6 @@ impl Beat {
 
     /// Starts a heartbeat and returns what to send: the pending stats with the minutes since the last one, measured here.
     pub fn take(&mut self, now: Instant) -> Option<Stats> {
-        self.in_flight = true;
         let mut stats = std::mem::take(&mut self.pending);
         stats.minutes = now.saturating_duration_since(self.last_taken).as_secs_f64() / 60.0;
         self.last_taken = now;
@@ -365,7 +412,6 @@ impl Beat {
         sent: Option<Stats>,
         result: Result<Heartbeat, ApiError>,
     ) -> Verdict {
-        self.in_flight = false;
         match result {
             Ok(beat) if beat.alive => {
                 self.last_ok = now;
@@ -478,13 +524,12 @@ mod tests {
     }
 
     #[test]
-    fn heartbeats_are_due_after_the_interval_and_not_while_one_is_in_flight() {
+    fn heartbeats_are_due_an_interval_after_the_last_answer() {
         let t0 = Instant::now();
         let mut beat = Beat::new(t0, Duration::from_secs(60));
         assert!(!beat.due(t0 + Duration::from_secs(59)));
         assert!(beat.due(t0 + Duration::from_secs(60)));
         beat.take(t0 + Duration::from_secs(60));
-        assert!(!beat.due(t0 + Duration::from_secs(120)));
         assert_eq!(
             beat.on_result(t0 + Duration::from_secs(61), None, alive()),
             Verdict::Continue
@@ -553,7 +598,7 @@ mod tests {
         let mut now = t0 + Duration::from_secs(60);
         let sent = beat.take(now);
         assert_eq!(beat.on_result(now, sent, network()), Verdict::Continue);
-        assert_eq!(beat.next_due() - now, Duration::from_secs(10));
+        assert_eq!(beat.next_due - now, Duration::from_secs(10));
 
         // The undelivered stats are sent again.
         now += Duration::from_secs(10);
@@ -563,7 +608,7 @@ mod tests {
             beat.on_result(now, Some(resent), network()),
             Verdict::Continue
         );
-        assert_eq!(beat.next_due() - now, Duration::from_secs(20));
+        assert_eq!(beat.next_due - now, Duration::from_secs(20));
 
         // Backoff is capped, and after 4 minutes without a success the script is stopped.
         let mut verdict = Verdict::Continue;
@@ -594,7 +639,7 @@ mod tests {
         beat.take(t0 + Duration::from_secs(70));
         beat.on_result(t0 + Duration::from_secs(70), None, network());
         assert_eq!(
-            beat.next_due() - (t0 + Duration::from_secs(70)),
+            beat.next_due - (t0 + Duration::from_secs(70)),
             Duration::from_secs(10)
         );
     }

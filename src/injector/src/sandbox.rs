@@ -848,6 +848,12 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("ticks", "utils/ticks.luau"),
     lib_module!("stats_report", "utils/stats_report.luau"),
     lib_module!("log", "utils/log.luau"),
+    lib_module!("npc_health", "main/entities/npc_health.luau"),
+    lib_module!("special_attack", "main/interfaces/special_attack.luau"),
+    lib_module!("combat", "main/interfaces/gametabs/combat.luau"),
+    lib_module!("equipment_layout", "main/equipment_layout.luau"),
+    lib_module!("inventory_layout", "main/inventory_layout.luau"),
+    lib_module!("prayer_layout", "main/prayer_layout.luau"),
 ];
 
 #[cfg(not(feature = "embedded-lib"))]
@@ -1965,11 +1971,18 @@ pub fn run_with_modules(
             }
         })?,
     )?;
-    // The skill the loader's Accounts page has set for spending this account's lamps. Needs no client.
+    // The skill the loader's Accounts page has set for spending the logged in account's lamps. The account is read here, as for the bank PIN: a script that named it could ask about any saved account.
     globals.set(
         "lamp_skill",
-        lua.create_function(|_, account: String| {
-            Ok(match crate::lamp::skill_for(&account) {
+        lua.create_function(move |_, (): ()| {
+            let skill = || -> Result<Option<String>, String> {
+                let pid = pid.ok_or(NO_CLIENT)?;
+                match game_state(pid)?.account_name {
+                    Some(account) => crate::lamp::skill_for(&account),
+                    None => Ok(None),
+                }
+            };
+            Ok(match skill() {
                 Ok(skill) => (skill, None),
                 Err(error) => (None, Some(error)),
             })
@@ -2705,6 +2718,31 @@ mod tests {
 
     #[test]
     #[cfg(feature = "embedded-lib")]
+    fn every_lib_file_is_a_lib_module() {
+        fn files(dir: &std::path::Path, found: &mut Vec<String>, root: &std::path::Path) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files(&path, found, root);
+                } else if path.extension().is_some_and(|e| e == "luau") {
+                    let relative = path.strip_prefix(root).unwrap();
+                    found.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../lib");
+        let mut found = vec!["host.luau".to_owned()];
+        files(&lib.join("main"), &mut found, &lib);
+        files(&lib.join("utils"), &mut found, &lib);
+        let missing: Vec<&String> = found
+            .iter()
+            .filter(|file| !LIB_MODULES.iter().any(|(_, path, _)| path == file))
+            .collect();
+        assert!(missing.is_empty(), "not in LIB_MODULES: {missing:?}");
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
     fn items_match_by_id_or_name() {
         let (lines, result) = run_lines(
             "local Item = require('item')\n\
@@ -3039,7 +3077,7 @@ Host.game_state = function() return { game_state = 30, player_name = 'Me', accou
 Host.players = function() return { { name = 'Other', index = 7 }, { name = 'Me', index = ME } } end
 Host.npcs = function() return stage.npcs end
 Host.item_container = function() return stage.inventory end
-Host.lamp_skill = function(account) assert(account == 'me') return stage.skill, stage.why end
+Host.lamp_skill = function() return stage.skill, stage.why end
 Npcs.interact = function(npc, option)
     assert(option == 'Talk-to')
     stage.talked += 1
@@ -3237,7 +3275,10 @@ local vars = {}
 Host.varbit = function(id) return vars[id] or 0 end
 local karamja = 'Karamja (varbit:4566=0?COINS=200)'
 local toll = 'Port Phasmatys (varbit:217=7?ECTO_TOKEN=2)'
+local carts = 'Carts (varbit:4567=0?COINS=300)'
 local stage_rows = {
+    row('link_gated', '', tile(5200, 3000), tile(5210, 3000), { note = carts }),
+    row('transports', '', tile(5220, 3000), tile(5900, 3000), { note = carts, items = 'COINS=300' }),
     row('link_gated', '', tile(5100, 3000), tile(5110, 3000), { note = karamja }),
     row('link_gated', '', tile(5120, 3000), tile(5130, 3000), { note = karamja, items = 'COINS=200' }),
     row('link_gated', '', tile(3010, 3000), tile(3020, 3000), { note = toll }),
@@ -3255,6 +3296,7 @@ local function allowed()
 end
 local has = allowed()
 assert(has(5100), 'a free row beside paying ones is not bound')
+assert(has(5200), 'nor beside paying far hops, which are no climbs or links')
 assert(not has(5120), 'the paying row owes its coins before the diary')
 assert(not has(3010), 'when no row names them the comment binds every row')
 assert(has(3030), 'a row with no comment is unaffected')

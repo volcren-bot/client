@@ -296,8 +296,6 @@ jobs:
             version: ${{ needs.package.outputs.version }}
         env:
             VERSION: ${{ needs.package.outputs.version }}
-            SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-            SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         steps:
             - uses: actions/checkout@v4
 
@@ -314,7 +312,24 @@ jobs:
             - name: Install rsign
               run: cargo install rsign2 --version 0.6.7 --locked
 
+            # Before anything is public: a manifest signed by a key the loader doesn't trust would stop every loader updating.
+            - name: Check the signature
+              run: |
+                  jq -j .manifest manifest/latest.signed.json > signed.manifest
+                  jq -j .signature manifest/latest.signed.json > signed.minisig
+                  jq -e --arg version "$VERSION" '.version == $version' signed.manifest > /dev/null \
+                      || { echo "latest.signed.json is not this version's manifest." >&2; exit 1; }
+                  verified=
+                  for key in $(grep -oE '"RW[A-Za-z0-9+/]{54}"' src/loader/src/update.rs | tr -d '"'); do
+                      rsign verify -P "$key" -x signed.minisig signed.manifest > /dev/null 2>&1 && verified=1
+                  done
+                  [ -n "$verified" ] || { echo "The manifest isn't signed by a key in update.rs." >&2; exit 1; }
+
+            # The Supabase key is only in this step's environment, not in the tools installed above.
             - name: Upload
+              env:
+                  SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+                  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
               run: |
                   if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
                       echo "Set the SUPABASE_URL repository variable and the SUPABASE_SERVICE_KEY secret." >&2
@@ -337,22 +352,14 @@ jobs:
                   upload manifest/latest.signed.json latest.signed.json application/json max-age=60
                   upload manifest/latest.json latest.json application/json max-age=60
 
-                  # What was just published must be this manifest, and signed by a key the loader trusts, or nobody could install it.
+                  # What was just published must be the manifests that were checked and uploaded, byte for byte.
                   sleep 2
                   public="$SUPABASE_URL/storage/v1/object/public/client"
-                  curl -sS --fail "$public/latest.json?check=$VERSION" -o check.json
-                  jq -e --arg version "$VERSION" '.version == $version' check.json > /dev/null \
-                      || { echo "The published latest.json is not the manifest that was uploaded." >&2; exit 1; }
-                  curl -sS --fail "$public/latest.signed.json?check=$VERSION" -o signed.json
-                  jq -j .manifest signed.json > signed.manifest
-                  jq -j .signature signed.json > signed.minisig
-                  jq -e --arg version "$VERSION" '.version == $version' signed.manifest > /dev/null \
-                      || { echo "The published latest.signed.json is not the manifest that was uploaded." >&2; exit 1; }
-                  verified=
-                  for key in $(grep -oE '"RW[A-Za-z0-9+/]{54}"' src/loader/src/update.rs | tr -d '"'); do
-                      rsign verify -P "$key" -x signed.minisig signed.manifest > /dev/null 2>&1 && verified=1
+                  for name in latest.json latest.signed.json; do
+                      curl -sS --fail "$public/$name?check=$VERSION" -o "published-$name"
+                      cmp -s "published-$name" "manifest/$name" \
+                          || { echo "The published $name is not the manifest that was uploaded." >&2; exit 1; }
                   done
-                  [ -n "$verified" ] || { echo "The published manifest isn't signed by a key in update.rs." >&2; exit 1; }
 
     # After a successful publish: tag the commit and create a GitHub release with the same packages. Uses only the runner's
     # `gh` and the job token, and runs apart from `publish` so the Supabase key never sits next to a write token.

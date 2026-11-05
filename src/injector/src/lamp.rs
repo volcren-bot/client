@@ -12,7 +12,7 @@ pub fn set_lookup(lookup: Lookup) {
     *LOOKUP.lock().unwrap_or_else(PoisonError::into_inner) = Some(lookup);
 }
 
-/// The skill set for the account with this name.
+/// The skill set for the account with this name, which the caller reads from the client itself.
 pub fn skill_for(account: &str) -> Result<Option<String>, String> {
     let mut lookup = LOOKUP.lock().unwrap_or_else(PoisonError::into_inner);
     match lookup.as_mut() {

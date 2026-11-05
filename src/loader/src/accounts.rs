@@ -261,6 +261,15 @@ impl Accounts {
         }
     }
 
+    #[cfg(test)]
+    pub fn with_entries(entries: Vec<Entry>) -> Self {
+        Self {
+            working: entries.clone(),
+            entries,
+            ..Self::default()
+        }
+    }
+
     /// The saved PIN of the account with this name hash, for `bank_pin_enter()`; `Err` while the file can't be read, and unsaved edits don't count.
     pub fn pin_for(&self, hash: &str) -> Result<Option<String>, String> {
         if let Some(why) = &self.locked {

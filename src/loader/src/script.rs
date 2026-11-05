@@ -1,9 +1,10 @@
 use std::{
     io::{BufRead, BufReader, Write},
     path::Path,
-    process::{Child, ChildStdin, Stdio},
+    process::{Child, ChildStdin, ExitStatus, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, channel},
     },
     thread,
@@ -13,33 +14,131 @@ use std::{
 use eframe::egui;
 use loader::backend::{self, Settings, Target};
 
+use crate::accounts::Accounts;
+use crate::api::Stats;
 use crate::whitelist::Whitelist;
+
+pub fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What a running script is answered from, on the thread reading its output: a script blocks until it gets an answer, and the UI draws no frames while the window is hidden.
+#[derive(Clone)]
+pub struct Host {
+    pub ctx: egui::Context,
+    pub accounts: Arc<RwLock<Accounts>>,
+    pub whitelist: Arc<RwLock<Whitelist>>,
+}
+
+impl Host {
+    /// The reply to a line that asks for a saved PIN or lamp skill, and what it was for.
+    fn lookup(&self, line: &str) -> Option<(String, &'static str)> {
+        if let Some(hash) = line.strip_prefix(injector::form::PIN_REQUEST_PREFIX) {
+            let answer = read(&self.accounts).pin_for(hash.trim());
+            return Some((injector::form::pin_reply_line(&answer), "PIN request"));
+        }
+        let hash = line.strip_prefix(injector::form::LAMP_REQUEST_PREFIX)?;
+        let answer = read(&self.accounts).lamp_skill_for(hash.trim());
+        Some((injector::form::lamp_reply_line(&answer), "lamp request"))
+    }
+}
+
+fn reply(stdin: &Mutex<ChildStdin>, line: &str, what: &str) -> Result<(), String> {
+    let mut stdin = stdin
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    writeln!(stdin, "{line}")
+        .and_then(|()| stdin.flush())
+        .map_err(|e| format!("Couldn't answer the script's {what}: {e}"))
+}
+
+/// Makes a script's `http_request` on a thread of its own if its host is whitelisted, and sends the response (or why there is none) back.
+fn answer_http(stdin: Arc<Mutex<ChildStdin>>, payload: &str, whitelist: Whitelist) {
+    let request = injector::http::parse_request(payload);
+    thread::spawn(move || {
+        let answer = request.and_then(|request| whitelist.perform(&request));
+        let _ = reply(&stdin, &injector::http::reply_line(&answer), "HTTP request");
+    });
+}
 
 pub enum ScriptEvent {
     Output(String),
     /// A line from `report_warning`, shown in the warning color.
     Warning(String),
     Form(serde_json::Value),
-    /// Experience, gold and custom tracker gains from `report_stats`.
-    Stats(i64, i64, Vec<i64>),
     /// The breaks and sleeps from `report_breaks`.
     Breaks(injector::form::BreakPlan),
     /// What the script counts, from `report_counters`.
     Counters(Vec<injector::form::Counter>),
-    /// `http_request()` asks for this request (a JSON `injector::http::Request`); answer with `answer_http`.
-    HttpRequest(String),
-    /// `bank_pin_enter()` asks for the PIN saved for the account with this name hash; answer with `answer_pin`.
-    PinRequest(String),
-    /// `lamp_skill()` asks for the lamp skill saved for the account with this name hash; answer with `answer_lamp`.
-    LampRequest(String),
     Finished {
         result: Result<(), String>,
         stopped: bool,
     },
 }
 
+/// A script's process and its `report_stats` gains, for a thread that can't wait for the UI's next frame.
+#[derive(Clone)]
+pub struct Process {
+    child: Arc<Mutex<Child>>,
+    stopped: Arc<AtomicBool>,
+    stats: Arc<Mutex<Stats>>,
+}
+
+impl Process {
+    fn new(child: Child) -> Self {
+        Self {
+            child: Arc::new(Mutex::new(child)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            stats: Arc::new(Mutex::new(Stats::default())),
+        }
+    }
+
+    fn child(&self) -> std::sync::MutexGuard<'_, Child> {
+        self.child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn id(&self) -> u32 {
+        self.child().id()
+    }
+
+    fn status(&self) -> Option<ExitStatus> {
+        self.child().try_wait().ok().flatten()
+    }
+
+    fn was_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = self.child().kill();
+    }
+
+    pub fn exited(&self) -> bool {
+        self.status().is_some()
+    }
+
+    /// The gains the script reported since the last call.
+    pub fn take_stats(&self) -> Stats {
+        std::mem::take(
+            &mut *self
+                .stats
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
 pub struct Script {
-    child: Child,
+    process: Process,
     /// Shared with the threads that answer HTTP requests, which write their reply when the response is in.
     stdin: Arc<Mutex<ChildStdin>>,
     output: Receiver<String>,
@@ -48,25 +147,24 @@ pub struct Script {
     paused: bool,
     stop_requested: Option<Instant>,
     stop_ignored_reported: bool,
-    stopped: bool,
 }
 
 impl Script {
     /// `lib` is your own lib folder, for a script run from a local file.
     pub fn start(
-        ctx: &egui::Context,
+        host: &Host,
         source: &str,
         path: Option<&Path>,
         lib: Option<&Path>,
         target: Option<&Target>,
         settings: &Settings,
     ) -> Result<Self, String> {
-        Self::start_with(ctx, source, &[], path, lib, target, settings)
+        Self::start_with(host, source, &[], path, lib, target, settings)
     }
 
     /// `modules` are the script's other files by name, sent to the injector to keep in memory, beside `path`.
     pub fn start_with(
-        ctx: &egui::Context,
+        host: &Host,
         source: &str,
         modules: &[(String, String)],
         path: Option<&Path>,
@@ -131,8 +229,12 @@ impl Script {
             });
         }
 
+        let process = Process::new(child);
+        let stdin = Arc::new(Mutex::new(stdin));
         let (tx, output) = channel();
-        let repaint_ctx = ctx.clone();
+        let repaint_ctx = host.ctx.clone();
+        let stats = process.stats.clone();
+        let (host, requests) = (host.clone(), stdin.clone());
         thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             let mut entry = Vec::new();
@@ -145,6 +247,28 @@ impl Script {
                 }
                 let line = String::from_utf8_lossy(&entry).into_owned();
                 entry.clear();
+                // A bad report goes on as a line, for `poll` to say so
+                if let Some((experience, gold, custom)) = line
+                    .strip_prefix(injector::form::STATS_PREFIX)
+                    .and_then(injector::form::parse_stats)
+                {
+                    stats
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .add(experience, gold, &custom);
+                    continue;
+                }
+                if let Some(payload) = line.strip_prefix(injector::http::REQUEST_PREFIX) {
+                    answer_http(requests.clone(), payload, read(&host.whitelist).clone());
+                    continue;
+                }
+                if let Some((answer, what)) = host.lookup(&line) {
+                    if let Err(error) = reply(&requests, &answer, what) {
+                        let _ = tx.send(format!("{}{error}", injector::form::WARN_PREFIX));
+                        repaint_ctx.request_repaint();
+                    }
+                    continue;
+                }
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -164,26 +288,23 @@ impl Script {
         });
 
         Ok(Self {
-            child,
-            stdin: Arc::new(Mutex::new(stdin)),
+            process,
+            stdin,
             output,
             stderr,
             finished: false,
             paused: false,
             stop_requested: None,
             stop_ignored_reported: false,
-            stopped: false,
         })
     }
 
+    pub fn process(&self) -> Process {
+        self.process.clone()
+    }
+
     fn reply(&self, line: &str, what: &str) -> Result<(), String> {
-        let mut stdin = self
-            .stdin
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        writeln!(stdin, "{line}")
-            .and_then(|()| stdin.flush())
-            .map_err(|e| format!("Couldn't answer the script's {what}: {e}"))
+        reply(&self.stdin, line, what)
     }
 
     pub fn answer_form(&mut self, values: Option<serde_json::Value>) -> Result<(), String> {
@@ -220,30 +341,6 @@ impl Script {
         self.reply(&injector::antiban::skip_line(kind, index), "skip")
     }
 
-    /// Tells the script's injector the PIN for the hash it asked about, `None` if no saved account has it, or why we can't say.
-    pub fn answer_pin(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
-        self.reply(&injector::form::pin_reply_line(&answer), "PIN request")
-    }
-
-    /// Tells the script's injector the lamp skill for the hash it asked about, `None` if there isn't one, or why we can't say.
-    pub fn answer_lamp(&mut self, answer: Result<Option<String>, String>) -> Result<(), String> {
-        self.reply(&injector::form::lamp_reply_line(&answer), "lamp request")
-    }
-
-    /// Makes a script's `http_request` on a thread of its own if its host is whitelisted, and sends the response (or why there is none) back.
-    pub fn answer_http(&self, payload: &str, whitelist: Whitelist) {
-        let stdin = self.stdin.clone();
-        let request = injector::http::parse_request(payload);
-        thread::spawn(move || {
-            let answer = request.and_then(|request| whitelist.perform(&request));
-            let mut stdin = stdin
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = writeln!(stdin, "{}", injector::http::reply_line(&answer))
-                .and_then(|()| stdin.flush());
-        });
-    }
-
     pub fn is_running(&self) -> bool {
         !self.finished
     }
@@ -257,19 +354,18 @@ impl Script {
             return;
         }
         self.paused = paused;
-        suspend_process(self.child.id(), paused);
+        suspend_process(self.process.id(), paused);
     }
 
     pub fn stop(&mut self) {
         if self.finished {
             return;
         }
-        self.stopped = true;
         self.stop_requested.get_or_insert_with(Instant::now);
         if self.paused {
-            suspend_process(self.child.id(), false);
+            suspend_process(self.process.id(), false);
         }
-        let _ = self.child.kill();
+        self.process.stop();
     }
 
     pub fn stop_requested(&self) -> bool {
@@ -290,26 +386,10 @@ impl Script {
             .try_iter()
             .map(|line| {
                 if let Some(payload) = line.strip_prefix(injector::form::STATS_PREFIX) {
-                    return match injector::form::parse_stats(payload) {
-                        Some((experience, gold, custom)) => {
-                            ScriptEvent::Stats(experience, gold, custom)
-                        }
-                        None => {
-                            ScriptEvent::Output(format!("Bad stats from the script: {payload}"))
-                        }
-                    };
+                    return ScriptEvent::Output(format!("Bad stats from the script: {payload}"));
                 }
                 if let Some(text) = line.strip_prefix(injector::form::WARN_PREFIX) {
                     return ScriptEvent::Warning(text.to_owned());
-                }
-                if let Some(payload) = line.strip_prefix(injector::http::REQUEST_PREFIX) {
-                    return ScriptEvent::HttpRequest(payload.to_owned());
-                }
-                if let Some(hash) = line.strip_prefix(injector::form::PIN_REQUEST_PREFIX) {
-                    return ScriptEvent::PinRequest(hash.trim().to_owned());
-                }
-                if let Some(hash) = line.strip_prefix(injector::form::LAMP_REQUEST_PREFIX) {
-                    return ScriptEvent::LampRequest(hash.trim().to_owned());
                 }
                 if let Some(payload) = line.strip_prefix(injector::form::BREAKS_PREFIX) {
                     return match injector::form::parse_breaks(payload) {
@@ -340,7 +420,7 @@ impl Script {
             })
             .collect();
         if !self.finished
-            && let Ok(Some(status)) = self.child.try_wait()
+            && let Some(status) = self.process.status()
         {
             self.finished = true;
             let result = if status.success() {
@@ -359,7 +439,7 @@ impl Script {
             };
             events.push(ScriptEvent::Finished {
                 result,
-                stopped: self.stopped,
+                stopped: self.process.was_stopped(),
             });
         }
         events
@@ -416,12 +496,6 @@ mod tests {
                     ScriptEvent::Counters(counters) => {
                         lines.push(format!("counters {}", counters.len()))
                     }
-                    ScriptEvent::PinRequest(hash) => lines.push(format!("pin {hash}")),
-                    ScriptEvent::LampRequest(hash) => lines.push(format!("lamp {hash}")),
-                    ScriptEvent::HttpRequest(payload) => lines.push(format!("http {payload}")),
-                    ScriptEvent::Stats(experience, gold, _) => {
-                        lines.push(format!("stats {experience} {gold}"))
-                    }
                     ScriptEvent::Finished { result, stopped } => {
                         return (lines, Some((result, stopped)));
                     }
@@ -432,17 +506,51 @@ mod tests {
         (lines, None)
     }
 
-    fn start(source: &str) -> Script {
+    fn host(whitelist: Vec<String>, accounts: Vec<crate::accounts::Entry>) -> Host {
+        Host {
+            ctx: egui::Context::default(),
+            accounts: Arc::new(RwLock::new(Accounts::with_entries(accounts))),
+            whitelist: Arc::new(RwLock::new(Whitelist::new(
+                whitelist,
+                &crate::api::Config::default(),
+            ))),
+        }
+    }
+
+    fn start_on(host: &Host, source: &str) -> Script {
         ensure_runner_built();
-        Script::start(
-            &egui::Context::default(),
-            source,
-            None,
-            None,
-            None,
-            &Settings::default(),
-        )
-        .unwrap()
+        Script::start(host, source, None, None, None, &Settings::default()).unwrap()
+    }
+
+    fn start(source: &str) -> Script {
+        start_on(&host(Vec::new(), Vec::new()), source)
+    }
+
+    #[test]
+    fn saved_pins_and_lamp_skills_answer_the_scripts_lookups() {
+        let entry = crate::accounts::Entry {
+            name: "main".into(),
+            hash: "abc".into(),
+            pin: "1234".into(),
+            lamp_skill: "Slayer".into(),
+        };
+        let host = host(Vec::new(), vec![entry]);
+        let lookup = |line: String| host.lookup(&line).unwrap();
+        let pin = lookup(injector::form::pin_request_line("abc"));
+        assert_eq!(
+            injector::form::parse_pin_reply(&pin.0),
+            Ok(Some("1234".into()))
+        );
+        assert_eq!(
+            injector::form::parse_pin_reply(&lookup(injector::form::pin_request_line("nobody")).0),
+            Ok(None)
+        );
+        let lamp = lookup(injector::form::lamp_request_line("abc"));
+        assert_eq!(
+            injector::form::parse_lamp_reply(&lamp.0),
+            Ok(Some("Slayer".into()))
+        );
+        assert_eq!(host.lookup("just a printed line"), None);
     }
 
     #[test]
@@ -469,12 +577,8 @@ mod tests {
                     ScriptEvent::Form(spec) => return spec,
                     ScriptEvent::Output(line) => lines.push(line),
                     ScriptEvent::Warning(..)
-                    | ScriptEvent::Stats(..)
                     | ScriptEvent::Breaks(..)
-                    | ScriptEvent::Counters(..)
-                    | ScriptEvent::PinRequest(..)
-                    | ScriptEvent::LampRequest(..)
-                    | ScriptEvent::HttpRequest(..) => {}
+                    | ScriptEvent::Counters(..) => {}
                     ScriptEvent::Finished { .. } => {
                         panic!("the script ended before asking for a form")
                     }
@@ -514,11 +618,121 @@ mod tests {
     }
 
     #[test]
-    fn report_stats_arrives_as_a_stats_event_not_output() {
+    fn report_stats_adds_up_on_the_process_and_is_not_output() {
         let mut script = start("report_stats(10, 5, { 1 }) report_stats(20, -5) print('done')");
         let (lines, end) = wait(&mut script, Duration::from_secs(5));
-        assert_eq!(lines, ["stats 10 5", "stats 20 -5", "done"]);
+        assert_eq!(lines, ["done"]);
         assert_eq!(end, Some((Ok(()), false)));
+        let stats = script.process().take_stats();
+        assert_eq!(
+            (stats.experience, stats.gold, stats.custom),
+            (30, 0, vec![1])
+        );
+        assert!(script.process().take_stats().is_empty());
+    }
+
+    /// A server for session `s1`: a heartbeat answers `alive`, ending the session charges 60.
+    fn session_server(alive: bool) -> crate::fake_api::FakeServer {
+        crate::fake_api::FakeServer::start(move |_, request| {
+            if request.path.ends_with("/end") {
+                crate::fake_api::Reply::json(200, serde_json::json!({ "charged": 60 }))
+            } else {
+                crate::fake_api::Reply::json(
+                    200,
+                    serde_json::json!({ "alive": alive, "reason": "timeout", "credits": 10 }),
+                )
+            }
+        })
+    }
+
+    /// Keeps session `s1` of the script on a thread, as the app does, heartbeating every 50 ms. Nothing here ever polls the script, as with a window that draws no frames.
+    fn keep_on_a_thread(
+        fake: &crate::fake_api::FakeServer,
+        script: &Script,
+    ) -> (
+        thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<crate::session::Kept>,
+    ) {
+        let api = crate::api::Api::signed_in(
+            crate::api::Config {
+                api_url: fake.url.clone(),
+                supabase_url: fake.url.clone(),
+                anon_key: "anon".into(),
+                site_url: String::new(),
+            },
+            "token",
+        );
+        let process = script.process();
+        let (tx, kept) = channel();
+        let keeper = thread::spawn(move || {
+            crate::session::keep(
+                &api,
+                "s1",
+                &process,
+                Duration::from_millis(50),
+                move |event| {
+                    let _ = tx.send(event);
+                },
+            );
+        });
+        (keeper, kept)
+    }
+
+    fn join_within(keeper: thread::JoinHandle<()>, limit: Duration) {
+        let start = Instant::now();
+        while !keeper.is_finished() {
+            assert!(start.elapsed() < limit, "the keeper is still running");
+            thread::sleep(Duration::from_millis(10));
+        }
+        keeper.join().unwrap();
+    }
+
+    #[test]
+    fn a_session_gets_heartbeats_and_stats_without_a_poll() {
+        let fake = session_server(true);
+        let script = start("report_stats(10, 5)\nwhile true do sleep(1000) end");
+        let (keeper, _kept) = keep_on_a_thread(&fake, &script);
+        let start = Instant::now();
+        let reported = |r: &crate::fake_api::Request| r.json()["stats"]["experience"] == 10;
+        while !fake.requests().iter().any(reported) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "{:?}",
+                fake.requests()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 0);
+        script.process().stop();
+        join_within(keeper, Duration::from_secs(5));
+        assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
+    }
+
+    #[test]
+    fn a_script_that_finishes_ends_its_session_without_a_poll() {
+        let fake = session_server(true);
+        let script = start("print('done')");
+        let (keeper, kept) = keep_on_a_thread(&fake, &script);
+        join_within(keeper, Duration::from_secs(10));
+        assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
+        assert!(matches!(
+            kept.try_iter().last(),
+            Some(crate::session::Kept::Ended(Ok(_)))
+        ));
+    }
+
+    #[test]
+    fn a_session_the_server_ended_kills_the_script_without_a_poll() {
+        let fake = session_server(false);
+        let mut script = start("while true do sleep(1000) end");
+        let (keeper, kept) = keep_on_a_thread(&fake, &script);
+        join_within(keeper, Duration::from_secs(10));
+        assert!(kept.try_iter().any(|event| matches!(
+            event,
+            crate::session::Kept::Stop { reason, sign_out: false } if reason.contains("timed out")
+        )));
+        let (_, end) = wait(&mut script, Duration::from_secs(2));
+        assert_eq!(end.map(|(_, stopped)| stopped), Some(true));
     }
 
     #[test]
@@ -599,35 +813,29 @@ mod tests {
     #[test]
     fn http_requests_only_reach_whitelisted_hosts() {
         let port = serve();
-        let mut script = start(&format!(
-            "local r, e = http_request({{ url = 'http://127.0.0.1:{port}/hi', headers = {{ ['X-Token'] = 'abc' }} }})\n\
+        let host = host(vec!["127.0.0.1".into()], Vec::new());
+        let mut script = start_on(
+            &host,
+            &format!(
+                "local r, e = http_request({{ url = 'http://127.0.0.1:{port}/hi', headers = {{ ['X-Token'] = 'abc' }} }})\n\
              print(r.ok, r.status, r.body, r.headers['x-seen'])\n\
              print(http_request({{ url = 'http://localhost:{port}/hi' }}))\n\
              print(http_request({{ url = 'http://127.0.0.1:{port}/hop' }}))\n\
              print(http_request({{ url = 'ftp://127.0.0.1/' }}))\n\
              print(http_request({{ url = 'http://127.0.0.1:{port}/', headers = {{ Host = 'evil.com' }} }}))"
-        ));
-        let whitelist = Whitelist::new(vec!["127.0.0.1".into()], &crate::api::Config::default());
-        let (mut lines, start) = (Vec::new(), Instant::now());
-        let end = loop {
-            assert!(start.elapsed() < Duration::from_secs(10), "{lines:?}");
-            let mut finished = None;
-            for event in script.poll() {
-                match event {
-                    ScriptEvent::HttpRequest(payload) => {
-                        script.answer_http(&payload, whitelist.clone())
-                    }
-                    ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Finished { result, .. } => finished = Some(result),
-                    _ => {}
-                }
-            }
-            if let Some(result) = finished {
-                break result;
-            }
+            ),
+        );
+        // Nothing polls until the script is done: it gets its answers without the UI.
+        let start = Instant::now();
+        while !script.process().exited() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the script is waiting for an answer"
+            );
             thread::sleep(Duration::from_millis(10));
-        };
-        assert_eq!(end, Ok(()), "{lines:?}");
+        }
+        let (lines, end) = wait(&mut script, Duration::from_secs(5));
+        assert_eq!(end, Some((Ok(()), false)), "{lines:?}");
         assert_eq!(lines[0], "false\t404\thello\ttrue");
         assert!(
             lines[1].starts_with("nil\tlocalhost isn't on the HTTP whitelist"),
@@ -669,7 +877,7 @@ mod tests {
 
     fn run_live(client: &(Target, Settings), source: &str) -> Run {
         let mut script = Script::start(
-            &egui::Context::default(),
+            &host(Vec::new(), Vec::new()),
             source,
             None,
             None,

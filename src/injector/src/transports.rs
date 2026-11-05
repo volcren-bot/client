@@ -170,7 +170,9 @@ pub fn is_shortcut(t: &Transport) -> bool {
 
 /// The menu option a row's menu starts with, "Climb-up" of "Climb-up Rope 51647". The data doesn't mark where it ends, and a few options are two words, the second of them lowercase like "Climb over Broken cart 28931".
 pub fn menu_option(menu: &str) -> Option<&str> {
-    const SECOND_WORDS: &[&str] = &["over", "on", "through", "up", "down", "to", "off", "in"];
+    const SECOND_WORDS: &[&str] = &[
+        "over", "on", "through", "up", "down", "to", "off", "in", "across",
+    ];
     let first = menu.split_whitespace().next()?;
     let start = menu.find(first)?;
     let rest = &menu[start + first.len()..];
@@ -681,6 +683,10 @@ mod tests {
         assert_eq!(
             menu_option("Jump on Rubber cap mushroom 1"),
             Some("Jump on")
+        );
+        assert_eq!(
+            menu_option("Swing across Monkeybars 23566"),
+            Some("Swing across")
         );
         assert_eq!(menu_option("Open trapdoor 5"), Some("Open"));
         assert_eq!(menu_option("Open Tree Door 1967"), Some("Open"));

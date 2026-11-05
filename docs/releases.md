@@ -10,7 +10,7 @@ Every push to `main` runs `.github/workflows/release.yml` and publishes to the p
 | `package` | The Linux archive: a `volcren/` folder with `loader`, `injector`, `injector.exe`, `agent.dll`.                                 | None                 |
 | `msi`     | Builds the MSI with WiX on `windows-latest` and runs `installer/test-msi.ps1`. Also runs on pull requests.                     | None                 |
 | `sign`    | Writes the manifest with each package's sha256 and signs it. Push only.                                                        | `UPDATE_SIGNING_KEY` |
-| `publish` | Uploads the packages, then `latest.signed.json`, then `latest.json`, and checks the published manifest verifies. Push only.    | `SUPABASE_SERVICE_KEY` |
+| `publish` | Checks `latest.signed.json` against the keys in `update.rs` before anything is public, uploads the packages, then `latest.signed.json`, then `latest.json`, and checks both published manifests are the uploaded bytes. Push only; the key is only in the upload step's environment.    | `SUPABASE_SERVICE_KEY` |
 | `release` | Tags the commit and makes a GitHub release with the same packages. Push only.                                                  | Job token            |
 
 ## Manifests

@@ -29,6 +29,8 @@ const FILES: [(&str, bool); 4] = [
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 static RELAUNCH: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Held while a download unpacks into the stage folder.
+static STAGE: Mutex<()> = Mutex::new(());
 
 pub struct Prepared {
     install: PathBuf,
@@ -75,6 +77,9 @@ pub fn prepare(
         .ok_or("This release has no build for this system.")?;
     let work = install.join(WORK_DIR);
     let archive = download(api, file, &work, progress, repaint)?;
+    // one unpack at a time: a skipped download may still be in its own
+    let _stage = STAGE.lock().unwrap_or_else(|e| e.into_inner());
+    progress.check()?;
     let stage = work.join(STAGE_DIR);
     let _ = fs::remove_dir_all(&stage);
     unpack(&archive, &stage)?;

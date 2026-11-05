@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
@@ -16,13 +16,13 @@ use loader::backend::{self, Scan, Settings, Target};
 
 use crate::account::{self, Auth};
 use crate::api::{
-    Api, ApiError, Config, Heartbeat, Me, Redeemed, Removed, Stats, StoreScript,
+    Api, ApiError, Config, Heartbeat, Me, Redeemed, Removed, StoreScript,
     models::{API_VERSION, Ended, Quote, RecentSession, Scored},
 };
 use crate::feedback;
 use crate::highlight::Highlighter;
 use crate::script::{Script, ScriptEvent};
-use crate::session::{self, Beat, Prepared, Verdict};
+use crate::session::{self, Kept, Prepared};
 use crate::store::{self, Confirmed, Store};
 use crate::update;
 
@@ -98,9 +98,15 @@ enum Event {
         result: Result<crate::inventory::Poll, String>,
     },
     /// Item icons a client drew for the icon store.
-    Icons(Result<Vec<(crate::icons::Key, Option<injector::Image>)>, String>),
+    Icons {
+        pictures: Vec<(crate::icons::Key, Option<injector::Image>)>,
+        /// Why the read stopped part way, when it did.
+        error: Option<String>,
+    },
     /// What the selected client holds, for a layout editor's "Read from client".
     LayoutRead {
+        /// The run whose editor asked.
+        run: u64,
         kind: crate::layouts::Kind,
         result: Result<crate::layouts::Read, String>,
     },
@@ -133,21 +139,29 @@ enum Event {
     /// What a start from the Scripts page would cost.
     RunQuoted {
         start: Box<PendingStart>,
-        result: Result<Quote, ApiError>,
+        result: Result<(Me, Quote), ApiError>,
     },
     /// What a restart of this run would cost; `None` when its script is no longer listed.
     RestartQuoted {
         run: u64,
-        result: Result<Option<(StoreScript, Quote)>, ApiError>,
+        result: Result<Option<(Me, StoreScript, Quote)>, ApiError>,
     },
     Heartbeat {
         session_id: String,
-        sent: Option<Stats>,
-        result: Result<Heartbeat, ApiError>,
+        beat: Heartbeat,
+    },
+    SessionStopped {
+        session_id: String,
+        reason: String,
+        sign_out: bool,
     },
     SessionEnded(Result<Ended, ApiError>),
     Update(Result<Option<update::Available>, update::CheckError>),
-    UpdatePrepared(Result<update::Prepared, String>),
+    UpdatePrepared {
+        /// The download it is the answer of: a skipped one's is dropped.
+        progress: Arc<update::Progress>,
+        result: Result<update::Prepared, String>,
+    },
     /// The sessions of the last 24 hours, for the Feedback page.
     RecentSessions(Result<Vec<RecentSession>, ApiError>),
     Scored {
@@ -168,11 +182,8 @@ struct StoreRun {
     script_id: String,
     /// Which script list holds it, for a restart.
     community: bool,
-    beat: Beat,
-    /// The script is being stopped for a reason already reported; the end of the session follows its exit.
-    stopping: bool,
-    /// The end was sent to the server.
-    ended: bool,
+    /// Disconnects when the thread keeping the session has ended it.
+    closed: std::sync::mpsc::Receiver<()>,
     /// The lib the script runs against, named in bug reports.
     lib_version: String,
     /// Credits per minute, fixed for the session.
@@ -233,6 +244,8 @@ struct Run {
     names: Vec<String>,
     xp_next: std::time::Instant,
     xp_reading: bool,
+    /// The layout tabs of this run's page: each run edits its own script's layouts.
+    editors: crate::layouts::Editors,
 }
 
 impl Run {
@@ -264,6 +277,7 @@ impl Run {
             names: Vec::new(),
             xp_next: now,
             xp_reading: false,
+            editors: Default::default(),
         }
     }
 
@@ -1286,9 +1300,9 @@ pub struct LoaderApp {
     api: Api,
     auth: Auth,
     store: Store,
-    accounts: crate::accounts::Accounts,
+    accounts: Arc<RwLock<crate::accounts::Accounts>>,
     /// The hosts scripts may send HTTP requests to.
-    http_whitelist: crate::whitelist::Whitelist,
+    http_whitelist: Arc<RwLock<crate::whitelist::Whitelist>>,
     whitelist_page: crate::whitelist::Page,
     /// Community scripts the user agreed to run, by revision (persisted).
     confirmed: Confirmed,
@@ -1297,8 +1311,10 @@ pub struct LoaderApp {
     /// A newer launcher release, until the user dismisses it.
     update: Option<update::Available>,
     update_state: UpdateState,
-    /// Title of the store script being prepared (session start and download).
-    starting: Option<String>,
+    /// This loader's share of the lock that tells whether another loader is open.
+    instance: update::Instance,
+    /// The client of the store script on its way (being quoted, started or downloaded), which is held for it.
+    starting: Option<u32>,
     targets: Vec<Target>,
     dll_version: Option<String>,
     selected: Option<String>,
@@ -1318,14 +1334,19 @@ pub struct LoaderApp {
     icons: crate::icons::Icons,
     /// Every script's saved equipment and inventory layouts, by form title.
     layouts: crate::layouts::AllLayouts,
-    /// The Equipment and Inventory tabs of the running script's page.
-    editors: crate::layouts::Editors,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
 
+/// The layout editors of the run `id`. Takes the list and not the app, so the caller can still borrow the saved layouts and the icons.
+fn editors_of(runs: &mut [Run], id: Option<u64>) -> Option<&mut crate::layouts::Editors> {
+    runs.iter_mut()
+        .find(|r| Some(r.id) == id)
+        .map(|r| &mut r.editors)
+}
+
 impl LoaderApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, instance: update::Instance) -> Self {
         let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
@@ -1379,13 +1400,13 @@ impl LoaderApp {
             api: Api::new(config.clone()),
             auth: Auth::Restoring,
             store: Store::default(),
-            accounts: crate::accounts::Accounts::load(),
-            http_whitelist: crate::whitelist::Whitelist::new(
+            accounts: Arc::new(RwLock::new(crate::accounts::Accounts::load())),
+            http_whitelist: Arc::new(RwLock::new(crate::whitelist::Whitelist::new(
                 cc.storage
                     .and_then(|s| eframe::get_value(s, HTTP_WHITELIST_KEY))
                     .unwrap_or_default(),
                 &config,
-            ),
+            ))),
             whitelist_page: Default::default(),
             confirmed: cc
                 .storage
@@ -1399,6 +1420,7 @@ impl LoaderApp {
             start_prompt: None,
             update: None,
             update_state: UpdateState::Offered,
+            instance,
             starting: None,
             targets: Vec::new(),
             dll_version: None,
@@ -1412,7 +1434,6 @@ impl LoaderApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, LAYOUTS_KEY))
                 .unwrap_or_default(),
-            editors: Default::default(),
             feedback: feedback::Page::default(),
             gpu,
             loader_log: Log::default(),
@@ -1453,7 +1474,21 @@ impl LoaderApp {
         });
     }
 
+    /// Stops every script and ends the open store sessions. Waits at most 3 seconds for the server: what doesn't land, its sweep ends within 5 minutes.
+    fn stop_all(&mut self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        for run in &mut self.runs {
+            run.script.stop();
+        }
+        for store in self.runs.iter().filter_map(|r| r.store.as_ref()) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let _ = store.closed.recv_timeout(left);
+        }
+    }
+
     fn sign_out(&mut self, why: Option<String>) {
+        // nothing keeps running behind the sign-in screen, and the sessions end while the token still works
+        self.stop_all();
         self.api.sign_out();
         self.auth = Auth::SignedOut;
         self.store = Store::default();
@@ -1528,13 +1563,13 @@ impl LoaderApp {
         if self.auth.me().is_none() {
             return Some("Sign in to run store scripts.".into());
         }
-        let target = self.restart_target(run);
-        if target.is_none() {
-            return Some(
-                "Its client is gone or busy. Start the script from the Scripts page.".into(),
-            );
+        // a start on its way holds its client, so what isn't about the client is said first
+        if let Some(why) = self.run_block(run.target.as_ref()) {
+            return Some(why);
         }
-        self.run_block(target.as_ref())
+        self.restart_target(run)
+            .is_none()
+            .then(|| "Its client is gone or busy. Start the script from the Scripts page.".into())
     }
 
     /// Closes the ended run's session and asks the server what a new one would cost; the answer decides the rest (`Event::RestartQuoted`).
@@ -1550,7 +1585,7 @@ impl LoaderApp {
             store.script_id.clone(),
             store.community,
         );
-        self.starting = Some(run.title.clone());
+        self.starting = run.target.as_ref().map(|t| t.client.pid);
         // what goes wrong shows in this run's log
         self.active_run = Some(id);
         self.log_tab = LogTab::Run(id);
@@ -1580,12 +1615,19 @@ impl LoaderApp {
 
     /// Asks the server what this start would cost; the answer decides the rest (`Event::RunQuoted`).
     fn quote_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
-        self.starting = Some(start.script.title.clone());
+        self.starting = Some(start.target.client.pid);
         let id = start.script.id.clone();
         self.api_job(ctx, move |api| Event::RunQuoted {
-            result: api.quote(&id),
+            result: session::quote(&api, &id),
             start: Box::new(start),
         });
+    }
+
+    /// Takes the account a quote came with, so the start is weighed against the balance of now.
+    fn refresh_me(&mut self, me: Me) {
+        if let Some(current) = self.auth.me_mut() {
+            *current = me;
+        }
     }
 
     /// Goes on with a start at the server's quote: refused, through the pricing dialog, or straight on.
@@ -1625,9 +1667,9 @@ impl LoaderApp {
             target,
             replaces,
         } = start;
-        self.starting = Some(script.title.clone());
-        self.info(format!("Starting {}…", script.title));
         let pid = target.client.pid;
+        self.starting = Some(pid);
+        self.info(format!("Starting {}…", script.title));
         // A community script only runs at the revision the user was warned about
         let warned = script.community.then_some(script.revision).flatten();
         self.api_job(ctx, move |api| {
@@ -1639,17 +1681,6 @@ impl LoaderApp {
                 result,
             }
         });
-    }
-
-    /// Ends the session of a store run that stopped. Idempotent on the server, so sending it twice is harmless; `ended` keeps it to once.
-    fn end_store_session(&mut self, ctx: &egui::Context, index: usize) {
-        if let Some(store) = self.runs[index].store.as_mut().filter(|s| !s.ended) {
-            store.ended = true;
-            let session_id = store.session_id.clone();
-            self.api_job(ctx, move |api| {
-                Event::SessionEnded(api.end_session(&session_id))
-            });
-        }
     }
 
     /// The run whose page is open.
@@ -1681,11 +1712,21 @@ impl LoaderApp {
             .filter_map(|r| r.store.as_ref())
     }
 
-    /// Whether a client is taken by a running script.
+    /// Whether a client is taken: by a running script, or by a store script on its way to starting there (quoted, waiting on a dialog or downloading).
     fn client_in_use(&self, pid: u32) -> bool {
-        self.runs
-            .iter()
-            .any(|r| r.is_running() && r.target.as_ref().is_some_and(|t| t.client.pid == pid))
+        let pending = [
+            self.start_prompt.as_ref().map(|prompt| &prompt.start),
+            self.warning.as_ref(),
+        ];
+        self.starting == Some(pid)
+            || pending
+                .into_iter()
+                .flatten()
+                .any(|start| start.target.client.pid == pid)
+            || self
+                .runs
+                .iter()
+                .any(|r| r.is_running() && r.target.as_ref().is_some_and(|t| t.client.pid == pid))
     }
 
     /// Adds a run, opens its page and its log.
@@ -1729,36 +1770,41 @@ impl LoaderApp {
         }
     }
 
-    /// Sends each store run's heartbeat when one is due, and asks for a repaint when the next one will be.
-    fn drive_session(&mut self, ctx: &egui::Context) {
-        let now = std::time::Instant::now();
-        let mut due = Vec::new();
-        for run in &mut self.runs {
-            let Some(store) = run.store.as_mut().filter(|s| !s.stopping && !s.ended) else {
-                continue;
-            };
-            if store.beat.due(now) {
-                due.push((store.session_id.clone(), store.beat.take(now)));
-            } else {
-                ctx.request_repaint_after(
-                    store
-                        .beat
-                        .next_due()
-                        .saturating_duration_since(now)
-                        .max(Duration::from_millis(250)),
-                );
-            }
+    fn script_host(&self, ctx: &egui::Context) -> crate::script::Host {
+        crate::script::Host {
+            ctx: ctx.clone(),
+            accounts: self.accounts.clone(),
+            whitelist: self.http_whitelist.clone(),
         }
-        for (session_id, sent) in due {
-            self.api_job(ctx, move |api| {
-                let result = api.heartbeat(&session_id, sent.as_ref());
-                Event::Heartbeat {
-                    session_id,
-                    sent,
-                    result,
-                }
+    }
+
+    /// Keeps a store run's session on a thread of its own, so it doesn't depend on the window drawing frames. Returns what disconnects once the session is ended.
+    fn keep_session(
+        &self,
+        ctx: &egui::Context,
+        session_id: String,
+        process: crate::script::Process,
+        interval: Duration,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let (tx, ctx, api) = (self.tx.clone(), ctx.clone(), self.api.clone());
+        let (closing, closed) = channel();
+        thread::spawn(move || {
+            let _closing: std::sync::mpsc::Sender<()> = closing;
+            session::keep(&api, &session_id, &process, interval, |kept| {
+                let session_id = session_id.clone();
+                let _ = tx.send(match kept {
+                    Kept::Beat(beat) => Event::Heartbeat { session_id, beat },
+                    Kept::Stop { reason, sign_out } => Event::SessionStopped {
+                        session_id,
+                        reason,
+                        sign_out,
+                    },
+                    Kept::Ended(result) => Event::SessionEnded(result),
+                });
+                ctx.request_repaint();
             });
-        }
+        });
+        closed
     }
 
     fn store_ui(&mut self, ui: &mut egui::Ui) {
@@ -1786,7 +1832,11 @@ impl LoaderApp {
         let target = self.run_target_ui(ui);
         let block = self.run_block(target.as_ref());
         match self.store.ui(ui, &me, block.as_deref()) {
-            Some(store::Action::Refresh) => self.fetch_scripts(&ctx),
+            Some(store::Action::Refresh) => {
+                self.fetch_scripts(&ctx);
+                // a top-up on the website shows here
+                self.api_job(&ctx, |api| Event::Me(api.me()));
+            }
             Some(store::Action::Run(script)) => {
                 if let Some(target) = target {
                     self.quote_store_script(
@@ -2155,19 +2205,38 @@ impl LoaderApp {
         self.update_state = UpdateState::Failed(error);
     }
 
+    /// Whether the update can replace the install's files: no other loader is open to run from them.
+    fn can_update(&mut self) -> bool {
+        let alone = self.instance.alone();
+        if !alone {
+            self.update_failed(
+                "Another VOLCREN window is open. Close it to update, so the update doesn't replace the files it runs from.".into(),
+            );
+        }
+        alone
+    }
+
     fn start_update(&mut self, ctx: &egui::Context, release: update::Release) {
+        if !self.can_update() {
+            return;
+        }
         let progress = Arc::new(update::Progress::default());
         self.update_state = UpdateState::Downloading(progress.clone());
         let repaint = ctx.clone();
         self.api_job(ctx, move |api| {
-            Event::UpdatePrepared(update::prepare(&api, &release, &progress, &|| {
+            let result = update::prepare(&api, &release, &progress, &|| {
                 repaint.request_repaint();
-            }))
+            });
+            Event::UpdatePrepared { progress, result }
         });
     }
 
     /// Installs a prepared update and closes, which saves the settings and stops what the loader runs.
     fn apply_update(&mut self, ctx: &egui::Context, prepared: &update::Prepared) {
+        // a loader opened during the download counts too
+        if !self.can_update() {
+            return;
+        }
         match update::apply(prepared) {
             Ok(()) => {
                 self.update_state = UpdateState::Installing;
@@ -2200,6 +2269,9 @@ impl LoaderApp {
             });
         });
         if skipped {
+            if let UpdateState::Downloading(progress) = &self.update_state {
+                progress.cancel();
+            }
             self.update_state = UpdateState::Offered;
         }
     }
@@ -2913,7 +2985,11 @@ impl LoaderApp {
 
     /// Asks the selected client to draw the icons the UI showed without one, a batch at a time.
     fn poll_icons(&mut self, ctx: &egui::Context) {
-        if !self.icons.due() {
+        let now = Instant::now();
+        if let Some(wait) = self.icons.retry_in(now) {
+            ctx.request_repaint_after(wait);
+        }
+        if !self.icons.due(now) {
             return;
         }
         let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else {
@@ -2921,8 +2997,9 @@ impl LoaderApp {
         };
         let batch = self.icons.start();
         self.background(ctx, move |settings| {
-            let read = || -> Result<Vec<(crate::icons::Key, Option<injector::Image>)>, String> {
-                let mut pictures = Vec::new();
+            let mut pictures = Vec::new();
+            // the items a failed sprite read comes after are kept, so the client doesn't draw them again
+            let mut read = || -> Result<(), String> {
                 if !batch.items.is_empty() {
                     let images = backend::item_icons(&target, &settings, &batch.items)?;
                     pictures.extend(
@@ -2943,9 +3020,10 @@ impl LoaderApp {
                             .zip(images),
                     );
                 }
-                Ok(pictures)
+                Ok(())
             };
-            Event::Icons(read())
+            let error = read().err();
+            Event::Icons { pictures, error }
         });
     }
 
@@ -3425,8 +3503,9 @@ impl LoaderApp {
 
     fn accounts_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
-        if let Some(crate::accounts::Action::ReadClientName) =
-            self.accounts.ui(ui, target.is_some())
+        // not in the `if let`, which would hold the lock through its body
+        let action = crate::script::write(&self.accounts).ui(ui, target.is_some());
+        if let Some(crate::accounts::Action::ReadClientName) = action
             && let Some(target) = target
         {
             let ctx = ui.ctx().clone();
@@ -3460,7 +3539,7 @@ impl LoaderApp {
                     | Event::Vars { .. }
                     | Event::ScriptRuns { .. }
                     | Event::Inventory { .. }
-                    | Event::Icons(_)
+                    | Event::Icons { .. }
                     | Event::LayoutRead { .. }
                     | Event::Widgets { .. }
                     | Event::WidgetMouse { .. }
@@ -3529,7 +3608,8 @@ impl LoaderApp {
                 Event::Update(result) => match result {
                     Ok(available) => {
                         let failed = matches!(self.update_state, UpdateState::Failed(_));
-                        let busy = self.start_in_progress();
+                        // another open loader runs from the files an update replaces
+                        let busy = self.start_in_progress() || !self.instance.alone();
                         let automatic = available
                             .as_ref()
                             .filter(|a| update::installs_by_itself(a.kind, failed, busy))
@@ -3547,13 +3627,15 @@ impl LoaderApp {
                         self.error("Update manifest signature is invalid");
                     }
                 },
-                // Skipped meanwhile: the download no longer matters.
-                Event::UpdatePrepared(_)
-                    if !matches!(self.update_state, UpdateState::Downloading(_)) => {}
-                Event::UpdatePrepared(result) => match result {
-                    Ok(prepared) => self.apply_update(ctx, &prepared),
-                    Err(error) => self.update_failed(error),
-                },
+                Event::UpdatePrepared { progress, result } => {
+                    // a skipped download's answer no longer matters, also once another has started
+                    let current = matches!(&self.update_state, UpdateState::Downloading(now) if Arc::ptr_eq(now, &progress));
+                    match result {
+                        Ok(prepared) if current => self.apply_update(ctx, &prepared),
+                        Err(error) if current => self.update_failed(error),
+                        _ => {}
+                    }
+                }
                 Event::Me(result) => match result {
                     Ok(me) => self.auth = Auth::SignedIn(me),
                     Err(ApiError::Unauthorized | ApiError::SignedOut(_)) => self.sign_out(Some("your session expired.".into())),
@@ -3614,7 +3696,10 @@ impl LoaderApp {
                 Event::RunQuoted { start, result } => {
                     self.starting = None;
                     match result {
-                        Ok(quote) => self.start_at_quote(ctx, *start, None, quote),
+                        Ok((me, quote)) => {
+                            self.refresh_me(me);
+                            self.start_at_quote(ctx, *start, None, quote);
+                        }
                         Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
                         Err(error) => {
                             self.script_error(format!("Couldn't start {}: {error}", start.script.title));
@@ -3626,49 +3711,41 @@ impl LoaderApp {
                 Event::RestartQuoted { run, result } => {
                     self.starting = None;
                     match result {
-                        Ok(Some((script, quote))) => self.restart_quoted(ctx, run, script, quote),
+                        Ok(Some((me, script, quote))) => {
+                            self.refresh_me(me);
+                            self.restart_quoted(ctx, run, script, quote);
+                        }
                         Ok(None) => self.script_error("Couldn't restart: the script is no longer available to this account."),
                         Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
                         Err(error) => self.script_error(format!("Couldn't restart: {error}")),
                     }
                 }
-                Event::Heartbeat { session_id, sent, result } => {
-                    let now = std::time::Instant::now();
-                    if let (Ok(beat), Some(me)) = (&result, self.auth.me_mut())
-                        && let Some(credits) = beat.credits
-                    {
+                Event::Heartbeat { session_id, beat } => {
+                    if let (Some(credits), Some(me)) = (beat.credits, self.auth.me_mut()) {
                         me.credits = credits;
                     }
-                    let beat = result.as_ref().ok().map(|b| (b.rank, b.fee, b.fee_charged));
-                    let verdict = match self.run_by_session(&session_id) {
-                        Some(run) => {
-                            let store = run.store.as_mut().expect("a run found by session has one");
-                            if let Some((rank, fee, charged)) = beat {
-                                store.rank = rank.unwrap_or(store.rank);
-                                store.fee = fee.unwrap_or(store.fee);
-                                store.fee_charged = charged.unwrap_or(store.fee_charged);
-                            }
-                            store.beat.on_result(now, sent, result)
-                        }
-                        None => Verdict::Continue,
-                    };
-                    if let Verdict::Stop { reason, sign_out } = verdict {
-                        if let Some(run) = self.run_by_session(&session_id) {
-                            if let Some(store) = &mut run.store {
-                                store.stopping = true;
-                            }
-                            run.script.stop();
-                            run.error(reason.clone());
-                        }
-                        if sign_out {
-                            self.sign_out(Some(reason));
-                        }
+                    if let Some(store) = self.run_by_session(&session_id).and_then(|run| run.store.as_mut()) {
+                        store.rank = beat.rank.unwrap_or(store.rank);
+                        store.fee = beat.fee.unwrap_or(store.fee);
+                        store.fee_charged = beat.fee_charged.unwrap_or(store.fee_charged);
+                    }
+                }
+                Event::SessionStopped { session_id, reason, sign_out } => {
+                    if let Some(run) = self.run_by_session(&session_id) {
+                        run.script.stop();
+                        run.error(reason.clone());
+                    }
+                    if sign_out {
+                        self.sign_out(Some(reason));
                     }
                 }
                 Event::SessionEnded(result) => match result {
                     Ok(ended) => {
-                        self.script_info(format!("Session ended, {} credits charged for the last minutes.", ended.charged));
-                        self.api_job(ctx, |api| Event::Me(api.me()));
+                        self.script_info(format!("Session ended, {} credits charged for the last minutes.", crate::api::models::credits_text(ended.charged as f64)));
+                        // signing out ends the sessions first, and this answer can arrive after it
+                        if self.auth.me().is_some() {
+                            self.api_job(ctx, |api| Event::Me(api.me()));
+                        }
                     }
                     Err(error) => self.script_error(format!("Couldn't end the session: {error}. The server will end it within 5 minutes.")),
                 },
@@ -3693,7 +3770,7 @@ impl LoaderApp {
                     Ok(DisplayName::Off) => self.info(format!("{pid}: the real display name shows.")),
                     Err(error) => self.error(format!("Setting the display name in {pid} failed: {error}")),
                 },
-                Event::AccountName(result) => self.accounts.client_name(result),
+                Event::AccountName(result) => crate::script::write(&self.accounts).client_name(result),
                 Event::XpState { run: id, result } => {
                     if let Some(run) = self.runs.iter_mut().find(|r| r.id == id) {
                         run.xp_reading = false;
@@ -3733,21 +3810,23 @@ impl LoaderApp {
                 Event::ScriptNames(result) => self.script_inspector.finish_names(result),
                 Event::ScriptRuns { pid, result } => self.script_inspector.finish(pid, Instant::now(), result),
                 Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
-                Event::Icons(result) => self.icons.finish(ctx, result),
-                Event::LayoutRead { kind, result } => match kind {
-                    crate::layouts::Kind::Equipment => self
-                        .editors
-                        .equipment
-                        .finish_read(result, crate::layouts::apply_equipment),
-                    crate::layouts::Kind::Inventory => self
-                        .editors
-                        .inventory
-                        .finish_read(result, crate::layouts::apply_inventory),
-                    crate::layouts::Kind::Prayer => self
-                        .editors
-                        .prayer
-                        .finish_read(result, crate::layouts::apply_prayers),
-                },
+                Event::Icons { pictures, error } => self.icons.finish(ctx, Instant::now(), pictures, error),
+                Event::LayoutRead { run, kind, result } => {
+                    // a run closed meanwhile has no editor left to fill
+                    if let Some(editors) = editors_of(&mut self.runs, Some(run)) {
+                        match kind {
+                            crate::layouts::Kind::Equipment => editors
+                                .equipment
+                                .finish_read(result, crate::layouts::apply_equipment),
+                            crate::layouts::Kind::Inventory => editors
+                                .inventory
+                                .finish_read(result, crate::layouts::apply_inventory),
+                            crate::layouts::Kind::Prayer => editors
+                                .prayer
+                                .finish_read(result, crate::layouts::apply_prayers),
+                        }
+                    }
+                }
                 Event::Widgets { pid, result } => self.widgets.finish(pid, result),
                 Event::WidgetMouse { pid, result } => {
                     self.widgets.mouse_done();
@@ -3973,7 +4052,8 @@ impl LoaderApp {
             }
         });
         // The entries are saved with the rest of the settings (`save`).
-        self.whitelist_page.ui(ui, &mut self.http_whitelist);
+        self.whitelist_page
+            .ui(ui, &mut crate::script::write(&self.http_whitelist));
         self.transport_settings_ui(ui);
         });
     }
@@ -4602,34 +4682,12 @@ impl LoaderApp {
                         // the script waits for its settings: show its page
                         self.active_run = Some(run.id);
                         self.tab = Tab::Run;
-                        self.editors = Default::default();
+                        run.editors = Default::default();
                         ctx.request_repaint();
-                    }
-                    // Only a store run has a session to send them to; stats from a local run are dropped.
-                    ScriptEvent::Stats(experience, gold, custom) => {
-                        if let Some(store) = &mut run.store {
-                            store.beat.report(experience, gold, &custom);
-                        }
                     }
                     ScriptEvent::Counters(counters) => {
                         let elapsed = run.run_time();
                         run.counters.update(counters, elapsed);
-                    }
-                    ScriptEvent::PinRequest(hash) => {
-                        let answer = self.accounts.pin_for(&hash);
-                        if let Err(error) = run.script.answer_pin(answer) {
-                            run.error(error);
-                        }
-                    }
-                    ScriptEvent::LampRequest(hash) => {
-                        let answer = self.accounts.lamp_skill_for(&hash);
-                        if let Err(error) = run.script.answer_lamp(answer) {
-                            run.error(error);
-                        }
-                    }
-                    ScriptEvent::HttpRequest(payload) => {
-                        run.script
-                            .answer_http(&payload, self.http_whitelist.clone());
                     }
                     ScriptEvent::Breaks(plan) => run.breaks.update(plan, std::time::Instant::now()),
                     ScriptEvent::Finished { stopped: true, .. } => run.info("Script stopped."),
@@ -4641,7 +4699,6 @@ impl LoaderApp {
                 if finished {
                     self.runs[index].ended = Some(std::time::Instant::now());
                     self.keep_run_record(ctx, index);
-                    self.end_store_session(ctx, index);
                 }
             }
         }
@@ -5055,26 +5112,28 @@ impl LoaderApp {
                     },
                     ToolsTab::Equipment => {
                         let saved = self.layouts.entry(form_title.clone()).or_default();
-                        if crate::layouts::equipment_ui(
-                            ui,
-                            &mut self.editors.equipment,
-                            &mut saved.equipment,
-                            &mut self.icons,
-                            can_read,
-                        ) == Some(crate::layouts::Action::Read)
+                        if let Some(editors) = editors_of(&mut self.runs, self.active_run)
+                            && crate::layouts::equipment_ui(
+                                ui,
+                                &mut editors.equipment,
+                                &mut saved.equipment,
+                                &mut self.icons,
+                                can_read,
+                            ) == Some(crate::layouts::Action::Read)
                         {
                             read = Some((crate::layouts::Kind::Equipment, false));
                         }
                     }
                     ToolsTab::Inventory => {
                         let saved = self.layouts.entry(form_title.clone()).or_default();
-                        if crate::layouts::inventory_ui(
-                            ui,
-                            &mut self.editors.inventory,
-                            &mut saved.inventory,
-                            &mut self.icons,
-                            can_read,
-                        ) == Some(crate::layouts::Action::Read)
+                        if let Some(editors) = editors_of(&mut self.runs, self.active_run)
+                            && crate::layouts::inventory_ui(
+                                ui,
+                                &mut editors.inventory,
+                                &mut saved.inventory,
+                                &mut self.icons,
+                                can_read,
+                            ) == Some(crate::layouts::Action::Read)
                         {
                             read = Some((crate::layouts::Kind::Inventory, false));
                         }
@@ -5086,14 +5145,18 @@ impl LoaderApp {
                             .and_then(|r| r.xp.rows().into_iter().find(|row| row.name == "Prayer"))
                             .and_then(|row| u32::try_from(row.level).ok());
                         let saved = self.layouts.entry(form_title.clone()).or_default();
-                        match crate::layouts::prayer_ui(
-                            ui,
-                            &mut self.editors.prayer,
-                            &mut saved.prayer,
-                            &mut self.icons,
-                            can_read,
-                            level,
-                        ) {
+                        let action =
+                            editors_of(&mut self.runs, self.active_run).and_then(|editors| {
+                                crate::layouts::prayer_ui(
+                                    ui,
+                                    &mut editors.prayer,
+                                    &mut saved.prayer,
+                                    &mut self.icons,
+                                    can_read,
+                                    level,
+                                )
+                            });
+                        match action {
                             Some(crate::layouts::Action::Read) => {
                                 read = Some((crate::layouts::Kind::Prayer, false))
                             }
@@ -5133,10 +5196,15 @@ impl LoaderApp {
     /// Reads the selected client's worn items, inventory (with the rune pouch's runes) or prayers (on, or with `quick` the quick selection) for the editor of `kind`.
     fn read_layout(&mut self, ctx: &egui::Context, kind: crate::layouts::Kind, quick: bool) {
         use crate::layouts::{self, Kind, Read};
+        let Some(run) = self.active_run else {
+            return;
+        };
         let Some(target) = self.layout_target() else {
-            self.editors.equipment.reading = false;
-            self.editors.inventory.reading = false;
-            self.editors.prayer.reading = false;
+            if let Some(editors) = editors_of(&mut self.runs, Some(run)) {
+                editors.equipment.reading = false;
+                editors.inventory.reading = false;
+                editors.prayer.reading = false;
+            }
             return;
         };
         self.background(ctx, move |settings| {
@@ -5300,6 +5368,7 @@ impl LoaderApp {
                 }
             };
             Event::LayoutRead {
+                run,
                 kind,
                 result: read(),
             }
@@ -5407,7 +5476,7 @@ impl LoaderApp {
             return false;
         };
         match Script::start_with(
-            ctx,
+            &self.script_host(ctx),
             &prepared.source,
             &prepared.modules,
             Some(&prepared.entry),
@@ -5418,13 +5487,13 @@ impl LoaderApp {
             Ok(process) => {
                 let interval =
                     Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
+                let closed =
+                    self.keep_session(ctx, session_id.clone(), process.process(), interval);
                 let store = StoreRun {
                     session_id,
                     script_id: script.id.clone(),
                     community: script.community,
-                    beat: Beat::new(std::time::Instant::now(), interval),
-                    stopping: false,
-                    ended: false,
+                    closed,
                     lib_version: prepared.lib_version.clone(),
                     price: prepared.session.price,
                     rank: prepared.session.rank,
@@ -5473,7 +5542,7 @@ impl LoaderApp {
             return;
         }
         match Script::start(
-            ctx,
+            &self.script_host(ctx),
             &self.script_file.text,
             path,
             lib.as_deref(),
@@ -5543,7 +5612,12 @@ impl LoaderApp {
         if reload {
             self.script_file.text = disk;
         }
-        let target = self.selected_target().filter(|t| t.client.loaded.is_some());
+        // the client picked under "Run on", if it is still free
+        let target = self
+            .targets
+            .iter()
+            .find(|t| Some(t.key()) == self.run_target && self.client_free(t))
+            .cloned();
         self.run_script(ctx, target.as_ref());
     }
 
@@ -6757,7 +6831,6 @@ impl eframe::App for LoaderApp {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);
         self.handle_script_events(&ctx);
-        self.drive_session(&ctx);
         self.drive_xp(&ctx);
         if matches!(
             self.update_state,
@@ -6982,7 +7055,11 @@ impl eframe::App for LoaderApp {
         eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
         eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
-        eframe::set_value(storage, HTTP_WHITELIST_KEY, &self.http_whitelist.user());
+        eframe::set_value(
+            storage,
+            HTTP_WHITELIST_KEY,
+            &crate::script::read(&self.http_whitelist).user(),
+        );
     }
 
     fn on_exit(&mut self) {
@@ -6992,25 +7069,8 @@ impl eframe::App for LoaderApp {
         if let Some(terminal) = &mut self.terminal {
             terminal.close();
         }
-        let mut sessions = Vec::new();
-        for run in &mut self.runs {
-            run.script.stop();
-            if let Some(store) = run.store.as_ref().filter(|s| !s.ended) {
-                sessions.push(store.session_id.clone());
-            }
-        }
-        // Closing must not wait on the network. If this doesn't land, the server ends the sessions within 5 minutes.
-        if !sessions.is_empty() {
-            let (done, wait) = channel();
-            let api = self.api.clone();
-            thread::spawn(move || {
-                for session_id in sessions {
-                    let _ = api.end_session(&session_id);
-                }
-                let _ = done.send(());
-            });
-            let _ = wait.recv_timeout(Duration::from_secs(3));
-        }
+        // Closing must not wait on the network for long
+        self.stop_all();
         backend::shutdown();
     }
 }

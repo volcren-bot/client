@@ -61,6 +61,7 @@ use ipc::{
     overlay_mode, overlay_offset,
     packets::{self as packet_log, LOG_SIZE, Log, direction, packets_memory_name},
     read::short_string_text,
+    request_mutex_name,
     script_runs::{
         self as script_log, arg_kind, phase as script_runs_phase, script_runs_memory_name,
     },
@@ -702,6 +703,18 @@ fn ask<S>(
     status: impl Fn(Shared<'_>) -> Option<(u32, S)>,
 ) -> Result<S, String> {
     let session = session(pid)?;
+    // One asker per slot at a time, across threads and injector processes (a script, the loader's helper): the agent answers only the newest request, so a second one would leave the first waiting out its timeout.
+    let name = wide(request_mutex_name(pid, message));
+    let mutex = Handle::new(unsafe { CreateMutexW(null(), 0, name.as_ptr()) })
+        .ok_or("cannot take the agent's request slot")?;
+    // An abandoned mutex (its owner died with it) is ours all the same; the slot is rewritten below.
+    if !matches!(
+        unsafe { WaitForSingleObject(mutex.0, REQUEST_TIMEOUT.as_millis() as u32) },
+        WAIT_OBJECT_0 | WAIT_ABANDONED
+    ) {
+        return Err("the agent is busy with another request".to_owned());
+    }
+    let _slot = SlotGuard(mutex.0);
     let shared = session.view.shared();
     let sequence = write(shared);
     crate::input::post_request(pid, message).and_then(|()| {
@@ -2299,14 +2312,17 @@ pub fn nav_plan(
     );
     let grown = |(x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)| {
         (
-            x1.min(x - MARGIN),
-            y1.min(y - MARGIN),
-            x2.max(x + MARGIN),
-            y2.max(y + MARGIN),
+            x1.min(x.saturating_sub(MARGIN)),
+            y1.min(y.saturating_sub(MARGIN)),
+            x2.max(x.saturating_add(MARGIN)),
+            y2.max(y.saturating_add(MARGIN)),
         )
     };
-    let fits =
-        |(x1, y1, x2, y2): (i32, i32, i32, i32)| x2 - x1 < MAX_WINDOW && y2 - y1 < MAX_WINDOW;
+    // in i64: a script may ask for a tile far outside the world, and a wrapped width would pass
+    let fits = |(x1, y1, x2, y2): (i32, i32, i32, i32)| {
+        let wide = i64::from(MAX_WINDOW);
+        i64::from(x2) - i64::from(x1) < wide && i64::from(y2) - i64::from(y1) < wide
+    };
     // a box grown by `extra` tiles on every side, trimmed back (evenly) to the largest the cache can fill in one go
     const WIDEN: [i32; 3] = [48, 112, 224];
     let widen = |(x1, y1, x2, y2): (i32, i32, i32, i32), extra: i32| {
@@ -2945,7 +2961,7 @@ thread_local! {
     static WORKER_BYTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-// Holds the worker's slot (a mutex shared with every injector process on this client) until dropped.
+// Holds a request slot (a mutex shared with every injector process on this client) until dropped.
 struct SlotGuard(HANDLE);
 
 impl Drop for SlotGuard {

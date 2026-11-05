@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     io::{Read, Write},
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
@@ -18,6 +19,8 @@ const RECORD_ITEM: u8 = 0;
 const RECORD_SPRITE: u8 = 1;
 /// Pictures asked of the client in one request.
 pub const BATCH: usize = 64;
+/// How long after a failed read the next one waits, so a client that can't answer isn't asked every frame.
+pub const RETRY_AFTER: Duration = Duration::from_secs(5);
 
 /// What a picture is of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -58,6 +61,8 @@ pub struct Icons {
     wanted: BTreeSet<Key>,
     /// Pictures a client is drawing now.
     in_flight: Vec<Key>,
+    /// When to ask again after a read that failed.
+    retry_at: Option<Instant>,
     loaded_file: bool,
     pub error: Option<String>,
 }
@@ -211,17 +216,25 @@ impl Icons {
         }
     }
 
-    /// Whether some pictures are waiting for a client to draw them, and none are being drawn.
-    pub fn due(&self) -> bool {
-        !self.wanted.is_empty() && self.in_flight.is_empty()
+    /// Whether some pictures are waiting for a client to draw them, none are being drawn, and a failed read's wait is over.
+    pub fn due(&self, now: Instant) -> bool {
+        !self.wanted.is_empty()
+            && self.in_flight.is_empty()
+            && self.retry_at.is_none_or(|at| now >= at)
     }
 
-    /// Takes the next batch of pictures to ask a client for.
+    /// How long until a failed read is tried again, when pictures wait for that.
+    pub fn retry_in(&self, now: Instant) -> Option<Duration> {
+        let at = self.retry_at.filter(|_| !self.wanted.is_empty())?;
+        Some(at.saturating_duration_since(now))
+    }
+
+    /// Takes the next batch of pictures to ask a client for. The rest are forgotten: the UI asks again for those it still shows.
     pub fn start(&mut self) -> Batch {
         let keys: Vec<Key> = self.wanted.iter().take(BATCH).copied().collect();
+        self.wanted.clear();
         let mut batch = Batch::default();
         for key in &keys {
-            self.wanted.remove(key);
             match key {
                 Key::Item(item) => batch.items.push(*item),
                 Key::Sprite(id) => batch.sprites.push(*id),
@@ -231,42 +244,39 @@ impl Icons {
         batch
     }
 
-    /// Keeps what the client drew. A picture it couldn't draw stays missing until the loader restarts; a failed read leaves them wanted.
+    /// Keeps what the client drew. A picture it couldn't draw stays missing until the loader restarts. With `error`, the read failed part way: what came is kept, and the rest is asked for again after `RETRY_AFTER` if the UI still shows it.
     pub fn finish(
         &mut self,
         ctx: &egui::Context,
-        result: Result<Vec<(Key, Option<Image>)>, String>,
+        now: Instant,
+        pictures: Vec<(Key, Option<Image>)>,
+        error: Option<String>,
     ) {
         let keys = std::mem::take(&mut self.in_flight);
-        match result {
-            Ok(pictures) => {
-                self.error = None;
-                let mut records = Vec::new();
-                for (key, image) in pictures {
-                    let entry = match image
-                        .as_ref()
-                        .and_then(|image| Some((image, image.pixels()?)))
-                    {
-                        Some((image, rgba)) => {
-                            records.push(record(key, image.width, image.height, &rgba));
-                            Entry::Texture(texture(ctx, key, image.width, image.height, &rgba))
-                        }
-                        None => Entry::Missing,
-                    };
-                    self.known.insert(key, entry);
+        let mut records = Vec::new();
+        for (key, image) in pictures {
+            let entry = match image
+                .as_ref()
+                .and_then(|image| Some((image, image.pixels()?)))
+            {
+                Some((image, rgba)) => {
+                    records.push(record(key, image.width, image.height, &rgba));
+                    Entry::Texture(texture(ctx, key, image.width, image.height, &rgba))
                 }
-                for key in keys {
-                    self.known.entry(key).or_insert(Entry::Missing);
-                }
-                if !records.is_empty() {
-                    self.append_file(&records);
-                }
-            }
-            Err(error) => {
-                self.error = Some(error);
-                self.wanted.extend(keys);
+                None => Entry::Missing,
+            };
+            self.known.insert(key, entry);
+        }
+        if !records.is_empty() {
+            self.append_file(&records);
+        }
+        self.retry_at = error.is_some().then(|| now + RETRY_AFTER);
+        if error.is_none() {
+            for key in keys {
+                self.known.entry(key).or_insert(Entry::Missing);
             }
         }
+        self.error = error;
     }
 }
 
@@ -338,10 +348,40 @@ mod tests {
         let mut icons = Icons::default();
         icons.wanted.insert(Key::item(1, 1, false));
         icons.wanted.insert(Key::Sprite(5));
-        assert!(icons.due());
+        let now = Instant::now();
+        assert!(icons.due(now));
         let batch = icons.start();
         assert_eq!(batch.items.len(), 1);
         assert_eq!(batch.sprites, [5]);
-        assert!(!icons.due());
+        assert!(!icons.due(now));
+    }
+
+    #[test]
+    fn a_failed_read_waits_before_the_next_and_keeps_what_came() {
+        let ctx = egui::Context::default();
+        let mut icons = Icons {
+            loaded_file: true,
+            ..Default::default()
+        };
+        let (item, sprite) = (Key::item(1, 1, false), Key::Sprite(5));
+        icons.wanted.insert(item);
+        icons.wanted.insert(sprite);
+        let now = Instant::now();
+        icons.start();
+        // the items came, the sprites failed
+        icons.finish(&ctx, now, vec![(item, None)], Some("no answer".into()));
+        assert!(icons.known.contains_key(&item));
+        assert!(!icons.known.contains_key(&sprite), "it is asked for again");
+
+        // the UI still shows the sprite: it waits for the retry
+        icons.texture(&ctx, sprite);
+        assert!(!icons.due(now));
+        assert_eq!(icons.retry_in(now), Some(RETRY_AFTER));
+        assert!(icons.due(now + RETRY_AFTER));
+
+        icons.start();
+        icons.finish(&ctx, now + RETRY_AFTER, vec![(sprite, None)], None);
+        assert_eq!(icons.retry_in(now + RETRY_AFTER), None);
+        assert!(icons.error.is_none());
     }
 }

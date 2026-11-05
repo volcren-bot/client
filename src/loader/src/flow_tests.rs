@@ -40,6 +40,10 @@ struct Server {
     price: i64,
     /// Serve the files encrypted, and the key with the session.
     encrypted: bool,
+    /// The account's role: below tester the community list is refused.
+    role: &'static str,
+    /// The account's balance.
+    credits: i64,
 }
 
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -72,6 +76,8 @@ impl Server {
             no_lib: false,
             price: 30,
             encrypted: false,
+            role: "user",
+            credits: 0,
         }
     }
 
@@ -99,6 +105,18 @@ impl Server {
                 }] }),
             ),
             ("GET", p) if p.ends_with("/lib.zip") => Reply::bytes(lib),
+            ("GET", "/launcher/me") => Reply::json(
+                200,
+                json!({ "username": "tester", "role": self.role, "credits": self.credits, "min_balance_minutes": 10, "api_version": 2 }),
+            ),
+            ("GET", "/launcher/scripts")
+                if request.path.contains("community=true") && self.role == "user" =>
+            {
+                Reply::json(
+                    403,
+                    json!({ "error": "Only testers can browse community scripts." }),
+                )
+            }
             ("GET", "/launcher/scripts") => {
                 let only_community = request.path.contains("community=true");
                 let scripts = [
@@ -111,10 +129,12 @@ impl Server {
                     .collect();
                 Reply::json(200, json!({ "scripts": scripts }))
             }
-            ("GET", p) if p == format!("/launcher/scripts/{SCRIPT_ID}/quote") => Reply::json(
-                200,
-                json!({ "price": 30, "rank": 0, "fee": 0, "required": 300 }),
-            ),
+            ("GET", p) if p.starts_with("/launcher/scripts/") && p.ends_with("/quote") => {
+                Reply::json(
+                    200,
+                    json!({ "price": 30, "rank": 0, "fee": 0, "required": 300 }),
+                )
+            }
             ("POST", "/launcher/scripts/redeem") => match request.json()["code"]
                 .as_str()
                 .and_then(|code| code.chars().next())
@@ -492,7 +512,8 @@ fn too_few_credits_downloads_nothing_and_ends_nothing() {
     let error = prepare_in(&api(&fake), &script(), &root)
         .err()
         .expect("fails");
-    assert!(error.contains("300"), "{error}");
+    // 300 credits, as the user sees them
+    assert!(error.contains("0.03 needed"), "{error}");
     assert_eq!(fake.count("GET", "/files/"), 0);
     assert_eq!(
         fake.count("POST", "/launcher/sessions/"),
@@ -620,7 +641,11 @@ fn an_id_that_isnt_plain_never_reaches_the_server() {
 
 #[test]
 fn the_list_carries_the_community_tag_and_the_filter_asks_for_it() {
-    let fake = Server::healthy().start();
+    let fake = Server {
+        role: "tester",
+        ..Server::healthy()
+    }
+    .start();
     let api = api(&fake);
 
     let all = api.scripts("", "", false).unwrap();
@@ -688,7 +713,7 @@ fn a_restart_ends_the_old_session_before_it_asks_for_the_quote() {
     let fake = Server::healthy().start();
     let api = api(&fake);
 
-    let (script, quote) = restart_quote(&api, "s1", SCRIPT_ID, false)
+    let (_, script, quote) = restart_quote(&api, "s1", SCRIPT_ID, false)
         .expect("quote")
         .expect("listed");
     assert_eq!(script.id, SCRIPT_ID);
@@ -707,6 +732,41 @@ fn a_restart_of_a_script_no_longer_listed_finds_nothing() {
 
     let found = restart_quote(&api, "s1", "not-listed", false).expect("quote");
     assert_eq!(found, None);
+}
+
+#[test]
+fn a_restart_of_a_community_script_asks_for_the_list_the_account_may_read() {
+    // below tester the community list is refused, and the script is in the default one
+    let fake = Server::healthy().start();
+    let (_, script, _) = restart_quote(&api(&fake), "s1", COMMUNITY_ID, true)
+        .expect("quote")
+        .expect("listed");
+    assert!(script.community);
+    assert_eq!(fake.count("GET", "/launcher/scripts?community=true"), 0);
+
+    let fake = Server {
+        role: "tester",
+        ..Server::healthy()
+    }
+    .start();
+    assert!(
+        restart_quote(&api(&fake), "s1", COMMUNITY_ID, true)
+            .expect("quote")
+            .is_some()
+    );
+    assert_eq!(fake.count("GET", "/launcher/scripts?community=true"), 1);
+}
+
+#[test]
+fn a_quote_comes_with_the_balance_of_now() {
+    let fake = Server {
+        credits: 500,
+        ..Server::healthy()
+    }
+    .start();
+    let (me, quote) = crate::session::quote(&api(&fake), SCRIPT_ID).expect("quote");
+    assert_eq!(me.credits, 500);
+    assert_eq!(start_block(&script(), &quote, me.credits), None);
 }
 
 fn quote(price: i64, fee: i64, required: i64) -> Quote {
