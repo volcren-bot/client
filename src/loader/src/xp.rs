@@ -34,10 +34,6 @@ pub fn xp_for_level(level: i64) -> i64 {
 }
 
 impl XpTracker {
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     /// Whether no read of the skills has come in yet.
     pub fn is_empty(&self) -> bool {
         self.first.is_empty()
@@ -159,7 +155,7 @@ mod tests {
             rows[0].to_level.unwrap().as_secs(),
             (missing as f64 / 10_000.0 * 3600.0) as u64
         );
-        tracker.reset();
+        tracker = Default::default();
         assert!(tracker.is_empty());
     }
 

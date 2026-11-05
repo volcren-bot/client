@@ -47,6 +47,91 @@ pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
 const PURPLE: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
 pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
+/// The credit coin's colour, the brand orange.
+pub const COIN: Color32 = Color32::from_rgb(0xd9, 0x78, 0x02);
+
+/// The credit coin, `size` high: the brand mark drawn white in the asset and tinted here.
+pub fn coin(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    ui.add(
+        egui::Image::new(egui::include_image!("../assets/coin.svg"))
+            .fit_to_exact_size(vec2(size, size))
+            .tint(COIN),
+    )
+}
+
+/// An amount of credits as users see it (1 = 1 EUR): the coin, then the number in `text`'s style, then `suffix` ("/h") in the same style.
+pub fn credits(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::Response {
+    let style = ui.style().clone();
+    let size = ui.ctx().fonts_mut(|fonts| text.font_height(fonts, &style));
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        coin(ui, size);
+        ui.label(text.clone());
+        if !suffix.is_empty() {
+            ui.label(egui::RichText::new(suffix).size(size * 0.85).weak());
+        }
+    })
+    .response
+}
+
+/// A row nested under a sidebar item, drawn with the tree's vertical bar before its own branch.
+pub fn sidebar_child<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    value: T,
+    name: &str,
+    dim: bool,
+    last: bool,
+) -> egui::Response {
+    let selected = *current == value;
+    let (rect, mut response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), ui.spacing().interact_size.y),
+        egui::Sense::click(),
+    );
+    if response.clicked() && !selected {
+        *current = value;
+        response.mark_changed();
+    }
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let text = if selected {
+            BLUE
+        } else if dim {
+            COMMENT
+        } else if response.hovered() {
+            FG
+        } else {
+            FG_DARK
+        };
+        if selected || response.hovered() {
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
+        }
+        let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
+        let mut job = egui::text::LayoutJob {
+            wrap: egui::text::TextWrapping {
+                max_width: rect.width() - 16.0,
+                max_rows: 1,
+                break_anywhere: true,
+                overflow_character: Some('\u{2026}'),
+            },
+            ..Default::default()
+        };
+        for (s, color) in [
+            ("│  ", COMMENT),
+            (if last { "└─ " } else { "├─ " }, COMMENT),
+            (name, text),
+        ] {
+            job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
+        }
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(
+            egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text,
+        );
+    }
+    response
+}
 
 /// A flat, square, all-monospace look after the webapp's Neovim/LazyVim layer, always dark.
 pub fn apply(ctx: &egui::Context) {

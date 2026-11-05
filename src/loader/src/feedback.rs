@@ -475,7 +475,7 @@ impl Page {
         &mut self,
         ui: &mut egui::Ui,
         include_system: &mut bool,
-        running: Option<&str>,
+        running: &[String],
     ) -> Vec<Action> {
         let mut actions = Vec::new();
         ui.horizontal(|ui| {
@@ -507,11 +507,8 @@ impl Page {
                     ui.label(egui::RichText::new(&session.title).strong());
                     ui.label(egui::RichText::new(format!("revision {}", session.revision)).weak());
                     ui.label(
-                        egui::RichText::new(when(
-                            session,
-                            running.is_some_and(|id| id == session.session_id),
-                        ))
-                        .weak(),
+                        egui::RichText::new(when(session, running.contains(&session.session_id)))
+                            .weak(),
                     );
                 });
                 actions.extend(session_ui(ui, session, draft, include_system));

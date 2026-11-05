@@ -35,10 +35,6 @@ fn ms(value: f64) -> Duration {
 }
 
 impl BreaksTracker {
-    pub fn reset(&mut self) {
-        self.plan = None;
-    }
-
     pub fn update(&mut self, plan: BreakPlan, at: Instant) {
         self.plan = Some((plan, at));
     }
@@ -379,7 +375,7 @@ mod tests {
         let view = tracker.view(start + Duration::from_secs(5)).unwrap();
         assert_eq!(view.breaks[0].remaining, Duration::from_secs(10));
         assert_eq!(view.active.unwrap().remaining, Duration::from_secs(25));
-        tracker.reset();
+        tracker = Default::default();
         assert!(tracker.view(start).is_none());
     }
 

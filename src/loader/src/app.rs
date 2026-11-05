@@ -54,8 +54,11 @@ enum Event {
         read: Read,
         result: Result<Option<Vec<i32>>, String>,
     },
-    /// A read for the XP tracker, taken while a script runs.
-    XpState(Result<GameState, String>),
+    /// A read for a run's XP tracker, taken while its script runs.
+    XpState {
+        run: u64,
+        result: Result<GameState, String>,
+    },
     /// The account name of the selected client, for the Accounts page.
     AccountName(Result<Option<String>, String>),
     Name {
@@ -146,24 +149,151 @@ enum Event {
     RunKept(Result<(), String>),
 }
 
-/// A store script that is running, and the session that is billing it.
+/// The session billing a store script.
 struct StoreRun {
     session_id: String,
-    /// The script's name, for its page in the sidebar.
-    title: String,
     beat: Beat,
     /// The script is being stopped for a reason already reported; the end of the session follows its exit.
     stopping: bool,
+    /// The end was sent to the server.
+    ended: bool,
     /// The lib the script runs against, named in bug reports.
     lib_version: String,
+    /// Credits per minute, fixed for the session.
+    price: i64,
+    /// The session's place among the account's open sessions and the extra-session fee (credits per month) it accrues there, as the server last said.
+    rank: i64,
+    fee: i64,
+    fee_charged: i64,
+}
+
+impl StoreRun {
+    /// What the session costs an hour right now: its price plus its share of the fee.
+    fn rate_per_hour(&self, minutes_per_month: i64) -> f64 {
+        crate::api::models::per_hour(self.price)
+            + crate::api::models::fee_per_hour(self.fee, minutes_per_month)
+    }
+}
+
+/// A script that is running, or ran until it is closed: its process, the client it runs on, the session billing it, and everything its page shows.
+struct Run {
+    id: u64,
+    title: String,
+    script: Script,
+    /// The client it was started on.
+    target: Option<Target>,
+    /// The store session billing it; none for a run from the editor.
+    store: Option<StoreRun>,
+    form: Option<crate::form::Form>,
+    /// What the script was last given from `form`; `None` while it still waits for its settings, and after submit the button becomes Update.
+    form_sent: Option<serde_json::Value>,
+    /// The break and sleep config the script has.
+    antiban_sent: injector::antiban::Config,
+    log: Log,
+    xp: crate::xp::XpTracker,
+    breaks: crate::breaks::BreaksTracker,
+    counters: crate::counters::CountersTracker,
+    started: std::time::Instant,
+    ended: Option<std::time::Instant>,
+    tools_tab: ToolsTab,
+    /// The account names the client showed, taken out of what a bug report sends.
+    names: Vec<String>,
+    xp_next: std::time::Instant,
+    xp_reading: bool,
+}
+
+impl Run {
+    fn new(
+        id: u64,
+        title: String,
+        script: Script,
+        target: Option<Target>,
+        store: Option<StoreRun>,
+        antiban: injector::antiban::Config,
+    ) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            id,
+            title,
+            script,
+            target,
+            store,
+            form: None,
+            form_sent: None,
+            antiban_sent: antiban,
+            log: Log::default(),
+            xp: Default::default(),
+            breaks: Default::default(),
+            counters: Default::default(),
+            started: now,
+            ended: None,
+            tools_tab: ToolsTab::Settings,
+            names: Vec::new(),
+            xp_next: now,
+            xp_reading: false,
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.script.is_running()
+    }
+
+    /// How long the script has run, frozen once it ended.
+    fn run_time(&self) -> Duration {
+        self.ended
+            .unwrap_or_else(std::time::Instant::now)
+            .saturating_duration_since(self.started)
+    }
+
+    /// The client it runs on, while its agent is loaded.
+    fn loaded_target(&self) -> Option<Target> {
+        self.target.clone().filter(|t| t.client.loaded.is_some())
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        self.store.as_ref().map(|s| s.session_id.as_str())
+    }
+
+    fn info(&mut self, text: impl Into<String>) {
+        self.log.push(false, text.into());
+    }
+
+    fn error(&mut self, text: impl Into<String>) {
+        self.log.push(true, text.into());
+    }
+
+    /// One word for the sessions list and the page header.
+    fn status(&self) -> &'static str {
+        if !self.is_running() {
+            "ended"
+        } else if self.script.stop_requested() {
+            "stopping"
+        } else if self.script.is_paused() {
+            "paused"
+        } else if self.form.is_some() && self.form_sent.is_none() {
+            "waiting"
+        } else {
+            "running"
+        }
+    }
+}
+
+/// A store script waiting for the user to accept the extra-session fee before it starts.
+struct ExtraPrompt {
+    script: StoreScript,
+    target: Target,
+    /// Sessions already open, so this would be the `open + 1`th.
+    open: i64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Clients,
     Store,
-    /// The page of the store script that is running; it replaces `Store` in the sidebar until the script ends.
-    Running,
+    /// The list of runs, with a page per run nested under it in the sidebar.
+    Sessions,
+    /// The page of `active_run`.
+    Run,
     Scripts,
     Development,
     Terminal,
@@ -992,7 +1122,8 @@ enum BreaksTab {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LogTab {
     Loader,
-    Script,
+    /// A run's log, by its id.
+    Run(u64),
 }
 
 type LogJobKey = (
@@ -1020,12 +1151,15 @@ pub struct LoaderApp {
     find: Find,
     highlighter: Highlighter,
     fold: crate::fold::Folds,
-    script: Option<Script>,
-    form: Option<crate::form::Form>,
-    /// What the script was last given from `form`; `None` while it still waits for its settings, and after submit the button becomes Update.
-    form_sent: Option<serde_json::Value>,
-    /// The break and sleep config the running script has.
-    antiban_sent: injector::antiban::Config,
+    /// Every script started and not closed yet, oldest first.
+    runs: Vec<Run>,
+    /// The run whose page `Tab::Run` shows.
+    active_run: Option<u64>,
+    next_run: u64,
+    /// The client the Run buttons start scripts on, by `Target::key`.
+    run_target: Option<String>,
+    /// A store script waiting for the extra-session fee to be accepted.
+    extra_prompt: Option<ExtraPrompt>,
     /// The file's new contents, while asking whether to reload it before running.
     reload_prompt: Option<String>,
     remembered_forms: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -1050,9 +1184,6 @@ pub struct LoaderApp {
     confirmed: Confirmed,
     /// A community script waiting for the user to accept the warning before it starts.
     warning: Option<(StoreScript, Target)>,
-    store_run: Option<StoreRun>,
-    /// Whether the latest script run came from the editor, so its page hands back to the editor when it ends. The editor stays in the sidebar while it runs.
-    run_was_local: bool,
     /// A newer launcher release, until the user dismisses it.
     update: Option<Release>,
     /// Title of the store script being prepared (session start and download).
@@ -1062,30 +1193,16 @@ pub struct LoaderApp {
     selected: Option<String>,
     busy: Option<&'static str>,
     log_tab: LogTab,
-    /// The main tab the output tab last followed, so switching main tabs switches the output but the output can still be changed on its own.
-    followed_tab: Tab,
-    script_log: Log,
+    /// The page (and run) the output tab last followed, so switching pages switches the output but the output can still be changed on its own.
+    followed_tab: (Tab, Option<u64>),
     loader_log: Log,
     /// The output tab's layout job, for the tab and revision it was built from.
     log_job: Option<(LogJobKey, egui::text::LayoutJob)>,
-    xp: crate::xp::XpTracker,
-    breaks: crate::breaks::BreaksTracker,
-    counters: crate::counters::CountersTracker,
-    /// When the running script started, and when it ended; the XP Tracker's clock.
-    run_started: Option<std::time::Instant>,
-    run_ended: Option<std::time::Instant>,
-    tools_tab: ToolsTab,
     breaks_tab: BreaksTab,
-    /// The account names the running client showed, taken out of what a bug report sends.
-    run_names: Vec<String>,
     /// The Feedback page's sessions and drafts.
     feedback: feedback::Page,
     /// The renderer eframe draws with, for a bug report's system info.
     gpu: Option<String>,
-    /// The client the XP tracker reads while the script runs, when one was chosen.
-    xp_target: Option<Target>,
-    xp_next: std::time::Instant,
-    xp_reading: bool,
     /// Item icons drawn by a client, for the inspectors and the layout editors.
     icons: crate::icons::Icons,
     /// Every script's saved equipment and inventory layouts, by form title.
@@ -1130,10 +1247,6 @@ impl LoaderApp {
             find: Find::default(),
             highlighter: Highlighter::default(),
             fold: crate::fold::Folds::default(),
-            script: None,
-            form: None,
-            form_sent: None,
-            antiban_sent: Default::default(),
             reload_prompt: None,
             remembered_forms: cc
                 .storage
@@ -1168,8 +1281,11 @@ impl LoaderApp {
                 .and_then(|s| eframe::get_value(s, CONFIRMED_KEY))
                 .unwrap_or_default(),
             warning: None,
-            store_run: None,
-            run_was_local: false,
+            runs: Vec::new(),
+            active_run: None,
+            next_run: 1,
+            run_target: None,
+            extra_prompt: None,
             update: None,
             starting: None,
             targets: Vec::new(),
@@ -1177,25 +1293,14 @@ impl LoaderApp {
             selected: None,
             busy: None,
             log_tab: LogTab::Loader,
-            followed_tab: Tab::Clients,
-            script_log: Log::default(),
-            xp: Default::default(),
-            breaks: Default::default(),
-            counters: Default::default(),
-            run_started: None,
-            run_ended: None,
-            tools_tab: ToolsTab::Settings,
+            followed_tab: (Tab::Clients, None),
             breaks_tab: BreaksTab::Breaks,
-            xp_target: None,
-            xp_next: std::time::Instant::now(),
-            xp_reading: false,
             icons: Default::default(),
             layouts: cc
                 .storage
                 .and_then(|s| eframe::get_value(s, LAYOUTS_KEY))
                 .unwrap_or_default(),
             editors: Default::default(),
-            run_names: Vec::new(),
             feedback: feedback::Page::default(),
             gpu,
             loader_log: Log::default(),
@@ -1273,12 +1378,9 @@ impl LoaderApp {
         if self.starting.is_some() {
             return Some("A script is starting.".into());
         }
-        if self.script.as_ref().is_some_and(Script::is_running) {
-            return Some("A script is already running. Stop it first.".into());
-        }
         target
             .is_none()
-            .then(|| "Select a client with agent loaded in the Clients tab.".into())
+            .then(|| "Pick a client with the agent loaded that isn't running a script.".into())
     }
 
     fn start_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
@@ -1294,68 +1396,118 @@ impl LoaderApp {
         });
     }
 
-    /// Ends the session of the store script that just stopped. Idempotent on the server, so it is safe to call twice.
-    fn end_store_session(&mut self, ctx: &egui::Context) {
-        if let Some(run) = self.store_run.take() {
+    /// Ends the session of a store run that stopped. Idempotent on the server, so sending it twice is harmless; `ended` keeps it to once.
+    fn end_store_session(&mut self, ctx: &egui::Context, index: usize) {
+        if let Some(store) = self.runs[index].store.as_mut().filter(|s| !s.ended) {
+            store.ended = true;
+            let session_id = store.session_id.clone();
+            if let Some(me) = self.auth.me_mut() {
+                me.open_sessions = (me.open_sessions - 1).max(0);
+            }
             self.api_job(ctx, move |api| {
-                Event::SessionEnded(api.end_session(&run.session_id))
+                Event::SessionEnded(api.end_session(&session_id))
             });
         }
     }
 
-    fn start_xp_tracking(&mut self, target: Option<Target>) {
-        self.xp.reset();
-        self.breaks.reset();
-        self.antiban_sent = self.settings.antiban.clone();
-        self.counters.reset();
-        self.run_names.clear();
-        self.run_started = Some(std::time::Instant::now());
-        self.run_ended = None;
-        self.xp_target = target;
-        self.xp_next = std::time::Instant::now();
+    /// The run whose page is open.
+    fn run(&self) -> Option<&Run> {
+        self.active_run
+            .and_then(|id| self.runs.iter().find(|r| r.id == id))
     }
 
-    /// While a script runs, reads the client's skills every few seconds for the XP tracker.
+    fn run_mut(&mut self) -> Option<&mut Run> {
+        self.active_run
+            .and_then(|id| self.runs.iter_mut().find(|r| r.id == id))
+    }
+
+    fn run_index(&self, id: u64) -> Option<usize> {
+        self.runs.iter().position(|r| r.id == id)
+    }
+
+    fn run_by_session(&mut self, session_id: &str) -> Option<&mut Run> {
+        self.runs
+            .iter_mut()
+            .find(|r| r.session_id() == Some(session_id))
+    }
+
+    /// The store sessions this loader is running, for the fee prompt and the spend rate.
+    fn store_runs(&self) -> impl Iterator<Item = &StoreRun> {
+        self.runs
+            .iter()
+            .filter(|r| r.is_running())
+            .filter_map(|r| r.store.as_ref())
+    }
+
+    /// Whether a client is taken by a running script.
+    fn client_in_use(&self, pid: u32) -> bool {
+        self.runs
+            .iter()
+            .any(|r| r.is_running() && r.target.as_ref().is_some_and(|t| t.client.pid == pid))
+    }
+
+    /// Adds a run, opens its page and its log.
+    fn add_run(&mut self, run: Run) {
+        self.active_run = Some(run.id);
+        self.log_tab = LogTab::Run(run.id);
+        self.runs.push(run);
+        self.tab = Tab::Run;
+        self.sidebar_open = false;
+    }
+
+    /// While scripts run, reads each client's skills every few seconds for the XP trackers.
     fn drive_xp(&mut self, ctx: &egui::Context) {
-        if !self.script.as_ref().is_some_and(Script::is_running) {
-            return;
-        }
-        // the run time on screen ticks every second
-        ctx.request_repaint_after(Duration::from_secs(1));
-        if self
-            .xp_target
-            .as_ref()
-            .is_none_or(|t| t.client.loaded.is_none())
-        {
-            return;
-        }
         let now = std::time::Instant::now();
-        if self.xp_reading || now < self.xp_next {
-            ctx.request_repaint_after(
-                self.xp_next
-                    .saturating_duration_since(now)
-                    .max(Duration::from_millis(250)),
-            );
-            return;
+        let mut reads = Vec::new();
+        for run in &mut self.runs {
+            if !run.is_running() {
+                continue;
+            }
+            // the run time on screen ticks every second
+            ctx.request_repaint_after(Duration::from_secs(1));
+            let Some(target) = run.loaded_target() else {
+                continue;
+            };
+            if run.xp_reading || now < run.xp_next {
+                ctx.request_repaint_after(
+                    run.xp_next
+                        .saturating_duration_since(now)
+                        .max(Duration::from_millis(250)),
+                );
+                continue;
+            }
+            run.xp_reading = true;
+            reads.push((run.id, target));
         }
-        let Some(target) = self.xp_target.clone() else {
-            return;
-        };
-        self.xp_reading = true;
-        self.background(ctx, move |settings| {
-            Event::XpState(backend::state(&target, &settings))
-        });
+        for (id, target) in reads {
+            self.background(ctx, move |settings| Event::XpState {
+                run: id,
+                result: backend::state(&target, &settings),
+            });
+        }
     }
 
-    /// Sends a heartbeat when one is due, and asks for a repaint when the next one will be.
+    /// Sends each store run's heartbeat when one is due, and asks for a repaint when the next one will be.
     fn drive_session(&mut self, ctx: &egui::Context) {
         let now = std::time::Instant::now();
-        let Some(run) = self.store_run.as_mut().filter(|run| !run.stopping) else {
-            return;
-        };
-        if run.beat.due(now) {
-            let sent = run.beat.take(now);
-            let session_id = run.session_id.clone();
+        let mut due = Vec::new();
+        for run in &mut self.runs {
+            let Some(store) = run.store.as_mut().filter(|s| !s.stopping && !s.ended) else {
+                continue;
+            };
+            if store.beat.due(now) {
+                due.push((store.session_id.clone(), store.beat.take(now)));
+            } else {
+                ctx.request_repaint_after(
+                    store
+                        .beat
+                        .next_due()
+                        .saturating_duration_since(now)
+                        .max(Duration::from_millis(250)),
+                );
+            }
+        }
+        for (session_id, sent) in due {
             self.api_job(ctx, move |api| {
                 let result = api.heartbeat(&session_id, sent.as_ref());
                 Event::Heartbeat {
@@ -1364,13 +1516,6 @@ impl LoaderApp {
                     result,
                 }
             });
-        } else {
-            ctx.request_repaint_after(
-                run.beat
-                    .next_due()
-                    .saturating_duration_since(now)
-                    .max(Duration::from_millis(250)),
-            );
         }
     }
 
@@ -1396,20 +1541,22 @@ impl LoaderApp {
         if !self.store.loaded && !self.store.loading && self.store.error.is_none() {
             self.fetch_scripts(&ctx);
         }
-        let target = self.loaded_target_ui(ui);
+        let target = self.run_target_ui(ui);
         let block = self.run_block(target.as_ref());
         match self.store.ui(ui, &me, block.as_deref()) {
             Some(store::Action::Refresh) => self.fetch_scripts(&ctx),
             Some(store::Action::Run(script)) => {
                 if let Some(target) = target {
-                    // Community scripts are not reviewed by staff: warn before the first run of each revision
-                    let confirmed = script
-                        .revision
-                        .is_some_and(|revision| self.confirmed.has(&script.id, revision));
-                    if script.community && !confirmed {
-                        self.warning = Some((*script, target));
+                    // An extra concurrent session costs a fee: say so before anything starts
+                    let open = me.open_sessions.max(self.store_runs().count() as i64);
+                    if me.extra_session_fee > 0 && open >= 1 {
+                        self.extra_prompt = Some(ExtraPrompt {
+                            script: *script,
+                            target,
+                            open,
+                        });
                     } else {
-                        self.start_store_script(&ctx, *script, target);
+                        self.confirm_store_script(&ctx, *script, target);
                     }
                 }
             }
@@ -1427,7 +1574,88 @@ impl LoaderApp {
             }
             None => {}
         }
+        self.extra_prompt_ui(&ctx);
         self.warning_ui(&ctx);
+    }
+
+    /// Starts a store script, after the community warning when the script needs one.
+    fn confirm_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+        // Community scripts are not reviewed by staff: warn before the first run of each revision
+        let confirmed = script
+            .revision
+            .is_some_and(|revision| self.confirmed.has(&script.id, revision));
+        if script.community && !confirmed {
+            self.warning = Some((script, target));
+        } else {
+            self.start_store_script(ctx, script, target);
+        }
+    }
+
+    /// The dialog before an extra concurrent session starts: what it adds, an hour and a minute, and the total with the script's price.
+    fn extra_prompt_ui(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.extra_prompt.take() else {
+            return;
+        };
+        let Some(me) = self.auth.me() else {
+            return;
+        };
+        use crate::api::models::{credits_text, fee_per_hour, per_hour};
+        let fee_hour = fee_per_hour(me.extra_session_fee, me.minutes_per_month);
+        let fee_minute = fee_hour / 60.0;
+        let price_hour = per_hour(prompt.script.price);
+        let total_hour = price_hour + fee_hour;
+        let nth = match prompt.open + 1 {
+            2 => "2nd".to_owned(),
+            3 => "3rd".to_owned(),
+            n => format!("{n}th"),
+        };
+        let mut decision = None;
+        egui::Window::new("Extra session")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label(egui::RichText::new(&prompt.script.title).strong());
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "This would be your {nth} script running at once. Every script past the first adds a fee on top of its own price:"
+                ));
+                ui.add_space(4.0);
+                egui::Grid::new("extra_fee").num_columns(2).spacing(egui::vec2(16.0, 4.0)).show(ui, |ui| {
+                    ui.label("extra fee");
+                    ui.horizontal(|ui| {
+                        crate::theme::credits(ui, egui::RichText::new(credits_text(fee_hour)).strong(), "/h");
+                        crate::theme::credits(ui, egui::RichText::new(format!("{:.7}", fee_minute / crate::api::models::CREDITS_PER_UNIT)).small(), "/min");
+                    });
+                    ui.end_row();
+                    ui.label("script price");
+                    crate::theme::credits(ui, egui::RichText::new(credits_text(price_hour)).strong(), "/h");
+                    ui.end_row();
+                    ui.label("in total");
+                    ui.horizontal(|ui| {
+                        crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour)).strong(), "/h");
+                        crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour * 24.0 * 30.0)).small(), "per 30 days");
+                    });
+                    ui.end_row();
+                });
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("The fee follows the order the scripts started in: when an older one stops, this one moves up and the oldest runs without a fee.").weak());
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm").clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        decision = Some(false);
+                    }
+                });
+            });
+        match decision {
+            Some(true) => self.confirm_store_script(ctx, prompt.script, prompt.target),
+            Some(false) => {}
+            None => self.extra_prompt = Some(prompt),
+        }
     }
 
     /// The warning shown before a community script runs. Accepting it is remembered for that revision of that script.
@@ -1482,15 +1710,12 @@ impl LoaderApp {
             return;
         }
         self.fetch_sessions_if_stale(&ctx);
-        let running = self.store_run.as_ref().map(|run| run.session_id.clone());
+        let running: Vec<String> = self.store_runs().map(|s| s.session_id.clone()).collect();
         let actions = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.feedback.ui(
-                    ui,
-                    &mut self.settings.include_system_info,
-                    running.as_deref(),
-                )
+                self.feedback
+                    .ui(ui, &mut self.settings.include_system_info, &running)
             })
             .inner;
         self.apply_feedback_actions(&ctx, actions);
@@ -1499,7 +1724,7 @@ impl LoaderApp {
     /// The Feedback tab of a running store script: the same controls, for this run only.
     fn run_feedback_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let Some(session_id) = self.store_run.as_ref().map(|run| run.session_id.clone()) else {
+        let Some(session_id) = self.run().and_then(|r| r.session_id().map(str::to_owned)) else {
             return;
         };
         self.fetch_sessions_if_stale(&ctx);
@@ -1557,44 +1782,36 @@ impl LoaderApp {
     }
 
     /// The versions a bug report names: the agent in the client the script runs on (or the loader's own copy), the running store script's lib, and the GPU.
-    fn versions(&self) -> feedback::Versions {
+    fn versions(&self, run: Option<&Run>) -> feedback::Versions {
         feedback::Versions {
-            agent: self
-                .xp_target
-                .as_ref()
+            agent: run
+                .and_then(|r| r.target.as_ref())
                 .and_then(|t| t.client.version.clone())
                 .or_else(|| self.dll_version.clone()),
-            lib: self.store_run.as_ref().map(|run| run.lib_version.clone()),
+            lib: run
+                .and_then(|r| r.store.as_ref())
+                .map(|s| s.lib_version.clone()),
             gpu: self.gpu.clone(),
         }
     }
 
-    /// The client the running script was started on, while its agent is loaded.
-    fn loaded_xp_target(&self) -> Option<Target> {
-        self.xp_target.clone().filter(|t| t.client.loaded.is_some())
-    }
-
     /// Sends a bug report: the running script's log and the client's state now, or the record kept when an earlier run ended.
     fn send_report(&mut self, ctx: &egui::Context, session_id: String, description: String) {
+        let run = self
+            .runs
+            .iter()
+            .find(|r| r.session_id() == Some(session_id.as_str()));
         let diagnostics =
-            feedback::diagnostics(&self.versions(), self.settings.include_system_info);
+            feedback::diagnostics(&self.versions(run), self.settings.include_system_info);
         let (tx, ctx, api, settings) = (
             self.tx.clone(),
             ctx.clone(),
             self.api.clone(),
             self.settings.clone(),
         );
-        let running = self
-            .store_run
-            .as_ref()
-            .is_some_and(|run| run.session_id == session_id);
-        let live = running.then(|| {
-            (
-                self.script_log.texts(),
-                self.run_names.clone(),
-                self.loaded_xp_target(),
-            )
-        });
+        let live = run
+            .filter(|r| r.is_running())
+            .map(|r| (r.log.texts(), r.names.clone(), r.loaded_target()));
         thread::spawn(move || {
             let report = match live {
                 Some((log, mut names, target)) => {
@@ -1625,16 +1842,13 @@ impl LoaderApp {
     }
 
     /// Keeps the store run that is ending, sealed on disk, so it can still be reported from the Feedback page for 24 hours.
-    fn keep_run_record(&mut self, ctx: &egui::Context) {
-        let Some(run) = &self.store_run else {
+    fn keep_run_record(&mut self, ctx: &egui::Context, index: usize) {
+        let run = &self.runs[index];
+        let Some(session_id) = run.session_id().map(str::to_owned) else {
             return;
         };
-        let (session_id, title) = (run.session_id.clone(), run.title.clone());
-        let (log, mut names, target) = (
-            self.script_log.texts(),
-            self.run_names.clone(),
-            self.loaded_xp_target(),
-        );
+        let title = run.title.clone();
+        let (log, mut names, target) = (run.log.texts(), run.names.clone(), run.loaded_target());
         self.feedback.fetched_at = None;
         self.background(ctx, move |settings| {
             let snapshot =
@@ -1651,44 +1865,61 @@ impl LoaderApp {
         });
     }
 
-    /// The name of the script that is running, a store script's title or the editor's file: the page that replaces Scripts and Editor.
-    fn running_title(&self) -> Option<String> {
-        match &self.store_run {
-            Some(run) => Some(run.title.clone()),
-            None if self.script.as_ref().is_some_and(Script::is_running) => {
-                Some(self.script_file.name())
-            }
-            None => None,
-        }
-    }
-
     /// The page tree on the left, after the website's neo-tree. Picking a page closes the drawer on narrow windows.
     fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
         crate::theme::sidebar_header(ui, "explorer");
         crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
-        let before = self.tab;
-        let running = self.running_title().map(|title| sidebar_name(&title));
-        // a running script's page sits after Scripts and Editor, which stay available
+        let before = (self.tab, self.active_run);
         let items = [
-            (Tab::Clients, "\u{f108}", "client".to_owned()),
-            (Tab::Store, "\u{f489}", "scripts".to_owned()),
-            (Tab::Scripts, "\u{f044}", "editor".to_owned()),
-        ]
-        .into_iter()
-        .chain(running.map(|name| (Tab::Running, "\u{f04b}", name)))
-        .chain([
-            (Tab::Development, "\u{f188}", "development".to_owned()),
-            (Tab::Terminal, "\u{f120}", "terminal".to_owned()),
-            (Tab::Accounts, "\u{f007}", "accounts".to_owned()),
-            (Tab::Feedback, "\u{f075}", "feedback".to_owned()),
-            (Tab::Settings, "\u{f013}", "settings".to_owned()),
-        ])
-        .collect::<Vec<_>>();
+            (Tab::Clients, "\u{f108}", "client"),
+            (Tab::Store, "\u{f489}", "scripts"),
+            (Tab::Scripts, "\u{f044}", "editor"),
+            (Tab::Sessions, "\u{f04b}", "sessions"),
+            (Tab::Development, "\u{f188}", "development"),
+            (Tab::Terminal, "\u{f120}", "terminal"),
+            (Tab::Accounts, "\u{f007}", "accounts"),
+            (Tab::Feedback, "\u{f075}", "feedback"),
+            (Tab::Settings, "\u{f013}", "settings"),
+        ];
+        // a run page is reached through its row under Sessions, so the Sessions row itself only matches the list
+        let mut current = if self.tab == Tab::Run {
+            (Tab::Run, self.active_run)
+        } else {
+            (self.tab, None)
+        };
         for (i, (tab, icon, name)) in items.iter().enumerate() {
-            crate::theme::sidebar_item(ui, &mut self.tab, *tab, icon, name, i == items.len() - 1);
+            crate::theme::sidebar_item(
+                ui,
+                &mut current,
+                (*tab, None),
+                icon,
+                name,
+                i == items.len() - 1,
+            );
+            if *tab == Tab::Sessions {
+                let rows: Vec<(u64, String, bool)> = self
+                    .runs
+                    .iter()
+                    .map(|r| (r.id, sidebar_name(&r.title), !r.is_running()))
+                    .collect();
+                for (j, (id, name, ended)) in rows.iter().enumerate() {
+                    crate::theme::sidebar_child(
+                        ui,
+                        &mut current,
+                        (Tab::Run, Some(*id)),
+                        name,
+                        *ended,
+                        j == rows.len() - 1,
+                    );
+                }
+            }
         }
-        if self.tab != before {
+        if current != before {
+            self.tab = current.0;
+            if let (Tab::Run, Some(id)) = current {
+                self.active_run = Some(id);
+            }
             self.sidebar_open = false;
         }
     }
@@ -1756,7 +1987,13 @@ impl LoaderApp {
         };
         match &self.auth {
             Auth::SignedIn(me) => {
-                let (name, balance) = (me.username.clone(), store::balance_label(me));
+                let name = me.username.clone();
+                let balance = crate::api::models::credits_text(me.credits as f64);
+                let minutes_per_month = me.minutes_per_month;
+                let rate: f64 = self
+                    .store_runs()
+                    .map(|s| s.rate_per_hour(minutes_per_month))
+                    .sum();
                 if ui
                     .add(egui::Button::new("Sign out").min_size(button_size))
                     .clicked()
@@ -1771,7 +2008,12 @@ impl LoaderApp {
                 {
                     let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
                 }
-                ui.label(balance);
+                if rate > 0.0 {
+                    crate::theme::credits(ui, egui::RichText::new(crate::api::models::credits_text(rate)).weak(), "/h")
+                        .on_hover_text("What the scripts running from this loader cost an hour, prices and extra-session fees together.");
+                }
+                crate::theme::credits(ui, egui::RichText::new(balance), "")
+                    .on_hover_text("Your credits. 1 credit is 1 EUR.");
                 ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
             }
             Auth::SigningIn(cancel) => {
@@ -1838,16 +2080,19 @@ impl LoaderApp {
         self.loader_log.push(true, text.into());
     }
 
+    /// Writes to the open run's log, or the loader's when no run page is open.
     fn script_info(&mut self, text: impl Into<String>) {
-        self.script_log.push(false, text.into());
-    }
-
-    fn script_warning(&mut self, text: impl Into<String>) {
-        self.script_log.push_tone(Tone::Warning, text.into());
+        match self.run_mut() {
+            Some(run) => run.log.push(false, text.into()),
+            None => self.loader_log.push(false, text.into()),
+        }
     }
 
     fn script_error(&mut self, text: impl Into<String>) {
-        self.script_log.push(true, text.into());
+        match self.run_mut() {
+            Some(run) => run.log.push(true, text.into()),
+            None => self.loader_log.push(true, text.into()),
+        }
     }
 
     fn spawn(
@@ -2885,7 +3130,7 @@ impl LoaderApp {
             if !matches!(
                 event,
                 Event::Tiles { .. }
-                    | Event::XpState(_)
+                    | Event::XpState { .. }
                     | Event::AccountName(_)
                     | Event::Packets { .. }
                     | Event::PacketLayouts { .. }
@@ -3021,18 +3266,34 @@ impl LoaderApp {
                     {
                         me.credits = credits;
                     }
-                    let verdict = match self.store_run.as_mut().filter(|run| run.session_id == session_id) {
-                        Some(run) => run.beat.on_result(now, sent, result),
+                    if let Ok(beat) = &result
+                        && let Some(me) = self.auth.me_mut()
+                        && let Some(rank) = beat.rank
+                    {
+                        // the server's count is at least this session's rank plus itself
+                        me.open_sessions = me.open_sessions.max(rank + 1);
+                    }
+                    let beat = result.as_ref().ok().map(|b| (b.rank, b.fee, b.fee_charged));
+                    let verdict = match self.run_by_session(&session_id) {
+                        Some(run) => {
+                            let store = run.store.as_mut().expect("a run found by session has one");
+                            if let Some((rank, fee, charged)) = beat {
+                                store.rank = rank.unwrap_or(store.rank);
+                                store.fee = fee.unwrap_or(store.fee);
+                                store.fee_charged = charged.unwrap_or(store.fee_charged);
+                            }
+                            store.beat.on_result(now, sent, result)
+                        }
                         None => Verdict::Continue,
                     };
                     if let Verdict::Stop { reason, sign_out } = verdict {
-                        if let Some(run) = &mut self.store_run {
-                            run.stopping = true;
+                        if let Some(run) = self.run_by_session(&session_id) {
+                            if let Some(store) = &mut run.store {
+                                store.stopping = true;
+                            }
+                            run.script.stop();
+                            run.error(reason.clone());
                         }
-                        if let Some(script) = &mut self.script {
-                            script.stop();
-                        }
-                        self.script_error(reason.clone());
                         if sign_out {
                             self.sign_out(Some(reason));
                         }
@@ -3067,24 +3328,27 @@ impl LoaderApp {
                     Err(error) => self.error(format!("Setting the display name in {pid} failed: {error}")),
                 },
                 Event::AccountName(result) => self.accounts.client_name(result),
-                Event::XpState(result) => {
-                    self.xp_reading = false;
-                    self.xp_next = std::time::Instant::now() + XP_READ_EVERY;
-                    if let Ok(state) = &result {
-                        for name in feedback::names_of(state) {
-                            if !self.run_names.contains(&name) {
-                                self.run_names.push(name);
+                Event::XpState { run: id, result } => {
+                    if let Some(run) = self.runs.iter_mut().find(|r| r.id == id) {
+                        run.xp_reading = false;
+                        run.xp_next = std::time::Instant::now() + XP_READ_EVERY;
+                        if let Ok(state) = &result {
+                            for name in feedback::names_of(state) {
+                                if !run.names.contains(&name) {
+                                    run.names.push(name);
+                                }
                             }
                         }
-                    }
-                    // a failed or empty read (logged out, client closing) is skipped; the baseline stays
-                    let skills = result.ok().and_then(|state| state.skills).filter(|skills| skills.iter().any(|s| s.xp > 0));
-                    if let Some(skills) = skills.filter(|_| self.script.as_ref().is_some_and(Script::is_running)) {
-                        let skills = skills
-                            .into_iter()
-                            .map(|s| crate::xp::SkillXp { name: s.name, level: s.real_level as i64, xp: s.xp as i64 })
-                            .collect();
-                        self.xp.update(skills, self.run_time());
+                        // a failed or empty read (logged out, client closing) is skipped; the baseline stays
+                        let skills = result.ok().and_then(|state| state.skills).filter(|skills| skills.iter().any(|s| s.xp > 0));
+                        if let Some(skills) = skills.filter(|_| run.is_running()) {
+                            let skills = skills
+                                .into_iter()
+                                .map(|s| crate::xp::SkillXp { name: s.name, level: s.real_level as i64, xp: s.xp as i64 })
+                                .collect();
+                            let elapsed = run.run_time();
+                            run.xp.update(skills, elapsed);
+                        }
                     }
                 }
                 Event::RecentSessions(result) => self
@@ -3406,10 +3670,12 @@ impl LoaderApp {
         if !data.message.is_empty() {
             ui.weak(&data.message);
         }
-        if changed && let Some(script) = &mut self.script {
+        if changed {
             let settings = self.settings.transports.clone();
-            if let Err(error) = script.push_transport_settings(&settings) {
-                self.script_error(error);
+            for run in self.runs.iter_mut().filter(|r| r.is_running()) {
+                if let Err(error) = run.script.push_transport_settings(&settings) {
+                    run.error(error);
+                }
             }
         }
     }
@@ -3940,167 +4206,381 @@ impl LoaderApp {
     }
 
     fn handle_script_events(&mut self, ctx: &egui::Context) {
-        if let Some(script) = &mut self.script {
-            if script.stop_ignored(Duration::from_secs(2)) {
-                self.script_error("The script's process didn't exit after being killed. It will end when the loader closes.");
-            } else if script.is_running() && script.stop_requested() {
-                ctx.request_repaint_after(Duration::from_millis(250));
+        for index in 0..self.runs.len() {
+            {
+                let run = &mut self.runs[index];
+                if run.script.stop_ignored(Duration::from_secs(2)) {
+                    run.error("The script's process didn't exit after being killed. It will end when the loader closes.");
+                } else if run.is_running() && run.script.stop_requested() {
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                }
             }
-        }
-        let events = self.script.as_mut().map(Script::poll).unwrap_or_default();
-        for event in events {
-            let finished = matches!(event, ScriptEvent::Finished { .. });
-            match event {
-                ScriptEvent::Output(line) => self.script_info(line),
-                ScriptEvent::Warning(line) => self.script_warning(line),
-                ScriptEvent::Form(spec) => {
-                    self.tab = Tab::Running;
-                    self.form_sent = None;
-                    let title = spec
-                        .get("title")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("Script settings")
-                        .to_owned();
-                    self.form = Some(crate::form::Form::new(
-                        spec,
-                        self.remembered_forms.get(&title),
-                    ));
-                    self.editors = Default::default();
-                    ctx.request_repaint();
-                }
-                // Only a store run has a session to send them to; stats from a local run are dropped.
-                ScriptEvent::Stats(experience, gold, custom) => {
-                    if let Some(run) = &mut self.store_run {
-                        run.beat.report(experience, gold, &custom);
+            let events = self.runs[index].script.poll();
+            for event in events {
+                let finished = matches!(event, ScriptEvent::Finished { .. });
+                let run = &mut self.runs[index];
+                match event {
+                    ScriptEvent::Output(line) => run.info(line),
+                    ScriptEvent::Warning(line) => run.log.push_tone(Tone::Warning, line),
+                    ScriptEvent::Form(spec) => {
+                        run.form_sent = None;
+                        let title = spec
+                            .get("title")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Script settings")
+                            .to_owned();
+                        run.form = Some(crate::form::Form::new(
+                            spec,
+                            self.remembered_forms.get(&title),
+                        ));
+                        // the script waits for its settings: show its page
+                        self.active_run = Some(run.id);
+                        self.tab = Tab::Run;
+                        self.editors = Default::default();
+                        ctx.request_repaint();
                     }
-                }
-                ScriptEvent::Counters(counters) => self.counters.update(counters, self.run_time()),
-                ScriptEvent::PinRequest(hash) => {
-                    let answer = self.accounts.pin_for(&hash);
-                    if let Some(script) = &mut self.script
-                        && let Err(error) = script.answer_pin(answer)
-                    {
-                        self.script_error(error);
+                    // Only a store run has a session to send them to; stats from a local run are dropped.
+                    ScriptEvent::Stats(experience, gold, custom) => {
+                        if let Some(store) = &mut run.store {
+                            store.beat.report(experience, gold, &custom);
+                        }
                     }
-                }
-                ScriptEvent::LampRequest(hash) => {
-                    let answer = self.accounts.lamp_skill_for(&hash);
-                    if let Some(script) = &mut self.script
-                        && let Err(error) = script.answer_lamp(answer)
-                    {
-                        self.script_error(error);
+                    ScriptEvent::Counters(counters) => {
+                        let elapsed = run.run_time();
+                        run.counters.update(counters, elapsed);
                     }
-                }
-                ScriptEvent::HttpRequest(payload) => {
-                    if let Some(script) = &self.script {
-                        script.answer_http(&payload, self.http_whitelist.clone());
+                    ScriptEvent::PinRequest(hash) => {
+                        let answer = self.accounts.pin_for(&hash);
+                        if let Err(error) = run.script.answer_pin(answer) {
+                            run.error(error);
+                        }
                     }
+                    ScriptEvent::LampRequest(hash) => {
+                        let answer = self.accounts.lamp_skill_for(&hash);
+                        if let Err(error) = run.script.answer_lamp(answer) {
+                            run.error(error);
+                        }
+                    }
+                    ScriptEvent::HttpRequest(payload) => {
+                        run.script
+                            .answer_http(&payload, self.http_whitelist.clone());
+                    }
+                    ScriptEvent::Breaks(plan) => run.breaks.update(plan, std::time::Instant::now()),
+                    ScriptEvent::Finished { stopped: true, .. } => run.info("Script stopped."),
+                    ScriptEvent::Finished { result: Ok(()), .. } => run.info("Script finished."),
+                    ScriptEvent::Finished {
+                        result: Err(error), ..
+                    } => run.error(format!("Script failed: {error}")),
                 }
-                ScriptEvent::Breaks(plan) => self.breaks.update(plan, std::time::Instant::now()),
-                ScriptEvent::Finished { stopped: true, .. } => self.script_info("Script stopped."),
-                ScriptEvent::Finished { result: Ok(()), .. } => {
-                    self.script_info("Script finished.")
+                if finished {
+                    self.runs[index].ended = Some(std::time::Instant::now());
+                    self.keep_run_record(ctx, index);
+                    self.end_store_session(ctx, index);
                 }
-                ScriptEvent::Finished {
-                    result: Err(error), ..
-                } => self.script_error(format!("Script failed: {error}")),
-            }
-            if finished {
-                self.keep_run_record(ctx);
-                self.run_ended = Some(std::time::Instant::now());
-                self.end_store_session(ctx);
             }
         }
     }
 
+    /// Takes an ended run off the list, with its log.
+    fn close_run(&mut self, id: u64) {
+        self.runs.retain(|r| r.id != id || r.is_running());
+        if self.active_run == Some(id) && self.run().is_none() {
+            self.active_run = None;
+            if self.tab == Tab::Run {
+                self.tab = Tab::Sessions;
+            }
+        }
+        if self.log_tab == LogTab::Run(id) && self.run_index(id).is_none() {
+            self.log_tab = LogTab::Loader;
+        }
+    }
+
+    /// The Sessions page: every run, with what it costs and its controls.
+    fn sessions_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Sessions");
+        if self.runs.is_empty() {
+            ui.label(
+                egui::RichText::new(
+                    "Nothing is running. Start a script from the Scripts page, or the editor.",
+                )
+                .weak(),
+            );
+            return;
+        }
+        let minutes_per_month = self.auth.me().map_or(43_200, |me| me.minutes_per_month);
+        ui.label(egui::RichText::new("Each script runs on its own client. Every script past the oldest pays the extra-session fee; the oldest runs without one.").weak());
+        ui.add_space(6.0);
+        let mut open = None;
+        let mut pause = None;
+        let mut stop = None;
+        let mut close = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for run in &self.runs {
+                    ui.add_space(4.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(&run.title).strong().size(16.0));
+                            ui.label(egui::RichText::new(run.status()).weak());
+                            match &run.target {
+                                Some(t) => ui.label(
+                                    egui::RichText::new(format!("client {}", t.client.pid)).weak(),
+                                ),
+                                None => ui.label(egui::RichText::new("no client").weak()),
+                            };
+                            ui.label(
+                                egui::RichText::new(crate::xp::duration(run.run_time())).weak(),
+                            );
+                        });
+                        ui.horizontal_wrapped(|ui| match &run.store {
+                            Some(store) => {
+                                let rate = store.rate_per_hour(minutes_per_month);
+                                crate::theme::credits(
+                                    ui,
+                                    egui::RichText::new(crate::api::models::credits_text(rate))
+                                        .strong(),
+                                    "/h",
+                                );
+                                if store.fee > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "includes the extra-session fee, {}",
+                                            if store.rank >= 1 {
+                                                "yours is not the oldest session"
+                                            } else {
+                                                ""
+                                            }
+                                        ))
+                                        .weak()
+                                        .small(),
+                                    );
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new("no extra-session fee").weak().small(),
+                                    );
+                                }
+                                if store.fee_charged > 0 {
+                                    crate::theme::credits(
+                                        ui,
+                                        egui::RichText::new(crate::api::models::credits_text(
+                                            store.fee_charged as f64,
+                                        ))
+                                        .small(),
+                                        "in fees so far",
+                                    );
+                                }
+                            }
+                            None => {
+                                ui.label(
+                                    egui::RichText::new("from the editor, not billed")
+                                        .weak()
+                                        .small(),
+                                );
+                            }
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("Open").clicked() {
+                                open = Some(run.id);
+                            }
+                            let running = run.is_running();
+                            let stopping = run.script.stop_requested();
+                            if ui
+                                .add_enabled(
+                                    running && !stopping,
+                                    egui::Button::new(if run.script.is_paused() {
+                                        "Resume"
+                                    } else {
+                                        "Pause"
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                pause = Some(run.id);
+                            }
+                            if ui
+                                .add_enabled(running && !stopping, egui::Button::new("Stop"))
+                                .clicked()
+                            {
+                                stop = Some(run.id);
+                            }
+                            if ui
+                                .add_enabled(!running, egui::Button::new("Close"))
+                                .on_hover_text("Takes the ended run and its log off the list.")
+                                .clicked()
+                            {
+                                close = Some(run.id);
+                            }
+                        });
+                    });
+                }
+            });
+        if let Some(id) = open {
+            self.active_run = Some(id);
+            self.tab = Tab::Run;
+        }
+        if let Some(id) = pause {
+            self.toggle_pause_of(id);
+        }
+        if let Some(id) = stop
+            && let Some(run) = self.runs.iter_mut().find(|r| r.id == id)
+        {
+            run.script.stop();
+        }
+        if let Some(id) = close {
+            self.close_run(id);
+        }
+    }
+
+    /// The dropdown of clients a script can start on: loaded, usable, and not running a script. Returns the pick.
+    fn run_target_ui(&mut self, ui: &mut egui::Ui) -> Option<Target> {
+        let free: Vec<Target> = self
+            .targets
+            .iter()
+            .filter(|t| {
+                t.client.loaded.is_some() && t.client.foreign_bot.is_none() && t.client.is_64bit
+            })
+            .filter(|t| !self.client_in_use(t.client.pid))
+            .cloned()
+            .collect();
+        if !free.iter().any(|t| Some(t.key()) == self.run_target) {
+            self.run_target = free.first().map(Target::key);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Run on");
+            let label = |t: &Target| format!("client {} ({})", t.client.pid, t.client.title);
+            let current = free.iter().find(|t| Some(t.key()) == self.run_target);
+            egui::ComboBox::from_id_salt("run_target")
+                .selected_text(current.map_or_else(|| "no free client".to_owned(), label))
+                .show_ui(ui, |ui| {
+                    for t in &free {
+                        ui.selectable_value(&mut self.run_target, Some(t.key()), label(t));
+                    }
+                });
+            if free.is_empty() {
+                ui.label(egui::RichText::new("Load the agent into a client on the Client page; a client runs one script at a time.").weak());
+            }
+        });
+        ui.add_space(6.0);
+        free.into_iter().find(|t| Some(t.key()) == self.run_target)
+    }
+
     /// Drops a form whose script is gone. The form itself is shown on the script's page (`running_ui`, or the editor's `scripts_ui` for a local run).
     fn form_ui(&mut self) {
-        if self.script.as_ref().is_none_or(|s| !s.is_running()) {
-            self.form = None;
-            self.form_sent = None;
+        for run in self.runs.iter_mut().filter(|r| !r.is_running()) {
+            run.form = None;
+            run.form_sent = None;
         }
     }
 
     /// Sends the script what the user did with its form and remembers the values; a submitted form stays on the page, a cancelled one is dropped.
     fn answer_form(&mut self, outcome: crate::form::Outcome) {
+        let Some(id) = self.active_run else {
+            return;
+        };
         let answer = match outcome {
             crate::form::Outcome::Open => return,
             crate::form::Outcome::Submitted(values) => {
-                if let Some(form) = &self.form {
-                    self.remembered_forms
-                        .insert(form.title.clone(), form.remembered());
+                if let Some(form) = self.run().and_then(|r| r.form.as_ref()) {
+                    let (title, remembered) = (form.title.clone(), form.remembered());
+                    self.remembered_forms.insert(title, remembered);
                 }
-                self.form_sent = Some(values.clone());
+                if let Some(run) = self.run_mut() {
+                    run.form_sent = Some(values.clone());
+                }
                 Some(values)
             }
             crate::form::Outcome::Cancelled => {
-                self.form = None;
+                if let Some(run) = self.run_mut() {
+                    run.form = None;
+                }
                 None
             }
         };
-        if let Some(script) = &mut self.script
-            && let Err(error) = script.answer_form(answer)
+        if let Some(run) = self.runs.iter_mut().find(|r| r.id == id)
+            && let Err(error) = run.script.answer_form(answer)
         {
-            self.script_error(error);
+            run.error(error);
         }
     }
 
     /// Pushes the form's current values to the running script, which reads them with `form_update()`.
     fn push_form_update(&mut self) {
-        let Some(form) = &self.form else {
+        let layouts = self.script_layouts().clone();
+        let Some(form) = self.run().and_then(|r| r.form.as_ref()) else {
             return;
         };
-        let crate::form::Outcome::Submitted(values) = form.submitted(self.script_layouts()) else {
+        let crate::form::Outcome::Submitted(values) = form.submitted(&layouts) else {
             return;
         };
-        self.remembered_forms
-            .insert(form.title.clone(), form.remembered());
-        if let Some(script) = &mut self.script {
-            match script.push_update(&values) {
+        let (title, remembered) = (form.title.clone(), form.remembered());
+        self.remembered_forms.insert(title, remembered);
+        if let Some(run) = self.run_mut() {
+            match run.script.push_update(&values) {
                 Ok(()) => {
-                    self.form_sent = Some(values);
-                    self.script_info("Settings updated.");
+                    run.form_sent = Some(values);
+                    run.info("Settings updated.");
                 }
-                Err(error) => self.script_error(error),
+                Err(error) => run.error(error),
             }
         }
     }
 
     /// The page of the running script, store or local: its controls, and its settings form while it is waiting for one.
     fn running_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(title) = self.running_title() else {
+        let Some(run) = self.run() else {
             return;
         };
-        let running = self.script.as_ref().is_some_and(Script::is_running);
-        let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
-        let stopping = self.script.as_ref().is_some_and(Script::stop_requested);
-        ui.add(egui::Label::new(egui::RichText::new(&title).heading()).truncate());
+        let title = run.title.clone();
+        let running = run.is_running();
+        let paused = running && run.script.is_paused();
+        let stopping = run.script.stop_requested();
+        let is_store = run.store.is_some();
+        let form_sent = run.form_sent.clone();
         // the script is waiting for its settings: it hasn't started yet
-        let waiting = self.form.is_some() && self.form_sent.is_none();
+        let waiting = run.form.is_some() && form_sent.is_none();
+        let changed_form = run.form.as_ref().and_then(|f| {
+            matches!(f.submitted(self.script_layouts()), crate::form::Outcome::Submitted(v) if Some(&v) != form_sent.as_ref()).then_some(())
+        }).is_some();
+        let submit_label = run
+            .form
+            .as_ref()
+            .map_or("Start", |f| f.submit_label())
+            .to_owned();
+        let has_equipment = run
+            .form
+            .as_ref()
+            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Equipment));
+        let has_inventory = run
+            .form
+            .as_ref()
+            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Inventory));
+        let has_prayer = run
+            .form
+            .as_ref()
+            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Prayer));
+        let mut tools_tab = run.tools_tab;
+        ui.add(egui::Label::new(egui::RichText::new(&title).heading()).truncate());
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
         let layouts = self.script_layouts().clone();
         ui.horizontal_wrapped(|ui| {
-            if self.form_sent.is_some() {
+            if form_sent.is_some() {
                 // the script has its settings: the same button sends it changes, once there are some
-                let changed = self.form.as_ref().is_some_and(|f| {
-                    matches!(f.submitted(&layouts), crate::form::Outcome::Submitted(v) if Some(&v) != self.form_sent.as_ref())
-                });
+                let changed = changed_form;
                 update = ui
                     .add_enabled(running && !stopping && changed, egui::Button::new("Update"))
                     .on_hover_text("Sends the changed settings to the running script.")
                     .clicked();
-            } else {
-                let start = self.form.as_ref().map_or("Start", |f| f.submit_label());
-                if ui.add_enabled(waiting, egui::Button::new(start)).clicked()
-                    && let Some(form) = &self.form
-                {
-                    outcome = form.submitted(&layouts);
-                }
+            } else if ui.add_enabled(waiting, egui::Button::new(submit_label.as_str())).clicked()
+                && let Some(form) = self.run().and_then(|r| r.form.as_ref())
+            {
+                outcome = form.submitted(&layouts);
             }
             if ui
                 .add_enabled(running && !stopping && !waiting, egui::Button::new(if paused { "Resume" } else { "Pause" }))
-                .on_hover_text(if self.store_run.is_some() {
+                .on_hover_text(if is_store {
                     "Suspends the script's process. It is still billed while paused: stop it to stop billing."
                 } else {
                     "Suspends the script's process, so it takes effect immediately, even in a tight loop."
@@ -4115,18 +4595,12 @@ impl LoaderApp {
             {
                 if waiting {
                     outcome = crate::form::Outcome::Cancelled;
-                } else if let Some(script) = &mut self.script {
-                    script.stop();
+                } else if let Some(run) = self.run_mut() {
+                    run.script.stop();
                 }
             }
             ui.separator();
-            ui.label(match (running, stopping, paused) {
-                (false, ..) => "ended",
-                (_, true, _) => "stopping",
-                (_, _, true) => "paused",
-                _ if waiting => "waiting",
-                _ => "running",
-            });
+            ui.label(self.run().map_or("ended", Run::status));
         });
         self.answer_form(outcome);
         if update {
@@ -4134,42 +4608,33 @@ impl LoaderApp {
         }
         ui.add_space(8.0);
         ui.spacing_mut().item_spacing.y = 0.0;
-        let has_equipment = self
-            .form
-            .as_ref()
-            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Equipment));
-        let has_inventory = self
-            .form
-            .as_ref()
-            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Inventory));
-        let has_prayer = self
-            .form
-            .as_ref()
-            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Prayer));
-        if (self.tools_tab == ToolsTab::Equipment && !has_equipment)
-            || (self.tools_tab == ToolsTab::Inventory && !has_inventory)
-            || (self.tools_tab == ToolsTab::Prayer && !has_prayer)
-            || (self.tools_tab == ToolsTab::Feedback && self.store_run.is_none())
+        if (tools_tab == ToolsTab::Equipment && !has_equipment)
+            || (tools_tab == ToolsTab::Inventory && !has_inventory)
+            || (tools_tab == ToolsTab::Prayer && !has_prayer)
+            || (tools_tab == ToolsTab::Feedback && !is_store)
         {
-            self.tools_tab = ToolsTab::Settings;
+            tools_tab = ToolsTab::Settings;
         }
         ui.horizontal_wrapped(|ui| {
-            crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Settings, "Settings");
+            crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Settings, "Settings");
             if has_equipment {
-                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Equipment, "Equipment");
+                crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Equipment, "Equipment");
             }
             if has_inventory {
-                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Inventory, "Inventory");
+                crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Inventory, "Inventory");
             }
             if has_prayer {
-                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Prayer, "Prayer");
+                crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Prayer, "Prayer");
             }
-            crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Xp, "XP Tracker");
-            crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Breaks, "Breaks");
-            if self.store_run.is_some() {
-                crate::theme::tab_value(ui, &mut self.tools_tab, ToolsTab::Feedback, "Feedback");
+            crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Xp, "XP Tracker");
+            crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Breaks, "Breaks");
+            if is_store {
+                crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Feedback, "Feedback");
             }
         });
+        if let Some(run) = self.run_mut() {
+            run.tools_tab = tools_tab;
+        }
         let (line, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
         ui.painter().rect_filled(
@@ -4179,23 +4644,21 @@ impl LoaderApp {
         );
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.add_space(8.0);
-        let can_read = self
-            .selected_target()
-            .is_some_and(|t| t.client.loaded.is_some());
+        let can_read = self.layout_target().is_some();
         // layouts are kept by the form's title, which is what the Settings picker reads them by
         let form_title = self
-            .form
-            .as_ref()
+            .run()
+            .and_then(|r| r.form.as_ref())
             .map(|form| form.title.clone())
             .unwrap_or_default();
         let mut read: Option<(crate::layouts::Kind, bool)> = None;
         egui::ScrollArea::both()
             .min_scrolled_height(0.0)
-            .id_salt(("tools_tab", self.tools_tab as u8))
+            .id_salt(("tools_tab", tools_tab as u8))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                crate::theme::tab_content(ui, |ui| match self.tools_tab {
-                    ToolsTab::Settings => match &mut self.form {
+                crate::theme::tab_content(ui, |ui| match tools_tab {
+                    ToolsTab::Settings => match self.run_mut().and_then(|r| r.form.as_mut()) {
                         Some(form) => {
                             ui.label(egui::RichText::new(&form.title).strong());
                             form.show_inline(ui, &layouts);
@@ -4233,14 +4696,12 @@ impl LoaderApp {
                         }
                     }
                     ToolsTab::Prayer => {
-                        let saved = self.layouts.entry(form_title.clone()).or_default();
                         // the Prayer level, from the XP tracker's reads while the script runs
                         let level = self
-                            .xp
-                            .rows()
-                            .into_iter()
-                            .find(|row| row.name == "Prayer")
+                            .run()
+                            .and_then(|r| r.xp.rows().into_iter().find(|row| row.name == "Prayer"))
                             .and_then(|row| u32::try_from(row.level).ok());
+                        let saved = self.layouts.entry(form_title.clone()).or_default();
                         match crate::layouts::prayer_ui(
                             ui,
                             &mut self.editors.prayer,
@@ -4272,16 +4733,23 @@ impl LoaderApp {
     fn script_layouts(&self) -> &crate::layouts::ScriptLayouts {
         static EMPTY: std::sync::LazyLock<crate::layouts::ScriptLayouts> =
             std::sync::LazyLock::new(Default::default);
-        self.form
-            .as_ref()
+        self.run()
+            .and_then(|r| r.form.as_ref())
             .and_then(|form| self.layouts.get(&form.title))
             .unwrap_or(&EMPTY)
+    }
+
+    /// The client a layout editor reads from: the open run's, or the one selected on the Client page.
+    fn layout_target(&self) -> Option<Target> {
+        self.run()
+            .and_then(Run::loaded_target)
+            .or_else(|| self.selected_target().filter(|t| t.client.loaded.is_some()))
     }
 
     /// Reads the selected client's worn items, inventory (with the rune pouch's runes) or prayers (on, or with `quick` the quick selection) for the editor of `kind`.
     fn read_layout(&mut self, ctx: &egui::Context, kind: crate::layouts::Kind, quick: bool) {
         use crate::layouts::{self, Kind, Read};
-        let Some(target) = self.selected_target().filter(|t| t.client.loaded.is_some()) else {
+        let Some(target) = self.layout_target() else {
             self.editors.equipment.reading = false;
             self.editors.inventory.reading = false;
             self.editors.prayer.reading = false;
@@ -4436,16 +4904,29 @@ impl LoaderApp {
     }
 
     fn toggle_pause(&mut self) {
-        let Some(script) = &mut self.script else {
+        if let Some(id) = self.active_run {
+            self.toggle_pause_of(id);
+        }
+    }
+
+    fn toggle_pause_of(&mut self, id: u64) {
+        let Some(run) = self.runs.iter_mut().find(|r| r.id == id) else {
             return;
         };
-        let paused = script.is_paused();
-        script.set_paused(!paused);
-        self.script_info(if paused {
+        let paused = run.script.is_paused();
+        run.script.set_paused(!paused);
+        run.info(if paused {
             "Script resumed."
         } else {
             "Script paused."
         });
+    }
+
+    /// The run started from the editor, while it runs.
+    fn editor_run_mut(&mut self) -> Option<&mut Run> {
+        self.runs
+            .iter_mut()
+            .find(|r| r.store.is_none() && r.is_running())
     }
 
     fn open_script(&mut self) {
@@ -4524,28 +5005,41 @@ impl LoaderApp {
             &self.settings,
         ) {
             Ok(script) => {
+                let interval =
+                    Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
+                let store = StoreRun {
+                    session_id,
+                    beat: Beat::new(std::time::Instant::now(), interval),
+                    stopping: false,
+                    ended: false,
+                    lib_version: prepared.lib_version.clone(),
+                    price: prepared.session.price,
+                    rank: prepared.session.rank,
+                    fee: prepared.session.fee,
+                    fee_charged: 0,
+                };
+                let id = self.next_run;
+                self.next_run += 1;
+                let mut run = Run::new(
+                    id,
+                    title.to_owned(),
+                    script,
+                    Some(target),
+                    Some(store),
+                    self.settings.antiban.clone(),
+                );
                 if let Some(warning) = &prepared.warning {
-                    self.script_info(format!("Warning: {warning}"));
+                    run.info(format!("Warning: {warning}"));
                 }
-                self.script_info(format!(
+                run.info(format!(
                     "Running {title} (revision {}).",
                     prepared.session.revision
                 ));
-                self.script = Some(script);
-                self.start_xp_tracking(Some(target.clone()));
-                let interval =
-                    Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
-                self.store_run = Some(StoreRun {
-                    session_id,
-                    title: title.to_owned(),
-                    beat: Beat::new(std::time::Instant::now(), interval),
-                    stopping: false,
-                    lib_version: prepared.lib_version.clone(),
-                });
+                if let Some(me) = self.auth.me_mut() {
+                    me.open_sessions = me.open_sessions.max(prepared.session.rank) + 1;
+                }
                 self.feedback.fetched_at = None;
-                self.run_was_local = false;
-                self.tab = Tab::Running;
-                self.sidebar_open = false;
+                self.add_run(run);
             }
             Err(error) => {
                 self.script_error(format!("Couldn't start {title}: {error}"));
@@ -4575,12 +5069,18 @@ impl LoaderApp {
             &self.settings,
         ) {
             Ok(script) => {
-                self.script_info(format!("Running {name}…"));
-                self.script = Some(script);
-                self.run_was_local = true;
-                self.tab = Tab::Running;
-                self.sidebar_open = false;
-                self.start_xp_tracking(target.cloned());
+                let id = self.next_run;
+                self.next_run += 1;
+                let mut run = Run::new(
+                    id,
+                    name.clone(),
+                    script,
+                    target.cloned(),
+                    None,
+                    self.settings.antiban.clone(),
+                );
+                run.info(format!("Running {name}…"));
+                self.add_run(run);
             }
             Err(error) => self.script_error(format!("Couldn't start the script: {error}")),
         }
@@ -4731,14 +5231,11 @@ impl LoaderApp {
         }
         if ui
             .add_enabled(running, egui::Button::new(if paused { "Resume" } else { "Pause" }).min_size(egui::vec2(width, 0.0)))
-            .on_hover_text(if self.store_run.is_some() {
-                "Suspends the script's process. A store script is still billed while paused: stop it to stop billing."
-            } else {
-                "Suspends the script's process, so it takes effect immediately, even in a tight loop."
-            })
+            .on_hover_text("Suspends the script's process, so it takes effect immediately, even in a tight loop.")
             .clicked()
+            && let Some(id) = self.editor_run_mut().map(|r| r.id)
         {
-            self.toggle_pause();
+            self.toggle_pause_of(id);
         }
         if ui
             .add_enabled(
@@ -4746,15 +5243,16 @@ impl LoaderApp {
                 egui::Button::new("Stop").min_size(egui::vec2(width, 0.0)),
             )
             .clicked()
-            && let Some(script) = &mut self.script
+            && let Some(run) = self.editor_run_mut()
         {
-            script.stop();
+            run.script.stop();
         }
     }
 
     fn scripts_ui(&mut self, ui: &mut egui::Ui) {
-        let running = self.script.as_ref().is_some_and(Script::is_running);
-        let paused = running && self.script.as_ref().is_some_and(Script::is_paused);
+        let (running, paused) = self
+            .editor_run_mut()
+            .map_or((false, false), |r| (true, r.script.is_paused()));
 
         let (find, replace) = ui.input_mut(|i| {
             (
@@ -4768,7 +5266,7 @@ impl LoaderApp {
             self.find.focus = true;
         }
 
-        let target = self.loaded_target_ui(ui);
+        let target = self.run_target_ui(ui);
 
         // Run controls on the left, file buttons on the right. Narrow windows stack the two groups first, then the buttons of a group.
         let button_width = uniform_button_width(
@@ -5279,31 +5777,25 @@ impl LoaderApp {
     }
 
     /// How long the script has run: it keeps counting while the script does and stops where the script ended.
-    fn run_time(&self) -> Duration {
-        let Some(started) = self.run_started else {
-            return Duration::ZERO;
-        };
-        self.run_ended
-            .unwrap_or_else(std::time::Instant::now)
-            .saturating_duration_since(started)
-    }
-
     fn xp_tracker_ui(&self, ui: &mut egui::Ui) {
         use crate::{
             counters::number,
             xp::{duration, thousands},
         };
-        if self.run_started.is_none() || (self.xp.is_empty() && self.counters.is_empty()) {
+        let Some(run) = self
+            .run()
+            .filter(|r| !(r.xp.is_empty() && r.counters.is_empty()))
+        else {
             ui.weak("Waiting for the first read of the client's skills.");
             return;
-        }
-        let elapsed = self.run_time();
+        };
+        let elapsed = run.run_time();
         ui.label(format!(
             "{} · {} xp",
             duration(elapsed),
-            thousands(self.xp.total())
+            thousands(run.xp.total())
         ));
-        let rows = self.xp.rows();
+        let rows = run.xp.rows();
         ui.vertical(|ui| {
             if rows.is_empty() {
                 ui.weak("No experience gained yet.");
@@ -5326,7 +5818,7 @@ impl LoaderApp {
                         }
                     });
             }
-            let counters = self.counters.rows();
+            let counters = run.counters.rows();
             if !counters.is_empty() {
                 ui.add_space(6.0);
                 ui.separator();
@@ -5352,7 +5844,11 @@ impl LoaderApp {
 
     fn breaks_ui(&mut self, ui: &mut egui::Ui) {
         use crate::{breaks::clock, xp::duration};
-        let running = self.script.as_ref().is_some_and(Script::is_running);
+        let running = self.run().is_some_and(Run::is_running);
+        let antiban_sent = self
+            .run()
+            .map(|r| r.antiban_sent.clone())
+            .unwrap_or_default();
         let mut skip: Option<(&'static str, u32)> = None;
         let mut update = false;
         ui.vertical(|ui| {
@@ -5381,7 +5877,7 @@ impl LoaderApp {
                 ui.colored_label(egui::Color32::LIGHT_RED, why);
             }
             if running {
-                let dirty = self.settings.antiban != self.antiban_sent;
+                let dirty = self.settings.antiban != antiban_sent;
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     update = ui
@@ -5398,7 +5894,10 @@ impl LoaderApp {
                 return;
             }
             // the schedule only exists while a script runs, counting down every second
-            let Some(view) = self.breaks.view(std::time::Instant::now()) else {
+            let Some(view) = self
+                .run()
+                .and_then(|r| r.breaks.view(std::time::Instant::now()))
+            else {
                 ui.add_space(6.0);
                 ui.weak("The script hasn't reported any breaks yet.");
                 return;
@@ -5455,30 +5954,53 @@ impl LoaderApp {
                 ui.weak("Nothing is scheduled.");
             }
         });
-        if update && let Some(script) = &mut self.script {
-            let config = self.settings.antiban.clone();
-            match script.push_antiban(&config) {
+        let config = self.settings.antiban.clone();
+        if update && let Some(run) = self.run_mut() {
+            match run.script.push_antiban(&config) {
                 Ok(()) => {
-                    self.antiban_sent = config;
-                    self.script_info("Breaks updated.");
+                    run.antiban_sent = config;
+                    run.info("Breaks updated.");
                 }
-                Err(error) => self.script_error(error),
+                Err(error) => run.error(error),
             }
         }
         if let Some((kind, index)) = skip
-            && let Some(script) = &mut self.script
+            && let Some(run) = self.run_mut()
         {
-            match script.skip_next(kind, index) {
-                Ok(()) => self.script_info(format!("Skipping the next {kind}.")),
-                Err(error) => self.script_error(error),
+            match run.script.skip_next(kind, index) {
+                Ok(()) => run.info(format!("Skipping the next {kind}.")),
+                Err(error) => run.error(error),
             }
         }
     }
 
     /// The tag filter and the Copy all / Clear buttons above the output (the filter only for the script's); meant to run inside a horizontal row.
+    fn log_ref(&self, tab: LogTab) -> &Log {
+        match tab {
+            LogTab::Run(id) => self
+                .runs
+                .iter()
+                .find(|r| r.id == id)
+                .map_or(&self.loader_log, |run| &run.log),
+            LogTab::Loader => &self.loader_log,
+        }
+    }
+
+    /// The log a log tab shows.
+    fn log_of(&mut self, tab: LogTab) -> &mut Log {
+        match tab {
+            LogTab::Run(id) => match self.runs.iter_mut().find(|r| r.id == id) {
+                Some(run) => &mut run.log,
+                None => &mut self.loader_log,
+            },
+            LogTab::Loader => &mut self.loader_log,
+        }
+    }
+
     fn log_controls_ui(&mut self, ui: &mut egui::Ui) {
-        if self.log_tab == LogTab::Script {
-            let log = &mut self.script_log;
+        if let LogTab::Run(_) = self.log_tab {
+            let tab = self.log_tab;
+            let log = self.log_of(tab);
             let mut filter = log.filter;
             egui::ComboBox::from_id_salt("log_tag")
                 .selected_text(filter.map_or("All", |index| log.tags[index].as_str()))
@@ -5498,10 +6020,8 @@ impl LoaderApp {
             egui::Layout::right_to_left(egui::Align::Center)
         };
         ui.with_layout(layout, |ui| {
-            let log = match self.log_tab {
-                LogTab::Script => &mut self.script_log,
-                LogTab::Loader => &mut self.loader_log,
-            };
+            let tab = self.log_tab;
+            let log = self.log_of(tab);
             if ui
                 .add_enabled(!log.is_empty(), egui::Button::new("Clear"))
                 .on_hover_text("Clears the output of the open tab.")
@@ -5522,9 +6042,12 @@ impl LoaderApp {
     fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.shrink_clip_rect(ui.available_rect_before_wrap());
         ui.spacing_mut().item_spacing.y = 0.0;
+        let tabs: Vec<(u64, String)> = self.runs.iter().map(|r| (r.id, r.title.clone())).collect();
         ui.horizontal_wrapped(|ui| {
             crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
-            crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Script, "Script");
+            for (id, title) in &tabs {
+                crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Run(*id), title);
+            }
         });
         // the line under the tabs, across the whole width, so they read as tabs rather than buttons
         let (line, _) =
@@ -5540,20 +6063,15 @@ impl LoaderApp {
     }
 
     fn log_ui(&mut self, ui: &mut egui::Ui) {
-        let log = match self.log_tab {
-            LogTab::Script => &self.script_log,
-            LogTab::Loader => &self.loader_log,
-        };
-        // One text widget for the whole output, so Ctrl+A and Ctrl+C cover every line.
-        let text = log.text.as_str();
+        let tab = self.log_tab;
         let font = egui::TextStyle::Body.resolve(ui.style());
         let normal = ui.visuals().text_color();
         let error = ui.visuals().error_fg_color;
         let warning = ui.visuals().warn_fg_color;
         // the job is only rebuilt when the shown lines change; egui's own cache then skips the layout too
         let key = (
-            self.log_tab,
-            log.revision,
+            tab,
+            self.log_ref(tab).revision,
             font.clone(),
             normal,
             warning,
@@ -5564,11 +6082,15 @@ impl LoaderApp {
             .as_ref()
             .is_none_or(|(cached, _)| *cached != key)
         {
-            self.log_job = Some((key, log.layout_job(font, normal, warning, error)));
+            let job = self.log_ref(tab).layout_job(font, normal, warning, error);
+            self.log_job = Some((key, job));
         }
-        let cached_job = self.log_job.as_ref().map(|(_, job)| job);
+        let cached_job = self.log_job.as_ref().map(|(_, job)| job.clone());
+        let log = self.log_ref(tab);
+        // One text widget for the whole output, so Ctrl+A and Ctrl+C cover every line.
+        let text = log.text.as_str();
         let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = cached_job.cloned().unwrap_or_default();
+            let mut job = cached_job.clone().unwrap_or_default();
             job.wrap.max_width = wrap_width;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
@@ -5995,26 +6517,30 @@ impl eframe::App for LoaderApp {
                 });
                 ui.separator();
             }
-            // the script's page goes away with the script
-            if self.tab == Tab::Running && self.running_title().is_none() {
-                self.tab = if self.run_was_local {
-                    Tab::Scripts
-                } else {
-                    Tab::Store
-                };
+            // a run page without its run (closed) goes back to the list
+            if self.tab == Tab::Run && self.run().is_none() {
+                self.tab = Tab::Sessions;
             }
-            if self.tab != self.followed_tab {
-                self.followed_tab = self.tab;
-                self.log_tab = if matches!(self.tab, Tab::Scripts | Tab::Store | Tab::Running) {
-                    LogTab::Script
-                } else {
-                    LogTab::Loader
+            if let LogTab::Run(id) = self.log_tab
+                && self.run_index(id).is_none()
+            {
+                self.log_tab = LogTab::Loader;
+            }
+            let followed = (self.tab, self.active_run);
+            if followed != self.followed_tab {
+                self.followed_tab = followed;
+                self.log_tab = match self.tab {
+                    Tab::Run | Tab::Sessions | Tab::Scripts | Tab::Store => {
+                        self.active_run.map_or(LogTab::Loader, LogTab::Run)
+                    }
+                    _ => LogTab::Loader,
                 };
             }
             match self.tab {
                 Tab::Clients => self.clients_ui(ui),
                 Tab::Store => self.store_ui(ui),
-                Tab::Running => self.running_ui(ui),
+                Tab::Sessions => self.sessions_ui(ui),
+                Tab::Run => self.running_ui(ui),
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),
                 Tab::Terminal => self.terminal_ui(ui),
@@ -6043,15 +6569,21 @@ impl eframe::App for LoaderApp {
         if let Some(terminal) = &mut self.terminal {
             terminal.close();
         }
-        if let Some(script) = &mut self.script {
-            script.stop();
+        let mut sessions = Vec::new();
+        for run in &mut self.runs {
+            run.script.stop();
+            if let Some(store) = run.store.as_ref().filter(|s| !s.ended) {
+                sessions.push(store.session_id.clone());
+            }
         }
-        // Closing must not wait on the network. If this doesn't land, the server ends the session within 5 minutes.
-        if let Some(run) = self.store_run.take() {
+        // Closing must not wait on the network. If this doesn't land, the server ends the sessions within 5 minutes.
+        if !sessions.is_empty() {
             let (done, wait) = channel();
             let api = self.api.clone();
             thread::spawn(move || {
-                let _ = api.end_session(&run.session_id);
+                for session_id in sessions {
+                    let _ = api.end_session(&session_id);
+                }
                 let _ = done.send(());
             });
             let _ = wait.recv_timeout(Duration::from_secs(3));

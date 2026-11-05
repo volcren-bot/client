@@ -378,6 +378,9 @@ mod tests {
             alive: true,
             reason: None,
             credits: Some(10),
+            rank: None,
+            fee: None,
+            fee_charged: None,
         })
     }
 
@@ -468,6 +471,9 @@ mod tests {
             alive: false,
             reason: Some("insufficient_credits".into()),
             credits: None,
+            rank: None,
+            fee: None,
+            fee_charged: None,
         });
         match beat.on_result(t0, None, dead) {
             Verdict::Stop { reason, sign_out } => {

@@ -1,15 +1,28 @@
 use serde::{Deserialize, Serialize};
 
-/// Credits per euro cent factor: 10_000 credits are 1 EUR.
-pub const CREDITS_PER_EUR: f64 = 10_000.0;
+/// 10,000 credits are 1 EUR, and users see credits at 1 = 1 EUR.
+pub const CREDITS_PER_UNIT: f64 = 10_000.0;
 
-pub fn credits_to_eur(credits: i64) -> f64 {
-    credits as f64 / CREDITS_PER_EUR
+/// Credits as users see them: at least two decimals and at most four, "12.50", "0.001".
+pub fn credits_text(credits: f64) -> String {
+    let four = format!("{:.4}", credits / CREDITS_PER_UNIT);
+    let (int, frac) = four.split_once('.').unwrap_or((&four, ""));
+    let frac = frac.trim_end_matches('0');
+    format!("{int}.{frac:0<2}")
 }
 
-/// Euros per hour for a price in credits per minute.
-pub fn eur_per_hour(credits_per_minute: i64) -> f64 {
-    credits_per_minute as f64 * 60.0 / CREDITS_PER_EUR
+/// Credits an hour at a price in credits per minute.
+pub fn per_hour(credits_per_minute: i64) -> f64 {
+    credits_per_minute as f64 * 60.0
+}
+
+/// Credits an hour of an extra-session fee quoted in credits per month of running.
+pub fn fee_per_hour(fee: i64, minutes_per_month: i64) -> f64 {
+    fee as f64 * 60.0 / minutes_per_month.max(1) as f64
+}
+
+fn default_minutes_per_month() -> i64 {
+    30 * 24 * 60
 }
 
 /// The launcher API contract version this build speaks; `GET /me` reports the server's.
@@ -24,6 +37,14 @@ pub struct Me {
     pub role: String,
     pub credits: i64,
     pub min_balance_minutes: i64,
+    /// Sessions the account has open anywhere, as the server last saw them.
+    #[serde(default)]
+    pub open_sessions: i64,
+    /// What an extra concurrent session costs this account, in credits per `minutes_per_month`; 0 for tester+.
+    #[serde(default)]
+    pub extra_session_fee: i64,
+    #[serde(default = "default_minutes_per_month")]
+    pub minutes_per_month: i64,
     pub api_version: u32,
 }
 
@@ -137,6 +158,12 @@ pub struct StartedSession {
     #[serde(default)]
     pub key: Option<String>,
     pub heartbeat_seconds: u64,
+    /// How many sessions the account had open when this one started; 0 means it runs without a fee.
+    #[serde(default)]
+    pub rank: i64,
+    /// The extra-session fee this session accrues at that rank, credits per month.
+    #[serde(default)]
+    pub fee: i64,
 }
 
 /// Stats gained since the previous heartbeat. `minutes` is measured by the loader's session clock, never reported by the script.
@@ -174,6 +201,13 @@ pub struct Heartbeat {
     pub reason: Option<String>,
     #[serde(default)]
     pub credits: Option<i64>,
+    /// The session's place among the account's open sessions now, and the fee it accrues there.
+    #[serde(default)]
+    pub rank: Option<i64>,
+    #[serde(default)]
+    pub fee: Option<i64>,
+    #[serde(default)]
+    pub fee_charged: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -248,8 +282,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(me.credits, 125_000);
-        assert_eq!(credits_to_eur(me.credits), 12.5);
+        assert_eq!(credits_text(me.credits as f64), "12.50");
         assert!(me.avatar_url.is_none());
+        assert_eq!(me.open_sessions, 0);
+        assert_eq!(me.minutes_per_month, 43_200);
+    }
+
+    #[test]
+    fn credits_show_two_to_four_decimals() {
+        assert_eq!(credits_text(125_000.0), "12.50");
+        assert_eq!(credits_text(10.0), "0.001");
+        assert_eq!(credits_text(12_345.0), "1.2345");
+        assert_eq!(credits_text(0.0), "0.00");
+        assert_eq!(credits_text(-500.0), "-0.05");
+        assert_eq!(credits_text(fee_per_hour(30_000, 43_200)), "0.0042");
     }
 
     #[test]
@@ -261,7 +307,7 @@ mod tests {
         let script = &list.scripts[0];
         assert_eq!(script.title, "Tempoross");
         assert!(!script.is_free());
-        assert_eq!(eur_per_hour(script.price), 0.18);
+        assert_eq!(credits_text(per_hour(script.price)), "0.18");
         assert_eq!(script.blocked(1000, 5), None);
         assert!(script.blocked(100, 5).unwrap().contains("150"));
         let mut locked = script.clone();
@@ -292,6 +338,9 @@ mod tests {
             role: role.into(),
             credits: 0,
             min_balance_minutes: 1,
+            open_sessions: 0,
+            extra_session_fee: 0,
+            minutes_per_month: 43_200,
             api_version: API_VERSION,
         };
         assert!(!me("user").can_browse_community());

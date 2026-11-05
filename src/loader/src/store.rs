@@ -6,8 +6,8 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{
-    Me, StoreScript,
-    models::{credits_to_eur, eur_per_hour, normalize_share_code},
+    StoreScript,
+    models::{credits_text, normalize_share_code, per_hour},
 };
 
 /// How many community scripts the loader remembers warning about. Old entries are only a missed "don't ask again".
@@ -74,24 +74,31 @@ pub fn origin_label(script: &StoreScript) -> &'static str {
     }
 }
 
-pub fn price_label(script: &StoreScript) -> String {
-    if script.is_free() {
-        "Free".into()
-    } else {
-        format!(
-            "{} credits/min (€{:.2}/h)",
-            script.price,
-            eur_per_hour(script.price)
+/// A script's price as the card shows it: credits an hour and credits a minute, or nothing for a free one.
+pub fn price_texts(script: &StoreScript) -> Option<(String, String)> {
+    (!script.is_free()).then(|| {
+        (
+            credits_text(per_hour(script.price)),
+            credits_text(script.price as f64),
         )
-    }
+    })
 }
 
-pub fn balance_label(me: &Me) -> String {
-    format!(
-        "{} credits (€{:.2})",
-        me.credits,
-        credits_to_eur(me.credits)
-    )
+/// The price on one row: the hourly rate in bold, the per-minute one small beside it.
+pub fn price_ui(ui: &mut egui::Ui, script: &StoreScript) {
+    match price_texts(script) {
+        Some((hour, minute)) => {
+            crate::theme::credits(ui, egui::RichText::new(hour).strong().size(16.0), "/h");
+            crate::theme::credits(ui, egui::RichText::new(minute).small(), "/min");
+        }
+        None => {
+            ui.label(
+                egui::RichText::new("Free")
+                    .strong()
+                    .color(crate::theme::GREEN),
+            );
+        }
+    }
 }
 
 impl Store {
@@ -117,7 +124,12 @@ impl Store {
     }
 
     /// `run_block` is why Run is disabled for reasons outside the script (no client, a script already running).
-    pub fn ui(&mut self, ui: &mut egui::Ui, me: &Me, run_block: Option<&str>) -> Option<Action> {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        me: &crate::api::Me,
+        run_block: Option<&str>,
+    ) -> Option<Action> {
         let mut action = None;
         let width = ui.available_width();
         ui.horizontal_wrapped(|ui| {
@@ -226,7 +238,7 @@ impl Store {
                             if button.clicked() {
                                 run = Some(Box::new(script.clone()));
                             }
-                            ui.label(price_label(script));
+                            price_ui(ui, script);
                         ui.label(format!("{} online", script.online));
                     });
                     if !script.description.is_empty() {
@@ -328,10 +340,10 @@ mod tests {
 
     #[test]
     fn prices_read_as_credits_and_euros() {
-        assert_eq!(price_label(&script("a", 0, &[])), "Free");
+        assert_eq!(price_texts(&script("a", 0, &[])), None);
         assert_eq!(
-            price_label(&script("a", 30, &[])),
-            "30 credits/min (€0.18/h)"
+            price_texts(&script("a", 30, &[])),
+            Some(("0.18".into(), "0.003".into()))
         );
     }
 

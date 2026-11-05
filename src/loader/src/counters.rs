@@ -19,10 +19,6 @@ pub struct CounterRow {
 }
 
 impl CountersTracker {
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-
     pub fn update(&mut self, counters: Vec<Counter>, at: Duration) {
         self.counters = counters;
         self.read_at = at;
