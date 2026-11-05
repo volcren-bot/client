@@ -7,38 +7,53 @@ param(
 )
 
 $failed = 0
-$uninstall = "Software\Microsoft\Windows\CurrentVersion\Uninstall"
 $work = Join-Path $env:RUNNER_TEMP "msi-test"
 New-Item -ItemType Directory -Force $work | Out-Null
+
+$installer = New-Object -ComObject WindowsInstaller.Installer
+$upgradeCode = "{DF7C7129-38EF-4E32-B9EE-F6FCFA75ED84}"
+
+function Show-Context([string] $log) {
+    Select-String -Path $log -Pattern "Property\(S\): (ALLUSERS|MSIINSTALLPERUSER|APPLICATIONFOLDER|Privileged|VolcrenPerUserFolder) = " |
+        ForEach-Object { Write-Host "  $($_.Line)" }
+}
 
 function Msi([string] $arguments) {
     $log = Join-Path $work "$([guid]::NewGuid()).log"
     $process = Start-Process msiexec -ArgumentList "$arguments /norestart /l*v `"$log`"" -Wait -PassThru
     Write-Host "msiexec $arguments -> $($process.ExitCode)"
+    Show-Context $log
     if ($process.ExitCode -ne 0) {
         Get-Content $log -Tail 60 | Write-Host
     }
 }
 
-function Entries([string] $hive) {
-    @(Get-ChildItem "${hive}:\$uninstall" -ErrorAction SilentlyContinue |
-        Get-ItemProperty | Where-Object { $_.DisplayName -eq "VOLCREN" })
+# The same questions the loader asks Windows Installer. AssignmentType is 0 per-user, 1 per-machine.
+function Products {
+    foreach ($product in $installer.RelatedProducts($upgradeCode)) {
+        [pscustomobject]@{
+            Assignment = $installer.ProductInfo($product, "AssignmentType")
+            Location   = $installer.ProductInfo($product, "InstallLocation")
+            Version    = $installer.ProductInfo($product, "VersionString")
+        }
+    }
 }
 
-function Check([string] $name, [string] $hive, [string] $otherHive, [string] $folder, [string] $version) {
-    $entries = Entries $hive
-    $others = Entries $otherHive
+function Check([string] $name, [string] $assignment, [string] $folder, [string] $version) {
+    $products = @(Products)
     $problems = @()
-    if ($others.Count -ne 0) { $problems += "$($others.Count) entries in $otherHive" }
     if ($version) {
-        if ($entries.Count -ne 1) { $problems += "$($entries.Count) entries in $hive" }
-        elseif ($entries[0].DisplayVersion -ne $version) { $problems += "version $($entries[0].DisplayVersion)" }
-        elseif ($entries[0].InstallLocation.TrimEnd("\") -ne $folder) { $problems += "location $($entries[0].InstallLocation)" }
+        if ($products.Count -ne 1) { $problems += "$($products.Count) products" }
+        else {
+            if ($products[0].Assignment -ne $assignment) { $problems += "assignment $($products[0].Assignment)" }
+            if ($products[0].Version -ne $version) { $problems += "version $($products[0].Version)" }
+            if ($products[0].Location.TrimEnd("\") -ne $folder) { $problems += "location $($products[0].Location)" }
+        }
         foreach ($file in "loader.exe", "injector.exe", "agent.dll") {
             if (-not (Test-Path (Join-Path $folder $file))) { $problems += "no $file" }
         }
     } else {
-        if ($entries.Count -ne 0) { $problems += "$($entries.Count) entries left in $hive" }
+        if ($products.Count -ne 0) { $problems += "$($products.Count) products left" }
         if (Test-Path (Join-Path $folder "loader.exe")) { $problems += "files left in $folder" }
     }
     if ($problems.Count -eq 0) {
@@ -69,6 +84,7 @@ function Update-Like-The-Loader([string] $folder, [string] $scope) {
     $started | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
     if (Test-Path $log) {
+        Show-Context $log
         Select-String -Path $log -Pattern "MainEngineThread is returning" | ForEach-Object { Write-Host $_.Line }
     } else {
         Write-Host "No installer log at $log"
@@ -80,17 +96,17 @@ $perMachineFolder = Join-Path $env:ProgramFiles "VOLCREN"
 
 # With no choice made the default is per-user, even for an administrator.
 Msi "/i `"$OldMsi`" /qn"
-Check "default install is per-user" HKCU HKLM $perUserFolder $OldVersion
+Check "default install is per-user" "0" $perUserFolder $OldVersion
 Update-Like-The-Loader $perUserFolder "user"
-Check "per-user update" HKCU HKLM $perUserFolder $NewVersion
+Check "per-user update" "0" $perUserFolder $NewVersion
 Msi "/x `"$NewMsi`" /qn"
-Check "per-user uninstall" HKCU HKLM $perUserFolder ""
+Check "per-user uninstall" "" $perUserFolder ""
 
 Msi "/i `"$OldMsi`" /qn ALLUSERS=1"
-Check "per-machine install" HKLM HKCU $perMachineFolder $OldVersion
+Check "per-machine install" "1" $perMachineFolder $OldVersion
 Update-Like-The-Loader $perMachineFolder "machine"
-Check "per-machine update" HKLM HKCU $perMachineFolder $NewVersion
+Check "per-machine update" "1" $perMachineFolder $NewVersion
 Msi "/x `"$NewMsi`" /qn"
-Check "per-machine uninstall" HKLM HKCU $perMachineFolder ""
+Check "per-machine uninstall" "" $perMachineFolder ""
 
 exit $failed

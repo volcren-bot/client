@@ -51,6 +51,6 @@ A loader that trusts neither key can only be updated by a manual install.
 
 ## What CI tests and what it can't
 
-`installer/test-msi.ps1` runs the real binaries on real Windows, in both modes: install, update through `--finish-update` as the loader starts it, uninstall. It checks the registered mode, version, location and files. A failure stops the release before anything is signed.
+`installer/test-msi.ps1` runs the real binaries on real Windows, in both modes: install, update through `--finish-update` as the loader starts it, uninstall. It asks Windows Installer for the mode, version and location, the way the loader does, and checks the files. A failure stops the release before anything is signed.
 
-It can't cover the dialog, the UAC prompt, `MsiEnumRelatedProducts` as the loader calls it, or injecting from an installed copy. Check those on a Windows machine after changing them.
+It can't cover the dialog, the UAC prompt or injecting from an installed copy. Check those on a Windows machine after changing them.

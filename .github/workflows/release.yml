@@ -201,6 +201,14 @@ jobs:
                       -NewMsi (Resolve-Path "out\volcren-windows-$env:VERSION.msi").Path `
                       -OldVersion 1.0.0 -NewVersion $env:MSI_VERSION
 
+            - name: Keep the installer logs
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: msi-logs
+                  path: ${{ runner.temp }}/msi-test/*.log
+                  if-no-files-found: ignore
+
             - uses: actions/upload-artifact@v4
               with:
                   name: package-windows
