@@ -50,7 +50,7 @@ pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
 /// The credit coin's colour, the brand orange.
 pub const COIN: Color32 = Color32::from_rgb(0xd9, 0x78, 0x02);
 
-/// The credit coin, `size` high: the brand mark drawn white in the asset and tinted here.
+/// The credits icon, `size` high: Lucide's `coins`, drawn white in the asset and tinted here.
 pub fn coin(ui: &mut egui::Ui, size: f32) -> egui::Response {
     ui.add(
         egui::Image::new(egui::include_image!("../assets/coin.svg"))
