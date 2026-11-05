@@ -158,6 +158,14 @@ pub fn item_changes(
     injector::item_changes_wait(target.client.pid, since, 2000, wait)
 }
 
+pub fn item_params(
+    target: &Target,
+    _settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<Option<std::collections::BTreeMap<u32, injector::config::Value>>>, String> {
+    injector::item_params(target.client.pid, ids)
+}
+
 pub fn item_names(
     target: &Target,
     _settings: &Settings,

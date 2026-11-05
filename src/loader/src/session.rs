@@ -9,7 +9,8 @@ use std::{
 use sha2::{Digest, Sha256};
 
 use crate::api::{
-    Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript, models::end_reason_message,
+    Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript,
+    models::{Quote, credits_text, end_reason_message},
 };
 use crate::libs;
 
@@ -120,6 +121,48 @@ pub struct Prepared {
 pub fn prepare(api: &Api, script: &StoreScript, warned: Option<i64>) -> Result<Prepared, String> {
     let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
     prepare_warned(api, script, &root, warned)
+}
+
+/// Ends a run's old session, so it isn't counted, and asks what a new one would cost. `None` when the script is no longer listed for the account.
+pub fn restart_quote(
+    api: &Api,
+    old_session: &str,
+    script_id: &str,
+    community: bool,
+) -> Result<Option<(StoreScript, Quote)>, ApiError> {
+    // repeating the end is safe, and it covers one still on its way or one that failed
+    let _ = api.end_session(old_session);
+    let Some(script) = api
+        .scripts("", "", community)?
+        .into_iter()
+        .find(|s| s.id == script_id)
+    else {
+        return Ok(None);
+    };
+    let quote = api.quote(script_id)?;
+    Ok(Some((script, quote)))
+}
+
+/// Why a start can't go ahead at this quote.
+pub fn start_block(script: &StoreScript, quote: &Quote, credits: i64) -> Option<String> {
+    if credits < quote.required {
+        return Some(format!(
+            "Needs a balance of at least {} to start.",
+            credits_text(quote.required as f64)
+        ));
+    }
+    if !script.can_access {
+        return Some("You don't have access to this script.".into());
+    }
+    script
+        .revision
+        .is_none()
+        .then(|| "This script has no live revision.".into())
+}
+
+/// Whether the user must see the pricing first: a restart's price differs from the old session's, or the new one pays the extra-session fee.
+pub fn asks_first(old_price: Option<i64>, quote: &Quote) -> bool {
+    old_price.is_some_and(|old| old != quote.price) || quote.fee > 0
 }
 
 /// `prepare_warned` for a script that needs no warning, with the cache folder given so tests don't touch the real one.

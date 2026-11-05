@@ -10,9 +10,12 @@ use serde_json::json;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    api::{Api, ApiError, Config, Stats, StoreScript},
+    api::{Api, ApiError, Config, Stats, StoreScript, models::Quote},
     fake_api::{FakeServer, Reply, Request},
-    session::{prepare_in, prepare_warned, revision_dir, sha256_hex},
+    session::{
+        asks_first, prepare_in, prepare_warned, restart_quote, revision_dir, sha256_hex,
+        start_block,
+    },
 };
 
 const SCRIPT_ID: &str = "7d081fdd-59de-4a4e-9c29-b2f92d9bc697";
@@ -108,6 +111,10 @@ impl Server {
                     .collect();
                 Reply::json(200, json!({ "scripts": scripts }))
             }
+            ("GET", p) if p == format!("/launcher/scripts/{SCRIPT_ID}/quote") => Reply::json(
+                200,
+                json!({ "price": 30, "rank": 0, "fee": 0, "required": 300 }),
+            ),
             ("POST", "/launcher/scripts/redeem") => match request.json()["code"]
                 .as_str()
                 .and_then(|code| code.chars().next())
@@ -674,4 +681,91 @@ fn a_community_script_never_runs_without_a_warning() {
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 1);
     assert_eq!(fake.count("GET", "/files/"), 0);
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_restart_ends_the_old_session_before_it_asks_for_the_quote() {
+    let fake = Server::healthy().start();
+    let api = api(&fake);
+
+    let (script, quote) = restart_quote(&api, "s1", SCRIPT_ID, false)
+        .expect("quote")
+        .expect("listed");
+    assert_eq!(script.id, SCRIPT_ID);
+    assert_eq!(quote.required, 300);
+
+    let paths: Vec<String> = fake.requests().into_iter().map(|r| r.path).collect();
+    let end = paths.iter().position(|p| p.ends_with("/s1/end")).unwrap();
+    let quoted = paths.iter().position(|p| p.ends_with("/quote")).unwrap();
+    assert!(end < quoted, "the quote must not count the old session");
+}
+
+#[test]
+fn a_restart_of_a_script_no_longer_listed_finds_nothing() {
+    let fake = Server::healthy().start();
+    let api = api(&fake);
+
+    let found = restart_quote(&api, "s1", "not-listed", false).expect("quote");
+    assert_eq!(found, None);
+}
+
+fn quote(price: i64, fee: i64, required: i64) -> Quote {
+    Quote {
+        price,
+        rank: i64::from(fee > 0),
+        fee,
+        required,
+    }
+}
+
+#[test]
+fn a_restart_asks_only_when_the_price_changed_or_a_fee_applies() {
+    assert!(!asks_first(Some(30), &quote(30, 0, 300)));
+    assert!(asks_first(Some(30), &quote(40, 0, 400)), "dearer");
+    assert!(asks_first(Some(30), &quote(20, 0, 200)), "cheaper");
+    assert!(
+        asks_first(Some(30), &quote(30, 30000, 307)),
+        "an extra session"
+    );
+    assert!(!asks_first(Some(0), &quote(0, 0, 0)));
+}
+
+#[test]
+fn a_new_run_asks_only_when_a_fee_applies() {
+    assert!(!asks_first(None, &quote(30, 0, 300)));
+    assert!(asks_first(None, &quote(30, 30000, 307)));
+    assert!(
+        asks_first(None, &quote(0, 30000, 7)),
+        "a free script's extra session"
+    );
+}
+
+#[test]
+fn a_start_is_refused_without_the_balance_or_the_access() {
+    assert_eq!(start_block(&script(), &quote(30, 0, 300), 300), None);
+    assert!(start_block(&script(), &quote(30, 0, 300), 299).is_some());
+
+    let mut gone = script();
+    gone.can_access = false;
+    assert!(start_block(&gone, &quote(30, 0, 300), 300).is_some());
+
+    let mut unpublished = script();
+    unpublished.revision = None;
+    assert!(start_block(&unpublished, &quote(30, 0, 300), 300).is_some());
+}
+
+#[test]
+fn an_exempt_account_starts_a_priced_script_on_no_balance() {
+    // listed at 30 a minute, but an author, a grantee or a tester is quoted 0
+    assert_eq!(script().price, 30);
+    let exempt = quote(0, 0, 0);
+    assert_eq!(start_block(&script(), &exempt, 0), None);
+    assert!(!asks_first(None, &exempt));
+}
+
+#[test]
+fn a_quote_comes_from_the_server() {
+    let fake = Server::healthy().start();
+    let quote = api(&fake).quote(SCRIPT_ID).expect("quote");
+    assert_eq!((quote.price, quote.required), (30, 300));
 }

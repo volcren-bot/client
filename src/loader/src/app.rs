@@ -17,7 +17,7 @@ use loader::backend::{self, Scan, Settings, Target};
 use crate::account::{self, Auth};
 use crate::api::{
     Api, ApiError, Config, Heartbeat, Me, Redeemed, Removed, Stats, StoreScript,
-    models::{API_VERSION, Ended, RecentSession, Scored},
+    models::{API_VERSION, Ended, Quote, RecentSession, Scored},
 };
 use crate::feedback;
 use crate::highlight::Highlighter;
@@ -125,8 +125,20 @@ enum Event {
     },
     StoreStarted {
         pid: u32,
-        title: String,
+        script: Box<StoreScript>,
+        /// The ended run this start takes the place of, closed once it succeeds.
+        replaces: Option<u64>,
         result: Result<Prepared, String>,
+    },
+    /// What a start from the Scripts page would cost.
+    RunQuoted {
+        start: Box<PendingStart>,
+        result: Result<Quote, ApiError>,
+    },
+    /// What a restart of this run would cost; `None` when its script is no longer listed.
+    RestartQuoted {
+        run: u64,
+        result: Result<Option<(StoreScript, Quote)>, ApiError>,
     },
     Heartbeat {
         session_id: String,
@@ -153,6 +165,9 @@ enum Event {
 /// The session billing a store script.
 struct StoreRun {
     session_id: String,
+    script_id: String,
+    /// Which script list holds it, for a restart.
+    community: bool,
     beat: Beat,
     /// The script is being stopped for a reason already reported; the end of the session follows its exit.
     stopping: bool,
@@ -298,12 +313,36 @@ impl Run {
     }
 }
 
-/// A store script waiting for the user to accept the extra-session fee before it starts.
-struct ExtraPrompt {
+/// The Restart button of an ended store run, greyed out with the reason; true when clicked.
+fn restart_button(ui: &mut egui::Ui, refusal: Option<&str>) -> bool {
+    let button = ui
+        .add_enabled(refusal.is_none(), egui::Button::new("Restart"))
+        .on_hover_text("Closes this session and starts the script again on the same client.");
+    match refusal {
+        Some(why) => button.on_disabled_hover_text(why).clicked(),
+        None => button.clicked(),
+    }
+}
+
+/// A store script on its way to starting, through whatever the user must accept first.
+struct PendingStart {
     script: StoreScript,
     target: Target,
-    /// Sessions already open, so this would be the `open + 1`th.
-    open: i64,
+    /// The ended run it takes the place of.
+    replaces: Option<u64>,
+}
+
+/// A start waiting for the user to accept what it will cost.
+struct StartPrompt {
+    start: PendingStart,
+    /// Credits per minute.
+    price: i64,
+    /// The extra-session fee, credits per month; 0 when it isn't an extra session.
+    fee: i64,
+    /// Which session at once this would be.
+    nth: i64,
+    /// The old session's price, when a restart changes it.
+    old_price: Option<i64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -362,6 +401,59 @@ fn sidebar_name(title: &str) -> String {
         return name;
     }
     name.chars().take(MAX - 1).chain(['\u{2026}']).collect()
+}
+
+/// The page tree, after the website's neo-tree, with a `(id, name, ended)` row per run under Sessions. Returns the page a click picked.
+fn sidebar_tree(
+    ui: &mut egui::Ui,
+    tab: Tab,
+    active_run: Option<u64>,
+    runs: &[(u64, String, bool)],
+) -> Option<(Tab, Option<u64>)> {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    crate::theme::sidebar_header(ui, "explorer");
+    crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
+    let items = [
+        (Tab::Clients, "\u{f108}", "client"),
+        (Tab::Store, "\u{f489}", "scripts"),
+        (Tab::Scripts, "\u{f044}", "editor"),
+        (Tab::Sessions, "\u{f04b}", "sessions"),
+        (Tab::Development, "\u{f188}", "development"),
+        (Tab::Terminal, "\u{f120}", "terminal"),
+        (Tab::Accounts, "\u{f007}", "accounts"),
+        (Tab::Feedback, "\u{f075}", "feedback"),
+        (Tab::Settings, "\u{f013}", "settings"),
+    ];
+    // a run page is reached through its row under Sessions, so the Sessions row itself only matches the list
+    let mut current = if tab == Tab::Run {
+        (Tab::Run, active_run)
+    } else {
+        (tab, None)
+    };
+    let before = current;
+    for (i, (tab, icon, name)) in items.iter().enumerate() {
+        crate::theme::sidebar_item(
+            ui,
+            &mut current,
+            (*tab, None),
+            icon,
+            name,
+            i == items.len() - 1,
+        );
+        if *tab == Tab::Sessions {
+            for (j, (id, name, ended)) in runs.iter().enumerate() {
+                crate::theme::sidebar_child(
+                    ui,
+                    &mut current,
+                    (Tab::Run, Some(*id)),
+                    name,
+                    *ended,
+                    j == runs.len() - 1,
+                );
+            }
+        }
+    }
+    (current != before).then_some(current)
 }
 
 /// Window width from which the sidebar is always shown.
@@ -1179,7 +1271,7 @@ pub struct LoaderApp {
     /// The client the Run buttons start scripts on, by `Target::key`.
     run_target: Option<String>,
     /// A store script waiting for the extra-session fee to be accepted.
-    extra_prompt: Option<ExtraPrompt>,
+    start_prompt: Option<StartPrompt>,
     /// The file's new contents, while asking whether to reload it before running.
     reload_prompt: Option<String>,
     remembered_forms: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -1203,7 +1295,7 @@ pub struct LoaderApp {
     /// Community scripts the user agreed to run, by revision (persisted).
     confirmed: Confirmed,
     /// A community script waiting for the user to accept the warning before it starts.
-    warning: Option<(StoreScript, Target)>,
+    warning: Option<PendingStart>,
     /// A newer launcher release, until the user dismisses it.
     update: Option<update::Available>,
     update_state: UpdateState,
@@ -1306,7 +1398,7 @@ impl LoaderApp {
             active_run: None,
             next_run: 1,
             run_target: None,
-            extra_prompt: None,
+            start_prompt: None,
             update: None,
             update_state: UpdateState::Offered,
             starting: None,
@@ -1404,21 +1496,150 @@ impl LoaderApp {
         if self.starting.is_some() {
             return Some("A script is starting.".into());
         }
+        if self.start_prompt.is_some() || self.warning.is_some() {
+            return Some("Answer the open dialog first.".into());
+        }
         target
             .is_none()
             .then(|| "Pick a client with the agent loaded that isn't running a script.".into())
     }
 
-    fn start_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+    /// Whether a script can start on this client: loaded, usable, and not running one.
+    fn client_free(&self, target: &Target) -> bool {
+        target.client.loaded.is_some()
+            && target.client.foreign_bot.is_none()
+            && target.client.is_64bit
+            && !self.client_in_use(target.client.pid)
+    }
+
+    /// This client as last scanned, if a script can start on it.
+    fn free_client(&self, pid: u32) -> Option<Target> {
+        self.targets
+            .iter()
+            .find(|t| t.client.pid == pid && self.client_free(t))
+            .cloned()
+    }
+
+    /// The client an ended run ran on, if a script can still start there.
+    fn restart_target(&self, run: &Run) -> Option<Target> {
+        self.free_client(run.target.as_ref()?.client.pid)
+    }
+
+    /// Why this ended run can't restart right now.
+    fn restart_refusal(&self, run: &Run) -> Option<String> {
+        if self.auth.me().is_none() {
+            return Some("Sign in to run store scripts.".into());
+        }
+        let target = self.restart_target(run);
+        if target.is_none() {
+            return Some(
+                "Its client is gone or busy. Start the script from the Scripts page.".into(),
+            );
+        }
+        self.run_block(target.as_ref())
+    }
+
+    /// Closes the ended run's session and asks the server what a new one would cost; the answer decides the rest (`Event::RestartQuoted`).
+    fn restart_run(&mut self, ctx: &egui::Context, id: u64) {
+        let Some(run) = self.runs.iter().find(|r| r.id == id) else {
+            return;
+        };
+        let Some(store) = &run.store else {
+            return;
+        };
+        let (session_id, script_id, community) = (
+            store.session_id.clone(),
+            store.script_id.clone(),
+            store.community,
+        );
+        self.starting = Some(run.title.clone());
+        // what goes wrong shows in this run's log
+        self.active_run = Some(id);
+        self.log_tab = LogTab::Run(id);
+        self.api_job(ctx, move |api| Event::RestartQuoted {
+            run: id,
+            result: session::restart_quote(&api, &session_id, &script_id, community),
+        });
+    }
+
+    /// Starts the restart at this quote, through the pricing dialog when the cost isn't what the old session paid.
+    fn restart_quoted(&mut self, ctx: &egui::Context, id: u64, script: StoreScript, quote: Quote) {
+        let Some(run) = self.runs.iter().find(|r| r.id == id) else {
+            return;
+        };
+        let (Some(old_price), Some(target)) =
+            (run.store.as_ref().map(|s| s.price), run.target.clone())
+        else {
+            return;
+        };
+        let start = PendingStart {
+            script,
+            target,
+            replaces: Some(id),
+        };
+        self.start_at_quote(ctx, start, Some(old_price), quote);
+    }
+
+    /// Asks the server what this start would cost; the answer decides the rest (`Event::RunQuoted`).
+    fn quote_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
+        self.starting = Some(start.script.title.clone());
+        let id = start.script.id.clone();
+        self.api_job(ctx, move |api| Event::RunQuoted {
+            result: api.quote(&id),
+            start: Box::new(start),
+        });
+    }
+
+    /// Goes on with a start at the server's quote: refused, through the pricing dialog, or straight on.
+    fn start_at_quote(
+        &mut self,
+        ctx: &egui::Context,
+        start: PendingStart,
+        old_price: Option<i64>,
+        quote: Quote,
+    ) {
+        let credits = self.auth.me().map_or(0, |me| me.credits);
+        let target = self.free_client(start.target.client.pid);
+        let refusal = session::start_block(&start.script, &quote, credits);
+        let (Some(target), None) = (target, refusal.as_ref()) else {
+            let why = refusal.unwrap_or_else(|| "Its client is gone or busy.".into());
+            self.script_error(format!("Couldn't start {}: {why}", start.script.title));
+            return;
+        };
+        let asks = session::asks_first(old_price, &quote);
+        let start = PendingStart { target, ..start };
+        if asks {
+            self.start_prompt = Some(StartPrompt {
+                start,
+                price: quote.price,
+                fee: quote.fee,
+                nth: quote.rank + 1,
+                old_price: old_price.filter(|old| *old != quote.price),
+            });
+        } else {
+            self.confirm_store_script(ctx, start);
+        }
+    }
+
+    fn start_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
+        let PendingStart {
+            script,
+            target,
+            replaces,
+        } = start;
         self.starting = Some(script.title.clone());
         self.info(format!("Starting {}…", script.title));
-        let (pid, title) = (target.client.pid, script.title.clone());
+        let pid = target.client.pid;
         // A community script only runs at the revision the user was warned about
         let warned = script.community.then_some(script.revision).flatten();
-        self.api_job(ctx, move |api| Event::StoreStarted {
-            pid,
-            title,
-            result: session::prepare(&api, &script, warned),
+        self.api_job(ctx, move |api| {
+            let result = session::prepare(&api, &script, warned);
+            Event::StoreStarted {
+                pid,
+                script: Box::new(script),
+                replaces,
+                result,
+            }
         });
     }
 
@@ -1427,9 +1648,6 @@ impl LoaderApp {
         if let Some(store) = self.runs[index].store.as_mut().filter(|s| !s.ended) {
             store.ended = true;
             let session_id = store.session_id.clone();
-            if let Some(me) = self.auth.me_mut() {
-                me.open_sessions = (me.open_sessions - 1).max(0);
-            }
             self.api_job(ctx, move |api| {
                 Event::SessionEnded(api.end_session(&session_id))
             });
@@ -1457,7 +1675,7 @@ impl LoaderApp {
             .find(|r| r.session_id() == Some(session_id))
     }
 
-    /// The store sessions this loader is running, for the fee prompt and the spend rate.
+    /// The store sessions this loader is running.
     fn store_runs(&self) -> impl Iterator<Item = &StoreRun> {
         self.runs
             .iter()
@@ -1573,17 +1791,14 @@ impl LoaderApp {
             Some(store::Action::Refresh) => self.fetch_scripts(&ctx),
             Some(store::Action::Run(script)) => {
                 if let Some(target) = target {
-                    // An extra concurrent session costs a fee: say so before anything starts
-                    let open = me.open_sessions.max(self.store_runs().count() as i64);
-                    if me.extra_session_fee > 0 && open >= 1 {
-                        self.extra_prompt = Some(ExtraPrompt {
+                    self.quote_store_script(
+                        &ctx,
+                        PendingStart {
                             script: *script,
                             target,
-                            open,
-                        });
-                    } else {
-                        self.confirm_store_script(&ctx, *script, target);
-                    }
+                            replaces: None,
+                        },
+                    );
                 }
             }
             Some(store::Action::Redeem(code)) => {
@@ -1600,73 +1815,94 @@ impl LoaderApp {
             }
             None => {}
         }
-        self.extra_prompt_ui(&ctx);
-        self.warning_ui(&ctx);
     }
 
     /// Starts a store script, after the community warning when the script needs one.
-    fn confirm_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+    fn confirm_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
         // Community scripts are not reviewed by staff: warn before the first run of each revision
+        let script = &start.script;
         let confirmed = script
             .revision
             .is_some_and(|revision| self.confirmed.has(&script.id, revision));
         if script.community && !confirmed {
-            self.warning = Some((script, target));
+            self.warning = Some(start);
         } else {
-            self.start_store_script(ctx, script, target);
+            self.start_store_script(ctx, start);
         }
     }
 
-    /// The dialog before an extra concurrent session starts: what it adds, an hour and a minute, and the total with the script's price.
-    fn extra_prompt_ui(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = self.extra_prompt.take() else {
+    /// The dialog before a start whose cost the user hasn't accepted: an extra session's fee, a restart's changed price, and what it comes to.
+    fn start_prompt_ui(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.start_prompt.take() else {
             return;
         };
         let Some(me) = self.auth.me() else {
             return;
         };
         use crate::api::models::{credits_text, fee_per_hour, per_hour};
-        let fee_hour = fee_per_hour(me.extra_session_fee, me.minutes_per_month);
+        let fee_hour = fee_per_hour(prompt.fee, me.minutes_per_month);
         let fee_minute = fee_hour / 60.0;
-        let price_hour = per_hour(prompt.script.price);
+        let price_hour = per_hour(prompt.price);
         let total_hour = price_hour + fee_hour;
-        let nth = match prompt.open + 1 {
+        let extra = prompt.fee > 0;
+        let nth = match prompt.nth {
             2 => "2nd".to_owned(),
             3 => "3rd".to_owned(),
             n => format!("{n}th"),
         };
+        let heading = if prompt.start.replaces.is_some() {
+            "Restart session"
+        } else {
+            "Extra session"
+        };
         let mut decision = None;
-        egui::Window::new("Extra session")
+        egui::Window::new(heading)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.set_max_width(440.0);
-                ui.label(egui::RichText::new(&prompt.script.title).strong());
+                ui.label(egui::RichText::new(&prompt.start.script.title).strong());
                 ui.add_space(6.0);
-                ui.label(format!(
-                    "This would be your {nth} script running at once. Every script past the first adds a fee on top of its own price:"
-                ));
+                if prompt.old_price.is_some() {
+                    ui.label("The price of this script changed since the session started.");
+                }
+                if extra {
+                    ui.label(format!(
+                        "This would be your {nth} script running at once. Every script past the first adds a fee on top of its own price:"
+                    ));
+                }
                 ui.add_space(4.0);
-                egui::Grid::new("extra_fee").num_columns(2).spacing(egui::vec2(16.0, 4.0)).show(ui, |ui| {
-                    ui.label("extra fee");
-                    ui.horizontal(|ui| {
-                        crate::theme::credits(ui, egui::RichText::new(credits_text(fee_hour)).strong(), "/h");
-                        crate::theme::credits(ui, egui::RichText::new(format!("{:.7}", fee_minute / crate::api::models::CREDITS_PER_UNIT)).small(), "/min");
-                    });
-                    ui.end_row();
+                egui::Grid::new("start_cost").num_columns(2).spacing(egui::vec2(16.0, 4.0)).show(ui, |ui| {
+                    if extra {
+                        ui.label("extra fee");
+                        ui.horizontal(|ui| {
+                            crate::theme::credits(ui, egui::RichText::new(credits_text(fee_hour)).strong(), "/h");
+                            crate::theme::credits(ui, egui::RichText::new(format!("{:.7}", fee_minute / crate::api::models::CREDITS_PER_UNIT)).small(), "/min");
+                        });
+                        ui.end_row();
+                    }
+                    if let Some(old_price) = prompt.old_price {
+                        ui.label("old price");
+                        crate::theme::credits(ui, egui::RichText::new(credits_text(per_hour(old_price))), "/h");
+                        ui.end_row();
+                    }
                     ui.label("script price");
                     crate::theme::credits(ui, egui::RichText::new(credits_text(price_hour)).strong(), "/h");
                     ui.end_row();
-                    ui.label("in total");
-                    ui.horizontal(|ui| {
-                        crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour)).strong(), "/h");
-                        crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour * 24.0 * 30.0)).small(), "per 30 days");
-                    });
-                    ui.end_row();
+                    if extra {
+                        ui.label("in total");
+                        ui.horizontal(|ui| {
+                            crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour)).strong(), "/h");
+                            crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour * 24.0 * 30.0)).small(), "per 30 days");
+                        });
+                        ui.end_row();
+                    }
                 });
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("The fee follows the order the scripts started in: when an older one stops, this one moves up and the oldest runs without a fee.").weak());
+                if extra {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("The fee follows the order the scripts started in: when an older one stops, this one moves up and the oldest runs without a fee.").weak());
+                }
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Confirm").clicked() {
@@ -1678,17 +1914,18 @@ impl LoaderApp {
                 });
             });
         match decision {
-            Some(true) => self.confirm_store_script(ctx, prompt.script, prompt.target),
+            Some(true) => self.confirm_store_script(ctx, prompt.start),
             Some(false) => {}
-            None => self.extra_prompt = Some(prompt),
+            None => self.start_prompt = Some(prompt),
         }
     }
 
     /// The warning shown before a community script runs. Accepting it is remembered for that revision of that script.
     fn warning_ui(&mut self, ctx: &egui::Context) {
-        let Some((script, target)) = self.warning.take() else {
+        let Some(start) = self.warning.take() else {
             return;
         };
+        let script = &start.script;
         let mut decision = None;
         egui::Window::new("Community script")
             .collapsible(false)
@@ -1720,10 +1957,10 @@ impl LoaderApp {
                 if let Some(revision) = script.revision {
                     self.confirmed.confirm(&script.id, revision);
                 }
-                self.start_store_script(ctx, script, target);
+                self.start_store_script(ctx, start);
             }
             Some(false) => {}
-            None => self.warning = Some((script, target)),
+            None => self.warning = Some(start),
         }
     }
 
@@ -1891,60 +2128,17 @@ impl LoaderApp {
         });
     }
 
-    /// The page tree on the left, after the website's neo-tree. Picking a page closes the drawer on narrow windows.
+    /// The sidebar's page tree. Picking a page closes the drawer on narrow windows.
     fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        crate::theme::sidebar_header(ui, "explorer");
-        crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
-        let before = (self.tab, self.active_run);
-        let items = [
-            (Tab::Clients, "\u{f108}", "client"),
-            (Tab::Store, "\u{f489}", "scripts"),
-            (Tab::Scripts, "\u{f044}", "editor"),
-            (Tab::Sessions, "\u{f04b}", "sessions"),
-            (Tab::Development, "\u{f188}", "development"),
-            (Tab::Terminal, "\u{f120}", "terminal"),
-            (Tab::Accounts, "\u{f007}", "accounts"),
-            (Tab::Feedback, "\u{f075}", "feedback"),
-            (Tab::Settings, "\u{f013}", "settings"),
-        ];
-        // a run page is reached through its row under Sessions, so the Sessions row itself only matches the list
-        let mut current = if self.tab == Tab::Run {
-            (Tab::Run, self.active_run)
-        } else {
-            (self.tab, None)
-        };
-        for (i, (tab, icon, name)) in items.iter().enumerate() {
-            crate::theme::sidebar_item(
-                ui,
-                &mut current,
-                (*tab, None),
-                icon,
-                name,
-                i == items.len() - 1,
-            );
-            if *tab == Tab::Sessions {
-                let rows: Vec<(u64, String, bool)> = self
-                    .runs
-                    .iter()
-                    .map(|r| (r.id, sidebar_name(&r.title), !r.is_running()))
-                    .collect();
-                for (j, (id, name, ended)) in rows.iter().enumerate() {
-                    crate::theme::sidebar_child(
-                        ui,
-                        &mut current,
-                        (Tab::Run, Some(*id)),
-                        name,
-                        *ended,
-                        j == rows.len() - 1,
-                    );
-                }
-            }
-        }
-        if current != before {
-            self.tab = current.0;
-            if let (Tab::Run, Some(id)) = current {
-                self.active_run = Some(id);
+        let rows: Vec<(u64, String, bool)> = self
+            .runs
+            .iter()
+            .map(|r| (r.id, sidebar_name(&r.title), !r.is_running()))
+            .collect();
+        if let Some((tab, run)) = sidebar_tree(ui, self.tab, self.active_run, &rows) {
+            self.tab = tab;
+            if run.is_some() {
+                self.active_run = run;
             }
             self.sidebar_open = false;
         }
@@ -3376,15 +3570,42 @@ impl LoaderApp {
                         Err(error) => self.store.redeem_result = Some((false, error.to_string())),
                     }
                 }
-                Event::StoreStarted { pid, title, result } => {
+                Event::StoreStarted { pid, script, replaces, result } => {
                     self.starting = None;
                     match result {
-                        Ok(prepared) => self.run_prepared(ctx, pid, &title, prepared),
+                        Ok(prepared) => {
+                            if self.run_prepared(ctx, pid, &script, prepared)
+                                && let Some(old) = replaces
+                            {
+                                self.close_run(old);
+                            }
+                        }
                         Err(error) => {
-                            self.script_error(format!("Couldn't start {title}: {error}"));
+                            self.script_error(format!("Couldn't start {}: {error}", script.title));
                             // The list may be stale (a new revision, a grant that was revoked)
                             self.fetch_scripts(ctx);
                         }
+                    }
+                }
+                Event::RunQuoted { start, result } => {
+                    self.starting = None;
+                    match result {
+                        Ok(quote) => self.start_at_quote(ctx, *start, None, quote),
+                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
+                        Err(error) => {
+                            self.script_error(format!("Couldn't start {}: {error}", start.script.title));
+                            // The list may be stale (a script that went away)
+                            self.fetch_scripts(ctx);
+                        }
+                    }
+                }
+                Event::RestartQuoted { run, result } => {
+                    self.starting = None;
+                    match result {
+                        Ok(Some((script, quote))) => self.restart_quoted(ctx, run, script, quote),
+                        Ok(None) => self.script_error("Couldn't restart: the script is no longer available to this account."),
+                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
+                        Err(error) => self.script_error(format!("Couldn't restart: {error}")),
                     }
                 }
                 Event::Heartbeat { session_id, sent, result } => {
@@ -3393,13 +3614,6 @@ impl LoaderApp {
                         && let Some(credits) = beat.credits
                     {
                         me.credits = credits;
-                    }
-                    if let Ok(beat) = &result
-                        && let Some(me) = self.auth.me_mut()
-                        && let Some(rank) = beat.rank
-                    {
-                        // the server's count is at least this session's rank plus itself
-                        me.open_sessions = me.open_sessions.max(rank + 1);
                     }
                     let beat = result.as_ref().ok().map(|b| (b.rank, b.fee, b.fee_charged));
                     let verdict = match self.run_by_session(&session_id) {
@@ -4442,6 +4656,7 @@ impl LoaderApp {
         let mut pause = None;
         let mut stop = None;
         let mut close = None;
+        let mut restart = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -4540,6 +4755,12 @@ impl LoaderApp {
                             {
                                 close = Some(run.id);
                             }
+                            if !running
+                                && run.store.is_some()
+                                && restart_button(ui, self.restart_refusal(run).as_deref())
+                            {
+                                restart = Some(run.id);
+                            }
                         });
                     });
                 }
@@ -4559,6 +4780,10 @@ impl LoaderApp {
         if let Some(id) = close {
             self.close_run(id);
         }
+        if let Some(id) = restart {
+            let ctx = ui.ctx().clone();
+            self.restart_run(&ctx, id);
+        }
     }
 
     /// The dropdown of clients a script can start on: loaded, usable, and not running a script. Returns the pick.
@@ -4566,10 +4791,7 @@ impl LoaderApp {
         let free: Vec<Target> = self
             .targets
             .iter()
-            .filter(|t| {
-                t.client.loaded.is_some() && t.client.foreign_bot.is_none() && t.client.is_64bit
-            })
-            .filter(|t| !self.client_in_use(t.client.pid))
+            .filter(|t| self.client_free(t))
             .cloned()
             .collect();
         if !free.iter().any(|t| Some(t.key()) == self.run_target) {
@@ -4689,9 +4911,13 @@ impl LoaderApp {
             .as_ref()
             .is_some_and(|f| f.has_layout(crate::layouts::Kind::Prayer));
         let mut tools_tab = run.tools_tab;
+        let run_id = run.id;
+        let restartable = !running && is_store;
+        let restart_refusal = self.restart_refusal(run);
         ui.add(egui::Label::new(egui::RichText::new(&title).heading()).truncate());
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
+        let mut restart = false;
         let layouts = self.script_layouts().clone();
         ui.horizontal_wrapped(|ui| {
             if form_sent.is_some() {
@@ -4727,12 +4953,18 @@ impl LoaderApp {
                     run.script.stop();
                 }
             }
+            restart = restartable && restart_button(ui, restart_refusal.as_deref());
             ui.separator();
             ui.label(self.run().map_or("ended", Run::status));
         });
         self.answer_form(outcome);
         if update {
             self.push_form_update();
+        }
+        if restart {
+            let ctx = ui.ctx().clone();
+            self.restart_run(&ctx, run_id);
+            return;
         }
         ui.add_space(8.0);
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -4957,17 +5189,8 @@ impl LoaderApp {
                 let slots = layouts::items_of(&items, &names, &stackable);
                 match kind {
                     Kind::Prayer => unreachable!("read above"),
-                    Kind::Equipment => Ok(Read::Equipment {
-                        // the combat tab offers autocast for staves and powered staves, by the weapon's category
-                        autocast: backend::varbit(
-                            &target,
-                            &settings,
-                            layouts::WEAPON_CATEGORY_VARBIT,
-                        )?
-                        .is_some_and(|category| {
-                            layouts::AUTOCAST_WEAPON_CATEGORIES.contains(&category)
-                        }),
-                        slots: slots
+                    Kind::Equipment => {
+                        let mut slots: Vec<layouts::EquipmentSlot> = slots
                             .into_iter()
                             .map(|item| {
                                 item.map_or(
@@ -4975,8 +5198,36 @@ impl LoaderApp {
                                     layouts::EquipmentSlot::Item,
                                 )
                             })
-                            .collect(),
-                    }),
+                            .collect();
+                        slots.resize(layouts::SECONDARY_AMMO_SLOT, layouts::EquipmentSlot::Empty);
+                        slots.push(
+                            match layouts::read_secondary_ammo(&target, &settings, &items)? {
+                                None => layouts::EquipmentSlot::Any,
+                                Some(None) => layouts::EquipmentSlot::Empty,
+                                Some(Some((id, quantity))) => {
+                                    let (names, stacks) = describe(&[id])?;
+                                    layouts::EquipmentSlot::Item(layouts::Item {
+                                        id,
+                                        quantity,
+                                        name: names.get(&id).cloned().unwrap_or_default(),
+                                        stackable: stacks.get(&id).copied().unwrap_or(true),
+                                    })
+                                }
+                            },
+                        );
+                        Ok(Read::Equipment {
+                            // the combat tab offers autocast for staves and powered staves, by the weapon's category
+                            autocast: backend::varbit(
+                                &target,
+                                &settings,
+                                layouts::WEAPON_CATEGORY_VARBIT,
+                            )?
+                            .is_some_and(|category| {
+                                layouts::AUTOCAST_WEAPON_CATEGORIES.contains(&category)
+                            }),
+                            slots,
+                        })
+                    }
                     Kind::Inventory => {
                         let has_pouch = slots.iter().flatten().any(layouts::Item::is_rune_pouch);
                         let pouch = if has_pouch {
@@ -5107,7 +5358,15 @@ impl LoaderApp {
         }
     }
 
-    fn run_prepared(&mut self, ctx: &egui::Context, pid: u32, title: &str, prepared: Prepared) {
+    /// Starts the prepared script; false when it didn't, with the reason logged and the session ended.
+    fn run_prepared(
+        &mut self,
+        ctx: &egui::Context,
+        pid: u32,
+        script: &StoreScript,
+        prepared: Prepared,
+    ) -> bool {
+        let title = script.title.as_str();
         let session_id = prepared.session.session_id.clone();
         let Some(target) = self
             .targets
@@ -5121,7 +5380,7 @@ impl LoaderApp {
             self.api_job(ctx, move |api| {
                 Event::SessionEnded(api.end_session(&session_id))
             });
-            return;
+            return false;
         };
         match Script::start_with(
             ctx,
@@ -5132,11 +5391,13 @@ impl LoaderApp {
             Some(&target),
             &self.settings,
         ) {
-            Ok(script) => {
+            Ok(process) => {
                 let interval =
                     Duration::from_secs(prepared.session.heartbeat_seconds.clamp(10, 120));
                 let store = StoreRun {
                     session_id,
+                    script_id: script.id.clone(),
+                    community: script.community,
                     beat: Beat::new(std::time::Instant::now(), interval),
                     stopping: false,
                     ended: false,
@@ -5151,7 +5412,7 @@ impl LoaderApp {
                 let mut run = Run::new(
                     id,
                     title.to_owned(),
-                    script,
+                    process,
                     Some(target),
                     Some(store),
                     self.settings.antiban.clone(),
@@ -5163,17 +5424,16 @@ impl LoaderApp {
                     "Running {title} (revision {}).",
                     prepared.session.revision
                 ));
-                if let Some(me) = self.auth.me_mut() {
-                    me.open_sessions = me.open_sessions.max(prepared.session.rank) + 1;
-                }
                 self.feedback.fetched_at = None;
                 self.add_run(run);
+                true
             }
             Err(error) => {
                 self.script_error(format!("Couldn't start {title}: {error}"));
                 self.api_job(ctx, move |api| {
                     Event::SessionEnded(api.end_session(&session_id))
                 });
+                false
             }
         }
     }
@@ -6676,6 +6936,10 @@ impl eframe::App for LoaderApp {
                 Tab::Feedback => self.feedback_ui(ui),
                 Tab::Settings => self.settings_ui(ui),
             }
+            // a restart can ask from any page that shows its button, and stays open across pages
+            let ctx = ui.ctx().clone();
+            self.start_prompt_ui(&ctx);
+            self.warning_ui(&ctx);
         });
     }
 
@@ -6846,6 +7110,82 @@ fn widget_node_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One frame of the page tree with these events, and the page it reports picked.
+    fn sidebar_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        tab: Tab,
+        active_run: Option<u64>,
+    ) -> Option<(Tab, Option<u64>)> {
+        let runs = [
+            (1, "woodcutter".to_string(), false),
+            (2, "old".to_string(), true),
+        ];
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut picked = None;
+        ctx.run_ui(input, |ui| {
+            picked = sidebar_tree(ui, tab, active_run, &runs);
+        })
+        .textures_delta
+        .clear();
+        picked
+    }
+
+    #[test]
+    fn the_sidebar_reports_no_pick_without_a_click_while_a_run_is_active() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        for tab in [
+            Tab::Clients,
+            Tab::Store,
+            Tab::Sessions,
+            Tab::Settings,
+            Tab::Run,
+        ] {
+            for _ in 0..3 {
+                assert!(sidebar_frame(&ctx, Vec::new(), tab, Some(1)).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_sidebar_row_picks_its_page() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut picks = Vec::new();
+        for y in (0..400).step_by(5) {
+            let pos = egui::pos2(40.0, y as f32);
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let frames = [
+                vec![egui::Event::PointerMoved(pos)],
+                vec![button(true)],
+                vec![button(false)],
+            ];
+            for events in frames {
+                if let Some(pick) = sidebar_frame(&ctx, events, Tab::Sessions, Some(1)) {
+                    picks.push(pick);
+                }
+            }
+        }
+        for page in [
+            (Tab::Clients, None),
+            (Tab::Settings, None),
+            (Tab::Run, Some(1)),
+            (Tab::Run, Some(2)),
+        ] {
+            assert!(picks.contains(&page));
+        }
+        assert!(!picks.contains(&(Tab::Sessions, None)));
+    }
 
     #[test]
     fn the_log_keeps_the_newest_lines_and_its_filter() {

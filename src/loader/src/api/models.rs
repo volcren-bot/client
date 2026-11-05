@@ -37,12 +37,6 @@ pub struct Me {
     pub role: String,
     pub credits: i64,
     pub min_balance_minutes: i64,
-    /// Sessions the account has open anywhere, as the server last saw them.
-    #[serde(default)]
-    pub open_sessions: i64,
-    /// What an extra concurrent session costs this account, in credits per `minutes_per_month`; 0 for tester+.
-    #[serde(default)]
-    pub extra_session_fee: i64,
     #[serde(default = "default_minutes_per_month")]
     pub minutes_per_month: i64,
     pub api_version: u32,
@@ -121,15 +115,23 @@ impl StoreScript {
 
     /// Why the Run button is disabled, or `None` when the script can start with `credits` in the account.
     pub fn blocked(&self, credits: i64, min_balance_minutes: i64) -> Option<String> {
-        if !self.can_access {
-            return Some("You don't have access to this script.".into());
-        }
         if self.revision.is_none() {
             return Some("This script has no live revision yet.".into());
         }
+        // `can_access` already weighs the balance and knows who pays nothing; a shortfall only explains a refusal
+        if self.can_access {
+            return None;
+        }
         let required = self.price * min_balance_minutes;
-        (credits < required)
-            .then(|| format!("Needs at least {required} credits to start ({credits} available)."))
+        Some(if credits < required {
+            format!(
+                "Needs a balance of at least {} to start ({} available).",
+                credits_text(required as f64),
+                credits_text(credits as f64)
+            )
+        } else {
+            "You don't have access to this script.".into()
+        })
     }
 }
 
@@ -144,6 +146,19 @@ pub struct SessionFile {
     pub url: String,
     #[serde(default)]
     pub sha256: Option<String>,
+}
+
+/// What a session of a script would cost the account if it started now.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Quote {
+    /// Credits per minute after the account's exemptions, unlike `StoreScript::price`.
+    pub price: i64,
+    /// The sessions the account has open, so this would be the `rank + 1`th.
+    pub rank: i64,
+    /// The extra-session fee at that rank, credits per month; 0 when none applies.
+    pub fee: i64,
+    /// The balance needed to start.
+    pub required: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -284,7 +299,6 @@ mod tests {
         assert_eq!(me.credits, 125_000);
         assert_eq!(credits_text(me.credits as f64), "12.50");
         assert!(me.avatar_url.is_none());
-        assert_eq!(me.open_sessions, 0);
         assert_eq!(me.minutes_per_month, 43_200);
     }
 
@@ -309,9 +323,11 @@ mod tests {
         assert!(!script.is_free());
         assert_eq!(credits_text(per_hour(script.price)), "0.18");
         assert_eq!(script.blocked(1000, 5), None);
-        assert!(script.blocked(100, 5).unwrap().contains("150"));
+        // the server said it can run: an author, a grantee or a tester with no balance pays nothing
+        assert_eq!(script.blocked(0, 5), None);
         let mut locked = script.clone();
         locked.can_access = false;
+        assert!(locked.blocked(100, 5).unwrap().contains("0.015"));
         assert!(locked.blocked(1_000_000, 5).unwrap().contains("access"));
         locked.can_access = true;
         locked.revision = None;
@@ -338,8 +354,6 @@ mod tests {
             role: role.into(),
             credits: 0,
             min_balance_minutes: 1,
-            open_sessions: 0,
-            extra_session_fee: 0,
             minutes_per_month: 43_200,
             api_version: API_VERSION,
         };

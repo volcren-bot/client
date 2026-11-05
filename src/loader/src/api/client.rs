@@ -10,8 +10,8 @@ use super::{
     config::Config,
     error::{ApiError, ErrorBody},
     models::{
-        Ended, Heartbeat, Me, RecentSession, RecentSessions, Redeemed, Removed, Report, Reported,
-        Scored, ScriptList, StartedSession, Stats, StoreScript,
+        Ended, Heartbeat, Me, Quote, RecentSession, RecentSessions, Redeemed, Removed, Report,
+        Reported, Scored, ScriptList, StartedSession, Stats, StoreScript,
     },
 };
 
@@ -273,6 +273,15 @@ impl Api {
         self.call(
             "DELETE",
             &format!("/launcher/scripts/{script_id}/grant"),
+            &[],
+            None::<&()>,
+        )
+    }
+
+    pub fn quote(&self, script_id: &str) -> Result<Quote, ApiError> {
+        self.call(
+            "GET",
+            &format!("/launcher/scripts/{script_id}/quote"),
             &[],
             None::<&()>,
         )

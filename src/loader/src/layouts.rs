@@ -6,11 +6,13 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use loader::backend::{self, Settings, Target};
+
 use crate::icons::{Icons, Key, SLOT_SIZE};
 use crate::theme;
 
-/// The worn items container's slots that exist, with their names, in the container's order.
-pub const EQUIPMENT_SLOTS: [(usize, &str); 11] = [
+/// The worn items container's slots that exist, with their names, in the container's order, then the secondary ammo.
+pub const EQUIPMENT_SLOTS: [(usize, &str); 12] = [
     (0, "Head"),
     (1, "Cape"),
     (2, "Amulet"),
@@ -22,10 +24,12 @@ pub const EQUIPMENT_SLOTS: [(usize, &str); 11] = [
     (10, "Feet"),
     (12, "Ring"),
     (13, "Ammo"),
+    (SECONDARY_AMMO_SLOT, "Secondary ammo"),
 ];
 /// Where each slot sits in the worn items tab: column and row of a 3 x 5 grid.
-const EQUIPMENT_CELLS: [(usize, usize, usize); 11] = [
+const EQUIPMENT_CELLS: [(usize, usize, usize); 12] = [
     (0, 1, 0),
+    (SECONDARY_AMMO_SLOT, 2, 0),
     (1, 0, 1),
     (2, 1, 1),
     (13, 2, 1),
@@ -37,7 +41,22 @@ const EQUIPMENT_CELLS: [(usize, usize, usize); 11] = [
     (10, 1, 4),
     (12, 2, 4),
 ];
-pub const EQUIPMENT_SIZE: usize = 14;
+pub const EQUIPMENT_SIZE: usize = 15;
+/// Past the worn items container: a bolt pouch or Dizana's quiver gives this slot, and the lib ignores it without one.
+pub const SECONDARY_AMMO_SLOT: usize = 14;
+const SECONDARY_AMMO_HINT: &str =
+    "Ignored unless the account has a bolt pouch in its inventory or Dizana's quiver.";
+const INVENTORY_CONTAINER: i32 = 93;
+const CAPE_SLOT: i32 = 1;
+const BOLT_POUCH: i32 = 9433;
+/// The bolt pouch's fourth stack is its extra ammo: its bolt (a number the enum maps to an item id) and amount.
+const POUCH_EXTRA_BOLT_VARBIT: i32 = 2476;
+const POUCH_EXTRA_AMOUNT_VARBIT: i32 = 2472;
+const POUCH_BOLTS_ENUM: i32 = 336;
+/// The item param that makes an item a quiver, and the client variables of what it holds.
+const QUIVER_PARAM: u32 = 1910;
+const QUIVER_AMMO_VARP: usize = 4142;
+const QUIVER_AMOUNT_VARP: usize = 4141;
 pub const INVENTORY_SIZE: usize = 28;
 pub const INVENTORY_COLUMNS: usize = 4;
 /// A rune pouch holds up to 4 kinds of rune (3 unless divine).
@@ -653,15 +672,15 @@ impl Layout for Equipment {
     fn to_value(&self) -> Value {
         let slots: Vec<Value> = EQUIPMENT_SLOTS
             .iter()
-            .map(|&(slot, _)| match self.slots.get(slot) {
-                Some(EquipmentSlot::Item(item)) => {
+            .map(|&(slot, _)| match self.slot(slot) {
+                EquipmentSlot::Item(item) => {
                     let mut value = item.to_value();
                     value["slot"] = json!(slot);
                     value["mode"] = json!("item");
                     value
                 }
-                Some(EquipmentSlot::Any) => json!({ "slot": slot, "mode": "any" }),
-                _ => json!({ "slot": slot, "mode": "empty" }),
+                EquipmentSlot::Any => json!({ "slot": slot, "mode": "any" }),
+                EquipmentSlot::Empty => json!({ "slot": slot, "mode": "empty" }),
             })
             .collect();
         let spell = self.spell.as_deref().and_then(spell_info).map(|s| {
@@ -712,13 +731,20 @@ impl Layout for Prayer {
 }
 
 impl Equipment {
+    /// What a slot asks for; one a layout doesn't list is empty, but the secondary ammo is any, so a layout saved or made without it never clears it.
     fn slot(&self, slot: usize) -> &EquipmentSlot {
-        self.slots.get(slot).unwrap_or(&EquipmentSlot::Empty)
+        self.slots
+            .get(slot)
+            .unwrap_or(if slot == SECONDARY_AMMO_SLOT {
+                &EquipmentSlot::Any
+            } else {
+                &EquipmentSlot::Empty
+            })
     }
 
     fn slot_mut(&mut self, slot: usize) -> &mut EquipmentSlot {
-        if self.slots.len() < EQUIPMENT_SIZE {
-            self.slots.resize(EQUIPMENT_SIZE, EquipmentSlot::Empty);
+        while self.slots.len() < EQUIPMENT_SIZE {
+            self.slots.push(self.slot(self.slots.len()).clone());
         }
         &mut self.slots[slot]
     }
@@ -1135,6 +1161,11 @@ pub fn equipment_ui(
                             format!("{name}: anything or nothing may be worn."),
                         ),
                     };
+                    let hover = if slot == SECONDARY_AMMO_SLOT {
+                        format!("{hover}\n{SECONDARY_AMMO_HINT}")
+                    } else {
+                        hover
+                    };
                     let response = slot_ui(
                         &mut child,
                         icons,
@@ -1161,6 +1192,9 @@ pub fn equipment_ui(
                         .find(|(s, _)| *s == slot)
                         .map_or("", |(_, name)| name);
                     ui.strong(name);
+                    if slot == SECONDARY_AMMO_SLOT {
+                        ui.weak(SECONDARY_AMMO_HINT);
+                    }
                     match editor.draft.slot_mut(slot) {
                         EquipmentSlot::Item(item) => amount_ui(ui, item),
                         state => {
@@ -1574,9 +1608,60 @@ pub fn apply_prayers(draft: &mut Prayer, read: Read) {
 pub fn apply_equipment(draft: &mut Equipment, read: Read) {
     if let Read::Equipment { slots, autocast } = read {
         draft.slots = slots;
-        draft.slots.resize(EQUIPMENT_SIZE, EquipmentSlot::Empty);
+        draft.slots.resize(EQUIPMENT_SIZE, EquipmentSlot::Any);
         draft.autocast = autocast;
     }
+}
+
+/// The item a bolt pouch's enum maps a stack's number to.
+fn enum_item(def: &injector::config::EnumDef, key: i32) -> Option<i32> {
+    def.entries
+        .iter()
+        .find(|e| e.key == key)
+        .and_then(|e| match &e.value {
+            injector::config::Value::Int(id) => i32::try_from(*id).ok(),
+            injector::config::Value::Str(_) => None,
+        })
+}
+
+/// What the secondary ammo slot holds: `None` when nothing gives the slot, else its item id and amount if any. A quiver worn or carried turns the pouch's slot off, as the client does.
+pub fn read_secondary_ammo(
+    target: &Target,
+    settings: &Settings,
+    worn: &[injector::Item],
+) -> Result<Option<Option<(i32, i32)>>, String> {
+    let carried =
+        backend::item_container(target, settings, INVENTORY_CONTAINER)?.unwrap_or_default();
+    let mut ids: Vec<i32> = carried.iter().map(|item| item.id).collect();
+    ids.extend(worn.iter().filter(|i| i.slot == CAPE_SLOT).map(|i| i.id));
+    ids.retain(|&id| id >= 0);
+    ids.sort_unstable();
+    ids.dedup();
+    let params = if ids.is_empty() {
+        Vec::new()
+    } else {
+        backend::item_params(target, settings, &ids)?
+    };
+    let quiver = params.iter().flatten().any(|params| {
+        matches!(params.get(&QUIVER_PARAM), Some(injector::config::Value::Int(value)) if *value > 0)
+    });
+    if quiver {
+        let id = backend::varp(target, settings, QUIVER_AMMO_VARP)?.unwrap_or(-1);
+        let amount = backend::varp(target, settings, QUIVER_AMOUNT_VARP)?.unwrap_or(0);
+        return Ok(Some((id >= 0 && amount > 0).then_some((id, amount))));
+    }
+    if !carried.iter().any(|item| item.id == BOLT_POUCH) {
+        return Ok(None);
+    }
+    let bolts = backend::enum_def(target, settings, POUCH_BOLTS_ENUM)?
+        .ok_or("the cache has no bolt pouch enum")?;
+    let index = backend::varbit(target, settings, POUCH_EXTRA_BOLT_VARBIT)?.unwrap_or(0);
+    let amount = backend::varbit(target, settings, POUCH_EXTRA_AMOUNT_VARBIT)?.unwrap_or(0);
+    Ok(Some(
+        enum_item(&bolts, index)
+            .filter(|&id| id > 0 && amount > 0)
+            .map(|id| (id, amount)),
+    ))
 }
 
 /// Puts what a client read into an inventory draft.
@@ -1662,6 +1747,7 @@ mod tests {
         assert_eq!(slots[3]["mode"], "item");
         assert_eq!(slots[3]["id"], 4151);
         assert_eq!(slots[10], json!({ "slot": 13, "mode": "any" }));
+        assert_eq!(slots[11], json!({ "slot": 14, "mode": "any" }));
         assert_eq!(value["name"], "Melee");
         assert_eq!(value["spell"], Value::Null);
         layout.spell = Some("ice_barrage".into());
@@ -1672,6 +1758,28 @@ mod tests {
         assert_eq!(value["spell"]["autocast"], true);
         assert_eq!(AUTOCAST_SPELLS.len(), 48);
         assert_eq!(spell_info("fire_surge").map(|s| s.index), Some(51));
+    }
+
+    #[test]
+    fn item_params_parse_as_the_injector_prints_them() {
+        let params: Vec<Option<std::collections::BTreeMap<u32, injector::config::Value>>> =
+            serde_json::from_str(r#"[{"295":1},{"295":1,"595":"Empty","1910":1},null]"#).unwrap();
+        assert_eq!(params.len(), 3);
+        let quiver = params[1].as_ref().unwrap().get(&QUIVER_PARAM);
+        assert!(matches!(quiver, Some(injector::config::Value::Int(1))));
+    }
+
+    #[test]
+    fn a_layout_without_the_secondary_ammo_slot_doesnt_care_about_it() {
+        let mut saved = Equipment {
+            slots: vec![EquipmentSlot::Empty; SECONDARY_AMMO_SLOT],
+            ..Default::default()
+        };
+        assert_eq!(saved.to_value()["slots"][11]["mode"], "any");
+        *saved.slot_mut(0) = EquipmentSlot::Any;
+        assert_eq!(saved.slots.len(), EQUIPMENT_SIZE);
+        assert_eq!(*saved.slot(SECONDARY_AMMO_SLOT), EquipmentSlot::Any);
+        assert_eq!(saved.to_value()["slots"][1]["mode"], "empty");
     }
 
     #[test]

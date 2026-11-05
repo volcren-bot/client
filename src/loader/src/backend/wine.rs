@@ -485,6 +485,19 @@ pub fn item_changes(
     )
 }
 
+pub fn item_params(
+    target: &Target,
+    settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<Option<std::collections::BTreeMap<u32, injector::config::Value>>>, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec!["item-params", pid.as_str()];
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    args.extend(ids.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
+}
+
 pub fn item_names(
     target: &Target,
     settings: &Settings,
