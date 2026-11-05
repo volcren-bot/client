@@ -45,7 +45,9 @@ jobs:
 
             # YYYY.MM.DD-<7 character commit>, from the commit's UTC date, so every job names the same build the same way.
             - name: Version
-              run: echo "VOLCREN_VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+              run: |
+                  echo "VOLCREN_VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+                  echo "VOLCREN_BUILD=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
 
             - name: Install MinGW toolchain
               if: matrix.name == 'windows'
@@ -102,21 +104,15 @@ jobs:
                   path: ${{ matrix.artifact_path }}
                   if-no-files-found: error
 
-    # On every push to main: package both platforms and publish them, with a manifest the loader's update check reads,
-    # to the public `client` bucket. latest.json goes up last, so it never points at files that aren't there yet.
-    publish:
-        name: publish to the client bucket
+    # The Linux archive: the loader and a native injector, plus the Windows injector and agent that run inside Wine.
+    package:
+        name: package for Linux
         needs: build
-        if: github.event_name == 'push'
-        concurrency:
-            group: publish
-            cancel-in-progress: false
         runs-on: ubuntu-latest
         outputs:
             version: ${{ steps.version.outputs.version }}
-        env:
-            SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-            SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+            build: ${{ steps.version.outputs.build }}
+            api_version: ${{ steps.version.outputs.api_version }}
         steps:
             - uses: actions/checkout@v4
 
@@ -130,25 +126,142 @@ jobs:
                   version="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)"
                   echo "VERSION=$version" >> "$GITHUB_ENV"
                   echo "version=$version" >> "$GITHUB_OUTPUT"
-                  echo "API_VERSION=$(grep -m1 'pub const API_VERSION' src/loader/src/api/models.rs | grep -o '[0-9]*;' | tr -d ';')" >> "$GITHUB_ENV"
+                  echo "build=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+                  echo "api_version=$(grep -m1 'pub const API_VERSION' src/loader/src/api/models.rs | grep -o '[0-9]*;' | tr -d ';')" >> "$GITHUB_OUTPUT"
 
             - name: Package
               run: |
                   mkdir -p out
                   win=dist/volcren-windows-release
                   lin=dist/volcren-linux-release
-
-                  # Windows: everything runs natively.
-                  (cd "$win" && zip -q "../../out/volcren-windows-$VERSION.zip" loader.exe injector.exe agent.dll)
-
-                  # Linux: the loader and a native injector, plus the Windows injector and agent that run inside Wine.
                   stage=$(mktemp -d)/volcren
                   mkdir -p "$stage"
                   cp "$lin/loader" "$lin/injector" "$win/injector.exe" "$win/agent.dll" "$stage/"
                   chmod +x "$stage/loader" "$stage/injector"
                   tar -C "$(dirname "$stage")" -czf "out/volcren-linux-$VERSION.tar.gz" volcren
 
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: package-linux
+                  path: out/volcren-linux-*.tar.gz
+                  if-no-files-found: error
+
+    # The Windows installer, built with WiX on real Windows and tested there. See docs/releases.md.
+    msi:
+        name: build and test the MSI
+        needs: build
+        runs-on: windows-latest
+        timeout-minutes: 20
+        env:
+            WIX_VERSION: "5.0.2"
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/download-artifact@v4
+              with:
+                  name: volcren-windows-release
+                  path: dist
+
+            # Windows Installer allows 255.255.65535 and ignores a fourth field, so the minute of the month keeps same-day builds apart.
+            - name: Version
+              shell: bash
+              run: |
+                  read -r year month day hour minute < <(TZ=UTC git show -s --format=%cd --date=format-local:'%y %m %d %H %M' HEAD)
+                  of_month=$(( (10#$day - 1) * 1440 + 10#$hour * 60 + 10#$minute ))
+                  echo "MSI_VERSION=$((10#$year)).$((10#$month)).$of_month" >> "$GITHUB_ENV"
+                  echo "VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+
+            # WiX 5 is the last version with no maintenance fee, and it runs on .NET 6.
+            - uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: 6.0.x
+
+            - name: Install WiX
+              shell: pwsh
+              run: |
+                  dotnet tool install --global wix --version $env:WIX_VERSION
+                  "$env:USERPROFILE\.dotnet\tools" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+            - name: Build
+              shell: pwsh
+              run: |
+                  wix extension add -g "WixToolset.UI.wixext/$env:WIX_VERSION"
+                  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  $bin = (Resolve-Path dist).Path
+                  foreach ($build in @(@{ version = "1.0.0"; out = "out\old\volcren.msi" }, @{ version = $env:MSI_VERSION; out = "out\volcren-windows-$env:VERSION.msi" })) {
+                      wix build installer\volcren.wxs -arch x64 -ext WixToolset.UI.wixext `
+                          -d "Version=$($build.version)" -d "BinDir=$bin" -o $build.out
+                      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                  }
+
+            - name: Test
+              shell: pwsh
+              run: |
+                  ./installer/test-msi.ps1 -OldMsi (Resolve-Path out\old\volcren.msi).Path `
+                      -NewMsi (Resolve-Path "out\volcren-windows-$env:VERSION.msi").Path `
+                      -OldVersion 1.0.0 -NewVersion $env:MSI_VERSION
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: package-windows
+                  path: out/volcren-windows-*.msi
+                  if-no-files-found: error
+
+    # Writes and signs the manifest. It holds the signing key and nothing that can upload, and the key is only available to this Environment.
+    sign:
+        name: sign the manifest
+        needs: [package, msi]
+        if: github.event_name == 'push'
+        runs-on: ubuntu-latest
+        environment: release-signing
+        env:
+            VERSION: ${{ needs.package.outputs.version }}
+            BUILD: ${{ needs.package.outputs.build }}
+            API_VERSION: ${{ needs.package.outputs.api_version }}
+            UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  pattern: package-*
+                  merge-multiple: true
+                  path: out
+
+            - name: Install rsign
+              run: cargo install rsign2 --version 0.6.7 --locked
+
+            - name: Sign
+              run: |
+                  if [ -z "$UPDATE_SIGNING_KEY" ]; then
+                      echo "Set the UPDATE_SIGNING_KEY secret on the release-signing environment." >&2
+                      exit 1
+                  fi
+                  win="volcren-windows-$VERSION.msi"
+                  lin="volcren-linux-$VERSION.tar.gz"
+                  mkdir manifest
+                  jq -n --arg version "$VERSION" --argjson build "$BUILD" --argjson api "${API_VERSION:-1}" \
+                      --arg win "$win" --arg winsum "$(sha256sum "out/$win" | cut -d' ' -f1)" \
+                      --arg lin "$lin" --arg linsum "$(sha256sum "out/$lin" | cut -d' ' -f1)" \
+                      '{version: $version, build: $build, api_version: $api, files: {
+                          windows: {name: $win, path: "\($version)/\($win)", sha256: $winsum},
+                          linux: {name: $lin, path: "\($version)/\($lin)", sha256: $linsum}}}' > manifest/latest.json
+                  cat manifest/latest.json
+
+                  key="$RUNNER_TEMP/update.key"
+                  (umask 077 && printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
+                  rsign sign -W -s "$key" -t "$VERSION" -x "$RUNNER_TEMP/latest.minisig" manifest/latest.json
+                  rm -f "$key"
+
+                  # One object, so a loader can never read a new signature with an old manifest.
+                  jq -n --rawfile manifest manifest/latest.json --rawfile signature "$RUNNER_TEMP/latest.minisig" \
+                      '{manifest: $manifest, signature: $signature}' > manifest/latest.signed.json
+
                   (cd out && sha256sum * | tee SHA256SUMS)
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: manifest
+                  path: manifest
+                  if-no-files-found: error
 
             # The same files the bucket gets, for the GitHub release job below (which has no access to the Supabase key).
             - name: Keep packages for the release
@@ -156,10 +269,42 @@ jobs:
               with:
                   name: release-packages
                   path: |
-                      out/volcren-windows-*.zip
+                      out/volcren-windows-*.msi
                       out/volcren-linux-*.tar.gz
                       out/SHA256SUMS
                   if-no-files-found: error
+
+    # On every push to main: publish both platforms and the manifests to the public `client` bucket. latest.signed.json and
+    # latest.json go up last, so they never point at files that aren't there yet.
+    publish:
+        name: publish to the client bucket
+        needs: [package, sign]
+        if: github.event_name == 'push'
+        concurrency:
+            group: publish
+            cancel-in-progress: false
+        runs-on: ubuntu-latest
+        outputs:
+            version: ${{ needs.package.outputs.version }}
+        env:
+            VERSION: ${{ needs.package.outputs.version }}
+            SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+            SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/download-artifact@v4
+              with:
+                  name: release-packages
+                  path: out
+
+            - uses: actions/download-artifact@v4
+              with:
+                  name: manifest
+                  path: manifest
+
+            - name: Install rsign
+              run: cargo install rsign2 --version 0.6.7 --locked
 
             - name: Upload
               run: |
@@ -177,25 +322,29 @@ jobs:
                           -H "x-upsert: true" -H "Content-Type: $3" -H "cache-control: ${4:-max-age=31536000}" \
                           --data-binary "@$1" > /dev/null
                   }
-                  win="volcren-windows-$VERSION.zip"
+                  win="volcren-windows-$VERSION.msi"
                   lin="volcren-linux-$VERSION.tar.gz"
-                  upload "out/$win" "$VERSION/$win" application/zip
+                  upload "out/$win" "$VERSION/$win" application/x-msi
                   upload "out/$lin" "$VERSION/$lin" application/gzip
+                  upload manifest/latest.signed.json latest.signed.json application/json max-age=60
+                  upload manifest/latest.json latest.json application/json max-age=60
 
-                  jq -n --arg version "$VERSION" --argjson api "${API_VERSION:-1}" \
-                      --arg win "$win" --arg winsum "$(sha256sum "out/$win" | cut -d' ' -f1)" \
-                      --arg lin "$lin" --arg linsum "$(sha256sum "out/$lin" | cut -d' ' -f1)" \
-                      '{version: $version, api_version: $api, files: {
-                          windows: {name: $win, path: "\($version)/\($win)", sha256: $winsum},
-                          linux: {name: $lin, path: "\($version)/\($lin)", sha256: $linsum}}}' > out/latest.json
-                  cat out/latest.json
-                  upload out/latest.json latest.json application/json max-age=60
-
-                  # What was just published must be the manifest itself, nothing else.
+                  # What was just published must be this manifest, and signed by a key the loader trusts, or nobody could install it.
                   sleep 2
-                  curl -sS --fail "$SUPABASE_URL/storage/v1/object/public/client/latest.json?check=$VERSION" -o out/check.json
-                  jq -e --arg version "$VERSION" '.version == $version' out/check.json > /dev/null \
+                  public="$SUPABASE_URL/storage/v1/object/public/client"
+                  curl -sS --fail "$public/latest.json?check=$VERSION" -o check.json
+                  jq -e --arg version "$VERSION" '.version == $version' check.json > /dev/null \
                       || { echo "The published latest.json is not the manifest that was uploaded." >&2; exit 1; }
+                  curl -sS --fail "$public/latest.signed.json?check=$VERSION" -o signed.json
+                  jq -j .manifest signed.json > signed.manifest
+                  jq -j .signature signed.json > signed.minisig
+                  jq -e --arg version "$VERSION" '.version == $version' signed.manifest > /dev/null \
+                      || { echo "The published latest.signed.json is not the manifest that was uploaded." >&2; exit 1; }
+                  verified=
+                  for key in $(grep -oE '"RW[A-Za-z0-9+/]{54}"' src/loader/src/update.rs | tr -d '"'); do
+                      rsign verify -P "$key" -x signed.minisig signed.manifest > /dev/null 2>&1 && verified=1
+                  done
+                  [ -n "$verified" ] || { echo "The published manifest isn't signed by a key in update.rs." >&2; exit 1; }
 
     # After a successful publish: tag the commit and create a GitHub release with the same packages. Uses only the runner's
     # `gh` and the job token, and runs apart from `publish` so the Supabase key never sits next to a write token.

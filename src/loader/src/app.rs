@@ -24,7 +24,7 @@ use crate::highlight::Highlighter;
 use crate::script::{Script, ScriptEvent};
 use crate::session::{self, Beat, Prepared, Verdict};
 use crate::store::{self, Confirmed, Store};
-use crate::update::{self, Release};
+use crate::update;
 
 enum Event {
     Scanned(Scan),
@@ -134,7 +134,8 @@ enum Event {
         result: Result<Heartbeat, ApiError>,
     },
     SessionEnded(Result<Ended, ApiError>),
-    Update(Result<Option<Release>, String>),
+    Update(Result<Option<update::Available>, update::CheckError>),
+    UpdatePrepared(Result<update::Prepared, String>),
     /// The sessions of the last 24 hours, for the Feedback page.
     RecentSessions(Result<Vec<RecentSession>, ApiError>),
     Scored {
@@ -176,6 +177,25 @@ impl StoreRun {
 }
 
 /// A script that is running, or ran until it is closed: its process, the client it runs on, the session billing it, and everything its page shows.
+/// Where an offered update is, from the banner's button to the loader closing.
+enum UpdateState {
+    Offered,
+    Downloading(Arc<update::Progress>),
+    /// Downloaded and checked, waiting for scripts to stop if any started meanwhile.
+    Ready(update::Prepared),
+    Installing,
+    Failed(String),
+}
+
+fn progress_text(progress: &update::Progress) -> String {
+    const MIB: u64 = 1024 * 1024;
+    let done = progress.done.load(Ordering::Relaxed) / MIB;
+    match progress.total.load(Ordering::Relaxed) / MIB {
+        0 => format!("Downloading: {done} MB"),
+        total => format!("Downloading: {done} of {total} MB"),
+    }
+}
+
 struct Run {
     id: u64,
     title: String,
@@ -1185,7 +1205,8 @@ pub struct LoaderApp {
     /// A community script waiting for the user to accept the warning before it starts.
     warning: Option<(StoreScript, Target)>,
     /// A newer launcher release, until the user dismisses it.
-    update: Option<Release>,
+    update: Option<update::Available>,
+    update_state: UpdateState,
     /// Title of the store script being prepared (session start and download).
     starting: Option<String>,
     targets: Vec<Target>,
@@ -1219,7 +1240,7 @@ impl LoaderApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
-        settings.fill_missing();
+        settings.fill_missing(update::is_dev_install());
         crate::theme::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
@@ -1287,6 +1308,7 @@ impl LoaderApp {
             run_target: None,
             extra_prompt: None,
             update: None,
+            update_state: UpdateState::Offered,
             starting: None,
             targets: Vec::new(),
             dll_version: None,
@@ -1312,6 +1334,10 @@ impl LoaderApp {
         thread::spawn(feedback::prune);
         app.restore_sign_in(&cc.egui_ctx);
         app.api_job(&cc.egui_ctx, |api| Event::Update(update::check(&api)));
+        if let Some(failure) = update::failure_from_args() {
+            app.error(failure.clone());
+            app.update_state = UpdateState::Failed(failure);
+        }
         app
     }
 
@@ -1924,26 +1950,100 @@ impl LoaderApp {
         }
     }
 
-    fn update_banner_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        let Some(release) = self.update.clone() else {
+    fn script_running(&self) -> bool {
+        self.runs.iter().any(|run| run.ended.is_none())
+    }
+
+    fn update_failed(&mut self, error: String) {
+        self.error(error.clone());
+        self.update_state = UpdateState::Failed(error);
+    }
+
+    fn start_update(&mut self, ctx: &egui::Context, release: update::Release) {
+        let progress = Arc::new(update::Progress::default());
+        self.update_state = UpdateState::Downloading(progress.clone());
+        let repaint = ctx.clone();
+        self.api_job(ctx, move |api| {
+            Event::UpdatePrepared(update::prepare(&api, &release, &progress, &|| {
+                repaint.request_repaint();
+            }))
+        });
+    }
+
+    /// Installs a prepared update and closes, which saves the settings and stops what the loader runs.
+    fn apply_update(&mut self, ctx: &egui::Context) {
+        let UpdateState::Ready(prepared) = &self.update_state else {
             return;
         };
+        match update::apply(prepared) {
+            Ok(()) => {
+                self.update_state = UpdateState::Installing;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => self.update_failed(error),
+        }
+    }
+
+    fn update_banner_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let Some(available) = self.update.clone() else {
+            return;
+        };
+        let (release, kind) = (available.release, available.kind);
+        let running = self.script_running();
+        let status = match (&self.update_state, kind) {
+            (_, update::Kind::Dev) => {
+                Some("Development build: updates aren't installed here.".to_owned())
+            }
+            (UpdateState::Downloading(progress), _) => Some(progress_text(progress)),
+            (UpdateState::Installing, _) => Some("Installing the update...".to_owned()),
+            (UpdateState::Failed(error), _) => Some(error.clone()),
+            (_, update::Kind::Auto { .. }) if running => {
+                Some("Stop running scripts to update".to_owned())
+            }
+            (_, update::Kind::Auto { admin: true }) => {
+                Some("An administrator has to approve the update.".to_owned())
+            }
+            _ => None,
+        };
+        let main_button = match (&self.update_state, kind) {
+            (_, update::Kind::Dev) => None,
+            (_, update::Kind::Manual) => Some("Download"),
+            (UpdateState::Offered | UpdateState::Ready(_), _) => Some("Update and restart"),
+            (UpdateState::Failed(_), _) => Some("Retry"),
+            (UpdateState::Downloading(_) | UpdateState::Installing, _) => None,
+        };
+        let can_dismiss = !matches!(
+            self.update_state,
+            UpdateState::Downloading(_) | UpdateState::Installing
+        );
+        let mut clicked = false;
+        let mut dismissed = false;
         // Added before the log panel so it takes the very bottom of the window.
         egui::Panel::bottom("update").show(ui, |ui| {
+            // Each button is as tall as a text line, in a slightly smaller font, and as wide as the longest label.
+            let row = ui.text_style_height(&egui::TextStyle::Body);
+            let font = egui::FontId::monospace(12.0);
+            let width = ui
+                .painter()
+                .layout_no_wrap(
+                    "Update and restart".into(),
+                    font.clone(),
+                    egui::Color32::WHITE,
+                )
+                .size()
+                .x
+                + 2.0 * ui.spacing().button_padding.x;
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
+                    ui.set_max_width(
+                        (ui.available_width() - width - ui.spacing().item_spacing.x).max(0.0),
+                    );
                     ui.label(format!("Version {} is available", release.version));
                     ui.label(format!("You have version {}", update::VERSION));
+                    if let Some(status) = &status {
+                        ui.label(status);
+                    }
                 });
-                // Each button is as tall as a text line, in a slightly smaller font, and as wide as the longer label.
-                let row = ui.text_style_height(&egui::TextStyle::Body);
-                let font = egui::FontId::monospace(12.0);
-                let width = ui
-                    .painter()
-                    .layout_no_wrap("Download".into(), font.clone(), egui::Color32::WHITE)
-                    .size()
-                    .x
-                    + 2.0 * ui.spacing().button_padding.x;
                 ui.add_space((ui.available_width() - width).max(0.0));
                 ui.vertical(|ui| {
                     ui.spacing_mut().button_padding.y = 0.0;
@@ -1952,18 +2052,32 @@ impl LoaderApp {
                         egui::Button::new(egui::RichText::new(text).font(font.clone()))
                             .min_size(size)
                     };
-                    if let Some(url) = release.download_url(&self.api)
-                        && ui.add(button("Download")).clicked()
-                    {
-                        let _ = webbrowser::open(&url);
+                    if let Some(label) = main_button {
+                        let enabled = kind == update::Kind::Manual || !running;
+                        clicked = ui.add_enabled(enabled, button(label)).clicked();
                     }
-                    if ui.add(button("Dismiss")).clicked() {
-                        self.update = None;
-                        ctx.request_repaint();
+                    if can_dismiss {
+                        dismissed = ui.add(button("Dismiss")).clicked();
                     }
                 });
             });
         });
+        if dismissed {
+            self.update = None;
+            ctx.request_repaint();
+        }
+        if !clicked {
+            return;
+        }
+        if kind == update::Kind::Manual {
+            if let Some(url) = release.download_url(&self.api) {
+                let _ = webbrowser::open(&url);
+            }
+        } else if matches!(self.update_state, UpdateState::Ready(_)) {
+            self.apply_update(ctx);
+        } else {
+            self.start_update(ctx, release);
+        }
     }
 
     /// `stacked`: the buttons sit one above the other, so they all take the width of the widest.
@@ -3204,9 +3318,23 @@ impl LoaderApp {
                     }
                 },
                 Event::Update(result) => match result {
-                    Ok(release) => self.update = release,
+                    Ok(available) => self.update = available,
                     // Offline or no release published yet: not worth an error line.
-                    Err(error) => self.info(format!("Couldn't check for updates: {error}")),
+                    Err(update::CheckError::Unavailable(error)) => {
+                        self.info(format!("Couldn't check for updates: {error}"));
+                    }
+                    Err(update::CheckError::BadSignature) => {
+                        self.error("Update manifest signature is invalid");
+                    }
+                },
+                Event::UpdatePrepared(result) => match result {
+                    Ok(prepared) => {
+                        self.update_state = UpdateState::Ready(prepared);
+                        if !self.script_running() {
+                            self.apply_update(ctx);
+                        }
+                    }
+                    Err(error) => self.update_failed(error),
                 },
                 Event::Me(result) => match result {
                     Ok(me) => self.auth = Auth::SignedIn(me),

@@ -40,6 +40,11 @@ mod xp;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    if update::finish_if_asked() {
+        return Ok(());
+    }
+    update::cleanup();
     transports::start();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -49,9 +54,12 @@ fn main() -> eframe::Result {
             .with_min_inner_size([520.0, 300.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Volcren",
         options,
         Box::new(|cc| Ok(Box::new(app::LoaderApp::new(cc)))),
-    )
+    );
+    #[cfg(not(windows))]
+    update::relaunch_after_exit();
+    result
 }

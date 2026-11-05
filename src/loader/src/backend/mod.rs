@@ -76,13 +76,17 @@ fn detect(exe_dir: &Path, name: &str) -> String {
 }
 
 impl Settings {
-    pub fn fill_missing(&mut self) {
-        let defaults = Self::default();
-        if !Path::new(&self.dll).is_file() && !defaults.dll.is_empty() {
-            self.dll = defaults.dll;
+    /// An install always uses its own files, so a path saved by an older install can't pair them with another version. A dev build keeps a saved path while its file exists.
+    pub fn fill_missing(&mut self, dev: bool) {
+        self.resolve_paths(Self::default(), dev);
+    }
+
+    fn resolve_paths(&mut self, detected: Self, dev: bool) {
+        if !detected.dll.is_empty() && (!dev || !Path::new(&self.dll).is_file()) {
+            self.dll = detected.dll;
         }
-        if !Path::new(&self.helper).is_file() && !defaults.helper.is_empty() {
-            self.helper = defaults.helper;
+        if !detected.helper.is_empty() && (!dev || !Path::new(&self.helper).is_file()) {
+            self.helper = detected.helper;
         }
     }
 
@@ -119,6 +123,32 @@ pub struct Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_install_ignores_saved_paths_and_a_dev_build_keeps_those_that_exist() {
+        let dir = std::env::temp_dir().join(format!("volcren-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.dll").display().to_string();
+        std::fs::write(&old, b"").unwrap();
+        let with = |dll: &str| Settings {
+            dll: dll.into(),
+            helper: String::new(),
+            ..Default::default()
+        };
+
+        let mut saved = with(&old);
+        saved.resolve_paths(with("detected.dll"), false);
+        assert_eq!(saved.dll, "detected.dll");
+
+        let mut saved = with(&old);
+        saved.resolve_paths(with("detected.dll"), true);
+        assert_eq!(saved.dll, old);
+
+        let mut saved = with("gone.dll");
+        saved.resolve_paths(with("detected.dll"), true);
+        assert_eq!(saved.dll, "detected.dll");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn an_installed_release_finds_its_files_next_to_the_executable() {

@@ -33,8 +33,28 @@ fn version() -> String {
         })
 }
 
+/// The commit's Unix time, which orders releases: `VOLCREN_BUILD` from the release workflow, else the checked out commit, else 0, which never prompts an update.
+fn build() -> String {
+    std::env::var("VOLCREN_BUILD")
+        .ok()
+        .filter(|build| !build.is_empty())
+        .or_else(|| {
+            let output = Command::new("git")
+                .args(["show", "-s", "--format=%ct", "HEAD"])
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
+        .unwrap_or_else(|| "0".to_owned())
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=VOLCREN_VERSION");
+    println!("cargo:rerun-if-env-changed=VOLCREN_BUILD");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rustc-env=VOLCREN_VERSION={}", version());
+    println!("cargo:rustc-env=VOLCREN_BUILD={}", build());
 }

@@ -14,6 +14,7 @@ VOLCREN Client automates the native game client (a C++ x64 PE). It reads game st
 | [decode](../src/decode/src/lib.rs)                                 | `src/decode`: the decoders over client memory (`Memory`) and their data types, shared by the agent (in-process, the worker) and the injector (`ReadProcessMemory`). Details in [ipc-protocol.md](ipc-protocol.md). |
 | [injector-and-sandbox.md](injector-and-sandbox.md)                 | `src/injector`: CLI, state readers, input, pathfinding, the Luau sandbox and `require`.                                                                                                                            |
 | [loader-gui.md](loader-gui.md)                                     | `src/loader`: the egui app, the Wine backend, script processes, dev tools.                                                                                                                                         |
+| [releases.md](releases.md)                                         | The release workflow, the signed manifest and its keys, the Windows MSI.                           |
 
 ## Architecture
 
@@ -41,7 +42,7 @@ Around the loader sits the Volcren backend:
    |                                                    Postgres: payments.*_session, stats.report_session
    |
    +------ signed URLs: script files ------------------> private `scripts` bucket
-   +------ latest.json, lib/index.json, releases ------> public `client` bucket
+   +------ latest.signed.json, lib/index.json, releases -> public `client` bucket
 ```
 
 The loader never talks to the database directly. The API owns billing: a session is billed per minute while heartbeats arrive. See [loader-gui.md](loader-gui.md).

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- See docs/releases.md. UpgradeCode must match UPGRADE_CODE in src/loader/src/update/msi.rs. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="VOLCREN"
+           Manufacturer="VOLCREN"
+           Version="$(var.Version)"
+           UpgradeCode="DF7C7129-38EF-4E32-B9EE-F6FCFA75ED84"
+           Scope="perUserOrMachine">
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of VOLCREN is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="volcren.ico" SourceFile="$(sys.SOURCEFILEDIR)volcren.ico" />
+    <Property Id="ARPPRODUCTICON" Value="volcren.ico" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- The loader finds its own product by this, to learn how it was installed. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" />
+
+    <!-- The dialog sets these itself; a silent install has only ALLUSERS. An update passes APPLICATIONFOLDER. -->
+    <Property Id="WixAppFolder" Value="WixPerUserFolder" />
+    <WixVariable Id="WixUISupportPerUser" Value="1" />
+    <WixVariable Id="WixUISupportPerMachine" Value="1" />
+    <SetProperty Id="VolcrenPerUserFolder" Value="[LocalAppDataFolder]Programs\VOLCREN" Before="CostFinalize" />
+    <SetProperty Id="VolcrenPerMachineFolder" Value="[ProgramFiles64Folder]VOLCREN" After="SetVolcrenPerUserFolder" />
+    <SetProperty Action="SetPerUserFolder" Id="APPLICATIONFOLDER" Value="[VolcrenPerUserFolder]"
+                 After="SetVolcrenPerMachineFolder"
+                 Condition="ACTION=&quot;INSTALL&quot; AND APPLICATIONFOLDER=&quot;&quot; AND NOT ALLUSERS=1" />
+    <SetProperty Action="SetPerMachineFolder" Id="APPLICATIONFOLDER" Value="[VolcrenPerMachineFolder]"
+                 After="SetPerUserFolder"
+                 Condition="ACTION=&quot;INSTALL&quot; AND APPLICATIONFOLDER=&quot;&quot; AND ALLUSERS=1" />
+
+    <!-- Welcome, then for whom to install, then Install. The stock WixUI_Advanced hides the choice behind a licence page. -->
+    <UI Id="VolcrenUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="WelcomeDlg" />
+      <DialogRef Id="InstallScopeDlg" />
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallScopeDlg" Condition="NOT Installed" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="InstallScopeDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <!-- A standard user isn't shown the choice and can only install for themselves. -->
+      <Publish Dialog="InstallScopeDlg" Control="Next" Property="WixAppFolder" Value="WixPerUserFolder" Order="1" Condition="NOT Privileged" />
+      <Publish Dialog="InstallScopeDlg" Control="Next" Property="ALLUSERS" Value="{}" Order="2" Condition="WixAppFolder = &quot;WixPerUserFolder&quot;" />
+      <Publish Dialog="InstallScopeDlg" Control="Next" Property="ALLUSERS" Value="1" Order="3" Condition="WixAppFolder = &quot;WixPerMachineFolder&quot;" />
+      <Publish Dialog="InstallScopeDlg" Control="Next" Property="APPLICATIONFOLDER" Value="[VolcrenPerUserFolder]" Order="4" Condition="WixAppFolder = &quot;WixPerUserFolder&quot;" />
+      <Publish Dialog="InstallScopeDlg" Control="Next" Property="APPLICATIONFOLDER" Value="[VolcrenPerMachineFolder]" Order="5" Condition="WixAppFolder = &quot;WixPerMachineFolder&quot;" />
+      <Publish Dialog="InstallScopeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="6" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="InstallScopeDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="3" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="APPLICATIONFOLDER" Name="VOLCREN">
+        <Component Id="Loader">
+          <File Id="LoaderExe" Source="$(var.BinDir)\loader.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Injector">
+          <File Id="InjectorExe" Source="$(var.BinDir)\injector.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Agent">
+          <File Id="AgentDll" Source="$(var.BinDir)\agent.dll" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder">
+      <Shortcut Id="LoaderShortcut" Name="VOLCREN" Target="[#LoaderExe]" WorkingDirectory="APPLICATIONFOLDER" Icon="volcren.ico" />
+      <RegistryValue Root="HKMU" Key="Software\VOLCREN" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Package>
+</Wix>
