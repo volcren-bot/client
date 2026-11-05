@@ -38,8 +38,9 @@ pub fn command_line(msi: &str, log: &str, folder: &str, scope: Scope) -> String 
 /// What to tell the user about an exit code, if anything.
 pub fn failure(code: Option<i32>, log: &str) -> Option<String> {
     match code {
-        // Success, and the user declining the UAC prompt.
-        Some(0 | 1602) => None,
+        Some(0) => None,
+        // A failure message also stops the next start repeating the prompt straight away.
+        Some(1602) => Some("The update wasn't installed because an administrator didn't approve it.".into()),
         // Another user's copy has the files open.
         Some(1641 | 3010) => Some("Restart Windows to finish the update.".into()),
         Some(1618) => {
@@ -88,9 +89,13 @@ mod tests {
     }
 
     #[test]
-    fn success_and_a_declined_prompt_say_nothing() {
+    fn success_says_nothing() {
         assert_eq!(failure(Some(0), "l"), None);
-        assert_eq!(failure(Some(1602), "l"), None);
+    }
+
+    #[test]
+    fn a_declined_prompt_is_reported_so_it_doesnt_repeat_at_once() {
+        assert!(failure(Some(1602), "l").unwrap().contains("administrator"));
     }
 
     #[test]

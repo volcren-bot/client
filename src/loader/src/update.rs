@@ -137,6 +137,11 @@ pub fn kind() -> Kind {
     }
 }
 
+/// Whether an update installs with no click. Never over a running script, and not right after a failed or declined try, which would repeat on every restart.
+pub fn installs_by_itself(kind: Kind, failed: bool, busy: bool) -> bool {
+    matches!(kind, Kind::Auto { .. }) && !failed && !busy
+}
+
 /// What the finished update's installer reported, passed by the process that ran it.
 pub fn failure_from_args() -> Option<String> {
     let mut args = env::args().skip(1);
@@ -535,6 +540,17 @@ pub(crate) mod tests {
         ] {
             assert!(package_name(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn an_update_installs_by_itself_only_when_nothing_stands_in_its_way() {
+        let auto = Kind::Auto { admin: false };
+        assert!(installs_by_itself(auto, false, false));
+        assert!(installs_by_itself(Kind::Auto { admin: true }, false, false));
+        assert!(!installs_by_itself(auto, true, false), "a failed try");
+        assert!(!installs_by_itself(auto, false, true), "a running script");
+        assert!(!installs_by_itself(Kind::Dev, false, false));
+        assert!(!installs_by_itself(Kind::Manual, false, false));
     }
 
     #[test]

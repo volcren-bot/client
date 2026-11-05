@@ -196,8 +196,6 @@ impl StoreRun {
 enum UpdateState {
     Offered,
     Downloading(Arc<update::Progress>),
-    /// Downloaded and checked, waiting for scripts to stop if any started meanwhile.
-    Ready(update::Prepared),
     Installing,
     Failed(String),
 }
@@ -2144,8 +2142,12 @@ impl LoaderApp {
         }
     }
 
-    fn script_running(&self) -> bool {
+    /// A run, a start on its way or a dialog about one, which an update mustn't close.
+    fn start_in_progress(&self) -> bool {
         self.runs.iter().any(|run| run.ended.is_none())
+            || self.starting.is_some()
+            || self.start_prompt.is_some()
+            || self.warning.is_some()
     }
 
     fn update_failed(&mut self, error: String) {
@@ -2165,10 +2167,7 @@ impl LoaderApp {
     }
 
     /// Installs a prepared update and closes, which saves the settings and stops what the loader runs.
-    fn apply_update(&mut self, ctx: &egui::Context) {
-        let UpdateState::Ready(prepared) = &self.update_state else {
-            return;
-        };
+    fn apply_update(&mut self, ctx: &egui::Context, prepared: &update::Prepared) {
         match update::apply(prepared) {
             Ok(()) => {
                 self.update_state = UpdateState::Installing;
@@ -2178,18 +2177,43 @@ impl LoaderApp {
         }
     }
 
+    /// Takes the whole window while an update installs, so nothing can start and then be closed under the user.
+    fn updating_ui(&mut self, ui: &mut egui::Ui) {
+        let status = match &self.update_state {
+            UpdateState::Downloading(progress) => progress_text(progress),
+            _ => "Installing...".to_owned(),
+        };
+        let version = self.update.as_ref().map(|a| a.release.version.clone());
+        let mut skipped = false;
+        egui::CentralPanel::default_margins().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.35);
+                ui.heading("Updating VOLCREN");
+                if let Some(version) = version {
+                    ui.label(format!("Version {version}"));
+                }
+                ui.label(status);
+                if matches!(self.update_state, UpdateState::Downloading(_)) {
+                    ui.add_space(8.0);
+                    skipped = ui.button("Skip for now").clicked();
+                }
+            });
+        });
+        if skipped {
+            self.update_state = UpdateState::Offered;
+        }
+    }
+
     fn update_banner_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let Some(available) = self.update.clone() else {
             return;
         };
         let (release, kind) = (available.release, available.kind);
-        let running = self.script_running();
+        let running = self.start_in_progress();
         let status = match (&self.update_state, kind) {
             (_, update::Kind::Dev) => {
                 Some("Development build: updates aren't installed here.".to_owned())
             }
-            (UpdateState::Downloading(progress), _) => Some(progress_text(progress)),
-            (UpdateState::Installing, _) => Some("Installing the update...".to_owned()),
             (UpdateState::Failed(error), _) => Some(error.clone()),
             (_, update::Kind::Auto { .. }) if running => {
                 Some("Stop running scripts to update".to_owned())
@@ -2202,14 +2226,9 @@ impl LoaderApp {
         let main_button = match (&self.update_state, kind) {
             (_, update::Kind::Dev) => None,
             (_, update::Kind::Manual) => Some("Download"),
-            (UpdateState::Offered | UpdateState::Ready(_), _) => Some("Update and restart"),
             (UpdateState::Failed(_), _) => Some("Retry"),
-            (UpdateState::Downloading(_) | UpdateState::Installing, _) => None,
+            _ => Some("Update and restart"),
         };
-        let can_dismiss = !matches!(
-            self.update_state,
-            UpdateState::Downloading(_) | UpdateState::Installing
-        );
         let mut clicked = false;
         let mut dismissed = false;
         // Added before the log panel so it takes the very bottom of the window.
@@ -2250,9 +2269,7 @@ impl LoaderApp {
                         let enabled = kind == update::Kind::Manual || !running;
                         clicked = ui.add_enabled(enabled, button(label)).clicked();
                     }
-                    if can_dismiss {
-                        dismissed = ui.add(button("Dismiss")).clicked();
-                    }
+                    dismissed = ui.add(button("Dismiss")).clicked();
                 });
             });
         });
@@ -2267,8 +2284,6 @@ impl LoaderApp {
             if let Some(url) = release.download_url(&self.api) {
                 let _ = webbrowser::open(&url);
             }
-        } else if matches!(self.update_state, UpdateState::Ready(_)) {
-            self.apply_update(ctx);
         } else {
             self.start_update(ctx, release);
         }
@@ -3512,7 +3527,18 @@ impl LoaderApp {
                     }
                 },
                 Event::Update(result) => match result {
-                    Ok(available) => self.update = available,
+                    Ok(available) => {
+                        let failed = matches!(self.update_state, UpdateState::Failed(_));
+                        let busy = self.start_in_progress();
+                        let automatic = available
+                            .as_ref()
+                            .filter(|a| update::installs_by_itself(a.kind, failed, busy))
+                            .map(|a| a.release.clone());
+                        self.update = available;
+                        if let Some(release) = automatic {
+                            self.start_update(ctx, release);
+                        }
+                    }
                     // Offline or no release published yet: not worth an error line.
                     Err(update::CheckError::Unavailable(error)) => {
                         self.info(format!("Couldn't check for updates: {error}"));
@@ -3521,13 +3547,11 @@ impl LoaderApp {
                         self.error("Update manifest signature is invalid");
                     }
                 },
+                // Skipped meanwhile: the download no longer matters.
+                Event::UpdatePrepared(_)
+                    if !matches!(self.update_state, UpdateState::Downloading(_)) => {}
                 Event::UpdatePrepared(result) => match result {
-                    Ok(prepared) => {
-                        self.update_state = UpdateState::Ready(prepared);
-                        if !self.script_running() {
-                            self.apply_update(ctx);
-                        }
-                    }
+                    Ok(prepared) => self.apply_update(ctx, &prepared),
                     Err(error) => self.update_failed(error),
                 },
                 Event::Me(result) => match result {
@@ -6735,6 +6759,13 @@ impl eframe::App for LoaderApp {
         self.handle_script_events(&ctx);
         self.drive_session(&ctx);
         self.drive_xp(&ctx);
+        if matches!(
+            self.update_state,
+            UpdateState::Downloading(_) | UpdateState::Installing
+        ) {
+            self.updating_ui(ui);
+            return;
+        }
         self.form_ui();
         self.reload_prompt_ui(&ctx);
         self.tiles_ui(&ctx);
