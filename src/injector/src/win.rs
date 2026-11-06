@@ -1400,6 +1400,44 @@ pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String
         .collect()
 }
 
+/// For each item, the doses or charges its family has, `(number, id)` by number, from every item's name in the cache: `None` for an
+/// item whose name ends in no number. Notes, placeholders and bought copies are left out; the cache is only scanned when one of the
+/// items has a number.
+pub fn item_doses(pid: u32, ids: &[i32]) -> Result<Vec<Option<crate::config::DoseFamily>>, String> {
+    let decode = |data: Option<Vec<u8>>| {
+        data.and_then(|data| crate::config::decode_obj(&data))
+            .filter(|def| !def.copy)
+            .and_then(|def| def.name)
+    };
+    let names: Vec<Option<String>> = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?
+        .into_iter()
+        .map(decode)
+        .collect();
+    let wanted: Vec<Option<&str>> = names.iter().map(Option::as_deref).collect();
+    if wanted
+        .iter()
+        .flatten()
+        .all(|name| crate::config::dose_of(name).is_none())
+    {
+        return Ok(vec![None; ids.len()]);
+    }
+    let all: Vec<i32> =
+        cache_archive_files(pid, crate::cache::CONFIG_INDEX, crate::config::OBJ_ARCHIVE)?
+            .ids
+            .iter()
+            .map(|&id| id as i32)
+            .collect();
+    let every: Vec<(i32, String)> = all
+        .iter()
+        .zip(config_files(pid, crate::config::OBJ_ARCHIVE, &all)?)
+        .filter_map(|(&id, data)| Some((id, decode(data)?)))
+        .collect();
+    Ok(crate::config::dose_families(
+        &wanted,
+        every.iter().map(|(id, name)| (*id, name.as_str())),
+    ))
+}
+
 // Every varbit stored in `varp`: (id, definition, gameval name), by lowest bit.
 pub fn varbits_of(
     pid: u32,

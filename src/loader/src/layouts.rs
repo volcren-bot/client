@@ -493,27 +493,305 @@ pub fn spell_info(key: &str) -> Option<&'static SpellInfo> {
     AUTOCAST_SPELLS.iter().find(|s| s.key == key)
 }
 
-/// An item in a layout, with what the editor needs to show it without a client.
+/// The doses or charges that count for an item whose name ends in a number (`Prayer potion(4)`): the numbers its family has, and the
+/// ones that count, in the order the bank takes them. A layout gives every item of one family the same setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Doses {
+    pub all: Vec<u32>,
+    pub accepted: Vec<u32>,
+    pub highest_first: bool,
+}
+
+impl Doses {
+    fn sort(&mut self) {
+        self.accepted.sort_unstable();
+        if self.highest_first {
+            self.accepted.reverse();
+        }
+    }
+}
+
+/// An item in a layout, with what the editor needs to show it without a client. A stack wants `min` to `max` of it (equal: exactly
+/// that many, both 0: any amount); an item that doesn't stack is one per slot. A `locked` item comes from the script's `required`
+/// list: `ids` are the other ids that count as it, and the user can move it but not remove or change it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredItem")]
 pub struct Item {
     pub id: i32,
-    pub quantity: i32,
     pub name: String,
     pub stackable: bool,
+    pub min: i32,
+    pub max: i32,
+    pub doses: Option<Doses>,
+    pub locked: bool,
+    pub ids: Vec<i32>,
+}
+
+/// An item as saved; a layout saved before ranges has the one `quantity`, which becomes both ends.
+#[derive(Deserialize)]
+struct StoredItem {
+    id: i32,
+    name: String,
+    stackable: bool,
+    #[serde(default)]
+    min: Option<i32>,
+    #[serde(default)]
+    max: Option<i32>,
+    #[serde(default)]
+    quantity: Option<i32>,
+    #[serde(default)]
+    doses: Option<Doses>,
+    #[serde(default)]
+    locked: bool,
+    #[serde(default)]
+    ids: Vec<i32>,
+}
+
+impl From<StoredItem> for Item {
+    fn from(s: StoredItem) -> Self {
+        let quantity = s.quantity.unwrap_or(1);
+        Item {
+            id: s.id,
+            name: s.name,
+            stackable: s.stackable,
+            min: s.min.unwrap_or(quantity),
+            max: s.max.unwrap_or(quantity),
+            doses: s.doses,
+            locked: s.locked,
+            ids: s.ids,
+        }
+    }
 }
 
 impl Item {
+    /// An item read from a client: a stack wants exactly what was read.
+    pub fn read(id: i32, quantity: i32, name: String, stackable: bool) -> Self {
+        let amount = if stackable { quantity } else { 1 };
+        Item {
+            id,
+            name,
+            stackable,
+            min: amount,
+            max: amount,
+            doses: None,
+            locked: false,
+            ids: Vec::new(),
+        }
+    }
+
     fn icon_key(&self) -> Key {
-        Key::item(self.id, self.quantity, self.stackable)
+        Key::item(self.id, self.max.max(1), self.stackable && self.max > 0)
     }
 
     fn to_value(&self) -> Value {
-        json!({ "id": self.id, "quantity": self.quantity, "name": self.name, "stackable": self.stackable })
+        let mut ids = vec![self.id];
+        ids.extend(self.ids.iter().copied().filter(|&id| id != self.id));
+        json!({
+            "id": self.id,
+            "ids": ids,
+            "name": self.name,
+            "stackable": self.stackable,
+            "min": self.min,
+            "max": self.max,
+            "doses": self.doses.as_ref().map(|d| &d.accepted),
+            "locked": self.locked,
+        })
     }
 
     /// Whether the name is a rune pouch's (plain, looted or divine).
     pub fn is_rune_pouch(&self) -> bool {
         self.name.to_ascii_lowercase().contains("rune pouch")
+    }
+
+    /// The family of a dose or charge item: its name without the number.
+    fn dose_base(&self) -> Option<&str> {
+        self.doses.as_ref()?;
+        injector::config::dose_of(&self.name).map(|(base, _)| base)
+    }
+
+    /// Whether `id` counts as this item.
+    fn counts_as(&self, id: i32) -> bool {
+        self.id == id || self.ids.contains(&id)
+    }
+}
+
+/// Gives each item that doesn't stack and whose family (`families`, by id: the numbers it has) has more than one dose a dose setting
+/// that takes only its own dose.
+pub fn add_doses<'a>(
+    items: impl IntoIterator<Item = &'a mut Item>,
+    families: &HashMap<i32, Vec<u32>>,
+) {
+    for item in items {
+        let Some(all) = families.get(&item.id).filter(|all| all.len() > 1) else {
+            continue;
+        };
+        if item.stackable {
+            continue;
+        }
+        if let Some((_, dose)) = injector::config::dose_of(&item.name) {
+            item.doses = Some(Doses {
+                all: all.clone(),
+                accepted: vec![dose],
+                highest_first: true,
+            });
+        }
+    }
+}
+
+/// Item names and stackability by id, for the script's required items, which the loader learns from a client.
+pub type Known = HashMap<i32, (String, bool)>;
+
+/// What a script's layout fields ask of their layouts: items every equipment or inventory layout holds, and prayers it controls itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rules {
+    pub required: Vec<injector::form::Required>,
+    pub locked: Vec<String>,
+}
+
+/// The item a required entry puts in a layout, named once a client told the loader its name.
+fn required_item(rule: &injector::form::Required, known: &Known) -> Item {
+    let id = rule.ids[0];
+    let (name, stackable) = known
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| (String::new(), rule.max > 0));
+    let (min, max) = if stackable {
+        (rule.min, rule.max)
+    } else {
+        (1, 1)
+    };
+    let doses = (!rule.doses.is_empty()).then(|| {
+        let mut all = rule.doses.clone();
+        all.sort_unstable();
+        Doses {
+            highest_first: rule.doses.first() >= rule.doses.last(),
+            all,
+            accepted: rule.doses.clone(),
+        }
+    });
+    Item {
+        id,
+        name,
+        stackable,
+        min,
+        max,
+        doses,
+        locked: true,
+        ids: rule.ids[1..].to_vec(),
+    }
+}
+
+impl Rules {
+    /// The ids of the required items whose names the loader doesn't know yet.
+    pub fn unknown(&self, known: &Known) -> Vec<i32> {
+        self.required
+            .iter()
+            .map(|r| r.ids[0])
+            .filter(|id| !known.contains_key(id))
+            .collect()
+    }
+
+    /// Puts the required items in an inventory layout: one already there (locked, or the user's with one of its ids) stays where it is,
+    /// the rest go to their slot or the first free one, and a locked item no longer required becomes the user's. How many found no room.
+    pub fn fit_inventory(&self, layout: &mut Inventory, known: &Known) -> usize {
+        layout
+            .slots
+            .resize(INVENTORY_SIZE.max(layout.slots.len()), None);
+        for item in layout.slots.iter_mut().flatten() {
+            if item.locked && !self.required.iter().any(|r| r.ids.contains(&item.id)) {
+                item.locked = false;
+                item.ids.clear();
+            }
+        }
+        let mut placed: Vec<usize> = Vec::new();
+        let mut homeless = Vec::new();
+        for rule in &self.required {
+            let at = |locked: bool| {
+                layout.slots.iter().position(|slot| {
+                    slot.as_ref()
+                        .is_some_and(|item| item.locked == locked && rule.ids.contains(&item.id))
+                })
+            };
+            match at(true)
+                .or_else(|| at(false))
+                .filter(|i| !placed.contains(i))
+            {
+                Some(i) => {
+                    layout.slots[i] = Some(required_item(rule, known));
+                    placed.push(i);
+                }
+                None => homeless.push(rule),
+            }
+        }
+        let mut missing = 0;
+        for rule in homeless {
+            let free = rule
+                .slot
+                .filter(|&s| layout.slots.get(s).is_some_and(Option::is_none))
+                .or_else(|| layout.slots.iter().position(Option::is_none));
+            match free {
+                Some(i) => layout.slots[i] = Some(required_item(rule, known)),
+                None => missing += 1,
+            }
+        }
+        // the user's items of a required dose item's family take its doses, so the bank sees them as one item
+        for i in 0..layout.slots.len() {
+            let Some(item) = layout.slots[i].as_ref().filter(|item| !item.locked) else {
+                continue;
+            };
+            if let Some(doses) = layout.script_doses(item)
+                && let Some(item) = layout.slots[i].as_mut()
+            {
+                item.doses = Some(doses);
+            }
+        }
+        missing
+    }
+
+    /// Puts the required items in their equipment slots, replacing what the layout had there; a locked item no longer required there
+    /// becomes the user's.
+    pub fn fit_equipment(&self, layout: &mut Equipment, known: &Known) {
+        for &(slot, _) in &EQUIPMENT_SLOTS {
+            if let EquipmentSlot::Item(item) = layout.slot_mut(slot)
+                && item.locked
+                && !self
+                    .required
+                    .iter()
+                    .any(|r| r.slot == Some(slot) && r.ids.contains(&item.id))
+            {
+                item.locked = false;
+                item.ids.clear();
+            }
+        }
+        for rule in &self.required {
+            if let Some(slot) = rule.slot.filter(|&s| s < EQUIPMENT_SIZE) {
+                *layout.slot_mut(slot) = EquipmentSlot::Item(required_item(rule, known));
+            }
+        }
+    }
+
+    /// Whether the script controls the prayer: it is locked, or can't be on with one that is.
+    pub fn blocks(&self, key: &str) -> bool {
+        let Some(info) = prayer_info(key) else {
+            return false;
+        };
+        self.locked.iter().any(|locked| {
+            locked == key || prayer_info(locked).is_some_and(|l| l.boosts & info.boosts != 0)
+        })
+    }
+
+    /// Takes the prayers the script controls out of a prayer layout.
+    pub fn fit_prayer(&self, layout: &mut Prayer) {
+        layout.prayers.retain(|key| !self.blocks(key));
+    }
+
+    /// The prayers the script controls, which the lib leaves alone: the locked ones and every one they can't be on with.
+    fn blocked_prayers(&self) -> Vec<&'static str> {
+        PRAYERS
+            .iter()
+            .filter(|p| self.blocks(p.key))
+            .map(|p| p.key)
+            .collect()
     }
 }
 
@@ -638,26 +916,48 @@ impl Kind {
         }
     }
 
-    /// What the script gets for the layout called `name`, or null when there is none.
-    pub fn value_of(self, layouts: &ScriptLayouts, name: &str) -> Value {
+    /// What the script gets for the layout called `name` with the script's rules applied, or null when there is none or it has no room
+    /// for the required items. A prayer layout also lists the prayers the script controls (`locked`), which the lib leaves alone.
+    pub fn value_of(
+        self,
+        layouts: &ScriptLayouts,
+        name: &str,
+        rules: &Rules,
+        known: &Known,
+    ) -> Value {
         match self {
-            Kind::Equipment => layouts
-                .equipment
-                .iter()
-                .find(|l| l.name == name)
-                .map(Layout::to_value),
+            Kind::Equipment => layouts.equipment.iter().find(|l| l.name == name).map(|l| {
+                let mut l = l.clone();
+                rules.fit_equipment(&mut l, known);
+                l.to_value()
+            }),
             Kind::Inventory => layouts
                 .inventory
                 .iter()
                 .find(|l| l.name == name)
-                .map(Layout::to_value),
-            Kind::Prayer => layouts
-                .prayer
-                .iter()
-                .find(|l| l.name == name)
-                .map(Layout::to_value),
+                .and_then(|l| {
+                    let mut l = l.clone();
+                    (rules.fit_inventory(&mut l, known) == 0).then(|| l.to_value())
+                }),
+            Kind::Prayer => layouts.prayer.iter().find(|l| l.name == name).map(|l| {
+                let mut l = l.clone();
+                rules.fit_prayer(&mut l);
+                let mut value = l.to_value();
+                value["locked"] = json!(rules.blocked_prayers());
+                value
+            }),
         }
         .unwrap_or(Value::Null)
+    }
+
+    /// Why the layout called `name` can't be picked: an inventory layout with no room for the script's required items.
+    pub fn unusable(self, layouts: &ScriptLayouts, name: &str, rules: &Rules) -> Option<String> {
+        if self != Kind::Inventory || rules.required.is_empty() {
+            return None;
+        }
+        let mut layout = layouts.inventory.iter().find(|l| l.name == name)?.clone();
+        let missing = rules.fit_inventory(&mut layout, &Known::new());
+        (missing > 0).then(|| no_room(missing))
     }
 }
 
@@ -758,6 +1058,19 @@ impl Inventory {
         &mut self.slots[slot]
     }
 
+    /// The doses of a required item of `item`'s family, which the user's items of that family follow.
+    fn script_doses(&self, item: &Item) -> Option<Doses> {
+        let (base, _) = injector::config::dose_of(&item.name)?;
+        self.slots
+            .iter()
+            .flatten()
+            .find(|other| {
+                other.locked
+                    && injector::config::dose_of(&other.name).is_some_and(|(b, _)| b == base)
+            })
+            .and_then(|other| other.doses.clone())
+    }
+
     fn holds_pouch(&self) -> bool {
         self.slots.iter().flatten().any(Item::is_rune_pouch)
     }
@@ -790,6 +1103,8 @@ pub struct Editor<L> {
     pub selected_in_pouch: bool,
     pub reading: bool,
     pub error: Option<String>,
+    /// Why the draft can't be saved as it is, besides its name.
+    pub invalid: Option<String>,
 }
 
 /// Both editor tabs of the running script's page.
@@ -912,13 +1227,16 @@ impl<L: Layout> Editor<L> {
                 .iter()
                 .enumerate()
                 .any(|(i, l)| Some(i) != self.index && l.name() == name);
-            let can_save = !name.is_empty() && !taken && self.dirty(saved);
+            let can_save =
+                !name.is_empty() && !taken && self.invalid.is_none() && self.dirty(saved);
             if ui
                 .add_enabled(
                     can_save,
                     egui::Button::new("Save").min_size(egui::vec2(button, 0.0)),
                 )
-                .on_disabled_hover_text(if taken {
+                .on_disabled_hover_text(if let Some(invalid) = &self.invalid {
+                    invalid.as_str()
+                } else if taken {
                     "Another layout has this name."
                 } else if name.is_empty() {
                     "Give the layout a name."
@@ -1087,20 +1405,30 @@ fn slot_ui(
         );
         let inner = egui::Rect::from_center_size(rect.center(), SLOT_SIZE);
         match item {
-            Some(item) => match icons.texture(ui.ctx(), item.icon_key()) {
-                Some(texture) => {
-                    egui::Image::from_texture(texture).paint_at(ui, inner);
+            Some(item) => {
+                match icons.texture(ui.ctx(), item.icon_key()) {
+                    Some(texture) => {
+                        egui::Image::from_texture(texture).paint_at(ui, inner);
+                    }
+                    None => {
+                        let short = if item.name.is_empty() {
+                            item.id.to_string()
+                        } else {
+                            item.name.chars().take(4).collect()
+                        };
+                        ui.painter().text(
+                            inner.center(),
+                            egui::Align2::CENTER_CENTER,
+                            short,
+                            egui::TextStyle::Small.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
                 }
-                None => {
-                    ui.painter().text(
-                        inner.center(),
-                        egui::Align2::CENTER_CENTER,
-                        item.name.chars().take(4).collect::<String>(),
-                        egui::TextStyle::Small.resolve(ui.style()),
-                        ui.visuals().weak_text_color(),
-                    );
+                if item.locked {
+                    paint_padlock(ui.painter(), rect);
                 }
-            },
+            }
             None => {
                 ui.painter().text(
                     inner.center(),
@@ -1115,24 +1443,172 @@ fn slot_ui(
     response
 }
 
-fn item_hover(item: &Item) -> String {
-    if item.stackable {
-        format!("{} x{}  (id {})", item.name, item.quantity, item.id)
-    } else {
-        format!("{}  (id {})", item.name, item.id)
+/// What a stack's range asks for, for hovers and labels.
+fn range_text(item: &Item) -> String {
+    match (item.min, item.max) {
+        (0, 0) => "any amount".to_owned(),
+        (min, max) if min == max => format!("x{min}"),
+        (0, max) => format!("up to {max}"),
+        (min, max) => format!("{min} to {max}"),
     }
 }
 
-/// The amount of a stackable item, editable; a non stackable one is always one.
-fn amount_ui(ui: &mut egui::Ui, item: &mut Item) {
-    ui.label(format!("{}  (id {})", item.name, item.id));
+fn doses_text(doses: &Doses) -> String {
+    let list: Vec<String> = doses.accepted.iter().map(|d| format!("({d})")).collect();
+    format!("doses {}", list.join(" "))
+}
+
+fn item_hover(item: &Item) -> String {
+    let mut text = format!("{}  (id {})", item_label(item), item.id);
     if item.stackable {
-        ui.label("Amount:");
-        ui.add(
-            egui::DragValue::new(&mut item.quantity)
-                .range(1..=i32::MAX)
-                .speed(1.0),
+        text = format!("{text}, {}", range_text(item));
+    }
+    if let Some(doses) = &item.doses {
+        text = format!("{text}, {}", doses_text(doses));
+    }
+    if item.locked {
+        text.push_str("\nRequired by the script.");
+    }
+    text
+}
+
+/// The item's name, or its id until a client told the loader the name.
+fn item_label(item: &Item) -> String {
+    if item.name.is_empty() {
+        format!("Item {}", item.id)
+    } else {
+        item.name.clone()
+    }
+}
+
+/// A padlock in the top right corner of `rect`, on a dark backing so it reads over any icon.
+fn paint_padlock(painter: &egui::Painter, rect: egui::Rect) {
+    let size = (rect.width() * 0.32).clamp(9.0, 14.0);
+    let body = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - size - 2.0, rect.top() + size * 0.55 + 2.0),
+        egui::vec2(size, size * 0.75),
+    );
+    let backing = body
+        .expand2(egui::vec2(2.0, size * 0.55 + 1.5))
+        .translate(egui::vec2(0.0, -size * 0.27));
+    painter.rect_filled(backing, 3.0, egui::Color32::from_black_alpha(170));
+    let gold = egui::Color32::from_rgb(232, 190, 80);
+    let radius = size * 0.3;
+    let center = egui::pos2(body.center().x, body.top());
+    let mut shackle: Vec<egui::Pos2> = vec![egui::pos2(center.x - radius, body.top() + 1.0)];
+    shackle.extend((0..=12).map(|i| {
+        let angle = std::f32::consts::PI * i as f32 / 12.0;
+        egui::pos2(
+            center.x - radius * angle.cos(),
+            center.y - radius * angle.sin(),
+        )
+    }));
+    shackle.push(egui::pos2(center.x + radius, body.top() + 1.0));
+    painter.add(egui::Shape::line(
+        shackle,
+        egui::Stroke::new(size * 0.16, gold),
+    ));
+    painter.rect_filled(body, 1.5, gold);
+    painter.circle_filled(
+        body.center(),
+        size * 0.1,
+        egui::Color32::from_black_alpha(200),
+    );
+}
+
+/// The selected item: its name, and what the user may set: a stack's range and the doses that count. A locked item only says the
+/// script requires it.
+fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool) -> Option<Doses> {
+    ui.label(format!("{}  (id {})", item_label(item), item.id));
+    if item.locked {
+        ui.colored_label(
+            theme::BLUE,
+            "The script requires this item: it can be moved, not removed or changed.",
         );
+        let mut parts = Vec::new();
+        if item.stackable {
+            parts.push(range_text(item));
+        }
+        if let Some(doses) = &item.doses {
+            parts.push(doses_text(doses));
+        }
+        if !parts.is_empty() {
+            ui.weak(parts.join(", "));
+        }
+        return None;
+    }
+    if item.stackable {
+        ui.horizontal(|ui| {
+            let spacing = ui.spacing().item_spacing.x;
+            let width = 2.0 * 30.0 + 2.0 * 70.0 + 3.0 * spacing;
+            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+            ui.label("Min");
+            let min = ui.add(
+                egui::DragValue::new(&mut item.min)
+                    .range(0..=i32::MAX)
+                    .speed(1.0),
+            );
+            ui.label("Max");
+            let max = ui.add(
+                egui::DragValue::new(&mut item.max)
+                    .range(0..=i32::MAX)
+                    .speed(1.0),
+            );
+            // the end the user didn't touch moves to keep min at most max; a max of 0 is "any", which takes min with it
+            if min.changed() && item.min > item.max {
+                item.max = item.min;
+            }
+            if max.changed() && (item.max == 0 || item.max < item.min) {
+                item.min = item.min.min(item.max);
+            }
+        });
+        ui.weak("Equal: exactly that many. Both 0: any amount.");
+    }
+    if doses_fixed {
+        if let Some(doses) = &item.doses {
+            ui.weak(format!(
+                "{}: the same as the item the script requires.",
+                doses_text(doses)
+            ));
+        }
+        return None;
+    }
+    let doses = item.doses.as_mut()?;
+    let before = doses.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Doses:");
+        for &dose in &doses.all {
+            let mut on = doses.accepted.contains(&dose);
+            if ui.checkbox(&mut on, format!("({dose})")).changed() {
+                if on {
+                    doses.accepted.push(dose);
+                } else if doses.accepted.len() > 1 {
+                    doses.accepted.retain(|&d| d != dose);
+                }
+            }
+        }
+    });
+    egui::ComboBox::from_id_salt("dose_order")
+        .selected_text(if doses.highest_first {
+            "Highest first"
+        } else {
+            "Lowest first"
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut doses.highest_first, true, "Highest first");
+            ui.selectable_value(&mut doses.highest_first, false, "Lowest first");
+        });
+    doses.sort();
+    ui.weak("A carried dose that isn't ticked is swapped at the bank.");
+    (*doses != before).then(|| doses.clone())
+}
+
+/// Gives every item of `base`'s family in the layout the dose setting one of them got.
+fn share_doses<'a>(items: impl IntoIterator<Item = &'a mut Item>, base: &str, doses: &Doses) {
+    for item in items {
+        if !item.locked && item.dose_base() == Some(base) {
+            item.doses = Some(doses.clone());
+        }
     }
 }
 
@@ -1143,7 +1619,13 @@ pub fn equipment_ui(
     saved: &mut Vec<Equipment>,
     icons: &mut Icons,
     can_read: bool,
+    rules: &Rules,
+    known: &Known,
 ) -> Option<Action> {
+    for layout in saved.iter_mut() {
+        rules.fit_equipment(layout, known);
+    }
+    rules.fit_equipment(&mut editor.draft, known);
     let cell = SLOT_SIZE + egui::vec2(8.0, 8.0);
     let gap = 6.0;
     let width = grid_width(3, cell.x, gap);
@@ -1158,7 +1640,11 @@ pub fn equipment_ui(
             ui.set_width(COLUMN_WIDTH);
             editor.header(ui, saved);
             ui.add_space(6.0);
-            let hint = "Right-click to empty.";
+            let hint = if rules.required.is_empty() {
+                "Right-click to empty."
+            } else {
+                "Right-click to empty.\nPadlocked items are the script's."
+            };
             action = editor.read_ui(ui, Some(hint), can_read, false);
             ui.add_space(6.0);
             ui.horizontal_top(|ui| {
@@ -1209,7 +1695,10 @@ pub fn equipment_ui(
                     }
                     if response.secondary_clicked() {
                         editor.selected = Some(slot);
-                        *editor.draft.slot_mut(slot) = EquipmentSlot::Empty;
+                        let slot = editor.draft.slot_mut(slot);
+                        if !matches!(slot, EquipmentSlot::Item(item) if item.locked) {
+                            *slot = EquipmentSlot::Empty;
+                        }
                     }
                 }
             });
@@ -1225,7 +1714,9 @@ pub fn equipment_ui(
                         ui.weak(SECONDARY_AMMO_HINT);
                     }
                     match editor.draft.slot_mut(slot) {
-                        EquipmentSlot::Item(item) => amount_ui(ui, item),
+                        EquipmentSlot::Item(item) => {
+                            item_ui(ui, item, false);
+                        }
                         state => {
                             const EMPTY: &str = "Must be empty";
                             const ANY: &str = "Any";
@@ -1377,6 +1868,15 @@ fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
     };
 }
 
+/// Why an inventory layout without room for the script's required items can't be used.
+fn no_room(missing: usize) -> String {
+    if missing == 1 {
+        "No room for an item the script requires: free a slot.".to_owned()
+    } else {
+        format!("No room for {missing} items the script requires: free {missing} slots.")
+    }
+}
+
 /// The Inventory tab: the 4 x 7 grid with drag to move items, amounts of stackables, and the rune pouch's runes when there is one.
 pub fn inventory_ui(
     ui: &mut egui::Ui,
@@ -1384,13 +1884,24 @@ pub fn inventory_ui(
     saved: &mut Vec<Inventory>,
     icons: &mut Icons,
     can_read: bool,
+    rules: &Rules,
+    known: &Known,
 ) -> Option<Action> {
+    for layout in saved.iter_mut() {
+        rules.fit_inventory(layout, known);
+    }
+    let missing = rules.fit_inventory(&mut editor.draft, known);
+    editor.invalid = (missing > 0).then(|| no_room(missing));
     let gap = 6.0;
     let margin = (COLUMN_WIDTH - grid_width(INVENTORY_COLUMNS, SLOT_SIZE.x + 8.0, gap)) / 2.0;
     centered_column(ui, |ui| {
         editor.header(ui, saved);
         ui.add_space(6.0);
-        let hint = "Drag to move.\nRight-click to empty.";
+        let hint = if rules.required.is_empty() {
+            "Drag to move.\nRight-click to empty."
+        } else {
+            "Drag to move. Right-click to empty.\nPadlocked items are the script's."
+        };
         let action = editor.read_ui(ui, Some(hint), can_read, false);
         ui.add_space(6.0);
         let mut moved: Option<(usize, usize)> = None;
@@ -1452,7 +1963,10 @@ pub fn inventory_ui(
                             editor.selected_in_pouch = false;
                         }
                         if response.secondary_clicked() {
-                            *editor.draft.slot_mut(slot) = None;
+                            let slot_item = editor.draft.slot_mut(slot);
+                            if !slot_item.as_ref().is_some_and(|item| item.locked) {
+                                *slot_item = None;
+                            }
                             editor.selected = Some(slot);
                             editor.selected_in_pouch = false;
                         }
@@ -1493,19 +2007,36 @@ pub fn inventory_ui(
                     .filter(|_| editor.selected_in_pouch)
                     .and_then(|i| runes.get_mut(i))
                 {
-                    amount_ui(ui, rune);
+                    item_ui(ui, rune, false);
                 }
                 ui.weak("Read from client fills it from the pouch's contents.");
                 ui.add_space(10.0);
             }
             if let Some(slot) = editor.selected.filter(|_| !editor.selected_in_pouch) {
                 ui.strong(format!("Slot {slot}"));
+                let mut shared = None;
+                let fixed = editor
+                    .draft
+                    .slots
+                    .get(slot)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|item| !item.locked && editor.draft.script_doses(item).is_some());
                 match editor.draft.slot_mut(slot) {
-                    Some(item) => amount_ui(ui, item),
+                    Some(item) => {
+                        if let Some(doses) = item_ui(ui, item, fixed) {
+                            shared = item.dose_base().map(|base| (base.to_owned(), doses));
+                        }
+                    }
                     None => {
                         ui.label("Empty.");
                     }
                 }
+                if let Some((base, doses)) = shared {
+                    share_doses(editor.draft.slots.iter_mut().flatten(), &base, &doses);
+                }
+            }
+            if let Some(invalid) = &editor.invalid {
+                ui.colored_label(ui.visuals().error_fg_color, invalid);
             }
         });
         if let Some((from, to)) = moved {
@@ -1528,7 +2059,12 @@ pub fn prayer_ui(
     icons: &mut Icons,
     can_read: bool,
     prayer_level: Option<u32>,
+    rules: &Rules,
 ) -> Option<Action> {
+    for layout in saved.iter_mut() {
+        rules.fit_prayer(layout);
+    }
+    rules.fit_prayer(&mut editor.draft);
     let cell = egui::Vec2::splat(PRAYER_CELL);
     centered_column(ui, |ui| {
         editor.header(ui, saved);
@@ -1536,6 +2072,7 @@ pub fn prayer_ui(
         let action = editor.read_ui(ui, None, can_read, true);
         ui.add_space(6.0);
         let mut toggled: Option<&'static str> = None;
+        let mut picked_blocked: Option<usize> = None;
         let margin = (COLUMN_WIDTH - grid_width(PRAYER_COLUMNS, PRAYER_CELL, PRAYER_GAP)) / 2.0;
         ui.horizontal_top(|ui| {
             ui.add_space(margin);
@@ -1544,6 +2081,7 @@ pub fn prayer_ui(
                 .show(ui, |ui| {
                     for (i, info) in PRAYERS.iter().enumerate() {
                         let on = editor.draft.has(info.key);
+                        let blocked = rules.blocks(info.key);
                         let too_high = prayer_level.is_some_and(|level| level < info.level);
                         let (rect, response) = ui.allocate_exact_size(cell, egui::Sense::click());
                         if ui.is_rect_visible(rect) {
@@ -1553,14 +2091,14 @@ pub fn prayer_ui(
                             } else {
                                 visuals.weak_bg_fill
                             };
-                            let stroke = if on {
+                            let stroke = if on || editor.selected == Some(i) {
                                 egui::Stroke::new(1.5, theme::BLUE)
                             } else {
                                 visuals.bg_stroke
                             };
                             ui.painter()
                                 .rect(rect, 4.0, fill, stroke, egui::StrokeKind::Inside);
-                            let tint = if too_high {
+                            let tint = if too_high || blocked {
                                 egui::Color32::from_white_alpha(90)
                             } else {
                                 egui::Color32::WHITE
@@ -1586,8 +2124,13 @@ pub fn prayer_ui(
                                     );
                                 }
                             }
+                            if blocked {
+                                paint_padlock(ui.painter(), rect);
+                            }
                         }
-                        let hover = if too_high {
+                        let hover = if blocked {
+                            format!("{}: {CONTROLLED}", info.name)
+                        } else if too_high {
                             format!(
                                 "{} (level {}, above the client's {})",
                                 info.name,
@@ -1598,7 +2141,11 @@ pub fn prayer_ui(
                             format!("{} (level {})", info.name, info.level)
                         };
                         if response.on_hover_text(hover).clicked() {
-                            toggled = Some(info.key);
+                            if blocked {
+                                picked_blocked = Some(i);
+                            } else {
+                                toggled = Some(info.key);
+                            }
                         }
                         if (i + 1) % PRAYER_COLUMNS == 0 {
                             ui.end_row();
@@ -1608,8 +2155,23 @@ pub fn prayer_ui(
         });
         if let Some(key) = toggled {
             editor.draft.toggle(key);
+            editor.selected = None;
+        }
+        if picked_blocked.is_some() {
+            editor.selected = picked_blocked;
         }
         ui.add_space(6.0);
+        if let Some(info) = editor
+            .selected
+            .and_then(|i| PRAYERS.get(i))
+            .filter(|p| rules.blocks(p.key))
+        {
+            ui.vertical_centered(|ui| {
+                ui.strong(info.name);
+                ui.colored_label(theme::BLUE, CONTROLLED);
+            });
+            ui.add_space(4.0);
+        }
         let names: Vec<&str> = editor
             .draft
             .prayers
@@ -1624,6 +2186,8 @@ pub fn prayer_ui(
         action
     })
 }
+
+const CONTROLLED: &str = "The script controls this prayer: it can't be customised.";
 
 /// Puts what a client read into a prayer draft.
 pub fn apply_prayers(draft: &mut Prayer, read: Read) {
@@ -1696,9 +2260,22 @@ pub fn read_secondary_ammo(
 /// Puts what a client read into an inventory draft.
 pub fn apply_inventory(draft: &mut Inventory, read: Read) {
     if let Read::Inventory { slots, pouch } = read {
+        let locked: Vec<(usize, Item)> = draft
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| Some((i, slot.clone().filter(|item| item.locked)?)))
+            .collect();
         draft.slots = slots;
         draft.slots.resize(INVENTORY_SIZE, None);
         draft.pouch = pouch;
+        // the script's items stay where the user put them unless the client holds them elsewhere
+        for (at, item) in locked {
+            let held = draft.slots.iter().flatten().any(|i| item.counts_as(i.id));
+            if !held && draft.slots[at].is_none() {
+                draft.slots[at] = Some(item);
+            }
+        }
     }
 }
 
@@ -1714,26 +2291,33 @@ pub fn items_of(
     container
         .iter()
         .map(|slot| {
-            (slot.id >= 0).then(|| Item {
-                id: slot.id,
-                quantity: slot.quantity,
-                name: names.get(&slot.id).cloned().unwrap_or_default(),
-                stackable: stackable.get(&slot.id).copied().unwrap_or(false),
+            (slot.id >= 0).then(|| {
+                Item::read(
+                    slot.id,
+                    slot.quantity,
+                    names.get(&slot.id).cloned().unwrap_or_default(),
+                    stackable.get(&slot.id).copied().unwrap_or(false),
+                )
             })
         })
         .collect()
 }
 
-/// A dropdown of the script's layouts of `kind` for the form's field, choosing by name; "None" picks nothing.
+/// A dropdown of the script's layouts of `kind` for the form's field, choosing by name; "None" picks nothing. An inventory layout with
+/// no room for the script's required items is listed but can't be picked.
 pub fn picker_ui(
     ui: &mut egui::Ui,
     kind: Kind,
     layouts: &ScriptLayouts,
     chosen: &mut Option<String>,
     id: &str,
+    rules: &Rules,
 ) {
     let names = kind.names(layouts);
-    if chosen.as_deref().is_some_and(|name| !names.contains(&name)) {
+    if chosen
+        .as_deref()
+        .is_some_and(|name| !names.contains(&name) || kind.unusable(layouts, name, rules).is_some())
+    {
         *chosen = None;
     }
     egui::ComboBox::from_id_salt(("layout_field", id))
@@ -1741,7 +2325,15 @@ pub fn picker_ui(
         .show_ui(ui, |ui| {
             ui.selectable_value(chosen, None, "None");
             for name in names {
-                ui.selectable_value(chosen, Some(name.to_owned()), name);
+                match kind.unusable(layouts, name, rules) {
+                    Some(why) => {
+                        ui.add_enabled(false, egui::Button::selectable(false, name))
+                            .on_disabled_hover_text(why);
+                    }
+                    None => {
+                        ui.selectable_value(chosen, Some(name.to_owned()), name);
+                    }
+                }
             }
         });
     ui.weak(format!("Edit them in the {} tab.", kind.label()));
@@ -1752,12 +2344,246 @@ mod tests {
     use super::*;
 
     fn item(id: i32, quantity: i32, stackable: bool) -> Item {
-        Item {
-            id,
-            quantity,
-            name: format!("item {id}"),
-            stackable,
+        Item::read(id, quantity, format!("item {id}"), stackable)
+    }
+
+    fn rule(ids: &[i32], slot: Option<usize>) -> injector::form::Required {
+        injector::form::Required {
+            ids: ids.to_vec(),
+            slot,
+            min: 0,
+            max: 0,
+            doses: vec![],
         }
+    }
+
+    #[test]
+    fn a_layout_saved_with_one_quantity_wants_exactly_it() {
+        let old: Item =
+            serde_json::from_str(r#"{"id":995,"quantity":1000,"name":"Coins","stackable":true}"#)
+                .unwrap();
+        assert_eq!((old.min, old.max), (1000, 1000));
+        assert!(!old.locked && old.doses.is_none());
+        let again: Item = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(again, old);
+        let value = old.to_value();
+        assert_eq!(value["min"], 1000);
+        assert_eq!(value["ids"], json!([995]));
+        assert_eq!(value["doses"], Value::Null);
+        assert_eq!(
+            range_text(&Item {
+                min: 0,
+                max: 0,
+                ..old.clone()
+            }),
+            "any amount"
+        );
+        assert_eq!(
+            range_text(&Item {
+                min: 0,
+                max: 50,
+                ..old.clone()
+            }),
+            "up to 50"
+        );
+        assert_eq!(
+            range_text(&Item {
+                min: 5,
+                max: 50,
+                ..old
+            }),
+            "5 to 50"
+        );
+    }
+
+    #[test]
+    fn required_items_go_in_every_inventory_layout_and_stay_where_moved() {
+        let rules = Rules {
+            required: vec![rule(&[2434, 139], Some(5)), rule(&[563], None)],
+            ..Default::default()
+        };
+        let known = Known::from([(2434, ("Prayer potion(4)".to_owned(), false))]);
+        let mut layout = Inventory::default();
+        *layout.slot_mut(5) = Some(item(1, 1, false));
+        *layout.slot_mut(9) = Some(item(139, 1, false));
+        assert_eq!(rules.fit_inventory(&mut layout, &known), 0);
+        // the user's own copy (an accepted id) became the required item in its slot; the rune took the first free slot
+        let potion = layout.slots[9].as_ref().unwrap();
+        assert!(potion.locked);
+        assert_eq!((potion.id, potion.ids.as_slice()), (2434, &[139][..]));
+        assert_eq!(potion.name, "Prayer potion(4)");
+        assert_eq!(layout.slots[0].as_ref().unwrap().id, 563);
+        assert_eq!(layout.slots[0].as_ref().unwrap().name, "");
+        // moved by the user, it stays moved
+        layout.slots.swap(9, 20);
+        assert_eq!(rules.fit_inventory(&mut layout, &known), 0);
+        assert!(layout.slots[20].as_ref().unwrap().locked);
+        assert!(layout.slots[9].is_none());
+        let value = layout.to_value();
+        assert_eq!(value["slots"][2]["ids"], json!([2434, 139]));
+        assert_eq!(value["slots"][2]["locked"], true);
+        // no longer required: the user's to keep or remove
+        assert_eq!(Rules::default().fit_inventory(&mut layout, &known), 0);
+        assert!(!layout.slots[20].as_ref().unwrap().locked);
+        // a full layout can't take them
+        let mut full = Inventory {
+            slots: (0..28).map(|i| Some(item(1000 + i, 1, false))).collect(),
+            ..Default::default()
+        };
+        assert_eq!(rules.fit_inventory(&mut full, &known), 2);
+        let saved = ScriptLayouts {
+            inventory: vec![Inventory {
+                name: "Full".into(),
+                ..full
+            }],
+            ..Default::default()
+        };
+        assert!(Kind::Inventory.unusable(&saved, "Full", &rules).is_some());
+        assert_eq!(
+            Kind::Inventory.value_of(&saved, "Full", &rules, &known),
+            Value::Null
+        );
+        assert!(
+            Kind::Inventory
+                .unusable(&saved, "Full", &Rules::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_users_items_of_a_required_family_take_its_doses() {
+        let rules = Rules {
+            required: vec![injector::form::Required {
+                doses: vec![4, 3],
+                ..rule(&[2434], None)
+            }],
+            ..Default::default()
+        };
+        let known = Known::from([(2434, ("Prayer potion(4)".to_owned(), false))]);
+        let mut layout = Inventory::default();
+        let mut own = Item::read(139, 1, "Prayer potion(3)".into(), false);
+        add_doses([&mut own], &HashMap::from([(139, vec![1, 2, 3, 4])]));
+        *layout.slot_mut(4) = Some(own);
+        assert_eq!(rules.fit_inventory(&mut layout, &known), 0);
+        assert_eq!(
+            layout.slots[4]
+                .as_ref()
+                .unwrap()
+                .doses
+                .as_ref()
+                .unwrap()
+                .accepted,
+            [4, 3]
+        );
+        let value = layout.to_value();
+        assert_eq!(value["slots"][0]["doses"], value["slots"][1]["doses"]);
+    }
+
+    #[test]
+    fn a_read_keeps_the_required_items_where_the_user_put_them() {
+        let mut draft = Inventory::default();
+        *draft.slot_mut(12) = Some(Item {
+            locked: true,
+            ..item(563, 100, true)
+        });
+        apply_inventory(
+            &mut draft,
+            Read::Inventory {
+                slots: vec![Some(item(1, 1, false))],
+                pouch: None,
+            },
+        );
+        assert!(draft.slots[12].as_ref().unwrap().locked);
+        assert_eq!(draft.slots[0].as_ref().unwrap().id, 1);
+    }
+
+    #[test]
+    fn required_equipment_replaces_the_slot() {
+        let rules = Rules {
+            required: vec![rule(&[1712], Some(2))],
+            ..Default::default()
+        };
+        let mut layout = Equipment::default();
+        *layout.slot_mut(2) = EquipmentSlot::Item(item(1725, 1, false));
+        rules.fit_equipment(&mut layout, &Known::new());
+        assert!(matches!(layout.slot(2), EquipmentSlot::Item(i) if i.id == 1712 && i.locked));
+        Rules::default().fit_equipment(&mut layout, &Known::new());
+        assert!(matches!(layout.slot(2), EquipmentSlot::Item(i) if i.id == 1712 && !i.locked));
+    }
+
+    #[test]
+    fn dose_items_take_their_own_dose_and_share_a_setting() {
+        let mut items = [
+            Item::read(2434, 1, "Prayer potion(4)".into(), false),
+            Item::read(139, 1, "Prayer potion(3)".into(), false),
+            Item::read(995, 10, "Coins".into(), true),
+            Item::read(1712, 1, "Amulet of glory(4)".into(), false),
+        ];
+        let families = HashMap::from([
+            (2434, vec![1, 2, 3, 4]),
+            (139, vec![1, 2, 3, 4]),
+            (1712, vec![1, 2, 3, 4, 5, 6]),
+        ]);
+        add_doses(items.iter_mut(), &families);
+        assert_eq!(items[0].doses.as_ref().unwrap().accepted, [4]);
+        assert_eq!(items[1].doses.as_ref().unwrap().accepted, [3]);
+        assert!(items[2].doses.is_none());
+        let mut doses = Doses {
+            all: vec![1, 2, 3, 4],
+            accepted: vec![3, 4],
+            highest_first: true,
+        };
+        doses.sort();
+        assert_eq!(doses.accepted, [4, 3]);
+        share_doses(items.iter_mut(), "Prayer potion", &doses);
+        assert_eq!(items[1].doses.as_ref().unwrap().accepted, [4, 3]);
+        assert_eq!(items[3].doses.as_ref().unwrap().accepted, [4]);
+        assert_eq!(items[0].to_value()["doses"], json!([4, 3]));
+        // a script's doses keep its order
+        let required = required_item(
+            &injector::form::Required {
+                doses: vec![3, 4],
+                ..rule(&[139], None)
+            },
+            &Known::new(),
+        );
+        assert_eq!(required.to_value()["doses"], json!([3, 4]));
+        assert!(!required.doses.unwrap().highest_first);
+    }
+
+    #[test]
+    fn locked_prayers_and_their_conflicts_are_the_scripts() {
+        let rules = Rules {
+            locked: vec!["protect_from_melee".into(), "piety".into()],
+            ..Default::default()
+        };
+        for key in [
+            "protect_from_melee",
+            "smite",
+            "redemption",
+            "piety",
+            "zeal",
+            "rigour",
+            "steel_skin",
+        ] {
+            assert!(rules.blocks(key), "{key}");
+        }
+        assert!(!rules.blocks("rapid_heal"));
+        assert!(!rules.blocks("protect_item"));
+        let mut layout = Prayer {
+            name: "P".into(),
+            prayers: vec!["rapid_heal".into(), "rigour".into()],
+        };
+        rules.fit_prayer(&mut layout);
+        assert_eq!(layout.prayers, ["rapid_heal"]);
+        let saved = ScriptLayouts {
+            prayer: vec![layout],
+            ..Default::default()
+        };
+        let value = Kind::Prayer.value_of(&saved, "P", &rules, &Known::new());
+        let locked = value["locked"].as_array().unwrap();
+        assert!(locked.contains(&json!("smite")) && locked.contains(&json!("augury")));
+        assert!(!locked.contains(&json!("rapid_heal")));
     }
 
     #[test]
@@ -1824,7 +2650,7 @@ mod tests {
         let slots = value["slots"].as_array().unwrap();
         assert_eq!(slots.len(), 2);
         assert_eq!(slots[0]["slot"], 2);
-        assert_eq!(slots[0]["quantity"], 1000);
+        assert_eq!(slots[0]["max"], 1000);
         assert_eq!(slots[1]["slot"], 27);
         assert_eq!(value["pouch"][0]["id"], 563);
         assert!(layout.holds_pouch());

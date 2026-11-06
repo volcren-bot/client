@@ -24,15 +24,15 @@ use ipc::packets::{Filter, filter_add, filter_has};
 use crate::bank_pin::enter as bank_pin_enter;
 #[cfg(windows)]
 use crate::{
-    ItemWatcher, PacketWatcher, cache_files, cache_locs, chat_messages, connection, draw,
-    draw_batch, draw_lines, enum_def, find_path, game_state, game_val_names, ground_items,
-    in_instance, item_container, item_names, item_params, landmasses, loc_model, loc_shown, locs,
-    map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
-    player_hitsplats, client_cycle, item_stackable,
-    npc_model, npc_sizes, npc_type_model, npcs, player_model, player_plane, players, project,
-    project_moved, projectiles, scene_collision, scene_route, selected_widget, send_input,
-    send_input_with, server_tile, spot_anims, sub_interfaces, varbit, varc, varp_value, varps,
-    wait_watchers, widget, widget_children, widget_model, world_route, world_select,
+    ItemWatcher, PacketWatcher, cache_files, cache_locs, chat_messages, client_cycle, connection,
+    draw, draw_batch, draw_lines, enum_def, find_path, game_state, game_val_names, ground_items,
+    in_instance, item_container, item_names, item_params, item_stackable, landmasses, loc_model,
+    loc_shown, locs, map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
+    npc_hitsplats, npc_model, npc_sizes, npc_type_model, npcs, player_hitsplats, player_model,
+    player_plane, players, project, project_moved, projectiles, scene_collision, scene_route,
+    selected_widget, send_input, send_input_with, server_tile, spot_anims, sub_interfaces, varbit,
+    varc, varp_value, varps, wait_watchers, widget, widget_children, widget_model, world_route,
+    world_select,
 };
 #[cfg(not(windows))]
 use offline::*;
@@ -877,6 +877,8 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("npc_health", "main/entities/npc_health.luau"),
     lib_module!("special_attack", "main/interfaces/special_attack.luau"),
     lib_module!("combat", "main/interfaces/gametabs/combat.luau"),
+    lib_module!("ferox", "main/ferox.luau"),
+    lib_module!("layout_item", "main/layout_item.luau"),
     lib_module!("equipment_layout", "main/equipment_layout.luau"),
     lib_module!("inventory_layout", "main/inventory_layout.luau"),
     lib_module!("prayer_layout", "main/prayer_layout.luau"),

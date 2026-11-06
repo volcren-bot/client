@@ -110,6 +110,8 @@ enum Event {
         kind: crate::layouts::Kind,
         result: Result<crate::layouts::Read, String>,
     },
+    /// The names and stackability of a script's required layout items, from a client.
+    ItemsKnown(Result<Vec<(i32, String, bool)>, String>),
     /// A read of the open interfaces for the widget inspector.
     Widgets {
         pid: u32,
@@ -1334,6 +1336,9 @@ pub struct LoaderApp {
     icons: crate::icons::Icons,
     /// Every script's saved equipment and inventory layouts, by form title.
     layouts: crate::layouts::AllLayouts,
+    /// The names and stackability of the scripts' required layout items, and the ids being asked of a client.
+    known_items: crate::layouts::Known,
+    asking_items: Vec<i32>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
@@ -1434,6 +1439,8 @@ impl LoaderApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, LAYOUTS_KEY))
                 .unwrap_or_default(),
+            known_items: Default::default(),
+            asking_items: Vec::new(),
             feedback: feedback::Page::default(),
             gpu,
             loader_log: Log::default(),
@@ -3827,6 +3834,15 @@ impl LoaderApp {
                         }
                     }
                 }
+                // a failed read keeps its ids asked, so it isn't repeated every frame; they show by id until the loader restarts
+                Event::ItemsKnown(result) => match result {
+                    Ok(items) => {
+                        self.asking_items.clear();
+                        self.known_items
+                            .extend(items.into_iter().map(|(id, name, stacks)| (id, (name, stacks))));
+                    }
+                    Err(error) => self.error(format!("Couldn't read the script's required items: {error}")),
+                },
                 Event::Widgets { pid, result } => self.widgets.finish(pid, result),
                 Event::WidgetMouse { pid, result } => {
                     self.widgets.mouse_done();
@@ -4942,7 +4958,8 @@ impl LoaderApp {
         let Some(form) = self.run().and_then(|r| r.form.as_ref()) else {
             return;
         };
-        let crate::form::Outcome::Submitted(values) = form.submitted(&layouts) else {
+        let crate::form::Outcome::Submitted(values) = form.submitted(&layouts, &self.known_items)
+        else {
             return;
         };
         let (title, remembered) = (form.title.clone(), form.remembered());
@@ -4972,7 +4989,7 @@ impl LoaderApp {
         // the script is waiting for its settings: it hasn't started yet
         let waiting = run.form.is_some() && form_sent.is_none();
         let changed_form = run.form.as_ref().and_then(|f| {
-            matches!(f.submitted(self.script_layouts()), crate::form::Outcome::Submitted(v) if Some(&v) != form_sent.as_ref()).then_some(())
+            matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != form_sent.as_ref()).then_some(())
         }).is_some();
         let submit_label = run
             .form
@@ -5011,7 +5028,7 @@ impl LoaderApp {
             } else if ui.add_enabled(waiting, egui::Button::new(submit_label.as_str())).clicked()
                 && let Some(form) = self.run().and_then(|r| r.form.as_ref())
             {
-                outcome = form.submitted(&layouts);
+                outcome = form.submitted(&layouts, &self.known_items);
             }
             if ui
                 .add_enabled(running && !stopping && !waiting, egui::Button::new(if paused { "Resume" } else { "Pause" }))
@@ -5093,6 +5110,24 @@ impl LoaderApp {
             .map(|form| form.title.clone())
             .unwrap_or_default();
         let mut read: Option<(crate::layouts::Kind, bool)> = None;
+        let rules_of = |kind| {
+            self.run()
+                .and_then(|r| r.form.as_ref())
+                .map(|form| form.rules(kind).clone())
+                .unwrap_or_default()
+        };
+        let rules = [
+            crate::layouts::Kind::Equipment,
+            crate::layouts::Kind::Inventory,
+            crate::layouts::Kind::Prayer,
+        ]
+        .map(rules_of);
+        let [equipment_rules, inventory_rules, prayer_rules] = &rules;
+        let unknown: Vec<i32> = rules
+            .iter()
+            .flat_map(|r| r.unknown(&self.known_items))
+            .filter(|id| !self.asking_items.contains(id))
+            .collect();
         egui::ScrollArea::both()
             .min_scrolled_height(0.0)
             .id_salt(("tools_tab", tools_tab as u8))
@@ -5119,6 +5154,8 @@ impl LoaderApp {
                                 &mut saved.equipment,
                                 &mut self.icons,
                                 can_read,
+                                equipment_rules,
+                                &self.known_items,
                             ) == Some(crate::layouts::Action::Read)
                         {
                             read = Some((crate::layouts::Kind::Equipment, false));
@@ -5133,6 +5170,8 @@ impl LoaderApp {
                                 &mut saved.inventory,
                                 &mut self.icons,
                                 can_read,
+                                inventory_rules,
+                                &self.known_items,
                             ) == Some(crate::layouts::Action::Read)
                         {
                             read = Some((crate::layouts::Kind::Inventory, false));
@@ -5154,6 +5193,7 @@ impl LoaderApp {
                                     &mut self.icons,
                                     can_read,
                                     level,
+                                    prayer_rules,
                                 )
                             });
                         match action {
@@ -5174,6 +5214,31 @@ impl LoaderApp {
         if let Some((kind, quick)) = read {
             self.read_layout(ui.ctx(), kind, quick);
         }
+        if !unknown.is_empty() {
+            self.describe_items(ui.ctx(), unknown);
+        }
+    }
+
+    /// Asks the layout editors' client for the names and stackability of the script's required items; without one they show by id.
+    fn describe_items(&mut self, ctx: &egui::Context, ids: Vec<i32>) {
+        let Some(target) = self.layout_target() else {
+            return;
+        };
+        self.asking_items.extend(&ids);
+        self.background(ctx, move |settings| {
+            Event::ItemsKnown((|| {
+                let names = backend::item_names(&target, &settings, &ids)?;
+                let stacks = backend::item_stackable(&target, &settings, &ids)?;
+                Ok(ids
+                    .iter()
+                    .zip(names)
+                    .zip(stacks)
+                    .map(|((&id, name), stacks)| {
+                        (id, name.unwrap_or_default(), stacks.unwrap_or(false))
+                    })
+                    .collect())
+            })())
+        });
     }
 
     /// The saved layouts of the script whose form is open; an empty set when no form is.
@@ -5278,7 +5343,27 @@ impl LoaderApp {
                 };
                 let ids: Vec<i32> = items.iter().map(|item| item.id).collect();
                 let (names, stackable) = describe(&ids)?;
-                let slots = layouts::items_of(&items, &names, &stackable);
+                let mut slots = layouts::items_of(&items, &names, &stackable);
+                let mut dosed: Vec<i32> = slots
+                    .iter()
+                    .flatten()
+                    .filter(|item| {
+                        !item.stackable && injector::config::dose_of(&item.name).is_some()
+                    })
+                    .map(|item| item.id)
+                    .collect();
+                dosed.sort_unstable();
+                dosed.dedup();
+                if !dosed.is_empty() {
+                    let families: std::collections::HashMap<i32, Vec<u32>> = dosed
+                        .iter()
+                        .zip(backend::item_doses(&target, &settings, &dosed)?)
+                        .filter_map(|(&id, family)| {
+                            Some((id, family?.into_iter().map(|(dose, _)| dose).collect()))
+                        })
+                        .collect();
+                    layouts::add_doses(slots.iter_mut().flatten(), &families);
+                }
                 match kind {
                     Kind::Prayer => unreachable!("read above"),
                     Kind::Equipment => {
@@ -5298,12 +5383,12 @@ impl LoaderApp {
                                 Some(None) => layouts::EquipmentSlot::Empty,
                                 Some(Some((id, quantity))) => {
                                     let (names, stacks) = describe(&[id])?;
-                                    layouts::EquipmentSlot::Item(layouts::Item {
+                                    layouts::EquipmentSlot::Item(layouts::Item::read(
                                         id,
                                         quantity,
-                                        name: names.get(&id).cloned().unwrap_or_default(),
-                                        stackable: stacks.get(&id).copied().unwrap_or(true),
-                                    })
+                                        names.get(&id).cloned().unwrap_or_default(),
+                                        stacks.get(&id).copied().unwrap_or(true),
+                                    ))
                                 }
                             },
                         );
@@ -5352,11 +5437,13 @@ impl LoaderApp {
                             let (names, _) = describe(&ids)?;
                             Some(
                                 held.into_iter()
-                                    .map(|(id, quantity)| layouts::Item {
-                                        id,
-                                        quantity,
-                                        name: names.get(&id).cloned().unwrap_or_default(),
-                                        stackable: true,
+                                    .map(|(id, quantity)| {
+                                        layouts::Item::read(
+                                            id,
+                                            quantity,
+                                            names.get(&id).cloned().unwrap_or_default(),
+                                            true,
+                                        )
                                     })
                                     .collect(),
                             )
