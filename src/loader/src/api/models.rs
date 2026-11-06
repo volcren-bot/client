@@ -3,12 +3,24 @@ use serde::{Deserialize, Serialize};
 /// 10,000 credits are 1 EUR, and users see credits at 1 = 1 EUR.
 pub const CREDITS_PER_UNIT: f64 = 10_000.0;
 
-/// Credits as users see them: at least two decimals and at most four, "12.50", "0.001".
+/// Credits as users see them: whole amounts bare, others with two to four decimals, "12", "12.50", "0.001".
 pub fn credits_text(credits: f64) -> String {
     let four = format!("{:.4}", credits / CREDITS_PER_UNIT);
     let (int, frac) = four.split_once('.').unwrap_or((&four, ""));
-    let frac = frac.trim_end_matches('0');
-    format!("{int}.{frac:0<2}")
+    match frac.trim_end_matches('0') {
+        "" => int.to_owned(),
+        frac => format!("{int}.{frac:0<2}"),
+    }
+}
+
+/// An amount of credits with its unit, written like a currency code and never plural: "12.50 CREDIT".
+pub fn credits_label(credits: f64) -> String {
+    format!("{}\u{a0}CREDIT", credits_text(credits))
+}
+
+/// An account balance: every decimal, "12.5000 CREDIT".
+pub fn balance_label(credits: f64) -> String {
+    format!("{:.4}\u{a0}CREDIT", credits / CREDITS_PER_UNIT)
 }
 
 /// Credits an hour at a price in credits per minute.
@@ -126,8 +138,8 @@ impl StoreScript {
         Some(if credits < required {
             format!(
                 "Needs a balance of at least {} to start ({} available).",
-                credits_text(required as f64),
-                credits_text(credits as f64)
+                credits_label(required as f64),
+                balance_label(credits as f64)
             )
         } else {
             "You don't have access to this script.".into()
@@ -279,7 +291,7 @@ pub struct Reported {
 /// Why a session ended, as the UI says it.
 pub fn end_reason_message(reason: Option<&str>) -> &'static str {
     match reason {
-        Some("insufficient_credits") => "Out of credits: top up to keep running.",
+        Some("insufficient_credits") => "Out of CREDIT: add funds to keep running.",
         Some("timeout") => "The session timed out.",
         Some("stopped") => "The session was stopped.",
         _ => "The session ended.",
@@ -303,13 +315,19 @@ mod tests {
     }
 
     #[test]
-    fn credits_show_two_to_four_decimals() {
+    fn credits_drop_whole_decimals_and_show_two_to_four_otherwise() {
         assert_eq!(credits_text(125_000.0), "12.50");
         assert_eq!(credits_text(10.0), "0.001");
         assert_eq!(credits_text(12_345.0), "1.2345");
-        assert_eq!(credits_text(0.0), "0.00");
+        assert_eq!(credits_text(0.0), "0");
+        assert_eq!(credits_text(10_000.0), "1");
+        assert_eq!(credits_text(-30_000.0), "-3");
         assert_eq!(credits_text(-500.0), "-0.05");
         assert_eq!(credits_text(fee_per_hour(30_000, 43_200)), "0.0042");
+        assert_eq!(credits_label(125_000.0), "12.50\u{a0}CREDIT");
+        assert_eq!(balance_label(125_000.0), "12.5000\u{a0}CREDIT");
+        assert_eq!(balance_label(10_000.0), "1.0000\u{a0}CREDIT");
+        assert_eq!(balance_label(-500.0), "-0.0500\u{a0}CREDIT");
     }
 
     #[test]
@@ -393,7 +411,7 @@ mod tests {
         let beat: Heartbeat =
             serde_json::from_str(r#"{"alive":false,"reason":"insufficient_credits"}"#).unwrap();
         assert!(!beat.alive);
-        assert!(end_reason_message(beat.reason.as_deref()).contains("top up"));
+        assert!(end_reason_message(beat.reason.as_deref()).contains("add funds"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::models::credits_text;
+use super::models::credits_label;
 
 /// What a launcher API call can fail with. The UI maps these to messages; `Unauthorized` is the only one that means "refresh the token and retry".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,10 +29,10 @@ impl fmt::Display for ApiError {
                 required: Some(required),
             } => write!(
                 f,
-                "Not enough credits: {} needed to start.",
-                credits_text(*required as f64)
+                "Not enough CREDIT: {} needed to start.",
+                credits_label(*required as f64)
             ),
-            Self::InsufficientCredits { required: None } => write!(f, "Not enough credits."),
+            Self::InsufficientCredits { required: None } => write!(f, "Not enough CREDIT."),
             Self::Conflict(message) | Self::NotFound(message) | Self::Server(message) => {
                 write!(f, "{message}")
             }

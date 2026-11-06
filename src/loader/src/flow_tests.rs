@@ -513,7 +513,7 @@ fn too_few_credits_downloads_nothing_and_ends_nothing() {
         .err()
         .expect("fails");
     // 300 credits, as the user sees them
-    assert!(error.contains("0.03 needed"), "{error}");
+    assert!(error.contains("0.03\u{a0}CREDIT needed"), "{error}");
     assert_eq!(fake.count("GET", "/files/"), 0);
     assert_eq!(
         fake.count("POST", "/launcher/sessions/"),

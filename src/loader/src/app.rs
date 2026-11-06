@@ -1887,7 +1887,7 @@ impl LoaderApp {
         let Some(me) = self.auth.me() else {
             return;
         };
-        use crate::api::models::{credits_text, fee_per_hour, per_hour};
+        use crate::api::models::{credits_label, fee_per_hour, per_hour};
         let fee_hour = fee_per_hour(prompt.fee, me.minutes_per_month);
         let fee_minute = fee_hour / 60.0;
         let price_hour = per_hour(prompt.price);
@@ -1925,24 +1925,24 @@ impl LoaderApp {
                     if extra {
                         ui.label("extra fee");
                         ui.horizontal(|ui| {
-                            crate::theme::credits(ui, egui::RichText::new(credits_text(fee_hour)).strong(), "/h");
-                            crate::theme::credits(ui, egui::RichText::new(format!("{:.7}", fee_minute / crate::api::models::CREDITS_PER_UNIT)).small(), "/min");
+                            crate::theme::credits(ui, egui::RichText::new(credits_label(fee_hour)).strong(), "/h");
+                            crate::theme::credits(ui, egui::RichText::new(format!("{:.7}\u{a0}CREDIT", fee_minute / crate::api::models::CREDITS_PER_UNIT)).small(), "/min");
                         });
                         ui.end_row();
                     }
                     if let Some(old_price) = prompt.old_price {
                         ui.label("old price");
-                        crate::theme::credits(ui, egui::RichText::new(credits_text(per_hour(old_price))), "/h");
+                        crate::theme::credits(ui, egui::RichText::new(credits_label(per_hour(old_price))), "/h");
                         ui.end_row();
                     }
                     ui.label("script price");
-                    crate::theme::credits(ui, egui::RichText::new(credits_text(price_hour)).strong(), "/h");
+                    crate::theme::credits(ui, egui::RichText::new(credits_label(price_hour)).strong(), "/h");
                     ui.end_row();
                     if extra {
                         ui.label("in total");
                         ui.horizontal(|ui| {
-                            crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour)).strong(), "/h");
-                            crate::theme::credits(ui, egui::RichText::new(credits_text(total_hour * 24.0 * 30.0)).small(), "per 30 days");
+                            crate::theme::credits(ui, egui::RichText::new(credits_label(total_hour)).strong(), "/h");
+                            crate::theme::credits(ui, egui::RichText::new(credits_label(total_hour * 24.0 * 30.0)).small(), " per 30 days");
                         });
                         ui.end_row();
                     }
@@ -2366,7 +2366,7 @@ impl LoaderApp {
         let ctx = ui.ctx().clone();
         let button_size = if stacked {
             let font = egui::TextStyle::Button.resolve(ui.style());
-            let width = ["Sign out", "Buy credits"]
+            let width = ["Sign out", "Add funds"]
                 .iter()
                 .map(|label| {
                     ui.painter()
@@ -2383,7 +2383,7 @@ impl LoaderApp {
         match &self.auth {
             Auth::SignedIn(me) => {
                 let name = me.username.clone();
-                let balance = crate::api::models::credits_text(me.credits as f64);
+                let balance = crate::api::models::balance_label(me.credits as f64);
                 let minutes_per_month = me.minutes_per_month;
                 let rate: f64 = self
                     .store_runs()
@@ -2398,17 +2398,17 @@ impl LoaderApp {
                 }
                 if !self.api.config().site_url.is_empty()
                     && ui
-                        .add(egui::Button::new("Buy credits").min_size(button_size))
+                        .add(egui::Button::new("Add funds").min_size(button_size))
                         .clicked()
                 {
                     let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
                 }
                 if rate > 0.0 {
-                    crate::theme::credits(ui, egui::RichText::new(crate::api::models::credits_text(rate)).weak(), "/h")
+                    crate::theme::credits(ui, egui::RichText::new(crate::api::models::credits_label(rate)).weak(), "/h")
                         .on_hover_text("What the scripts running from this loader cost an hour, prices and extra-session fees together.");
                 }
                 crate::theme::credits(ui, egui::RichText::new(balance), "")
-                    .on_hover_text("Your credits.");
+                    .on_hover_text("Your balance.");
                 ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
             }
             Auth::SigningIn(cancel) => {
@@ -3741,7 +3741,7 @@ impl LoaderApp {
                 }
                 Event::SessionEnded(result) => match result {
                     Ok(ended) => {
-                        self.script_info(format!("Session ended, {} credits charged for the last minutes.", crate::api::models::credits_text(ended.charged as f64)));
+                        self.script_info(format!("Session ended, {} charged for the last minutes.", crate::api::models::credits_label(ended.charged as f64)));
                         // signing out ends the sessions first, and this answer can arrive after it
                         if self.auth.me().is_some() {
                             self.api_job(ctx, |api| Event::Me(api.me()));
@@ -4763,7 +4763,7 @@ impl LoaderApp {
                                 let rate = store.rate_per_hour(minutes_per_month);
                                 crate::theme::credits(
                                     ui,
-                                    egui::RichText::new(crate::api::models::credits_text(rate))
+                                    egui::RichText::new(crate::api::models::credits_label(rate))
                                         .strong(),
                                     "/h",
                                 );
@@ -4788,11 +4788,11 @@ impl LoaderApp {
                                 if store.fee_charged > 0 {
                                     crate::theme::credits(
                                         ui,
-                                        egui::RichText::new(crate::api::models::credits_text(
+                                        egui::RichText::new(crate::api::models::credits_label(
                                             store.fee_charged as f64,
                                         ))
                                         .small(),
-                                        "in fees so far",
+                                        " in fees so far",
                                     );
                                 }
                             }

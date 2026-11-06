@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{
     Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript,
-    models::{Ended, Me, Quote, credits_text, end_reason_message},
+    models::{Ended, Me, Quote, credits_label, end_reason_message},
 };
 use crate::libs;
 use crate::script::Process;
@@ -160,7 +160,7 @@ pub fn start_block(script: &StoreScript, quote: &Quote, credits: i64) -> Option<
     if credits < quote.required {
         return Some(format!(
             "Needs a balance of at least {} to start.",
-            credits_text(quote.required as f64)
+            credits_label(quote.required as f64)
         ));
     }
     if !script.can_access {
@@ -565,7 +565,7 @@ mod tests {
         });
         match beat.on_result(t0, None, dead) {
             Verdict::Stop { reason, sign_out } => {
-                assert!(reason.contains("top up"));
+                assert!(reason.contains("add funds"));
                 assert!(!sign_out);
             }
             other => panic!("{other:?}"),

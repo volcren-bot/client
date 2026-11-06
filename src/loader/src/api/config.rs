@@ -8,7 +8,7 @@ pub struct Config {
     pub supabase_url: String,
     /// The public anon key.
     pub anon_key: String,
-    /// The website, for "Buy credits". Optional: the button is hidden without it.
+    /// The website, for "Add funds". Optional: the button is hidden without it.
     pub site_url: String,
 }
 

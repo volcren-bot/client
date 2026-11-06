@@ -47,23 +47,14 @@ pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
 const PURPLE: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
 pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
-/// The credits icon, `size` high: Lucide's `coins`, drawn white in the asset and tinted with the text colour.
-pub fn coin(ui: &mut egui::Ui, size: f32) -> egui::Response {
-    ui.add(
-        egui::Image::new(egui::include_image!("../assets/coin.svg"))
-            .fit_to_exact_size(vec2(size, size))
-            .tint(ui.visuals().text_color()),
-    )
-}
-
-/// An amount of credits as users see it (1 = 1 EUR): the coin, then the number in `text`'s style, then `suffix` ("/h") in the same style.
+/// An amount of credits as users see it (`api::models::credits_label`, "12.50 CREDIT"), then `suffix` ("/h", or " per 30 days")
+/// right after it, smaller and weak.
 pub fn credits(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::Response {
     let style = ui.style().clone();
     let size = ui.ctx().fonts_mut(|fonts| text.font_height(fonts, &style));
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
-        coin(ui, size);
-        ui.label(text.clone());
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.label(text);
         if !suffix.is_empty() {
             ui.label(egui::RichText::new(suffix).size(size * 0.85).weak());
         }

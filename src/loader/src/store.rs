@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     StoreScript,
-    models::{credits_text, normalize_share_code, per_hour},
+    models::{credits_label, normalize_share_code, per_hour},
 };
 
 /// How many community scripts the loader remembers warning about. Old entries are only a missed "don't ask again".
@@ -74,12 +74,12 @@ pub fn origin_label(script: &StoreScript) -> &'static str {
     }
 }
 
-/// A script's price as the card shows it: credits an hour and credits a minute, or nothing for a free one.
+/// A script's price as the card shows it: "0.18 CREDIT" an hour and a minute, or nothing for a free one.
 pub fn price_texts(script: &StoreScript) -> Option<(String, String)> {
     (!script.is_free()).then(|| {
         (
-            credits_text(per_hour(script.price)),
-            credits_text(script.price as f64),
+            credits_label(per_hour(script.price)),
+            credits_label(script.price as f64),
         )
     })
 }
@@ -339,11 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn prices_read_as_credits_and_euros() {
+    fn prices_read_as_credit_amounts() {
         assert_eq!(price_texts(&script("a", 0, &[])), None);
         assert_eq!(
             price_texts(&script("a", 30, &[])),
-            Some(("0.18".into(), "0.003".into()))
+            Some(("0.18\u{a0}CREDIT".into(), "0.003\u{a0}CREDIT".into()))
         );
     }
 
