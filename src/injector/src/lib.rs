@@ -5,7 +5,7 @@ use ipc::{Header, Incompatible};
 use serde::{Deserialize, Serialize};
 
 /// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
-pub const HOST_API: u32 = 13;
+pub const HOST_API: u32 = 14;
 pub use ipc::state::varp;
 
 pub mod antiban;
@@ -388,6 +388,7 @@ pub use win::{
     item_changes_wait, item_container, item_containers, item_icons, item_names, item_params,
     item_stackable, landmasses, list_clients, load, loc_model, loc_shown, locs, map_regions,
     memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
+    player_hitsplats, client_cycle,
     npc_model, npc_sizes, npc_type_model, npc_words, npcs, packet_layouts, packets, player_model,
     player_plane, player_words, players, project, project_moved, projectiles, scene_collision,
     scene_route, scene_tiles, scene_tiles_next_frame, screenshot, script_runs, selected_widget,

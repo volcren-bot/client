@@ -28,6 +28,7 @@ use crate::{
     draw_batch, draw_lines, enum_def, find_path, game_state, game_val_names, ground_items,
     in_instance, item_container, item_names, item_params, landmasses, loc_model, loc_shown, locs,
     map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan, npc_hitsplats,
+    player_hitsplats, client_cycle,
     npc_model, npc_sizes, npc_type_model, npcs, player_model, player_plane, players, project,
     project_moved, projectiles, scene_collision, scene_route, selected_widget, send_input,
     send_input_with, server_tile, spot_anims, sub_interfaces, varbit, varc, varp_value, varps,
@@ -238,6 +239,15 @@ mod offline {
         _: u32,
         _: &[i32],
     ) -> Result<std::collections::BTreeMap<i32, Vec<decode::world::Hitsplat>>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn player_hitsplats(
+        _: u32,
+        _: &[i32],
+    ) -> Result<std::collections::BTreeMap<i32, Vec<decode::world::Hitsplat>>, String> {
+        Err(NO_WIN32.into())
+    }
+    pub fn client_cycle(_: u32) -> Result<i32, String> {
         Err(NO_WIN32.into())
     }
     pub fn scene_collision(_: u32) -> Result<(i32, i32, i32, Vec<Vec<u32>>), String> {
@@ -1685,6 +1695,16 @@ pub fn run_with_modules(
         query(&lua, pid, |pid, indices: Vec<i32>| {
             npc_hitsplats(pid, &indices)
         })?,
+    )?;
+    globals.set(
+        "player_hitsplats",
+        query(&lua, pid, |pid, indices: Vec<i32>| {
+            player_hitsplats(pid, &indices)
+        })?,
+    )?;
+    globals.set(
+        "client_cycle",
+        query(&lua, pid, |pid, (): ()| client_cycle(pid))?,
     )?;
     globals.set(
         "locs",

@@ -3095,6 +3095,26 @@ pub fn npc_hitsplats(
         .collect())
 }
 
+// The hitsplats in use on the players with `indices`, by index.
+pub fn player_hitsplats(
+    pid: u32,
+    indices: &[i32],
+) -> Result<std::collections::BTreeMap<i32, Vec<world::Hitsplat>>, String> {
+    let (layout, memory) = world_reader(pid)?;
+    Ok(indices
+        .iter()
+        .filter_map(|&i| Some((i, world::player_hitsplats(&memory, &layout.world, i)?)))
+        .collect())
+}
+
+// The client cycle (50 a second) that hitsplat, projectile and spot animation cycles count in.
+pub fn client_cycle(pid: u32) -> Result<i32, String> {
+    let (layout, memory) = reader(pid, part::PROJECTILES, "the client cycle")?;
+    memory
+        .i32(layout.module_base + layout.projectiles.cycle as u64)
+        .ok_or_else(|| "can't read the client cycle".into())
+}
+
 // Debug: `count` 4-byte words of the client's memory at `address`, to follow pointers found with `npc_words`.
 pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, String> {
     let (_, memory) = world_reader(pid)?;

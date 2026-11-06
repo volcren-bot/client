@@ -537,7 +537,7 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
 const DEFINITION_SIZE: u64 = 0x20;
 const MAX_NPC_SIZE: i32 = 10;
 
-// A hitsplat on an actor: the splat type, the damage it shows and the client cycle it was added on.
+// A hitsplat on an actor: the splat type, the damage it shows and the client cycle it stops showing on (about 1 s after it lands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hitsplat {
     // which of the four slots it is in; a hit keeps its slot until it is replaced
@@ -560,10 +560,30 @@ pub fn npc_hitsplats(
 ) -> Option<Vec<Hitsplat>> {
     let client = client(memory, layout)?;
     let (view, _, _) = world_view(memory, layout, client)?;
-    let npc = table_get(memory, view + layout.npc_table as u64, index)?;
+    actor_hitsplats(
+        memory,
+        table_get(memory, view + layout.npc_table as u64, index)?,
+    )
+}
+
+/// The hitsplats in use on the player with `index` (None when gone).
+pub fn player_hitsplats(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+    index: i32,
+) -> Option<Vec<Hitsplat>> {
+    let client = client(memory, layout)?;
+    let (view, _, _) = world_view(memory, layout, client)?;
+    actor_hitsplats(
+        memory,
+        table_get(memory, view + layout.players as u64, index)?,
+    )
+}
+
+fn actor_hitsplats(memory: &impl Memory, actor: u64) -> Option<Vec<Hitsplat>> {
     let mut splats = Vec::new();
     for slot in 0..HITSPLAT_SLOTS {
-        let at = npc + ACTOR_HITSPLATS + slot * HITSPLAT_SIZE;
+        let at = actor + ACTOR_HITSPLATS + slot * HITSPLAT_SIZE;
         let (kind, damage, cycle) = (memory.i32(at)?, memory.i32(at + 4)?, memory.i32(at + 8)?);
         if cycle != -1 && kind != -1 {
             splats.push(Hitsplat {
