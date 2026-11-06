@@ -415,6 +415,20 @@ pub fn game_val_names(
     run(&target.location, &helper, &args)
 }
 
+/// For each item, its dose or charge family `(number, id)`, or `None` when its name ends in no number.
+pub fn item_doses(
+    target: &Target,
+    settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<Option<injector::config::DoseFamily>>, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec!["item-doses", pid.as_str()];
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    args.extend(ids.iter().map(String::as_str));
+    run(&target.location, &helper, &args)
+}
+
 pub fn item_stackable(
     target: &Target,
     settings: &Settings,

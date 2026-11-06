@@ -150,12 +150,62 @@ pub fn decode_enum(data: &[u8]) -> Option<EnumDef> {
     }
 }
 
-/// What an item definition says that the loader and scripts use: its params (opcode 249) and whether it stacks.
+/// What an item definition says that the loader and scripts use: its name, params (opcode 249), whether it stacks and whether it is
+/// a note, placeholder or bought copy of another item (opcodes 98, 149 and 140 name the template it is drawn with).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ObjDef {
+    pub name: Option<String>,
     pub params: BTreeMap<u32, Value>,
-    /// Opcode 11, or a noted item (opcode 98 names its note template), which stacks whatever the plain item does.
+    /// Opcode 11, or a noted item, which stacks whatever the plain item does.
     pub stackable: bool,
+    pub copy: bool,
+}
+
+/// The base and number of a dose or charge item's name, `Prayer potion(4)` or `Black mask (10)`: the base keeps what precedes the
+/// bracket, so items of one family share it exactly.
+pub fn dose_of(name: &str) -> Option<(&str, u32)> {
+    let inner = name.strip_suffix(')')?;
+    let open = inner.rfind('(')?;
+    let digits = &inner[open + 1..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) || open == 0 {
+        return None;
+    }
+    Some((&name[..open], digits.parse().ok()?))
+}
+
+/// The doses or charges of one item family, `(number, id)` by number.
+pub type DoseFamily = Vec<(u32, i32)>;
+
+/// For each of `wanted`'s names, the doses its family has (by number, the lowest id for each), from every item's `(id, name)`;
+/// `None` for a name without a dose number.
+pub fn dose_families<'a>(
+    wanted: &[Option<&str>],
+    items: impl IntoIterator<Item = (i32, &'a str)>,
+) -> Vec<Option<DoseFamily>> {
+    let bases: Vec<Option<&str>> = wanted
+        .iter()
+        .map(|name| name.and_then(dose_of).map(|(base, _)| base))
+        .collect();
+    let mut families: BTreeMap<&str, BTreeMap<u32, i32>> = bases
+        .iter()
+        .flatten()
+        .map(|base| (*base, BTreeMap::new()))
+        .collect();
+    for (id, name) in items {
+        if let Some((base, dose)) = dose_of(name)
+            && let Some(family) = families.get_mut(base)
+        {
+            let entry = family.entry(dose).or_insert(id);
+            *entry = (*entry).min(id);
+        }
+    }
+    bases
+        .iter()
+        .map(|base| {
+            base.and_then(|base| families.get(base))
+                .map(|family| family.iter().map(|(&dose, &id)| (dose, id)).collect())
+        })
+        .collect()
 }
 
 /// The params (opcode 249) of an item definition; an unknown opcode fails the decode instead of misreading the rest.
@@ -165,29 +215,22 @@ pub fn decode_obj_params(data: &[u8]) -> Option<BTreeMap<u32, Value>> {
 
 pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
     let mut r = Reader::new(data);
-    let mut params = BTreeMap::new();
-    let mut stackable = false;
+    let mut def = ObjDef::default();
     loop {
         match r.u8()? {
-            0 => return Some(ObjDef { params, stackable }),
-            11 => stackable = true,
-            98 => stackable |= r.u16()? != 0,
-            1
-            | 4..=8
-            | 24
-            | 26
-            | 75
-            | 78
-            | 79
-            | 90..=95
-            | 97
-            | 99
-            | 110..=112
-            | 139
-            | 140
-            | 148
-            | 149 => r.skip(2)?,
-            2 | 3 | 9 | 30..=39 => {
+            0 => return Some(def),
+            2 => def.name = Some(r.string()?),
+            11 => def.stackable = true,
+            98 => {
+                let noted = r.u16()? != 0;
+                def.stackable |= noted;
+                def.copy |= noted;
+            }
+            140 | 149 => def.copy |= r.u16()? != 0,
+            1 | 4..=8 | 24 | 26 | 75 | 78 | 79 | 90..=95 | 97 | 99 | 110..=112 | 139 | 148 => {
+                r.skip(2)?
+            }
+            3 | 9 | 30..=39 => {
                 r.string()?;
             }
             15 | 16 | 65 | 160 | 251 => {}
@@ -231,7 +274,7 @@ pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
                     } else {
                         Value::Int(r.i32()? as i64)
                     };
-                    params.insert(key, value);
+                    def.params.insert(key, value);
                 }
             }
             _ => return None,
@@ -387,6 +430,59 @@ mod tests {
         assert_eq!(params.get(&596), Some(&Value::Int(218 << 16 | 21)));
         assert_eq!(params.get(&604), Some(&Value::Int(17)));
         assert_eq!(params.get(&365), Some(&Value::Int(562)));
+    }
+
+    #[test]
+    fn reads_the_name_and_whether_an_item_is_a_copy() {
+        let def = decode_obj(&hex("02580000")).unwrap();
+        assert_eq!(def.name.as_deref(), Some("X"));
+        assert!(!def.copy);
+        // a placeholder (template 14401) and a bought copy (template 1)
+        assert!(decode_obj(&hex("95384100")).unwrap().copy);
+        assert!(decode_obj(&hex("8c000100")).unwrap().copy);
+        assert!(!decode_obj(&hex("95000000")).unwrap().copy);
+        assert!(decode_obj(&hex("62031f00")).unwrap().copy);
+    }
+
+    #[test]
+    fn splits_dose_and_charge_names() {
+        assert_eq!(dose_of("Prayer potion(4)"), Some(("Prayer potion", 4)));
+        assert_eq!(dose_of("Black mask (10)"), Some(("Black mask ", 10)));
+        assert_eq!(dose_of("Amulet of glory"), None);
+        assert_eq!(dose_of("Rune scimitar (g)"), None);
+        assert_eq!(dose_of("Graceful hood(i)"), None);
+        assert_eq!(dose_of("(4)"), None);
+        assert_eq!(dose_of("Potion()"), None);
+    }
+
+    #[test]
+    fn groups_dose_families_by_their_base() {
+        let items = [
+            (2434, "Prayer potion(4)"),
+            (139, "Prayer potion(3)"),
+            (141, "Prayer potion(2)"),
+            (143, "Prayer potion(1)"),
+            (20393, "Prayer potion(4)"),
+            (1712, "Amulet of glory(4)"),
+            (1704, "Amulet of glory"),
+            (2440, "Super strength(4)"),
+        ];
+        let families = dose_families(
+            &[
+                Some("Prayer potion(3)"),
+                Some("Coins"),
+                None,
+                Some("Amulet of glory(4)"),
+            ],
+            items,
+        );
+        assert_eq!(
+            families[0].as_deref(),
+            Some(&[(1, 143), (2, 141), (3, 139), (4, 2434)][..])
+        );
+        assert_eq!(families[1], None);
+        assert_eq!(families[2], None);
+        assert_eq!(families[3].as_deref(), Some(&[(4, 1712)][..]));
     }
 
     #[test]

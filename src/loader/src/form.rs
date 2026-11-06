@@ -4,7 +4,7 @@ use eframe::egui;
 use injector::form::{self as spec_form};
 use serde_json::{Map, Value, json};
 
-use crate::layouts::{self, Kind, ScriptLayouts};
+use crate::layouts::{self, Kind, Known, Rules, ScriptLayouts};
 
 /// Narrower than this (in points), a two column form stacks its columns.
 const STACK_BELOW: f32 = 420.0;
@@ -41,10 +41,24 @@ fn layout_kind(field: &Value) -> Option<Kind> {
     }
 }
 
+/// A form's rules for each layout kind, in `Kind` order.
+struct KindRules([Rules; 3]);
+
+impl KindRules {
+    fn of(&self, kind: Kind) -> &Rules {
+        &self.0[match kind {
+            Kind::Equipment => 0,
+            Kind::Inventory => 1,
+            Kind::Prayer => 2,
+        }]
+    }
+}
+
 pub struct Form {
     pub title: String,
     spec: Value,
     values: HashMap<String, FieldValue>,
+    rules: KindRules,
 }
 
 pub enum Outcome {
@@ -123,10 +137,23 @@ impl Form {
                 values.insert(id.to_owned(), value);
             }
         }
+        let rules = KindRules(
+            [Kind::Equipment, Kind::Inventory, Kind::Prayer].map(|kind| {
+                let mut rules = Rules::default();
+                for field in spec_form::fields(&spec) {
+                    if layout_kind(field) == Some(kind) {
+                        rules.required.extend(spec_form::required(field));
+                        rules.locked.extend(spec_form::locked(field));
+                    }
+                }
+                rules
+            }),
+        );
         Self {
             title,
             spec,
             values,
+            rules,
         }
     }
 
@@ -157,6 +184,7 @@ impl Form {
         field: &Value,
         value: Option<&mut FieldValue>,
         layouts: &ScriptLayouts,
+        rules: &KindRules,
     ) {
         let label = field
             .get("label")
@@ -227,11 +255,17 @@ impl Form {
                         layouts,
                         chosen,
                         spec_form::id(field).unwrap_or(""),
+                        rules.of(kind),
                     );
                 }
             }
             _ => {}
         }
+    }
+
+    /// What the form's fields of the layout `kind` ask of its layouts: the required items and locked prayers of all of them.
+    pub fn rules(&self, kind: Kind) -> &Rules {
+        self.rules.of(kind)
     }
 
     /// Whether the form has a field of the layout `kind`, so its editor tab is shown.
@@ -255,12 +289,16 @@ impl Form {
     }
 
     /// What the form would send the script if submitted now: a layout field as the chosen layout's contents, null for none.
-    pub fn submitted(&self, layouts: &ScriptLayouts) -> Outcome {
+    pub fn submitted(&self, layouts: &ScriptLayouts, known: &Known) -> Outcome {
         let mut values = collect(&self.values);
+        let rules = &self.rules;
         for field in spec_form::fields(&self.spec) {
             if let (Some(kind), Some(id)) = (layout_kind(field), spec_form::id(field)) {
                 let chosen = values.get(id).and_then(Value::as_str).unwrap_or("");
-                values.insert(id.to_owned(), kind.value_of(layouts, chosen));
+                values.insert(
+                    id.to_owned(),
+                    kind.value_of(layouts, chosen, rules.of(kind), known),
+                );
             }
         }
         Outcome::Submitted(Value::Object(values))
@@ -269,6 +307,7 @@ impl Form {
     /// The form's fields in `ui` for a page hosting its own buttons; with `columns = true` the checks go on the right unless narrower than `STACK_BELOW`.
     pub fn show_inline(&mut self, ui: &mut egui::Ui, layouts: &ScriptLayouts) {
         ui.spacing_mut().item_spacing.y = FIELD_GAP;
+        let rules = &self.rules;
         let fields = spec_form::fields(&self.spec);
         let columns = self
             .spec
@@ -277,7 +316,7 @@ impl Form {
             .unwrap_or(false);
         if !columns {
             for field in fields {
-                Self::show_field(ui, field, &mut self.values, layouts);
+                Self::show_field(ui, field, &mut self.values, layouts, rules);
             }
             return;
         }
@@ -287,16 +326,16 @@ impl Form {
         let values = &mut self.values;
         if ui.available_width() < STACK_BELOW {
             for field in others.into_iter().chain(checks) {
-                Self::show_field(ui, field, values, layouts);
+                Self::show_field(ui, field, values, layouts, rules);
             }
             return;
         }
         ui.columns(2, |cols| {
             for field in others {
-                Self::show_field(&mut cols[0], field, values, layouts);
+                Self::show_field(&mut cols[0], field, values, layouts, rules);
             }
             for field in checks {
-                Self::show_field(&mut cols[1], field, values, layouts);
+                Self::show_field(&mut cols[1], field, values, layouts, rules);
             }
         });
     }
@@ -317,6 +356,7 @@ impl Form {
         field: &Value,
         values: &mut HashMap<String, FieldValue>,
         layouts: &ScriptLayouts,
+        rules: &KindRules,
     ) {
         if !Self::visible(field, values) {
             return;
@@ -324,6 +364,8 @@ impl Form {
         let usable = spec_form::enabled_by(field)
             .is_none_or(|id| matches!(values.get(id), Some(FieldValue::Check(true))));
         let value = spec_form::id(field).and_then(|id| values.get_mut(id));
-        ui.add_enabled_ui(usable, |ui| Self::field_ui(ui, field, value, layouts));
+        ui.add_enabled_ui(usable, |ui| {
+            Self::field_ui(ui, field, value, layouts, rules)
+        });
     }
 }

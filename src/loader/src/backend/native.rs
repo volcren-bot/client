@@ -132,6 +132,15 @@ pub fn item_stackable(
     injector::item_stackable(target.client.pid, ids)
 }
 
+/// For each item, its dose or charge family `(number, id)`, or `None` when its name ends in no number.
+pub fn item_doses(
+    target: &Target,
+    _settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<Option<injector::config::DoseFamily>>, String> {
+    injector::item_doses(target.client.pid, ids)
+}
+
 pub fn item_icons(
     target: &Target,
     _settings: &Settings,

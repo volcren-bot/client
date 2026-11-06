@@ -150,6 +150,148 @@ pub const KINDS: [&str; 9] = [
 /// The kinds whose value is a layout the loader keeps per script: the script gets the chosen one, or nil.
 pub const LAYOUT_KINDS: [&str; 3] = ["equipment", "inventory", "prayer"];
 
+/// The worn items slots an `equipment` field's `required` items may name: the container's, then the secondary ammo (14).
+pub const EQUIPMENT_SLOTS: [usize; 12] = [0, 1, 2, 3, 4, 5, 7, 9, 10, 12, 13, 14];
+pub const INVENTORY_SLOTS: usize = 28;
+
+/// An item a layout field's `required` list puts in every layout of that kind, which the user can move but not remove or change:
+/// the ids that count as it (the first is shown and taken first), its slot (an equipment field's must have one; an inventory's is
+/// where it starts), the amount range of a stack (both 0: any amount) and the doses or charges that count, in the order to take them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Required {
+    pub ids: Vec<i32>,
+    pub slot: Option<usize>,
+    pub min: i32,
+    pub max: i32,
+    pub doses: Vec<u32>,
+}
+
+fn parse_required(kind: &str, row: &Value) -> Result<Required, String> {
+    let int = |key: &str| -> Result<Option<i64>, String> {
+        match row.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_i64()
+                .map(Some)
+                .ok_or_else(|| format!("`{key}` is not a whole number")),
+        }
+    };
+    let list = |key: &str| -> Result<Vec<i64>, String> {
+        match row.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::Array(values)) => values
+                .iter()
+                .map(|v| {
+                    v.as_i64()
+                        .ok_or_else(|| format!("`{key}` holds a non-number"))
+                })
+                .collect(),
+            Some(_) => Err(format!("`{key}` is not a list")),
+        }
+    };
+    let ids = list("ids")?;
+    if ids.is_empty()
+        || ids
+            .iter()
+            .any(|&id| !(0..=i64::from(i32::MAX)).contains(&id))
+    {
+        return Err("`ids` needs one or more item ids".into());
+    }
+    let slot = int("slot")?;
+    let slot = match (kind, slot) {
+        ("equipment", None) => return Err("an equipment item needs a `slot`".into()),
+        ("equipment", Some(s)) if !EQUIPMENT_SLOTS.iter().any(|&e| e as i64 == s) => {
+            return Err(format!("{s} is not a worn items slot"));
+        }
+        (_, Some(s)) if !(0..INVENTORY_SLOTS as i64).contains(&s) => {
+            return Err(format!("slot {s} is not 0 to {}", INVENTORY_SLOTS - 1));
+        }
+        (_, s) => s.map(|s| s as usize),
+    };
+    let (min, max) = (int("min")?.unwrap_or(0), int("max")?.unwrap_or(0));
+    if min < 0
+        || max < 0
+        || max > i64::from(i32::MAX)
+        || (max > 0 && min > max)
+        || (max == 0 && min > 0)
+    {
+        return Err(
+            "`min` and `max` are 0 to any amount with `min` at most `max`, or both 0".into(),
+        );
+    }
+    let doses = list("doses")?;
+    if doses
+        .iter()
+        .any(|&d| !(1..=i64::from(u32::MAX)).contains(&d))
+    {
+        return Err("`doses` are numbers from 1".into());
+    }
+    let mut seen = doses.clone();
+    seen.sort_unstable();
+    seen.dedup();
+    if seen.len() != doses.len() {
+        return Err("`doses` lists a dose twice".into());
+    }
+    Ok(Required {
+        ids: ids.into_iter().map(|id| id as i32).collect(),
+        slot,
+        min: min as i32,
+        max: max as i32,
+        doses: doses.into_iter().map(|d| d as u32).collect(),
+    })
+}
+
+fn check_required(kind: &str, field: &Value) -> Result<Vec<Required>, String> {
+    let rows = match field.get("required") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(rows)) => rows,
+        Some(_) => return Err("`required` is not a list".into()),
+    };
+    let items = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            parse_required(kind, row).map_err(|e| format!("required item {}: {e}", i + 1))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut slots: Vec<usize> = items.iter().filter_map(|r| r.slot).collect();
+    let named = slots.len();
+    slots.sort_unstable();
+    slots.dedup();
+    if slots.len() != named {
+        return Err("two required items name the same slot".into());
+    }
+    if kind == "inventory" && items.len() > INVENTORY_SLOTS {
+        return Err(format!("more than {INVENTORY_SLOTS} required items"));
+    }
+    Ok(items)
+}
+
+/// The items a layout field puts in every layout (`required`); a list that doesn't check out (see `validate`) is none.
+pub fn required(field: &Value) -> Vec<Required> {
+    check_required(kind(field), field).unwrap_or_default()
+}
+
+fn check_locked(field: &Value) -> Result<Vec<String>, String> {
+    match field.get("locked") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(keys)) => keys
+            .iter()
+            .map(|k| {
+                k.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "`locked` holds a non-string".to_owned())
+            })
+            .collect(),
+        Some(_) => Err("`locked` is not a list of prayer keys".into()),
+    }
+}
+
+/// The prayers a `prayer` field's script controls itself (`locked`, by key), which its layouts leave out.
+pub fn locked(field: &Value) -> Vec<String> {
+    check_locked(field).unwrap_or_default()
+}
+
 pub fn fields(spec: &Value) -> &[Value] {
     spec.get("fields")
         .and_then(Value::as_array)
@@ -255,6 +397,16 @@ pub fn validate(spec: &Value) -> Result<(), String> {
                 "field \"{id}\": a list needs items, each with an id"
             ));
         }
+        if field.get("required").is_some() && !matches!(kind, "equipment" | "inventory") {
+            return Err(format!(
+                "field \"{id}\": only equipment and inventory fields take `required`"
+            ));
+        }
+        if field.get("locked").is_some() && kind != "prayer" {
+            return Err(format!("field \"{id}\": only prayer fields take `locked`"));
+        }
+        check_required(kind, field).map_err(|e| format!("field \"{id}\": {e}"))?;
+        check_locked(field).map_err(|e| format!("field \"{id}\": {e}"))?;
     }
     Ok(())
 }
@@ -451,6 +603,74 @@ mod tests {
             assert_eq!(parse_pin_reply(&pin_reply_line(&answer)), answer);
         }
         assert!(parse_pin_reply("nonsense").is_err());
+    }
+
+    #[test]
+    fn checks_required_items_and_locked_prayers() {
+        let field = |kind: &str, extra: Value| {
+            let mut f = json!({ "id": "f", "kind": kind });
+            f.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({ "fields": [f] })
+        };
+        let ok = field(
+            "inventory",
+            json!({ "required": [
+                { "ids": [2434], "doses": [4, 3] },
+                { "ids": [563], "slot": 27, "min": 100, "max": 500 },
+                { "ids": [995], "min": 0, "max": 0 }
+            ] }),
+        );
+        assert_eq!(validate(&ok), Ok(()));
+        let parsed = required(&fields(&ok)[0]);
+        assert_eq!(parsed[0].doses, [4, 3]);
+        assert_eq!(parsed[1].slot, Some(27));
+        assert_eq!((parsed[1].min, parsed[1].max), (100, 500));
+        let equipment = field(
+            "equipment",
+            json!({ "required": [{ "ids": [1712, 1710], "slot": 2 }] }),
+        );
+        assert_eq!(validate(&equipment), Ok(()));
+        for bad in [
+            field("equipment", json!({ "required": [{ "ids": [1712] }] })),
+            field(
+                "equipment",
+                json!({ "required": [{ "ids": [1712], "slot": 6 }] }),
+            ),
+            field("inventory", json!({ "required": [{ "ids": [] }] })),
+            field(
+                "inventory",
+                json!({ "required": [{ "ids": [1], "slot": 28 }] }),
+            ),
+            field(
+                "inventory",
+                json!({ "required": [{ "ids": [1], "min": 5, "max": 2 }] }),
+            ),
+            field(
+                "inventory",
+                json!({ "required": [{ "ids": [1], "min": 5 }] }),
+            ),
+            field(
+                "inventory",
+                json!({ "required": [{ "ids": [1], "doses": [4, 4] }] }),
+            ),
+            field(
+                "inventory",
+                json!({ "required": [{ "ids": [1], "slot": 3 }, { "ids": [2], "slot": 3 }] }),
+            ),
+            field("prayer", json!({ "required": [{ "ids": [1] }] })),
+            field("inventory", json!({ "locked": ["piety"] })),
+            field("prayer", json!({ "locked": "piety" })),
+        ] {
+            assert!(validate(&bad).is_err(), "{bad}");
+        }
+        let prayer = field(
+            "prayer",
+            json!({ "locked": ["protect_from_melee", "piety"] }),
+        );
+        assert_eq!(validate(&prayer), Ok(()));
+        assert_eq!(locked(&fields(&prayer)[0]), ["protect_from_melee", "piety"]);
     }
 
     #[test]
