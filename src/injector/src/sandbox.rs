@@ -3557,7 +3557,10 @@ local vars = {}
 Host.varbit = function(id) return vars[id] or 0 end
 assert(T.choose(home, far) == nil, 'nothing says a Nexus is built')
 assert(T.choose(home, tile(3000, 500)) == nil, 'and nothing can say a glory is, before a visit')
-vars[House.NEXUS_VARBIT] = 1
+-- the Nexus's first slot holds teleport 10, which the cache names Barrows
+Host.enum_def = function(id) return if id == House.NEXUS_ENUM then { entries = { { key = 10, value = 500 } } } else nil end
+Host.cache_files = function() return { '\249\1\1' .. string.pack('>I3', House.NEXUS_NAME_PARAM) .. 'Barrows\0' } end
+vars[House.NEXUS_SLOT_VARBITS[1]] = 10
 local c = T.choose(home, far)
 assert(c and c.kind == 'item', 'the tablet first')
 Host.in_instance = function() return true end
@@ -3568,7 +3571,7 @@ local from_inside = tile(11675, 5277)
 c = T.choose(from_inside, far)
 assert(c and c.kind == 'house' and c.option == 'Barrows' and c.spell == 'nexus', 'then the Nexus, whatever the tile inside')
 assert(T.choose(from_inside, tile(11680, 5280)) == nil, 'a goal in the house is a walk')
-vars[House.BOX_VARBIT] = 27
+vars[House.BOX_VARBIT] = 2
 c = T.choose(from_inside, tile(3000, 2100))
 assert(c == nil or c.spell ~= 'box', 'a visit beats the variable: no box seen')
 c = T.choose(from_inside, tile(3000, 500))
@@ -3648,7 +3651,8 @@ assert(c and c.kind == 'item', 'from outside a visit makes a tablet and the tree
             r#"
 local enclave = tile(3150, 3635)
 stage.rows = { row('teleportation_spells', 'Good Teleport', nil, enclave) }
-assert(T.in_ferox(3150, 3635) and not T.in_ferox(3150, 3700))
+local Ferox = require('@lib/main/ferox')
+assert(Ferox.contains(3150, 3635) and not Ferox.contains(3150, 3700))
 assert(T.choose(home, enclave) ~= nil, 'to go to the Enclave')
 assert(T.choose(home, tile(3148, 3630)) ~= nil, 'or inside it')
 assert(T.choose(home, tile(3150, 3660)) == nil, 'a goal north of it is the Wilderness')
