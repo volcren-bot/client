@@ -345,6 +345,21 @@ pub fn enabled_by(field: &Value) -> Option<&str> {
     field.get("enabled_by").and_then(Value::as_str)
 }
 
+/// The gap, in points, the form puts between the fields of a row, when it sets one.
+pub fn row_gap(spec: &Value) -> Option<f64> {
+    spec.get("row_gap").and_then(Value::as_f64)
+}
+
+/// A label's heading level: 1 for a title, 2 for a section, none for plain text.
+pub fn heading(field: &Value) -> Option<u64> {
+    field.get("heading").and_then(Value::as_u64)
+}
+
+/// The name of the row the field shares with the fields next to it that name the same one, drawn side by side.
+pub fn row(field: &Value) -> Option<&str> {
+    field.get("row").and_then(Value::as_str)
+}
+
 /// The conditions that all have to hold for the field to be shown: `visible_when` is one `{ id, equals }` or a list of them, where `equals` is a value or a list of values.
 pub fn visible_rules(field: &Value) -> Vec<(&str, &Value)> {
     fn rule(r: &Value) -> Option<(&str, &Value)> {
@@ -369,6 +384,9 @@ pub fn validate(spec: &Value) -> Result<(), String> {
     if !spec.is_object() {
         return Err("form() takes a table: { title = ..., fields = { ... } }".into());
     }
+    if spec.get("row_gap").is_some() && !row_gap(spec).is_some_and(|g| (0.0..=500.0).contains(&g)) {
+        return Err("`row_gap` is a number of points, 0 to 500".into());
+    }
     let mut seen = Vec::new();
     for (i, field) in fields(spec).iter().enumerate() {
         let kind = kind(field);
@@ -378,6 +396,14 @@ pub fn validate(spec: &Value) -> Result<(), String> {
                 i + 1,
                 KINDS.join(", ")
             ));
+        }
+        if field.get("row").is_some_and(|r| !r.is_string()) {
+            return Err(format!("field {}: `row` is the name of a row", i + 1));
+        }
+        if field.get("heading").is_some()
+            && !(kind == "label" && matches!(heading(field), Some(1 | 2)))
+        {
+            return Err(format!("field {}: `heading` is 1 or 2, on a label", i + 1));
         }
         if kind == "label" {
             continue;
@@ -696,6 +722,19 @@ mod tests {
         let list = json!({ "id": "l", "kind": "list", "items": [{ "id": "x", "label": "X", "default": true }, { "id": "y" }] });
         assert_eq!(default_value(&list), Some(json!({ "x": true, "y": false })));
         assert!(validate(&json!({ "fields": [{ "id": "a" }, { "id": "a" }] })).is_err());
+        assert!(validate(&json!({ "fields": [{ "id": "a", "row": 1 }] })).is_err());
+        assert!(validate(&json!({ "fields": [{ "kind": "label", "heading": 3 }] })).is_err());
+        assert!(validate(&json!({ "row_gap": -1, "fields": [] })).is_err());
+        assert_eq!(validate(&json!({ "row_gap": 12, "fields": [] })), Ok(()));
+        assert!(validate(&json!({ "fields": [{ "id": "a", "heading": 1 }] })).is_err());
+        assert_eq!(
+            validate(&json!({ "fields": [{ "kind": "label", "text": "A", "heading": 2 }] })),
+            Ok(())
+        );
+        assert_eq!(
+            validate(&json!({ "fields": [{ "id": "a", "row": "x" }, { "id": "b", "row": "x" }] })),
+            Ok(())
+        );
         let line = stats_line(10, -5, &[1, 2]);
         assert_eq!(
             parse_stats(line.strip_prefix(STATS_PREFIX).unwrap()),

@@ -12,6 +12,9 @@ const STACK_BELOW: f32 = 420.0;
 /// The gap (in points) between the fields of a form.
 const FIELD_GAP: f32 = 10.0;
 
+/// The gap (in points) between the fields of a row, unless the form's `row_gap` sets one.
+const ROW_GAP: f32 = 24.0;
+
 /// A dropdown's label sits above it and ends with a colon.
 fn with_colon(label: &str) -> String {
     if label.ends_with(':') {
@@ -194,9 +197,21 @@ impl Form {
             .unwrap_or("");
         let number = |key: &str| field.get(key).and_then(Value::as_f64);
         match (spec_form::kind(field), value) {
-            ("label", _) => {
-                ui.label(label);
-            }
+            ("label", _) => match spec_form::heading(field) {
+                Some(1) => {
+                    ui.heading(label);
+                }
+                Some(_) => {
+                    let style = ui.style();
+                    let size = (egui::TextStyle::Body.resolve(style).size
+                        + egui::TextStyle::Heading.resolve(style).size)
+                        / 2.0;
+                    ui.label(egui::RichText::new(label).strong().size(size));
+                }
+                None => {
+                    ui.label(label);
+                }
+            },
             ("list", Some(FieldValue::List(rows))) => {
                 if !label.is_empty() {
                     ui.label(label);
@@ -314,30 +329,89 @@ impl Form {
             .get("columns")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let gap = spec_form::row_gap(&self.spec).map_or(ROW_GAP, |g| g as f32);
+        let values = &mut self.values;
         if !columns {
-            for field in fields {
-                Self::show_field(ui, field, &mut self.values, layouts, rules);
-            }
+            let all: Vec<&Value> = fields.iter().collect();
+            Self::show_fields(ui, &all, gap, values, layouts, rules);
             return;
         }
         let (checks, others): (Vec<&Value>, Vec<&Value>) = fields
             .iter()
             .partition(|field| spec_form::kind(field) == "check");
-        let values = &mut self.values;
         if ui.available_width() < STACK_BELOW {
-            for field in others.into_iter().chain(checks) {
+            let all: Vec<&Value> = others.into_iter().chain(checks).collect();
+            Self::show_fields(ui, &all, gap, values, layouts, rules);
+            return;
+        }
+        ui.columns(2, |cols| {
+            Self::show_fields(&mut cols[0], &others, gap, values, layouts, rules);
+            Self::show_fields(&mut cols[1], &checks, gap, values, layouts, rules);
+        });
+    }
+
+    /// The fields one under another, except that the shown fields next to each other with the same `row` share a line (`show_row`).
+    fn show_fields(
+        ui: &mut egui::Ui,
+        fields: &[&Value],
+        gap: f32,
+        values: &mut HashMap<String, FieldValue>,
+        layouts: &ScriptLayouts,
+        rules: &KindRules,
+    ) {
+        let shown: Vec<&Value> = fields
+            .iter()
+            .copied()
+            .filter(|field| Self::visible(field, values))
+            .collect();
+        let mut rest = shown.as_slice();
+        while let Some(first) = rest.first() {
+            let len = spec_form::row(first).map_or(1, |row| {
+                rest.iter()
+                    .take_while(|field| spec_form::row(field) == Some(row))
+                    .count()
+            });
+            let (line, after) = rest.split_at(len);
+            rest = after;
+            if len == 1 {
+                Self::show_field(ui, first, values, layouts, rules);
+            } else {
+                Self::show_row(ui, line, gap, values, layouts, rules);
+            }
+        }
+    }
+
+    /// A row's fields left to right, each as wide as it needs and `gap` apart, or one under another while the width the row took when last drawn that way doesn't fit.
+    fn show_row(
+        ui: &mut egui::Ui,
+        line: &[&Value],
+        gap: f32,
+        values: &mut HashMap<String, FieldValue>,
+        layouts: &ScriptLayouts,
+        rules: &KindRules,
+    ) {
+        let id = ui
+            .id()
+            .with(("form_row", spec_form::row(line[0]), spec_form::id(line[0])));
+        let width: Option<f32> = ui.data(|d| d.get_temp(id));
+        if width.is_some_and(|w| w > ui.available_width()) {
+            for field in line {
                 Self::show_field(ui, field, values, layouts, rules);
             }
             return;
         }
-        ui.columns(2, |cols| {
-            for field in others {
-                Self::show_field(&mut cols[0], field, values, layouts, rules);
-            }
-            for field in checks {
-                Self::show_field(&mut cols[1], field, values, layouts, rules);
+        let row = ui.horizontal_top(|ui| {
+            // text keeps its width, so the row's measured width is what it needs
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            ui.spacing_mut().item_spacing.x = gap;
+            for field in line {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.x = FIELD_GAP;
+                    Self::show_field(ui, field, values, layouts, rules);
+                });
             }
         });
+        ui.data_mut(|d| d.insert_temp(id, row.response.rect.width()));
     }
 
     /// Whether all the field's `visible_when` rules hold for the values now; a field that is hidden still keeps its value and is still sent.
