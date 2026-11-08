@@ -1336,6 +1336,8 @@ pub struct LoaderApp {
     icons: crate::icons::Icons,
     /// Every script's saved equipment and inventory layouts, by form title.
     layouts: crate::layouts::AllLayouts,
+    /// The saved layouts couldn't be read (`layouts::load`): they are never saved over.
+    layouts_unreadable: bool,
     /// The names and stackability of the scripts' required layout items, and the ids being asked of a client.
     known_items: crate::layouts::Known,
     asking_items: Vec<i32>,
@@ -1357,6 +1359,10 @@ impl LoaderApp {
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
         settings.fill_missing(update::is_dev_install());
+        let data_dir = directories::ProjectDirs::from("com", "volcren", "Volcren")
+            .map(|dirs| dirs.data_dir().to_path_buf());
+        let (layouts, layouts_unreadable) =
+            crate::layouts::load(cc.storage, LAYOUTS_KEY, data_dir.as_deref());
         crate::theme::apply(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
@@ -1435,10 +1441,8 @@ impl LoaderApp {
             followed_tab: (Tab::Clients, None),
             breaks_tab: BreaksTab::Breaks,
             icons: Default::default(),
-            layouts: cc
-                .storage
-                .and_then(|s| eframe::get_value(s, LAYOUTS_KEY))
-                .unwrap_or_default(),
+            layouts,
+            layouts_unreadable: layouts_unreadable.is_some(),
             known_items: Default::default(),
             asking_items: Vec::new(),
             feedback: feedback::Page::default(),
@@ -1455,6 +1459,9 @@ impl LoaderApp {
         if let Some(failure) = update::failure_from_args() {
             app.error(failure.clone());
             app.update_state = UpdateState::Failed(failure);
+        }
+        if let Some(message) = layouts_unreadable {
+            app.error(message);
         }
         app
     }
@@ -7139,7 +7146,9 @@ impl eframe::App for LoaderApp {
         eframe::set_value(storage, SCRIPT_KEY, &self.script_file);
         eframe::set_value(storage, LAST_SCRIPT_KEY, &self.last_script);
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
-        eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
+        if !self.layouts_unreadable {
+            eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
+        }
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
         eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
         eframe::set_value(

@@ -875,6 +875,46 @@ pub struct ScriptLayouts {
 /// Every script's layouts, by the title of its form.
 pub type AllLayouts = HashMap<String, ScriptLayouts>;
 
+/// The saved layouts under `key`, and, when the saved text can't be read (layouts saved by a newer loader, or a broken file), the
+/// message to show: the text is copied to a file in `backup_dir`, and the caller must not save over it.
+pub fn load(
+    storage: Option<&dyn eframe::Storage>,
+    key: &str,
+    backup_dir: Option<&std::path::Path>,
+) -> (AllLayouts, Option<String>) {
+    let Some(text) = storage.and_then(|s| s.get_string(key)) else {
+        return (AllLayouts::default(), None);
+    };
+    if let Some(layouts) = storage.and_then(|s| eframe::get_value(s, key)) {
+        return (layouts, None);
+    }
+    let kept = backup_dir
+        .map(|dir| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            dir.join(format!("layouts-unreadable-{secs}.ron"))
+        })
+        .ok_or_else(|| "no data folder".to_owned())
+        .and_then(|path| {
+            std::fs::create_dir_all(path.parent().unwrap_or(&path))
+                .and_then(|()| std::fs::write(&path, &text))
+                .map(|()| path)
+                .map_err(|e| e.to_string())
+        });
+    let copy = match kept {
+        Ok(path) => format!("a copy is in {}", path.display()),
+        Err(e) => format!("they couldn't be copied: {e}"),
+    };
+    (
+        AllLayouts::default(),
+        Some(format!(
+            "The saved layouts can't be read by this loader (saved by a newer one?), so they are left as they were and layout \
+             changes won't be saved until it is updated; {copy}"
+        )),
+    )
+}
+
 pub trait Layout: Clone + Default + PartialEq {
     const KIND: Kind;
     fn name(&self) -> &str;
@@ -2342,6 +2382,56 @@ pub fn picker_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct Storage(HashMap<String, String>);
+
+    impl eframe::Storage for Storage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn unreadable_layouts_are_kept_and_copied() {
+        let dir = std::env::temp_dir().join(format!("volcren-layouts-{}", std::process::id()));
+        let mut storage = Storage::default();
+        let (none, message) = load(Some(&storage), "layouts", Some(&dir));
+        assert!(none.is_empty() && message.is_none());
+
+        let mut saved = AllLayouts::default();
+        saved
+            .entry("Zulrah".into())
+            .or_default()
+            .prayer
+            .push(Prayer {
+                name: "Boost".into(),
+                prayers: vec!["rigour".into()],
+            });
+        eframe::set_value(&mut storage, "layouts", &saved);
+        let (read, message) = load(Some(&storage), "layouts", Some(&dir));
+        assert_eq!(read, saved);
+        assert!(message.is_none());
+
+        // a value of a shape this loader doesn't read, as a newer loader might save
+        let text = storage.0["layouts"].replace("prayers:[", "prayers:5,old:[");
+        assert_ne!(text, storage.0["layouts"]);
+        storage.0.insert("layouts".into(), text.clone());
+        let (read, message) = load(Some(&storage), "layouts", Some(&dir));
+        assert!(read.is_empty());
+        assert!(message.unwrap().contains("left as they were"));
+        let copies: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(std::fs::read_to_string(copies[0].path()).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn item(id: i32, quantity: i32, stackable: bool) -> Item {
         Item::read(id, quantity, format!("item {id}"), stackable)
