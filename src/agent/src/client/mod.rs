@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod focus;
 pub mod graphics;
 pub mod hooks;
 pub mod item_log;

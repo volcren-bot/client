@@ -42,6 +42,7 @@ pub unsafe fn unload(events: &[HANDLE]) {
     }
 
     println!("[Agent]: Unloading.\r\n");
+    super::focus::unhook();
     unhook_wndproc();
     unhook_wgl_swap_buffers();
     super::name::unhook_decoder();

@@ -42,6 +42,10 @@ Under Wine, memory diffs that skip stack regions (`0x7ffffe...`) miss anything o
 - Hash tables are custom chained, not `std::unordered_map`.
 - Short leaf getters (`mov rax, [rcx+X]; ret`) have no `.pdata` entry, so they are missing from `Pe::functions`; find them by their bytes.
 
+### Keyboard focus (`client/focus.rs`)
+
+The client imports `GetFocus`, `GetAsyncKeyState` and `SetWindowsHookExA` from USER32 and drops posted `WM_KEYDOWN`s while `GetFocus` isn't its window (seen 2026-11-07 under Wine on Hyprland: F-keys and typed digits did nothing with another window focused, mouse input worked; with the import answering the render view both worked unfocused). Swallowing `WM_KILLFOCUS` on the render view alone doesn't help, and posting `WM_SETFOCUS` doesn't either. Where in the client the check sits wasn't traced.
+
 ### Menu (`offsets/menu.rs`)
 
 - The menu object (`client + Menu.object`) lives on the main thread's stack, not the heap. Java's `widgetSelected` group (selected spell: verb, name, component id, child, item id, target mask, flag) is a sub-object of it, found by `find_selection` from the native `ug()`/`ut()` (deselect/select) and read with the menu reply.

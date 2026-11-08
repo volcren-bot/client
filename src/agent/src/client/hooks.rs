@@ -97,6 +97,11 @@ static HOOKED_HWND: AtomicIsize = AtomicIsize::new(0);
 static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static WNDPROC_HOOKED: AtomicBool = AtomicBool::new(false);
 
+/// The render view whose window procedure is hooked, 0 before it is.
+pub fn hooked_window() -> isize {
+    HOOKED_HWND.load(Ordering::SeqCst)
+}
+
 fn hooked_wndproc_address() -> isize {
     hooked_wndproc as *const () as isize
 }
@@ -287,6 +292,7 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
             super::script_runs::unhook();
             super::varc_log::unhook();
             super::item_log::unhook();
+            super::focus::unhook();
             unhook_wndproc();
 
             return LRESULT(0);
@@ -1065,6 +1071,7 @@ pub unsafe fn reenable_hooks() {
     super::varc_log::rehook();
     super::item_log::rehook();
     hook_wndproc(HOOKED_HWND.load(Ordering::SeqCst) as u64);
+    super::focus::hook();
 }
 pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {
     let hwnd = lparam as u64;
@@ -1077,6 +1084,7 @@ pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {
         }
 
         hook_wndproc(hwnd);
+        super::focus::hook();
         hook_wgl_swap_buffers();
         find_offsets();
 
