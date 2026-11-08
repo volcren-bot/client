@@ -891,6 +891,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("equipment_layout", "main/equipment_layout.luau"),
     lib_module!("inventory_layout", "main/inventory_layout.luau"),
     lib_module!("prayer_layout", "main/prayer_layout.luau"),
+    lib_module!("consumables", "main/consumables.luau"),
 ];
 
 #[cfg(not(feature = "embedded-lib"))]
@@ -3159,7 +3160,15 @@ Npcs.interact = function(npc, option)
 end
 ChatOptions.contains_continue = function() return stage.message end
 ChatOptions.continue_chat = function() stage.continued += 1 stage.message = false return true end
-Lamp.use = function(skill, item) stage.used = skill assert(item == Randoms.GENIE_LAMP) return true end
+Randoms.LAMP_WAIT_MS = 50
+local function lamp_index()
+    for i, h in stage.inventory do
+        if h.id == Randoms.GENIE_LAMP then return i end
+    end
+    return nil
+end
+Lamp.slot = function() local i = lamp_index() return if i then stage.inventory[i].slot else nil end
+Lamp.use = function(skill) stage.used = skill table.remove(stage.inventory, lamp_index()) return true end
 local function genie(player) return { id = Randoms.GENIE, index = 1, name = 'Genie', interacting_player = player } end
 "#;
 
@@ -3883,6 +3892,48 @@ assert(T.use(piece) and calls == 1, 'landed during the pause: no second charge')
 assert(not T.failed_lately(piece))
 "#,
         );
+    }
+
+    #[test]
+    #[cfg(feature = "embedded-lib")]
+    fn consumables_work_out_heals_boosts_drains_and_ranges_from_given_levels() {
+        let (lines, result) = run_lines(
+            "local C = require('consumables')\n\
+             local function at(hp, real)\n\
+               local l = {}\n\
+               for _, s in ipairs({ 'Attack', 'Strength', 'Defence', 'Ranged', 'Magic', 'Prayer', 'Herblore', 'Cooking', 'Fishing' }) do\n\
+                 l[s] = { level = 99, real = 99 }\n\
+               end\n\
+               l.Hitpoints = { level = hp, real = real or 99 }\n\
+               l['Run energy'] = { level = 50, real = 100 }\n\
+               return l\n\
+             end\n\
+             local shark = C.get(385)\n\
+             assert(shark and shark.name == 'Shark' and shark.option == 'Eat' and not shark.combo)\n\
+             assert(C.get(1) == nil and C.result(1, at(50)) == nil)\n\
+             assert(C.result(385, at(50)).Hitpoints.low == 70, 'shark heals 20')\n\
+             assert(C.result(385, at(95)).Hitpoints.high == 99, 'food stops at the real level')\n\
+             assert(C.result(13441, at(99)).Hitpoints.low == 121, 'anglerfish overheals 22 at 99')\n\
+             local brew = C.result(6685, at(99))\n\
+             assert(brew.Hitpoints.low == 115 and brew.Defence.low == 120 and brew.Attack.low == 88, 'saradomin brew')\n\
+             assert(C.result(2450, at(99)).Hitpoints.low == 88, 'zamorak brew takes 12% of current hitpoints')\n\
+             assert(C.result(29149, at(50)).Hitpoints.low == 64, 'graahk heals 8, then 6')\n\
+             local snail = C.result(3369, at(50)).Hitpoints\n\
+             assert(snail.from == 50 and snail.low == 55 and snail.high == 57, 'thin snail heals 5 to 7')\n\
+             local l = at(99)\n\
+             l.Prayer = { level = 0, real = 70 }\n\
+             assert(C.result(3024, l).Prayer.low == 25, 'super restore: 8 + 25% of 70')\n\
+             assert(C.get(3144).combo and C.get(2452).option == 'Drink')\n\
+             local names = {}\n\
+             for _, c in ipairs(C.raising('Hitpoints', 1, at(1))) do names[c.name] = true end\n\
+             assert(names.Shark and names['Saradomin brew'] and not names['Prayer potion'], 'raising hitpoints')\n\
+             local fire = {}\n\
+             for _, c in ipairs(C.with_special('antifire')) do fire[c.name] = c.special[1].ticks end\n\
+             assert(fire['Antifire potion'] == 600 and fire['Extended antifire mix'] == 1200, 'antifire specials')\n\
+             print('ok')",
+        );
+        assert!(result.is_ok(), "{result:?} {lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
     }
 
     #[test]
