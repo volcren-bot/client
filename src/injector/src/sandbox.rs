@@ -837,6 +837,14 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
         "main/interfaces/mainscreen/jewellerybox.luau"
     ),
     lib_module!("lamp", "main/interfaces/mainscreen/lamp.luau"),
+    lib_module!(
+        "surprise_exam",
+        "main/interfaces/mainscreen/surprise_exam.luau"
+    ),
+    lib_module!(
+        "itemretrieval",
+        "main/interfaces/mainscreen/itemretrieval.luau"
+    ),
     lib_module!("occult_altar", "main/occult_altar.luau"),
     lib_module!("randoms", "main/antiban/randoms.luau"),
     lib_module!("scrollbook", "main/interfaces/mainscreen/scrollbook.luau"),
@@ -870,6 +878,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("cs2", "utils/cs2.luau"),
     lib_module!("geometry", "utils/math/geometry.luau"),
     lib_module!("mouse", "utils/input/mouse.luau"),
+    lib_module!("track", "utils/input/track.luau"),
     lib_module!("keyboard", "utils/input/keyboard.luau"),
     lib_module!("ticks", "utils/ticks.luau"),
     lib_module!("stats_report", "utils/stats_report.luau"),

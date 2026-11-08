@@ -37,6 +37,12 @@ pub struct Widget {
     /// the widget's first menu option ("Close", or the port's name on a map marker), read at fixed offsets (build a2636a01); nil when it has none
     #[serde(default)]
     pub action: Option<String>,
+    /// the item it shows (an inventory or bank cell; -1 for none) and how many, read at the fixed `DETAIL_ITEM_ID` offsets: a
+    /// bank placeholder shows quantity 0 while its container slot reads 1
+    #[serde(default = "minus_one")]
+    pub item_id: i32,
+    #[serde(default)]
+    pub item_quantity: i32,
 }
 
 fn minus_one() -> i32 {
@@ -215,6 +221,8 @@ fn widget_at<M: Memory>(
         scroll_width: scroll(layout.scroll_width, 0)?,
         scroll_height: scroll(layout.scroll_width, 4)?,
         action: action_at(tree.memory, component),
+        item_id: tree.memory.i32(component + DETAIL_ITEM_ID).unwrap_or(-1),
+        item_quantity: tree.memory.i32(component + DETAIL_ITEM_ID + 4).unwrap_or(0),
     })
 }
 
@@ -823,6 +831,8 @@ mod tests {
             scroll_width: 0,
             scroll_height: 5104,
             action: None,
+            item_id: -1,
+            item_quantity: 0,
         };
         let scaled = widget.clone().scaled(1402.0 / 807.0);
         assert_eq!(

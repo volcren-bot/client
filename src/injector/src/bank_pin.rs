@@ -670,6 +670,8 @@ mod tests {
                 scroll_width: 0,
                 scroll_height: 0,
                 action: None,
+                item_id: -1,
+                item_quantity: 0,
             }
         }
     }
