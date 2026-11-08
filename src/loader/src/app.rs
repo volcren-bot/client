@@ -257,7 +257,7 @@ impl Run {
         script: Script,
         target: Option<Target>,
         store: Option<StoreRun>,
-        antiban: injector::antiban::Config,
+        settings: &Settings,
     ) -> Self {
         let now = std::time::Instant::now();
         Self {
@@ -268,8 +268,8 @@ impl Run {
             store,
             form: None,
             form_sent: None,
-            antiban_sent: antiban,
-            log: Log::default(),
+            antiban_sent: settings.antiban.clone(),
+            log: Log::new(settings.log_lines),
             xp: Default::default(),
             breaks: Default::default(),
             counters: Default::default(),
@@ -1084,11 +1084,7 @@ struct LogLine {
     tag: Option<usize>,
 }
 
-/// The lines a log tab keeps; older ones are dropped, since the whole output is laid out again whenever a line is added.
-const MAX_LOG_LINES: usize = 2000;
-
 /// One log tab's output; `view` and `text` hold only lines the tag filter lets through and are rebuilt only when it changes.
-#[derive(Default)]
 struct Log {
     lines: Vec<LogLine>,
     tags: Vec<String>,
@@ -1097,9 +1093,31 @@ struct Log {
     text: String,
     /// Bumped whenever `view` changes, so the laid out output is only rebuilt then.
     revision: u64,
+    /// The lines kept (`Settings::log_lines`); older ones are dropped, since the whole output is laid out again whenever a line is added.
+    keep: usize,
 }
 
 impl Log {
+    fn new(keep: usize) -> Self {
+        Self {
+            lines: Vec::new(),
+            tags: Vec::new(),
+            filter: None,
+            view: Vec::new(),
+            text: String::new(),
+            revision: 0,
+            keep,
+        }
+    }
+
+    fn set_keep(&mut self, keep: usize) {
+        self.keep = keep;
+        if self.lines.len() > keep {
+            self.lines.drain(..self.lines.len() - keep);
+            self.rebuild();
+        }
+    }
+
     fn push(&mut self, error: bool, text: String) {
         self.push_tone(if error { Tone::Error } else { Tone::Normal }, text);
     }
@@ -1120,8 +1138,8 @@ impl Log {
         }
         self.lines.push(LogLine { tone, text, tag });
         // dropped a quarter at a time, so the view is rebuilt once every few hundred lines rather than on each
-        if self.lines.len() > MAX_LOG_LINES + MAX_LOG_LINES / 4 {
-            self.lines.drain(..self.lines.len() - MAX_LOG_LINES);
+        if self.lines.len() > self.keep + self.keep / 4 {
+            self.lines.drain(..self.lines.len() - self.keep);
             self.rebuild();
         }
     }
@@ -1209,7 +1227,7 @@ impl Log {
         // the revision keeps counting, so a job laid out before the clear can't pass for the new output
         *self = Self {
             revision: self.revision + 1,
-            ..Self::default()
+            ..Self::new(self.keep)
         };
     }
 
@@ -1223,6 +1241,44 @@ fn line_tag(text: &str) -> Option<&str> {
     let rest = text.strip_prefix('[')?;
     let end = rest.find(']')?;
     (end > 0 && end <= 32 && !rest[..end].contains('[')).then(|| &rest[..end])
+}
+
+/// The fastest a dragged selection scrolls the output, in points a second.
+const SELECTION_SCROLL_MAX: f32 = 2400.0;
+/// How far past the output's edge a dragged selection reaches `SELECTION_SCROLL_MAX`, when the window has that much room.
+const SELECTION_SCROLL_RAMP: f32 = 200.0;
+
+/// While a text selection is dragged above or below the scroll area, scrolls that way (`selection_scroll_speed`).
+fn scroll_selection_past_edge(ui: &egui::Ui, text: &egui::Response) {
+    // egui's TextEdit scrolls to its cursor only when keys move it, never during a drag
+    let Some(pointer) = ui
+        .input(|i| i.pointer.interact_pos())
+        .filter(|_| text.dragged())
+    else {
+        return;
+    };
+    let speed = selection_scroll_speed(
+        pointer.y,
+        ui.clip_rect().y_range(),
+        ui.ctx().viewport_rect().y_range(),
+    );
+    if speed != 0.0 {
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        ui.scroll_with_delta(egui::vec2(0.0, -speed * dt));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Points a second to scroll down (negative: up) for a selection dragged to `pointer`: the share crossed of the room between the output's edge and the window's, since the output sits at the bottom with little room below.
+fn selection_scroll_speed(pointer: f32, visible: egui::Rangef, window: egui::Rangef) -> f32 {
+    let past = pointer - pointer.clamp(visible.min, visible.max);
+    let room = if past < 0.0 {
+        visible.min - window.min
+    } else {
+        window.max - visible.max
+    };
+    let share = (past.abs() / room.clamp(1.0, SELECTION_SCROLL_RAMP)).min(1.0);
+    past.signum() * share * SELECTION_SCROLL_MAX
 }
 
 /// The tabs of the running script's page.
@@ -1368,6 +1424,7 @@ impl LoaderApp {
 
         let (tx, rx) = channel();
         let config = Config::from_env();
+        let loader_log = Log::new(settings.log_lines);
         let gpu = cc.wgpu_render_state.as_ref().map(|state| {
             let info = state.adapter.get_info();
             format!("{} ({:?}, {})", info.name, info.backend, info.driver)
@@ -1447,7 +1504,7 @@ impl LoaderApp {
             asking_items: Vec::new(),
             feedback: feedback::Page::default(),
             gpu,
-            loader_log: Log::default(),
+            loader_log,
             log_job: None,
             tx,
             rx,
@@ -4048,6 +4105,7 @@ impl LoaderApp {
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         // Fields take what is left after the label and the Browse button, down to a usable minimum.
         let field = (ui.available_width() - 190.0).clamp(120.0, 760.0);
+        let mut log_lines_changed = false;
         egui::ScrollArea::both().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
         // A grid cell not in the last column can't grow past its previous frame's width, which kept the fields tiny; `max_col_width` lifts that.
         egui::Grid::new("settings").num_columns(3).max_col_width(field).show(ui, |ui| {
@@ -4073,12 +4131,23 @@ impl LoaderApp {
                 }
                 ui.end_row();
             }
+
+            ui.label("output lines").on_hover_text("How many lines each output tab keeps. A tab lays out all of its lines again whenever one is added, so more lines cost more CPU and memory.");
+            log_lines_changed = ui.add(egui::DragValue::new(&mut self.settings.log_lines).range(backend::LOG_LINES).speed(50.0)).changed();
+            ui.end_row();
         });
         // The entries are saved with the rest of the settings (`save`).
         self.whitelist_page
             .ui(ui, &mut crate::script::write(&self.http_whitelist));
         self.transport_settings_ui(ui);
         });
+        if log_lines_changed {
+            let keep = self.settings.log_lines;
+            self.loader_log.set_keep(keep);
+            for run in &mut self.runs {
+                run.log.set_keep(keep);
+            }
+        }
     }
 
     fn transport_settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -5602,7 +5671,7 @@ impl LoaderApp {
                     process,
                     Some(target),
                     Some(store),
-                    self.settings.antiban.clone(),
+                    &self.settings,
                 );
                 if let Some(warning) = &prepared.warning {
                     run.info(format!("Warning: {warning}"));
@@ -5652,7 +5721,7 @@ impl LoaderApp {
                     script,
                     target.cloned(),
                     None,
-                    self.settings.antiban.clone(),
+                    &self.settings,
                 );
                 run.info(format!("Running {name}…"));
                 self.add_run(run);
@@ -6686,6 +6755,7 @@ impl LoaderApp {
                     .desired_width(ui.available_width())
                     .layouter(&mut layouter)
                     .show(ui);
+                scroll_selection_past_edge(ui, &output.response);
 
                 let Some(pointer) = ui
                     .input(|i| i.pointer.hover_pos())
@@ -7376,8 +7446,9 @@ mod tests {
 
     #[test]
     fn the_log_keeps_the_newest_lines_and_its_filter() {
-        let mut log = Log::default();
-        for i in 0..MAX_LOG_LINES + MAX_LOG_LINES / 4 + 1 {
+        let keep = *backend::LOG_LINES.start() * 2;
+        let mut log = Log::new(keep);
+        for i in 0..keep + keep / 4 + 1 {
             log.push(
                 false,
                 if i % 2 == 0 {
@@ -7387,23 +7458,96 @@ mod tests {
                 },
             );
         }
-        assert_eq!(log.lines.len(), MAX_LOG_LINES);
+        assert_eq!(log.lines.len(), keep);
         assert_eq!(
             log.lines.last().unwrap().text,
-            format!("[even] {}", MAX_LOG_LINES + MAX_LOG_LINES / 4)
+            format!("[even] {}", keep + keep / 4)
         );
-        assert_eq!(log.text.lines().count(), MAX_LOG_LINES);
+        assert_eq!(log.text.lines().count(), keep);
         log.set_filter(Some(0));
-        assert_eq!(log.view.len(), MAX_LOG_LINES / 2);
+        assert_eq!(log.view.len(), keep / 2);
         assert!(log.text.lines().all(|line| line.starts_with("[even]")));
+        log.set_keep(keep / 2);
+        assert_eq!(log.lines.len(), keep / 2);
+        assert_eq!(log.view.len(), keep / 4);
         let revision = log.revision;
         log.clear();
         assert!(log.revision > revision);
+        assert_eq!(log.keep, keep / 2);
+    }
+
+    #[test]
+    fn a_dragged_selection_scrolls_as_fast_down_as_up_for_the_same_share_of_room() {
+        let visible = egui::Rangef::new(300.0, 590.0);
+        let window = egui::Rangef::new(0.0, 600.0);
+        let speed = |y| selection_scroll_speed(y, visible, window);
+        assert_eq!(speed(400.0), 0.0);
+        assert_eq!(speed(300.0 - SELECTION_SCROLL_RAMP / 2.0), -SELECTION_SCROLL_MAX / 2.0);
+        assert_eq!(speed(595.0), SELECTION_SCROLL_MAX / 2.0);
+        assert_eq!(speed(0.0), -SELECTION_SCROLL_MAX);
+        assert_eq!(speed(600.0), SELECTION_SCROLL_MAX);
+        assert_eq!(speed(700.0), SELECTION_SCROLL_MAX);
+    }
+
+    #[test]
+    fn a_selection_dragged_above_the_output_keeps_scrolling_up() {
+        let ctx = egui::Context::default();
+        let text: String = (0..500)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut time = 0.0;
+        let mut frame = |events: Vec<egui::Event>| {
+            time += 0.016;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                time: Some(time),
+                ..Default::default()
+            };
+            let mut offset = 0.0;
+            let mut output = ctx.run_ui(input, |ui| {
+                ui.add_space(300.0);
+                offset = egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        let mut read_only = text.as_str();
+                        let output = egui::TextEdit::multiline(&mut read_only).show(ui);
+                        scroll_selection_past_edge(ui, &output.response);
+                    })
+                    .state
+                    .offset
+                    .y;
+            });
+            output.textures_delta.clear();
+            offset
+        };
+        for _ in 0..3 {
+            frame(Vec::new());
+        }
+        let inside = egui::pos2(50.0, 400.0);
+        frame(vec![egui::Event::PointerMoved(inside)]);
+        let bottom = frame(vec![egui::Event::PointerButton {
+            pos: inside,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        for y in [380.0, 340.0, 300.0, 250.0] {
+            frame(vec![egui::Event::PointerMoved(egui::pos2(50.0, y))]);
+        }
+        let moved = frame(Vec::new());
+        let held = (0..10).map(|_| frame(Vec::new())).last().unwrap();
+        assert!(moved < bottom && held < moved, "{bottom} {moved} {held}");
     }
 
     #[test]
     fn log_sections_cover_runs_of_one_color() {
-        let mut log = Log::default();
+        let mut log = Log::new(*backend::LOG_LINES.start());
         for (tone, text) in [
             (Tone::Normal, "a"),
             (Tone::Normal, "bb"),

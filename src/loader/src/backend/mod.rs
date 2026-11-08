@@ -25,6 +25,9 @@ pub use wine::{
     varbit, varbits_of, varc, varc_changes, varp, varps, widget, widget_tree,
 };
 
+/// How many lines an output tab may keep: each new line lays out all of them again, which costs about 6 ms and 13 MB per thousand.
+pub const LOG_LINES: std::ops::RangeInclusive<usize> = 2000..=10_000;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -38,6 +41,8 @@ pub struct Settings {
     pub transports: injector::transports::Settings,
     /// Whether a bug report carries the OS, Wine, CPU, memory and GPU besides the versions.
     pub include_system_info: bool,
+    /// How many lines each output tab keeps, within `LOG_LINES`.
+    pub log_lines: usize,
 }
 
 impl Default for Settings {
@@ -53,6 +58,7 @@ impl Default for Settings {
             antiban: Default::default(),
             transports: Default::default(),
             include_system_info: true,
+            log_lines: *LOG_LINES.start(),
         }
     }
 }
@@ -76,9 +82,10 @@ fn detect(exe_dir: &Path, name: &str) -> String {
 }
 
 impl Settings {
-    /// An install always uses its own files, so a path saved by an older install can't pair them with another version. A dev build keeps a saved path while its file exists.
+    /// An install always uses its own files, so a path saved by an older install can't pair them with another version. A dev build keeps a saved path while its file exists. `log_lines` is brought into `LOG_LINES`.
     pub fn fill_missing(&mut self, dev: bool) {
         self.resolve_paths(Self::default(), dev);
+        self.log_lines = self.log_lines.clamp(*LOG_LINES.start(), *LOG_LINES.end());
     }
 
     fn resolve_paths(&mut self, detected: Self, dev: bool) {
