@@ -182,14 +182,26 @@ fn point(x: i32, y: i32) -> LPARAM {
 }
 
 fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Result<(), String> {
+    // letters, digits and space by their own keys (the layout Wine reports can name another key for them); punctuation by the
+    // layout, which the client reads it through too
     let keys = text
-        .encode_utf16()
-        .map(|unit| match unsafe { VkKeyScanW(unit) } {
-            -1 => Err(format!(
-                "{:?} can't be typed with this keyboard layout.",
-                char::from_u32(unit as u32).unwrap_or('?')
-            )),
-            key => Ok(key as u16),
+        .chars()
+        .map(|c| {
+            if let Some((vk, shift)) = crate::us_keys::us_key(c) {
+                return Ok(vk as u16 | if shift { 1 << 8 } else { 0 });
+            }
+            let mut units = [0u16; 2];
+            match c.encode_utf16(&mut units) {
+                // a keypad key isn't taken as text by the client
+                [unit] => match unsafe { VkKeyScanW(*unit) } {
+                    -1 => Err(format!("{c:?} can't be typed with this keyboard layout.")),
+                    key if (0x60..=0x6f).contains(&(key as u16 & 0xff)) => {
+                        Err(format!("{c:?} is on the keypad in this keyboard layout."))
+                    }
+                    key => Ok(key as u16),
+                },
+                _ => Err(format!("{c:?} can't be typed with this keyboard layout.")),
+            }
         })
         .collect::<Result<Vec<u16>, String>>()?;
 
