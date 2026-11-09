@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     OnceLock,
@@ -13,21 +12,20 @@ use ipc::{
 };
 
 use super::{
+    detour::function,
     offsets::{Menu, MenuClick, MenuLayout, Selection},
     own::{on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
 };
 
 const SEARCH: u64 = 0x2000;
 const MAX_ENTRIES: u64 = 500;
 const EXAMINE_PRIORITY: i32 = 0x7fff_fffe;
-/// A row of the open menu: its entry list, the entry's index in it, and the rows of the submenu it opens.
 const ROW_SIZE: u64 = 24;
 const ROW_INDEX: u64 = 8;
 
 static MENU: OnceLock<(u64, Menu)> = OnceLock::new();
 static VECTOR: AtomicU32 = AtomicU32::new(0);
-/// Where an entry list keeps its entries vector; the menu's own list is a sub-object of the menu object.
 static LIST_ENTRIES: AtomicU32 = AtomicU32::new(u32::MAX);
 static CLICK: OnceLock<MenuClick> = OnceLock::new();
 static MINIMENU: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -47,7 +45,6 @@ pub fn set_selection(rule: Selection) {
     let _ = SELECTION.set(rule);
 }
 
-/// The menu object's field that is non-null while the menu is open.
 pub fn set_menu_open(offset: u32) {
     let _ = OPEN.set(offset);
 }
@@ -56,8 +53,13 @@ pub fn set_menu_layout(rule: MenuLayout) {
     let _ = LAYOUT_RULE.set(rule);
 }
 
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
+fn menu_object(memory: &impl Memory) -> Option<(u64, &'static Menu, u64)> {
+    let (module_base, rule) = MENU.get()?;
+    let client = read::client(memory, LAYOUT.get()?)?;
+    let object = memory
+        .ptr(client + rule.object as u64)
+        .filter(|&o| o != 0)?;
+    Some((*module_base, rule, object))
 }
 
 fn entries_vector(memory: &impl Memory, object: u64, vtable: u64, size: u64) -> Option<u64> {
@@ -145,11 +147,7 @@ fn minimenu(memory: &impl Memory, object: u64, vtable: u64) -> Option<u64> {
 fn read_click(memory: &impl Memory) -> Option<(MenuEntryInfo, i32, i32, i32)> {
     let (module_base, rule) = MENU.get()?;
     let click = CLICK.get()?;
-    let client = read::client(memory, LAYOUT.get()?)?;
-    let object = memory
-        .ptr(client + rule.object as u64)
-        .filter(|&o| o != 0)?;
-    let minimenu = minimenu(memory, object, module_base + click.minimenu_vtable as u64)?;
+    let (_, minimenu) = open_minimenu(memory)?;
     let entry = minimenu + click.entry as u64;
     if memory.u64(entry)? != module_base + rule.entry_vtable as u64 {
         return None;
@@ -163,19 +161,14 @@ fn read_click(memory: &impl Memory) -> Option<(MenuEntryInfo, i32, i32, i32)> {
     ))
 }
 
-/// Whether the choose-option menu is open, from the menu object's open field.
 fn read_open(memory: &impl Memory) -> Option<bool> {
-    let (_, rule) = MENU.get()?;
     let offset = *OPEN.get()?;
-    let client = read::client(memory, LAYOUT.get()?)?;
-    let object = memory
-        .ptr(client + rule.object as u64)
-        .filter(|&o| o != 0)?;
+    let (_, _, object) = menu_object(memory)?;
     Some(memory.u64(object + offset as u64)? != 0)
 }
 
-/// What the client's layout routine writes: rectangles, heights, scroll offset and fields the agent doesn't use.
 #[repr(C)]
+#[derive(Default)]
 struct LayoutOut {
     menu: [i32; 4],
     header: [i32; 4],
@@ -189,13 +182,11 @@ struct LayoutOut {
 
 const _: () = assert!(std::mem::size_of::<LayoutOut>() == 0x68);
 
-/// Lays out the menu (empty path) or a submenu with the client's own routine; must run on the main thread.
 fn read_geometry(minimenu: u64, path: &[u64]) -> Option<MenuGeometry> {
     let (module_base, _) = MENU.get()?;
     let layout = LAYOUT_RULE.get()?;
     let function: unsafe extern "C" fn(u64, *mut LayoutOut, *const [u64; 3]) -> *mut LayoutOut =
-        unsafe { std::mem::transmute(module_base + layout.function as u64) };
-    // a std::vector of row indices; an empty one (begin == end, like the client's own) is the menu
+        unsafe { function(module_base + layout.function as u64) };
     let empty = 0u64;
     let begin = if path.is_empty() {
         &empty as *const u64 as u64
@@ -204,16 +195,7 @@ fn read_geometry(minimenu: u64, path: &[u64]) -> Option<MenuGeometry> {
     };
     let end = begin + 8 * path.len() as u64;
     let vector = [begin, end, end];
-    let mut out = LayoutOut {
-        menu: [0; 4],
-        header: [0; 4],
-        rows: [0; 4],
-        header_height: 0,
-        row_height: 0,
-        rows_total: 0,
-        scroll: 0,
-        rest: [0; 10],
-    };
+    let mut out = LayoutOut::default();
     unsafe { function(minimenu + layout.view as u64, &mut out, &vector) };
     let [x, y, width, height] = out.menu;
     let [rows_x, rows_y, rows_width, rows_height] = out.rows;
@@ -233,14 +215,9 @@ fn read_geometry(minimenu: u64, path: &[u64]) -> Option<MenuGeometry> {
     })
 }
 
-/// The component waiting for a target as an entry, plus whether one is selected at all.
 fn read_selection(memory: &impl Memory) -> Option<(MenuEntryInfo, bool)> {
-    let (_, rule) = MENU.get()?;
     let selection = SELECTION.get()?;
-    let client = read::client(memory, LAYOUT.get()?)?;
-    let object = memory
-        .ptr(client + rule.object as u64)
-        .filter(|&o| o != 0)?;
+    let (_, _, object) = menu_object(memory)?;
     let s = object + selection.offset as u64;
     let mut info = MenuEntryInfo::default();
     string(memory, s + selection.verb as u64, &mut info.option);
@@ -255,13 +232,8 @@ fn read_selection(memory: &impl Memory) -> Option<(MenuEntryInfo, bool)> {
     Some((info, byte[0] != 0))
 }
 
-/// The menu's entries in the order the client keeps them.
 fn read_raw_entries(memory: &impl Memory) -> Option<Vec<MenuEntryInfo>> {
-    let (module_base, rule) = MENU.get()?;
-    let client = read::client(memory, LAYOUT.get()?)?;
-    let object = memory
-        .ptr(client + rule.object as u64)
-        .filter(|&o| o != 0)?;
+    let (module_base, rule, object) = menu_object(memory)?;
     let size = rule.entry_size as u64;
     let vector = entries_vector(memory, object, module_base + rule.entry_vtable as u64, size)?;
     let (begin, end) = (
@@ -276,7 +248,6 @@ fn read_raw_entries(memory: &impl Memory) -> Option<Vec<MenuEntryInfo>> {
         .collect()
 }
 
-/// The entries top to bottom as a hover shows them (the first is what a left click does).
 fn sorted(entries: Vec<MenuEntryInfo>) -> Vec<MenuEntryInfo> {
     let mut entries: Vec<_> = entries.into_iter().enumerate().collect();
     entries.sort_by(|(ia, a), (ib, b)| {
@@ -294,28 +265,21 @@ fn sorted(entries: Vec<MenuEntryInfo>) -> Vec<MenuEntryInfo> {
     entries.into_iter().map(|(_, e)| e).collect()
 }
 
-/// The open minimenu, from the menu object.
 fn open_minimenu(memory: &impl Memory) -> Option<(u64, u64)> {
-    let (module_base, rule) = MENU.get()?;
     let click = CLICK.get()?;
-    let client = read::client(memory, LAYOUT.get()?)?;
-    let object = memory
-        .ptr(client + rule.object as u64)
-        .filter(|&o| o != 0)?;
+    let (module_base, _, object) = menu_object(memory)?;
     Some((
         object,
         minimenu(memory, object, module_base + click.minimenu_vtable as u64)?,
     ))
 }
 
-/// A `std::vector`'s (begin, count) for elements of `size` bytes, if it looks sane.
 fn vector(memory: &impl Memory, at: u64, size: u64, max: u64) -> Option<(u64, u64)> {
     let (begin, end) = (memory.u64(at)?, memory.u64(at + 8)?);
     (end >= begin && (end - begin) % size == 0 && (end - begin) / size <= max)
         .then_some((begin, (end - begin) / size))
 }
 
-/// The entries of a menu level's rows, top to bottom; hidden entries have no row.
 fn read_rows(memory: &impl Memory, object: u64, rows: u64, max: u64) -> Option<Vec<MenuEntryInfo>> {
     let (module_base, rule) = MENU.get()?;
     let layout = LAYOUT_RULE.get()?;
@@ -329,7 +293,6 @@ fn read_rows(memory: &impl Memory, object: u64, rows: u64, max: u64) -> Option<V
             let entries = if known != u32::MAX {
                 known as u64
             } else {
-                // the first list seen is the menu's own, inside the menu object before its entries
                 let vector = VECTOR.load(Ordering::Relaxed) as u64;
                 let offset = list
                     .checked_sub(object)
@@ -350,7 +313,6 @@ fn read_rows(memory: &impl Memory, object: u64, rows: u64, max: u64) -> Option<V
         .collect()
 }
 
-/// The rows the open submenus are opened from, parents first, then the open row (-1 for none).
 fn open_path(memory: &impl Memory, minimenu: u64) -> Option<Vec<u64>> {
     let layout = LAYOUT_RULE.get()?;
     let (begin, count) = vector(
@@ -370,7 +332,6 @@ fn open_path(memory: &impl Memory, minimenu: u64) -> Option<Vec<u64>> {
     Some(path)
 }
 
-/// The open submenus, the one opened from the menu first; stops at a row that opens none, like the client.
 fn read_submenus(
     memory: &OwnMemory,
     object: u64,
@@ -406,17 +367,15 @@ fn read_submenus(
 }
 
 pub fn on_request() {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let Some(sequence) = shared.read_menu_request() else {
         return;
     };
     let other_thread = on_other_thread();
-    let raw = if other_thread {
-        None
-    } else {
-        read_raw_entries(&OwnMemory)
-    };
+    let raw = (!other_thread)
+        .then(|| read_raw_entries(&OwnMemory))
+        .flatten();
     let (click, selection, open) = match raw {
         Some(_) => (
             read_click(&OwnMemory),
@@ -425,12 +384,9 @@ pub fn on_request() {
         ),
         None => (None, None, None),
     };
-    let minimenu = if open == Some(true) {
-        open_minimenu(&OwnMemory)
-    } else {
-        None
-    };
-    // an open menu is reported as drawn; otherwise as a hover would show it
+    let minimenu = (open == Some(true))
+        .then(|| open_minimenu(&OwnMemory))
+        .flatten();
     let entries = raw.map(|raw| match minimenu {
         Some((object, minimenu)) => LAYOUT_RULE
             .get()
@@ -445,13 +401,11 @@ pub fn on_request() {
             .unwrap_or_else(|| sorted(raw)),
         None => sorted(raw),
     });
-    // the client only lays the menu out while it's open, so the agent doesn't either
     let geometry = minimenu.and_then(|(_, minimenu)| read_geometry(minimenu, &[]));
     let submenus = match (minimenu, geometry) {
         (Some((object, minimenu)), Some(_)) => read_submenus(&OwnMemory, object, minimenu),
         _ => Vec::new(),
     };
-    // filled in place: with MENU_ENTRIES entries the reply doesn't belong on the window procedure's stack
     shared.write_menu_reply_with(|reply| {
         reply.sequence = sequence;
         reply.status = match &entries {

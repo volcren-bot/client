@@ -1,19 +1,14 @@
-use super::{model::whole_function, *};
+use super::*;
 
-/// The spot animations placed on tiles: a list in the world view and the object fields, from the constructor and the code that appends one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpotAnims {
-    /// the list in the world view: a circular list whose head is the sentinel node (next, previous, size)
     pub list: u32,
-    /// RVA of the client cycle the start cycle counts in (50 per second)
     pub cycle: u32,
     pub start_cycle: u32,
     pub level: u32,
-    /// local fine x, y and z (height above the ground, as the packet handler works it out)
     pub x: u32,
     pub y: u32,
     pub z: u32,
-    /// the spot animation id
     pub id: u32,
 }
 
@@ -27,7 +22,6 @@ struct Fields {
     id: u32,
 }
 
-// The list sits in a world view, a few hundred bytes in; the displacements below that are shared pointer fields.
 const LIST_RANGE: std::ops::Range<u64> = 0x100..0x1000;
 
 fn is_store(i: &Instruction, this: Register) -> bool {
@@ -48,7 +42,6 @@ fn stack_load(i: &Instruction) -> Option<u32> {
         .then(|| i.memory_displacement64() as u32)
 }
 
-// The constructor `(this, world view, id in r8d, level in r9d, then x, y, z, delay, cycle on the stack)` looks up the id and stores the parameters.
 fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
     let this = instrs
         .iter()
@@ -61,8 +54,7 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
         })?
         .op0_register();
     let init = instrs.windows(5).position(|w| {
-        w[0].mnemonic() == Mnemonic::Call
-            && w[0].op0_kind() == OpKind::NearBranch64
+        call_target(&w[0]).is_some()
             && w[1..4]
                 .iter()
                 .any(|i| load_from(i, Register::RAX) == Some(8))
@@ -90,7 +82,6 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
     let id = store_of(id_register)?;
     let level = store_of(Register::R9D)?;
 
-    // `add edx, [rsp + delay]` (the start cycle is the delay plus the cycle), stored a few instructions later
     let start_cycle = instrs.iter().enumerate().find_map(|(at, add)| {
         if !(add.mnemonic() == Mnemonic::Add
             && add.op0_register() == Register::EDX
@@ -105,7 +96,6 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
             .map(|i| i.memory_displacement64() as u32)
     })?;
 
-    // `mov eax, [rsp + n]; mov [this + field], eax` for x, y and z, in stack order
     let mut stack: Vec<(u32, u32)> = instrs
         .windows(2)
         .filter_map(|w| {
@@ -128,26 +118,6 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
     })
 }
 
-// Calls and tail jumps to `target`.
-fn jumps_to(pe: &Pe, target: u32) -> Vec<u32> {
-    let mut found = Vec::new();
-    for section in &pe.code {
-        let data = &pe.image[section.rva..section.rva + section.size];
-        for (offset, window) in data.windows(5).enumerate() {
-            if window[0] == 0xe9
-                && (section.rva + offset) as i64
-                    + 5
-                    + i32::from_le_bytes(window[1..5].try_into().unwrap()) as i64
-                    == target as i64
-            {
-                found.push((section.rva + offset) as u32);
-            }
-        }
-    }
-    found
-}
-
-// From a call that builds the object: the list offset in the world view and the client cycle, the last stack argument.
 fn creation_site(instrs: &[Instruction], call: usize) -> Option<(u32, u32)> {
     let before = &instrs[call.saturating_sub(40)..call];
     let last = before
@@ -205,13 +175,11 @@ pub fn find_spot_anims(pe: &Pe) -> Result<SpotAnims, ScanError> {
     }
     let (constructor, fields) = one(constructors)?;
 
-    // `std::make_shared` reaches the constructor through a thunk; the packet handler calls it directly or through a wrapper.
-    let thunks = jumps_to(pe, constructor);
     let calls = direct_calls(pe);
     let mut sites = Vec::new();
-    for thunk in thunks
-        .iter()
-        .filter_map(|&at| pe.function_containing(at))
+    for thunk in direct_jumps(pe)
+        .filter(|&(_, target)| target == constructor)
+        .filter_map(|(at, _)| pe.function_containing(at))
         .map(|(begin, _)| begin)
     {
         for &(site, _) in calls.iter().filter(|&&(_, target)| target == thunk) {
@@ -232,15 +200,8 @@ pub fn find_spot_anims(pe: &Pe) -> Result<SpotAnims, ScanError> {
     }
     let mut found = Vec::new();
     for site in sites {
-        let Some((begin, end)) = pe.function_containing(site) else {
-            continue;
-        };
-        let instrs = whole_function(pe, begin, end - begin);
-        let Some(call) = instrs.iter().position(|i| i.ip() == site as u64) else {
-            continue;
-        };
-        if let Some((list, cycle)) = creation_site(&instrs, call) {
-            found.push((list, cycle));
+        if let Some((instrs, call)) = site_function(pe, site) {
+            found.extend(creation_site(&instrs, call));
         }
     }
     let (list, cycle) = one(found)?;

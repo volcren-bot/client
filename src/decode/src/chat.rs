@@ -7,7 +7,6 @@ const MAX_BUCKETS: u64 = 1 << 16;
 const MAX_NODES: usize = 1 << 14;
 const CYCLE_MS: i64 = 20;
 
-/// A chat history message: `age` and `time` in ms, `time_utc` and `time_local` the client's "HH:MM" stamps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub uid: i32,
@@ -54,7 +53,6 @@ fn message(
     })
 }
 
-/// Every message the client keeps, oldest first; one freed while read is left out.
 pub fn messages(memory: &impl Memory, layout: &Layout, now: i64) -> Option<Vec<ChatMessage>> {
     let c = &layout.chat;
     let table = layout.module_base + c.messages as u64;
@@ -127,7 +125,6 @@ mod tests {
         m.put_i32(0x10_2000, 1000);
         m.put_u64(table + TABLE_BUCKETS, 0x50_0000);
         m.put_u64(table + TABLE_COUNT, 2);
-        // bucket 0: uid 4 -> uid 2, bucket 1: empty, sentinel after the buckets
         m.put_u64(0x50_0000, 0x60_0000);
         m.put_u64(0x50_0008, 0);
         m.put_u64(0x50_0010, 0x6f_0000);

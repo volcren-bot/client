@@ -1,22 +1,20 @@
-use std::sync::Arc;
-use std::sync::{
-    atomic::{AtomicI32, Ordering},
-    OnceLock,
-};
+use std::sync::OnceLock;
 
 use ipc::{
     read::{self, Memory},
     state::{
         game_state, model_status, model_target, project_status, ModelReply, ModelRequest,
-        MODEL_FACES, MODEL_HULL,
+        MODEL_HULL,
     },
 };
 
 use super::{
-    offsets::{ActorOrientation, ModelFaces, ModelVertices, NpcModel, TypeModels},
+    detour::function,
+    items::release,
+    offsets::{u16_at, u32_at, ActorOrientation, ModelFaces, ModelVertices, NpcModel, TypeModels},
     own::{on_other_thread, OwnMemory, LAYOUT},
     projection::Scene,
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
 };
 
 type GetModel = unsafe extern "system" fn(u64, *mut [u64; 2], i32) -> *mut [u64; 2];
@@ -35,14 +33,11 @@ struct Rules {
 static RULES: OnceLock<Rules> = OnceLock::new();
 static TYPES: OnceLock<TypeModels> = OnceLock::new();
 
-// `(out, id)`: a definition as a {control, object} pair
 type Lookup = unsafe extern "system" fn(*mut [u64; 2], i32) -> *mut [u64; 2];
-// `NpcType::getModel(npc, out, seq, frame, seq2, frame2, overrides)`
 type NpcGetModel =
     unsafe extern "system" fn(u64, *mut [u64; 2], u64, i32, u64, i32, u64) -> *mut [u64; 2];
 type IsSkeletal = unsafe extern "system" fn(u64) -> u8;
 
-// NPC and animation ids the definition lookups are asked about; any other gets a default definition
 const MAX_TYPE_ID: i32 = 0x10000;
 
 pub fn set_type_models(types: TypeModels) {
@@ -57,26 +52,19 @@ const BOUNDING_BOX_MARGIN: i32 = 8;
 const ANGLE_STEP: f64 = 0.0030679615;
 
 fn section(image: &[u8], name: &[u8]) -> Option<std::ops::Range<usize>> {
-    let u16_at = |at: usize| {
-        image
-            .get(at..at + 2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-    };
-    let u32_at = |at: usize| {
-        image
-            .get(at..at + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    let nt = u32_at(0x3c)? as usize;
-    let count = u16_at(nt + 6)? as usize;
-    let table = nt + 24 + u16_at(nt + 20)? as usize;
+    let nt = u32_at(image, 0x3c)? as usize;
+    let count = u16_at(image, nt + 6)? as usize;
+    let table = nt + 24 + u16_at(image, nt + 20)? as usize;
     (0..count).find_map(|i| {
         let header = table + i * 40;
         let section_name = image.get(header..header + 8)?;
         if !section_name.starts_with(name) {
             return None;
         }
-        let (size, rva) = (u32_at(header + 8)? as usize, u32_at(header + 12)? as usize);
+        let (size, rva) = (
+            u32_at(image, header + 8)? as usize,
+            u32_at(image, header + 12)? as usize,
+        );
         Some(rva..(rva + size).min(image.len()) / 8 * 8)
     })
 }
@@ -130,29 +118,6 @@ pub unsafe fn set_npc_model(
         faces,
         orientation,
     });
-}
-
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
-}
-
-unsafe fn release(control: u64) {
-    if control == 0 {
-        return;
-    }
-    let vtable = *(control as *const u64);
-    let uses = &*((control + 8) as *const AtomicI32);
-    if uses.fetch_sub(1, Ordering::AcqRel) == 1 {
-        let destroy: unsafe extern "system" fn(u64) =
-            std::mem::transmute(*((vtable + 8) as *const u64));
-        destroy(control);
-        let weaks = &*((control + 0xc) as *const AtomicI32);
-        if weaks.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let delete: unsafe extern "system" fn(u64) =
-                std::mem::transmute(*((vtable + 16) as *const u64));
-            delete(control);
-        }
-    }
 }
 
 fn sin_cos(orientation: i32) -> (i32, i32) {
@@ -227,19 +192,22 @@ fn thin(hull: Vec<[f32; 2]>, limit: usize) -> Vec<[f32; 2]> {
     (0..limit).map(|i| hull[i * hull.len() / limit]).collect()
 }
 
+fn count(memory: &OwnMemory, at: u64, max: usize) -> Option<usize> {
+    let count = memory.i32(at)?;
+    (count > 0 && count as usize <= max).then_some(count as usize)
+}
+
+fn array(memory: &OwnMemory, model: u64, offset: u32, count: usize) -> Option<Vec<i32>> {
+    memory
+        .ptr(model + offset as u64)
+        .and_then(|p| memory.i32s(p, count))
+}
+
 fn read_vertices(memory: &OwnMemory, model: u64, layout: &ModelVertices) -> Option<Vec<[i32; 3]>> {
-    let count = memory.i32(model + layout.count as u64)?;
-    if count <= 0 || count as usize > MAX_VERTICES {
-        return None;
-    }
-    let axis = |offset: u32| {
-        memory
-            .ptr(model + offset as u64)
-            .filter(|&p| p != 0)
-            .and_then(|p| memory.i32s(p, count as usize))
-    };
-    let (xs, ys, zs) = (axis(layout.x)?, axis(layout.y)?, axis(layout.z)?);
-    Some((0..count as usize).map(|i| [xs[i], ys[i], zs[i]]).collect())
+    let count = count(memory, model + layout.count as u64, MAX_VERTICES)?;
+    let field = |offset| array(memory, model, offset, count);
+    let (xs, ys, zs) = (field(layout.x)?, field(layout.y)?, field(layout.z)?);
+    Some((0..count).map(|i| [xs[i], ys[i], zs[i]]).collect())
 }
 
 fn read_faces(
@@ -248,20 +216,12 @@ fn read_faces(
     layout: &ModelFaces,
     vertex_count: usize,
 ) -> Option<Vec<[usize; 3]>> {
-    let count = memory.i32(model + layout.count as u64)?;
-    if count <= 0 || count as usize > MAX_FACES {
-        return None;
-    }
-    let array = |offset: u32| {
-        memory
-            .ptr(model + offset as u64)
-            .filter(|&p| p != 0)
-            .and_then(|p| memory.i32s(p, count as usize))
-    };
-    let (a, b, c) = (array(layout.a)?, array(layout.b)?, array(layout.c)?);
-    let colors = array(layout.color);
+    let count = count(memory, model + layout.count as u64, MAX_FACES)?;
+    let field = |offset| array(memory, model, offset, count);
+    let (a, b, c) = (field(layout.a)?, field(layout.b)?, field(layout.c)?);
+    let colors = field(layout.color);
     Some(
-        (0..count as usize)
+        (0..count)
             .filter(|&i| {
                 colors
                     .as_ref()
@@ -317,15 +277,11 @@ fn project(scene: &Scene, rules: &Rules, model: u64, at: &Placement) -> Option<P
         .iter()
         .map(|v| scene.project(x + v[0], y + v[2], height + v[1]))
         .collect();
-    // box-picked models send their faces too: any point on them is inside the box
-    let mut faces = Vec::new();
-    for face in read_faces(&memory, model, &rules.faces, vertices.len()).unwrap_or_default() {
-        let (Some(a), Some(b), Some(c)) = (screen[face[0]], screen[face[1]], screen[face[2]])
-        else {
-            continue;
-        };
-        faces.push([a, b, c]);
-    }
+    let faces = read_faces(&memory, model, &rules.faces, vertices.len())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|[a, b, c]| Some([screen[a]?, screen[b]?, screen[c]?]))
+        .collect();
     Some(Projected {
         bounding_box,
         corners,
@@ -355,23 +311,26 @@ fn write(reply: &mut ModelReply, models: &[Projected], orientation: i32) {
     );
     reply.hull_count = hull.len() as u32;
     reply.hull[..hull.len()].copy_from_slice(&hull);
-    let mut count = 0;
-    for face in models.iter().flat_map(|m| m.faces.iter()) {
-        if count < MODEL_FACES {
-            reply.faces[count] = *face;
-        }
-        count += 1;
+    let faces = models.iter().flat_map(|m| m.faces.iter());
+    for (slot, face) in reply.faces.iter_mut().zip(faces) {
+        *slot = *face;
     }
-    reply.face_count = count as u32;
+    reply.face_count = models.iter().map(|m| m.faces.len() as u32).sum();
     reply.vertex_count = models.iter().map(|m| m.vertex_count as u32).sum();
 }
 
-fn scene_status(status: i32) -> i32 {
-    match status {
+type Status = Result<(), i32>;
+
+fn scene() -> Result<Scene, i32> {
+    Scene::current().map_err(|status| match status {
         project_status::NOT_IN_GAME => model_status::NOT_IN_GAME,
         project_status::OTHER_THREAD => model_status::OTHER_THREAD,
         _ => model_status::NOT_FOUND,
-    }
+    })
+}
+
+fn rules() -> Result<&'static Rules, i32> {
+    RULES.get().ok_or(model_status::NOT_FOUND)
 }
 
 struct Built {
@@ -382,7 +341,7 @@ struct Built {
 
 unsafe fn build(rules: &Rules, renderable: u64) -> Option<Built> {
     let memory = OwnMemory;
-    let vtable = memory.ptr(renderable).filter(|&v| v != 0)?;
+    let vtable = memory.ptr(renderable)?;
     let bounds = memory
         .u64(vtable + rules.vertices.bounds_slot as u64)
         .unwrap_or(0);
@@ -398,24 +357,17 @@ unsafe fn build(rules: &Rules, renderable: u64) -> Option<Built> {
             lift: 0,
         });
     }
-    let get_model: GetModel =
-        std::mem::transmute(memory.ptr(vtable).filter(|&f| f != 0)? as *const ());
+    let get_model: GetModel = function(memory.ptr(vtable)?);
     let mut model = [0u64; 2];
     get_model(renderable, &mut model, 0);
     if model[1] == 0 {
         release(model[0]);
         return None;
     }
-    let lift = match rules.animation_slot {
-        Some(slot) => match memory.ptr(vtable + slot as u64).filter(|&f| f != 0) {
-            Some(f) => {
-                let height: AnimationHeight = std::mem::transmute(f as *const ());
-                height(renderable)
-            }
-            None => 0,
-        },
-        None => 0,
-    };
+    let lift = rules
+        .animation_slot
+        .and_then(|slot| memory.ptr(vtable + slot as u64))
+        .map_or(0, |height| function::<AnimationHeight>(height)(renderable));
     Some(Built {
         model: model[1],
         control: model[0],
@@ -423,14 +375,12 @@ unsafe fn build(rules: &Rules, renderable: u64) -> Option<Built> {
     })
 }
 
-fn project_renderables(reply: &mut ModelReply, renderables: &[(u64, Placement)]) -> i32 {
-    let Some(rules) = RULES.get() else {
-        return model_status::NOT_FOUND;
-    };
-    let scene = match Scene::current() {
-        Ok(scene) => scene,
-        Err(status) => return scene_status(status),
-    };
+fn project_renderables(
+    reply: &mut ModelReply,
+    rules: &Rules,
+    scene: &Scene,
+    renderables: &[(u64, Placement)],
+) -> Status {
     let mut models = Vec::new();
     for &(renderable, at) in renderables {
         let Some(built) = (unsafe { build(rules, renderable) }) else {
@@ -440,49 +390,41 @@ fn project_renderables(reply: &mut ModelReply, renderables: &[(u64, Placement)])
             height: at.height - built.lift,
             ..at
         };
-        models.extend(project(&scene, rules, built.model, &at));
+        models.extend(project(scene, rules, built.model, &at));
         unsafe { release(built.control) };
     }
     if models.is_empty() {
-        return model_status::NO_MODEL;
+        return Err(model_status::NO_MODEL);
     }
     write(reply, &models, renderables[0].1.orientation);
-    model_status::OK
+    Ok(())
 }
 
-fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> i32 {
+fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> Status {
     let memory = OwnMemory;
-    let Some(layout) = LAYOUT.get() else {
-        return model_status::NOT_FOUND;
-    };
-    let Some(rules) = RULES.get() else {
-        return model_status::NOT_FOUND;
-    };
-    let Some((view, _)) = read::local_player(&memory, layout) else {
-        return model_status::NOT_IN_GAME;
-    };
+    let layout = LAYOUT.get().ok_or(model_status::NOT_FOUND)?;
+    let rules = rules()?;
+    let (view, _) = read::local_player(&memory, layout).ok_or(model_status::NOT_IN_GAME)?;
     let table = if target == model_target::PLAYER {
         layout.player.players
     } else {
         layout.world.npc_table
     };
-    let Some(actor) = read::table_get(&memory, view + table as u64, index) else {
-        return model_status::NO_NPC;
-    };
+    let actor = read::table_get(&memory, view + table as u64, index).ok_or(model_status::NO_NPC)?;
     let local = layout.world.local_x as u64;
     let (Some(x), Some(y), Some(orientation)) = (
         memory.i32(actor + local),
         memory.i32(actor + local + 4),
         memory.i32(actor + rules.orientation.current as u64),
     ) else {
-        return model_status::NO_NPC;
+        return Err(model_status::NO_NPC);
     };
-    let height = match Scene::current() {
-        Ok(scene) => scene.ground(x, y),
-        Err(status) => return scene_status(status),
-    };
+    let scene = scene()?;
+    let height = scene.ground(x, y);
     project_renderables(
         reply,
+        rules,
+        &scene,
         &[(
             actor,
             Placement {
@@ -495,13 +437,11 @@ fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> i32 {
     )
 }
 
-// A definition looked up by id; released when dropped.
 struct Pair([u64; 2]);
 
 impl Pair {
     unsafe fn lookup(rva: u32, id: i32) -> Option<Self> {
-        let rules = RULES.get()?;
-        let lookup: Lookup = std::mem::transmute((rules.module_base + rva as u64) as *const ());
+        let lookup: Lookup = function(RULES.get()?.module_base + rva as u64);
         let mut pair = Pair([0; 2]);
         lookup(&mut pair.0, id);
         (pair.0[1] != 0).then_some(pair)
@@ -518,12 +458,9 @@ impl Drop for Pair {
     }
 }
 
-// The animation's frame count when `frame` is one of its frames. Skeletal animations aren't supported: their frames
-// come another way, and a frame past the end must never reach the client, which indexes the frames without checking.
 unsafe fn checked_frames(types: &TypeModels, rules: &Rules, seq: &Pair, frame: i32) -> Option<u32> {
     let memory = OwnMemory;
-    let skeletal: IsSkeletal =
-        std::mem::transmute((rules.module_base + types.seq_skeletal as u64) as *const ());
+    let skeletal: IsSkeletal = function(rules.module_base + types.seq_skeletal as u64);
     if skeletal(seq.object()) != 0 {
         return None;
     }
@@ -532,39 +469,29 @@ unsafe fn checked_frames(types: &TypeModels, rules: &Rules, seq: &Pair, frame: i
     (count > 0 && frames != 0 && frame >= 0 && frame < count).then_some(count as u32)
 }
 
-fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
-    let (Some(types), Some(rules)) = (TYPES.get(), RULES.get()) else {
-        return model_status::NOT_FOUND;
-    };
+fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {
+    let types = TYPES.get().ok_or(model_status::NOT_FOUND)?;
+    let rules = rules()?;
     if !(0..MAX_TYPE_ID).contains(&request.type_id) {
-        return model_status::NO_NPC;
+        return Err(model_status::NO_NPC);
     }
-    let scene = match Scene::current() {
-        Ok(scene) => scene,
-        Err(status) => return scene_status(status),
-    };
-    let Some(npc) = (unsafe { Pair::lookup(types.npc_lookup, request.type_id) }) else {
-        return model_status::NO_NPC;
-    };
+    let scene = scene()?;
+    let npc =
+        unsafe { Pair::lookup(types.npc_lookup, request.type_id) }.ok_or(model_status::NO_NPC)?;
     let mut frame_count = 0;
     let seq = if request.animation >= 0 {
-        if request.animation >= MAX_TYPE_ID {
-            return model_status::BAD_ANIMATION;
-        }
-        let Some(seq) = (unsafe { Pair::lookup(types.seq_lookup, request.animation) }) else {
-            return model_status::BAD_ANIMATION;
-        };
-        match unsafe { checked_frames(types, rules, &seq, request.frame) } {
-            Some(count) => frame_count = count,
-            None => return model_status::BAD_ANIMATION,
-        }
+        let seq = (request.animation < MAX_TYPE_ID)
+            .then(|| unsafe { Pair::lookup(types.seq_lookup, request.animation) })
+            .flatten()
+            .ok_or(model_status::BAD_ANIMATION)?;
+        frame_count = unsafe { checked_frames(types, rules, &seq, request.frame) }
+            .ok_or(model_status::BAD_ANIMATION)?;
         Some(seq)
     } else {
         None
     };
-    let get_model: NpcGetModel = unsafe {
-        std::mem::transmute((rules.module_base + types.npc_get_model as u64) as *const ())
-    };
+    let get_model: NpcGetModel =
+        unsafe { function(rules.module_base + types.npc_get_model as u64) };
     let mut model = Pair([0; 2]);
     unsafe {
         get_model(
@@ -578,7 +505,7 @@ fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
         )
     };
     if model.object() == 0 {
-        return model_status::NO_MODEL;
+        return Err(model_status::NO_MODEL);
     }
     let (x, y) = (request.fine_x, request.fine_y);
     let at = Placement {
@@ -587,29 +514,29 @@ fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
         height: scene.ground(x, y),
         orientation: request.orientation,
     };
-    let Some(projected) = project(&scene, rules, model.object(), &at) else {
-        return model_status::NO_MODEL;
-    };
+    let projected = project(&scene, rules, model.object(), &at).ok_or(model_status::NO_MODEL)?;
     write(reply, &[projected], request.orientation);
     reply.frame_count = frame_count;
-    model_status::OK
+    Ok(())
 }
 
-fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> i32 {
+fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {
     match super::scene::loc_renderables(
         request.loc_kind as u8,
         request.loc_x,
         request.loc_y,
         request.loc_id,
     ) {
-        Some(renderables) if !renderables.is_empty() => project_renderables(reply, &renderables),
-        Some(_) => model_status::NO_MODEL,
-        None => model_status::NO_NPC,
+        Some(renderables) if !renderables.is_empty() => {
+            project_renderables(reply, rules()?, &scene()?, &renderables)
+        }
+        Some(_) => Err(model_status::NO_MODEL),
+        None => Err(model_status::NO_NPC),
     }
 }
 
 pub fn on_request() {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let Some((sequence, request)) = shared.read_model_request() else {
         return;
@@ -621,23 +548,21 @@ pub fn on_request() {
         reply.hull_count = 0;
         reply.face_count = 0;
         reply.frame_count = 0;
-        reply.status = if RULES.get().is_none() || LAYOUT.get().is_none() {
-            model_status::NOT_FOUND
-        } else if on_other_thread() {
-            model_status::OTHER_THREAD
-        } else if LAYOUT
-            .get()
-            .and_then(|layout| read::current_game_state(&memory, layout))
-            != Some(game_state::LOGGED_IN)
-        {
-            model_status::NOT_IN_GAME
-        } else if request.target == model_target::LOC {
-            loc_request(reply, &request)
-        } else if request.target == model_target::NPC_TYPE {
-            npc_type_request(reply, &request)
-        } else {
-            actor_request(reply, request.target, request.index)
+        let status = match LAYOUT.get().filter(|_| RULES.get().is_some()) {
+            None => Err(model_status::NOT_FOUND),
+            Some(_) if on_other_thread() => Err(model_status::OTHER_THREAD),
+            Some(layout)
+                if read::current_game_state(&memory, layout) != Some(game_state::LOGGED_IN) =>
+            {
+                Err(model_status::NOT_IN_GAME)
+            }
+            _ => match request.target {
+                model_target::LOC => loc_request(reply, &request),
+                model_target::NPC_TYPE => npc_type_request(reply, &request),
+                target => actor_request(reply, target, request.index),
+            },
         };
+        reply.status = status.map_or_else(|status| status, |()| model_status::OK);
     });
 }
 

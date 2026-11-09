@@ -13,12 +13,10 @@ use crate::{
 pub const MAX_VARPS: usize = 8192;
 const MAX_SKILLS: u32 = 64;
 
-/// The world tile a world view's scene starts at.
 pub(crate) fn view_base(memory: &impl Memory, layout: &Layout, view: u64) -> Option<(i32, i32)> {
     i32_pair(memory, view + layout.player.base_x as u64)
 }
 
-/// The player's own world view's plane, not the top one's: they differ on a boat.
 fn view_plane(memory: &impl Memory, layout: &Layout, view: u64) -> Option<i32> {
     layout
         .has(part::PROJECTION)
@@ -38,7 +36,6 @@ fn position(memory: &impl Memory, layout: &Layout, view: u64, player: u64) -> Op
     })
 }
 
-/// The local player's server tile: entry 0 of its path, on its own world view's base.
 pub fn server_tile(memory: &impl Memory, layout: &Layout) -> Option<ServerTile> {
     if !layout.has(part::PLAYER | part::PATH) {
         return None;
@@ -446,7 +443,6 @@ mod tests {
         let mut l = layout();
         let mut m = logged_in();
         let player = 0x21_0000;
-        // the model stands on scene tile (51, 53) while the server already put the player one tile east
         l.found |= part::PATH;
         l.path = PathLayout {
             x: 0x3f0,

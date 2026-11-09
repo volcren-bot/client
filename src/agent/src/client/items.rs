@@ -1,5 +1,7 @@
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicI32, Ordering},
+    OnceLock,
+};
 
 use ipc::{
     read::{self, read_string, Memory},
@@ -7,9 +9,10 @@ use ipc::{
 };
 
 use super::{
+    detour::function,
     offsets::{GameVals, ObjTypeLookup},
     own::{on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
 };
 
 const MAX_ID: i32 = 1 << 20;
@@ -24,8 +27,7 @@ type Release = unsafe extern "system" fn(u64);
 static LOOKUP: OnceLock<(Lookup, ObjTypeLookup)> = OnceLock::new();
 
 pub unsafe fn set_lookup(module_base: u64, rule: ObjTypeLookup) {
-    let function: Lookup = std::mem::transmute((module_base + rule.function as u64) as *const ());
-    let _ = LOOKUP.set((function, rule));
+    let _ = LOOKUP.set((function(module_base + rule.function as u64), rule));
 }
 
 pub(super) unsafe fn release(control: u64) {
@@ -36,19 +38,18 @@ pub(super) unsafe fn release(control: u64) {
     let Some(vtable) = memory.ptr(control) else {
         return;
     };
-    let uses = &*((control + USES) as *const std::sync::atomic::AtomicI32);
-    if uses.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) != 1 {
-        return;
-    }
-    if let Some(dispose) = memory.ptr(vtable + DISPOSE) {
-        std::mem::transmute::<u64, Release>(dispose)(control);
-    }
-    let weaks = &*((control + WEAKS) as *const std::sync::atomic::AtomicI32);
-    if weaks.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) != 1 {
-        return;
-    }
-    if let Some(delete) = memory.ptr(vtable + DELETE) {
-        std::mem::transmute::<u64, Release>(delete)(control);
+    let drop_one = |count: u64, call: u64| {
+        let count = &*((control + count) as *const AtomicI32);
+        if count.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return false;
+        }
+        if let Some(call) = memory.ptr(vtable + call) {
+            function::<Release>(call)(control);
+        }
+        true
+    };
+    if drop_one(USES, DISPOSE) {
+        drop_one(WEAKS, DELETE);
     }
 }
 
@@ -66,37 +67,49 @@ unsafe fn name(lookup: Lookup, rule: &ObjTypeLookup, id: i32) -> Option<String> 
     name
 }
 
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
-}
-
-pub fn on_request() {
-    let Some(mapping) = shared() else { return };
-    let shared = mapping.shared();
-    let Some((sequence, request)) = shared.read_item_name_request() else {
-        return;
-    };
-    let mut status = NamesReply {
+fn names_reply(
+    sequence: u32,
+    ids: &[i32],
+    count: usize,
+    name: Option<impl Fn(i32) -> Option<Vec<u8>>>,
+) -> NamesReply {
+    let mut reply = NamesReply {
         sequence,
         ..NamesReply::default()
     };
-    let count = request.count as usize;
-    status.status = if count > ITEM_NAME_BATCH {
+    reply.status = if count > ITEM_NAME_BATCH {
         item_name_status::TOO_MANY
     } else if on_other_thread() {
         item_name_status::OTHER_THREAD
-    } else if let Some((lookup, rule)) = LOOKUP.get() {
-        status.count = count as u32;
-        for (index, &id) in request.ids[..count].iter().enumerate() {
-            if let Some(name) = unsafe { name(*lookup, rule, id) } {
-                status.set_name(index, name.as_bytes());
+    } else if let Some(name) = name {
+        reply.count = count as u32;
+        for (index, &id) in ids[..count].iter().enumerate() {
+            if let Some(name) = name(id) {
+                reply.set_name(index, &name);
             }
         }
         item_name_status::OK
     } else {
         item_name_status::NOT_FOUND
     };
-    shared.write_item_name_status(&status);
+    reply
+}
+
+pub fn on_request() {
+    let Some(mapping) = mapping() else { return };
+    let shared = mapping.shared();
+    let Some((sequence, request)) = shared.read_item_name_request() else {
+        return;
+    };
+    let lookup = LOOKUP
+        .get()
+        .map(|(lookup, rule)| move |id| unsafe { name(*lookup, rule, id) }.map(String::into_bytes));
+    shared.write_item_name_status(&names_reply(
+        sequence,
+        &request.ids,
+        request.count as usize,
+        lookup,
+    ));
 }
 
 pub(super) type Reader = unsafe extern "system" fn(u64, *mut [u64; 2], i32, i32, u8) -> u64;
@@ -108,8 +121,7 @@ pub(super) fn game_vals() -> Option<&'static (Reader, GameVals)> {
 }
 
 pub unsafe fn set_game_vals(module_base: u64, rule: GameVals) {
-    let reader: Reader = std::mem::transmute((module_base + rule.reader as u64) as *const ());
-    let _ = GAME_VALS.set((reader, rule));
+    let _ = GAME_VALS.set((function(module_base + rule.reader as u64), rule));
 }
 
 pub(super) const BUFFER_LENGTH: u64 = 0x8;
@@ -146,45 +158,27 @@ unsafe fn game_val(reader: Reader, index: u64, kind: u32, id: i32) -> Option<Vec
 }
 
 pub fn on_game_val_request() {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let Some((sequence, request)) = shared.read_game_val_request() else {
         return;
     };
-    let mut status = NamesReply {
-        sequence,
-        ..NamesReply::default()
-    };
-    let count = request.count as usize;
     let memory = OwnMemory;
     let index = LAYOUT
         .get()
         .and_then(|layout| read::client(&memory, layout))
         .zip(GAME_VALS.get())
         .and_then(|(client, (reader, rule))| {
-            Some((
-                *reader,
-                memory
-                    .ptr(client + rule.index as u64)
-                    .filter(|&index| index != 0)?,
-            ))
+            Some((*reader, memory.ptr(client + rule.index as u64)?))
         });
-    status.status = if count > ITEM_NAME_BATCH {
-        item_name_status::TOO_MANY
-    } else if on_other_thread() {
-        item_name_status::OTHER_THREAD
-    } else if let Some((reader, index)) = index {
-        status.count = count as u32;
-        for (i, &id) in request.ids[..count].iter().enumerate() {
-            if let Some(name) = unsafe { game_val(reader, index, request.kind, id) } {
-                status.set_name(i, &name);
-            }
-        }
-        item_name_status::OK
-    } else {
-        item_name_status::NOT_FOUND
-    };
-    shared.write_game_val_status(&status);
+    let read =
+        index.map(|(reader, index)| move |id| unsafe { game_val(reader, index, request.kind, id) });
+    shared.write_game_val_status(&names_reply(
+        sequence,
+        &request.ids,
+        request.count as usize,
+        read,
+    ));
 }
 
 #[cfg(test)]

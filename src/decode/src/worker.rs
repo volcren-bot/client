@@ -1,5 +1,3 @@
-//! The reads the agent's worker answers, plain functions over a `Memory` so the injector can run them too; `serve` encodes results (postcard).
-
 use ipc::state::{
     Layout,
     game_state::{LOGGED_IN, LOGIN_SCREEN, LOGIN_SCREEN_AUTHENTICATOR},
@@ -17,7 +15,6 @@ use crate::{
     world_select::{self, WorldSelect},
 };
 
-/// What `read` finds while logged in, and nothing otherwise.
 fn in_game<M: Memory, T>(
     memory: &M,
     layout: &Layout,
@@ -51,12 +48,10 @@ pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Vec<SpotAnim> {
 
 pub const GROUND_ITEM_PARTS: u64 = part::GROUND_ITEMS | part::PROJECTION | part::PLAYER;
 
-/// Ground items without their names, which the client's item definitions give.
 pub fn ground_items(memory: &impl Memory, layout: &Layout) -> Vec<GroundItem> {
     in_game(memory, layout, world::ground_items)
 }
 
-/// The interface root and the scale its widgets are drawn at; `None` while no interface is up.
 fn interface_root(memory: &impl Memory, layout: &Layout) -> Option<(i32, f32)> {
     let root = state::root_interface(memory, layout, state::current(memory, layout))?;
     Some((root, state::ui_scale(memory, layout).unwrap_or(1.0)))
@@ -78,7 +73,6 @@ pub fn widget_children(
         .map(|children| children.into_iter().map(|w| w.scaled(scale)).collect())
 }
 
-/// Every open interface with its components, read by the injector since the worker's reply buffer is small.
 pub fn widget_tree(memory: &impl Memory, layout: &Layout) -> Option<WidgetTree> {
     let (root, scale) = interface_root(memory, layout)?;
     find_tree(memory, &layout.interfaces, root, scale)
@@ -105,7 +99,6 @@ pub fn varc(memory: &impl Memory, layout: &Layout, id: i32) -> Option<i32> {
     world::varc(memory, &layout.world, id)
 }
 
-/// `now` is the host's clock in ms since the epoch, which the message ages are measured against.
 pub fn chat(memory: &impl Memory, layout: &Layout, now: i64) -> Option<Vec<ChatMessage>> {
     chat::messages(memory, layout, now)
 }
@@ -121,7 +114,6 @@ pub fn world_select(memory: &impl Memory, layout: &Layout) -> Option<WorldSelect
     world_select::world_select(memory, layout, client)
 }
 
-/// What `kind` needs the agent to have found; the worker answers `NOT_FOUND` without it.
 pub fn parts(kind_id: u32) -> Option<u64> {
     Some(match kind_id {
         kind::NPCS | kind::PLAYERS | kind::ITEM_CONTAINER | kind::VARC => part::WORLD,
@@ -142,7 +134,6 @@ fn put<T: Serialize>(value: &T, out: &mut [u8]) -> Result<usize, i32> {
         .map_err(|_| status::TOO_BIG)
 }
 
-/// Runs the read `kind_id` names with `args` and encodes the result into `out`: the length used or a status.
 pub fn serve(
     memory: &impl Memory,
     layout: &Layout,
@@ -209,7 +200,6 @@ mod tests {
             serve(&memory, &layout, 9999, [0; 4], &mut out),
             Err(status::NOT_FOUND)
         );
-        // the agent found no interfaces in a default layout
         assert_eq!(
             serve(&memory, &layout, kind::WIDGET, [1, 2, 0, 0], &mut out),
             Err(status::NOT_FOUND)

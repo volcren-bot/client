@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
     OnceLock,
@@ -11,9 +10,10 @@ use ipc::{
 use retour::GenericDetour;
 
 use super::{
+    detour,
     offsets::ComponentInvalidate,
     own::{note_game_thread, on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
     unload::HookCall,
 };
 
@@ -105,43 +105,27 @@ pub unsafe fn hook(module_base: u64, rule: ComponentInvalidate) {
     if HOOK.get().is_some() {
         return;
     }
-    let target: Invalidate = std::mem::transmute((module_base + rule.function as u64) as *const ());
-    let detour = match GenericDetour::new(target, invalidated) {
-        Ok(detour) => detour,
-        Err(error) => {
-            println!("[Agent]: Failed to hook the component invalidation: {error}.\r\n");
-            return;
-        }
+    let Some(created) = detour::create::<Invalidate>(
+        module_base + rule.function as u64,
+        invalidated,
+        "component invalidation",
+    ) else {
+        return;
     };
-    let _ = HOOK.set((detour, rule));
-    match HOOK.get().unwrap().0.enable() {
-        Ok(()) => println!("[Agent]: Component invalidation hooked.\r\n"),
-        Err(error) => {
-            println!("[Agent]: Failed to enable the component invalidation hook: {error}.\r\n")
-        }
-    }
-}
-
-pub unsafe fn rehook() {
-    if let Some((detour, _)) = HOOK.get() {
-        if !detour.is_enabled() {
-            let _ = detour.enable();
-        }
-    }
+    let (hooked, _) = HOOK.get_or_init(|| (created, rule));
+    detour::enable(
+        hooked,
+        "component invalidation hook",
+        "Component invalidation hooked",
+    );
 }
 
 pub unsafe fn unhook() {
-    let Some((detour, _)) = HOOK.get() else {
-        return;
-    };
-    if detour.is_enabled() {
-        match detour.disable() {
-            Ok(()) => println!("[Agent]: Component invalidation unhooked.\r\n"),
-            Err(error) => {
-                println!("[Agent]: Failed to disable the component invalidation hook: {error}.\r\n")
-            }
-        }
-    }
+    detour::disable(
+        HOOK.get().map(|(detour, _)| detour),
+        "component invalidation hook",
+        Some("Component invalidation unhooked"),
+    );
 }
 
 unsafe extern "system" fn invalidated(client: u64, holder: u64) -> usize {
@@ -164,16 +148,12 @@ unsafe extern "system" fn invalidated(client: u64, holder: u64) -> usize {
     result
 }
 
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
-}
-
 fn report(shared: ipc::state::Shared<'_>, sequence: u32, status: i32) {
     shared.write_total_xp_status(&TotalXpStatus { sequence, status });
 }
 
 pub fn on_request() {
-    let (Some(layout), Some(mapping)) = (LAYOUT.get(), shared()) else {
+    let (Some(layout), Some(mapping)) = (LAYOUT.get(), mapping()) else {
         return;
     };
     let shared = mapping.shared();

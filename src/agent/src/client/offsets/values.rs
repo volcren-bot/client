@@ -73,16 +73,14 @@ pub fn find_item_containers(pe: &Pe) -> Result<ItemContainers, ScanError> {
             getters.extend(container_slot_getter(&decode_at(pe, target, 30)));
         }
     }
-    let ids = one(getters
-        .iter()
-        .filter(|g| g.4)
-        .map(|g| (g.1, g.2, g.3))
-        .collect())?;
-    let quantities = one(getters
-        .iter()
-        .filter(|g| !g.4)
-        .map(|g| (g.1, g.2, g.3))
-        .collect())?;
+    let pick = |miss: bool| {
+        one(getters
+            .iter()
+            .filter(|g| g.4 == miss)
+            .map(|g| (g.1, g.2, g.3))
+            .collect())
+    };
+    let (ids, quantities) = (pick(true)?, pick(false)?);
     if (ids.0, ids.1) != (quantities.0, quantities.1) {
         return Err(ScanError::Ambiguous(2));
     }
@@ -165,29 +163,26 @@ pub struct RunEnergy {
 }
 
 pub fn find_run_energy(pe: &Pe) -> Result<RunEnergy, ScanError> {
+    let extends = |i: &Instruction, mnemonic: Mnemonic| {
+        i.mnemonic() == mnemonic
+            && i.op1_kind() == OpKind::Register
+            && i.op1_register() == Register::AX
+    };
+    let store = |i: &Instruction, reg: Register| {
+        (i.mnemonic() == Mnemonic::Mov
+            && i.op1_kind() == OpKind::Register
+            && i.op1_register() == reg)
+            .then(|| field_operand(i, 0))
+            .flatten()
+    };
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
-        let extends = |i: &Instruction, mnemonic: Mnemonic| {
-            i.mnemonic() == mnemonic
-                && i.op1_kind() == OpKind::Register
-                && i.op1_register() == Register::AX
-        };
+        let instrs = function_instrs(pe, begin, end);
         for (n, instr) in instrs.iter().enumerate() {
             if !extends(instr, Mnemonic::Movzx) {
                 continue;
             }
             let reg = instr.op0_register();
-            let store = |i: &Instruction, reg: Register| {
-                (i.mnemonic() == Mnemonic::Mov
-                    && i.op1_kind() == OpKind::Register
-                    && i.op1_register() == reg)
-                    .then(|| field_operand(i, 0))
-                    .flatten()
-            };
             let Some(energy) = instrs[n + 1..].iter().take(3).find_map(|i| store(i, reg)) else {
                 continue;
             };
@@ -203,15 +198,14 @@ pub fn find_run_energy(pe: &Pe) -> Result<RunEnergy, ScanError> {
                     })?
                 });
             if weight == Some(energy + 4) {
-                found.push(RunEnergy {
-                    energy,
-                    weight: energy + 4,
-                });
+                found.push(energy);
             }
         }
     }
-    one(found.into_iter().map(|r| (r.energy, r.weight)).collect())
-        .map(|(energy, weight)| RunEnergy { energy, weight })
+    one(found).map(|energy| RunEnergy {
+        energy,
+        weight: energy + 4,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,10 +268,7 @@ pub fn find_actor_lists(pe: &Pe) -> Result<ActorLists, ScanError> {
     let npc_count = npc_indices + 8;
     let mut scores: HashMap<u32, usize> = HashMap::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         for (n, i) in instrs.iter().enumerate() {
             let reads_count = matches!(
                 i.mnemonic(),
@@ -292,25 +283,19 @@ pub fn find_actor_lists(pe: &Pe) -> Result<ActorLists, ScanError> {
             if !window.iter().any(|w| w.mnemonic() == Mnemonic::Div) {
                 continue;
             }
-            let qwords: HashSet<u32> = window
-                .iter()
-                .filter(|w| {
-                    w.op0_kind() == OpKind::Register
-                        && w.op0_register().size() == 8
-                        && w.memory_base() == base
-                })
-                .filter_map(|w| object_operand(w, 1))
-                .collect();
-            let dwords: HashSet<u32> = window
-                .iter()
-                .filter(|w| {
-                    w.op0_kind() == OpKind::Register
-                        && w.op0_register().size() == 4
-                        && w.memory_base() == base
-                })
-                .filter_map(|w| object_operand(w, 1))
-                .collect();
-            for &buckets in &qwords {
+            let loads = |size: usize| -> HashSet<u32> {
+                window
+                    .iter()
+                    .filter(|w| {
+                        w.op0_kind() == OpKind::Register
+                            && w.op0_register().size() == size
+                            && w.memory_base() == base
+                    })
+                    .filter_map(|w| object_operand(w, 1))
+                    .collect()
+            };
+            let dwords = loads(4);
+            for buckets in loads(8) {
                 let table = buckets.wrapping_sub(hash_table::BUCKETS as u32);
                 if dwords.contains(&(buckets + 8))
                     && table != npc_indices - 8
@@ -346,7 +331,6 @@ pub struct ActorNames {
     pub npc_animation: u32,
 }
 
-// The NPC actor's animation id, read off a lightning cloud's actor (see `injector npc-words`), not found by a rule; redo if the client changes.
 pub const NPC_ANIMATION: u32 = 0x4d8;
 
 fn npc_name_getter(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
@@ -386,10 +370,7 @@ pub fn find_actor_names(pe: &Pe) -> Result<ActorNames, ScanError> {
     let mut id_reads: HashMap<u32, usize> = HashMap::new();
     let mut player_names = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         for (n, load) in instrs.iter().enumerate() {
             if load.mnemonic() != Mnemonic::Mov
                 || load.op0_kind() != OpKind::Register
@@ -455,10 +436,7 @@ pub fn find_appearance_decoder(
     let pointer = player_name.checked_sub(8).ok_or(ScanError::NotFound)?;
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         let checks = instrs
             .iter()
             .filter(|i| {
@@ -519,24 +497,17 @@ pub struct World {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NpcHeadIcons {
-    /// the NPC's pointer to the head icons the server set (null for none)
     pub field: u32,
-    /// where in that object the sprite vector starts; the archive vector is at 0, both `std::vector<int>`
     pub sprites: u32,
 }
 
-// The function clearing an NPC's head icons: it loads the field, zeroes it, destroys the sprite vector and then the
-// archive vector with one call, and frees the object, which is twice the sprite vector's offset in size.
 pub fn find_npc_head_icons(pe: &Pe) -> Result<NpcHeadIcons, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         if end - begin > 0x80 {
             continue;
         }
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         for w in instrs.windows(9) {
             let [load, test, je, zero, lea, destroy, back, destroy_again, size] = w else {
                 continue;
@@ -555,10 +526,8 @@ pub fn find_npc_head_icons(pe: &Pe) -> Result<NpcHeadIcons, ScanError> {
                     OpKind::Immediate32to64 | OpKind::Immediate32
                 )
                 && zero.immediate(1) == 0;
-            let same_call = destroy.mnemonic() == Mnemonic::Call
-                && destroy.op0_kind() == OpKind::NearBranch64
-                && destroy_again.mnemonic() == Mnemonic::Call
-                && destroy_again.op0_kind() == OpKind::NearBranch64
+            let same_call = call_target(destroy).is_some()
+                && call_target(destroy_again).is_some()
                 && destroy.near_branch_target() == destroy_again.near_branch_target();
             let sprites = (lea.mnemonic() == Mnemonic::Lea
                 && lea.op0_register() == Register::RCX

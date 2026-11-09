@@ -10,10 +10,10 @@ use windows::Win32::{
 };
 
 use super::{
-    hooks::{unhook_wgl_swap_buffers, unhook_wndproc, wndproc_can_be_restored},
+    hooks::{unhook_all, wndproc_can_be_restored},
     state::LAYOUT_MAP,
 };
-use crate::shared::{main::MODULE, memory::MEMORY_MANAGER};
+use crate::shared::{main::MODULE, memory::try_memory_manager};
 
 static ACTIVE_CALLS: AtomicIsize = AtomicIsize::new(0);
 
@@ -42,15 +42,7 @@ pub unsafe fn unload(events: &[HANDLE]) {
     }
 
     println!("[Agent]: Unloading.\r\n");
-    super::focus::unhook();
-    unhook_wndproc();
-    unhook_wgl_swap_buffers();
-    super::name::unhook_decoder();
-    super::total_xp::unhook();
-    super::packets::unhook();
-    super::script_runs::unhook();
-    super::varc_log::unhook();
-    super::item_log::unhook();
+    unhook_all();
 
     if !wait_for_hook_calls() {
         println!("[Agent]: Cannot unload: a hook call is still running. agent stays loaded with its hooks off.\r\n");
@@ -64,8 +56,7 @@ pub unsafe fn unload(events: &[HANDLE]) {
     if let Some(layout) = LAYOUT_MAP.get() {
         layout.close();
     }
-    if let Some(memory) = MEMORY_MANAGER.get() {
-        let mut memory = memory.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(mut memory) = try_memory_manager() {
         memory.mark_closed();
         memory.close_map();
     }

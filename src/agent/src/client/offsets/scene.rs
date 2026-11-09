@@ -1,4 +1,4 @@
-use super::{items::string_rvas, model::whole_function, *};
+use super::{items::string_rvas, *};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Scene {
@@ -46,12 +46,8 @@ fn mem_load(i: &Instruction, size: usize) -> Option<(Register, Register, u32)> {
         })
 }
 
-fn calls(instrs: &[Instruction]) -> impl Iterator<Item = (usize, u32)> + '_ {
-    instrs
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
-        .map(|(n, i)| (n, i.near_branch_target() as u32))
+fn rcx_load(i: &Instruction) -> Option<u32> {
+    mem_load(i, 8).filter(|l| l.0 == Register::RCX).map(|l| l.2)
 }
 
 fn id_shift(pe: &Pe, decoder: u32) -> Option<u32> {
@@ -75,7 +71,6 @@ struct Find {
 
 fn scene_find(pe: &Pe, rva: u32) -> Option<Find> {
     let instrs = whole_function(pe, rva, 0x300);
-    // sizes: the -1 plane path multiplies by size_y only, the normal one by size_x then size_y
     let imuls: Vec<(usize, u32)> = instrs
         .iter()
         .enumerate()
@@ -98,11 +93,7 @@ fn scene_find(pe: &Pe, rva: u32) -> Option<Find> {
     let mut id_decoder = None;
     for (n, call) in calls(&instrs) {
         let window = &instrs[n.saturating_sub(4)..n];
-        let Some((_, _, tag)) = window
-            .iter()
-            .rev()
-            .find_map(|i| mem_load(i, 8).filter(|l| l.0 == Register::RCX))
-        else {
+        let Some(tag) = window.iter().rev().find_map(rcx_load) else {
             continue;
         };
         let Some(slot) = instrs[n.saturating_sub(8)..n].iter().find_map(|i| {
@@ -124,7 +115,6 @@ fn scene_find(pe: &Pe, rva: u32) -> Option<Find> {
             id_decoder.get_or_insert(call);
         }
     }
-    // the game object lookup: the call taking (scene, plane, x, y) that isn't the id decoder
     let id_decoder = id_decoder?;
     let game_find = calls(&instrs).map(|(_, c)| c).find(|&c| c != id_decoder)?;
     Some(Find {
@@ -154,7 +144,7 @@ fn game_find(pe: &Pe, rva: u32) -> Option<(u32, u32, u32, u32, u32)> {
     let (call_at, _) = calls(&instrs).find(|&(n, _)| n > count_at)?;
     let tag = instrs[call_at.saturating_sub(3)..call_at]
         .iter()
-        .find_map(|i| mem_load(i, 8).filter(|l| l.0 == Register::RCX).map(|l| l.2))?;
+        .find_map(rcx_load)?;
     let compares: Vec<u32> = instrs[call_at..]
         .iter()
         .filter(|i| {
@@ -180,7 +170,7 @@ pub fn find_scene(pe: &Pe) -> Result<Scene, ScanError> {
         let Some(scene) = instrs[n.saturating_sub(10)..n]
             .iter()
             .rev()
-            .find_map(|i| mem_load(i, 8).filter(|l| l.0 == Register::RCX).map(|l| l.2))
+            .find_map(rcx_load)
         else {
             continue;
         };
@@ -265,7 +255,6 @@ fn placement_call(instrs: &[Instruction], call: usize, tag: u32) -> Option<GameO
             .filter(|l| l.1 == base && l.2 != tag)
             .map(|l| l.2)
     })?;
-    // y, x and height are next to each other, orientation and config follow
     (x == height + 4 && y == x + 4 && orientation == y + 4).then_some(GameObjectLayout {
         renderable,
         x,
@@ -280,13 +269,10 @@ pub fn find_game_object_layout(pe: &Pe, scene: &Scene) -> Result<GameObjectLayou
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let code = pe.bytes(begin, end);
-        if !code.windows(4).any(|w| w == scene.game_tag.to_le_bytes()) {
+        if !has_dword(code, scene.game_tag) {
             continue;
         }
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, code, begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = decode(code, begin);
         if !instrs
             .iter()
             .any(|i| mem_load(i, 8).is_some_and(|l| l.2 == scene.game_tag))
@@ -300,7 +286,6 @@ pub fn find_game_object_layout(pe: &Pe, scene: &Scene) -> Result<GameObjectLayou
     one(found)
 }
 
-// Where walls and decorations keep their config byte (shape in the low 6 bits, rotation in the next 2), from `Scene.getConfig`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocConfigs {
     pub wall: u32,
@@ -335,14 +320,10 @@ pub fn find_loc_configs(
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
         let code = pe.bytes(begin, end);
-        if code.len() > 0x200 || !code.windows(4).any(|w| w == scene.game_tag.to_le_bytes()) {
+        if code.len() > 0x200 || !has_dword(code, scene.game_tag) {
             continue;
         }
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, code, begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
-        // `lea rcx,[tile + slot]` before each slot's check
+        let instrs = decode(code, begin);
         let slot_at = |slot: u32| {
             instrs.iter().position(|i| {
                 i.mnemonic() == Mnemonic::Lea
@@ -404,10 +385,7 @@ pub struct DecorationLayout {
 pub fn find_decoration_layout(pe: &Pe, scene: &Scene) -> Result<DecorationLayout, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = decode(pe.bytes(begin, end), begin);
         for w in instrs.windows(5) {
             let (Some((a, base, x_offset)), Some((_, b2, height))) =
                 (mem_load(&w[0], 4), mem_load(&w[1], 4))
@@ -459,10 +437,7 @@ pub fn find_loc_names(pe: &Pe) -> Result<LocNames, ScanError> {
     let colors = string_rvas(pe, "<col=00FFFF>");
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = decode(pe.bytes(begin, end), begin);
         for (n, i) in instrs.iter().enumerate() {
             if !(i.mnemonic() == Mnemonic::Lea
                 && i.is_ip_rel_memory_operand()
@@ -481,7 +456,6 @@ pub fn find_loc_names(pe: &Pe) -> Result<LocNames, ScanError> {
                 continue;
             };
             let head = &instrs[n.saturating_sub(120)..n];
-            // calls answering a `{control, definition}` pair: `mov a,[rax]; mov b,[rax+8]` right after
             let pair_calls: Vec<(usize, u32)> = calls(head)
                 .filter(|&(c, _)| {
                     let after = &head[c + 1..(c + 4).min(head.len())];
@@ -521,7 +495,6 @@ pub fn find_loc_names(pe: &Pe) -> Result<LocNames, ScanError> {
     one(found)
 }
 
-// The scene's collision maps (Java's `CollisionMap[]`), from `getCollisionMap(plane)`: the scene's vector begin, indexed by `plane * 5 * 8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CollisionMaps {
     pub maps: u32,
@@ -544,7 +517,6 @@ pub fn find_collision_maps(pe: &Pe, scene: &Scene) -> Result<CollisionMaps, Scan
         else {
             continue;
         };
-        // `lea r,[p+p*4]`, then `[begin + r*8]`
         let times_five = instrs.iter().any(|j| {
             j.mnemonic() == Mnemonic::Lea
                 && j.memory_base() == j.memory_index()

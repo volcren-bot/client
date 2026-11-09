@@ -1,4 +1,4 @@
-use super::{model::whole_function, scene::DecorationLayout, *};
+use super::{scene::DecorationLayout, *};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GroundItems {
@@ -45,8 +45,7 @@ fn id_compares(instrs: &[Instruction]) -> Vec<(u32, u32)> {
     instrs
         .windows(2)
         .filter_map(|w| {
-            let load = &w[0];
-            let compare = &w[1];
+            let [load, compare] = w else { return None };
             (load.mnemonic() == Mnemonic::Mov
                 && load.op0_kind() == OpKind::Register
                 && load.op0_register().size() == 8
@@ -67,21 +66,13 @@ fn id_compares(instrs: &[Instruction]) -> Vec<(u32, u32)> {
         .collect()
 }
 
-fn direct_targets(instrs: &[Instruction]) -> Vec<u32> {
-    instrs
-        .iter()
-        .filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
-        .map(|i| i.near_branch_target() as u32)
-        .collect()
-}
-
 pub fn find_ground_items(pe: &Pe) -> Result<GroundItems, ScanError> {
     let implementation = lua_binding(pe, "objFind")?;
     let mut found = Vec::new();
-    for find in direct_targets(&whole_function(pe, implementation, 0x800)) {
+    for (_, find) in calls(&whole_function(pe, implementation, 0x800)) {
         let instrs = whole_function(pe, find, 0x200);
         let compares = id_compares(&instrs);
-        for lookup in direct_targets(&instrs) {
+        for (_, lookup) in calls(&instrs) {
             if let Some((items, level)) = tile_lookup(&whole_function(pe, lookup, 0x80)) {
                 found.extend(compares.iter().map(|&(node_item, id)| GroundItems {
                     items,
@@ -101,8 +92,7 @@ fn pile_store(instrs: &[Instruction], decoration: &DecorationLayout) -> Option<u
         if w[0].mnemonic() == Mnemonic::Lea
             && w[0].op0_register() == Register::RCX
             && w[0].memory_index() == Register::None
-            && w[1].mnemonic() == Mnemonic::Call
-            && w[1].op0_kind() == OpKind::NearBranch64
+            && call_target(&w[1]).is_some()
         {
             slots
                 .entry((w[1].near_branch_target() as u32, w[0].memory_base()))
@@ -118,7 +108,6 @@ fn pile_store(instrs: &[Instruction], decoration: &DecorationLayout) -> Option<u
                 && i.memory_displacement64() == field as u64
         })
     };
-    // the old pile's slots are destroyed three times too: keep the base that gets placed
     slots
         .iter()
         .filter(|(_, offsets)| offsets.len() == 3)
@@ -149,10 +138,7 @@ pub fn find_item_pile(pe: &Pe, decoration: &DecorationLayout) -> Result<u32, Sca
         if end - begin > 0x800 {
             continue;
         }
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = decode(pe.bytes(begin, end), begin);
         found.extend(pile_store(&instrs, decoration));
     }
     one(found)

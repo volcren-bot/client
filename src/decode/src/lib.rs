@@ -1,5 +1,3 @@
-//! Decoders over the client's memory and their data, run by the injector via `ReadProcessMemory` and in-process by the agent.
-
 pub use postcard;
 
 use ipc::state::game_state;
@@ -19,7 +17,6 @@ pub struct Position {
     pub local_y: i32,
     pub x: i32,
     pub y: i32,
-    /// 0 is the ground floor; `None` when the projection offsets weren't found.
     pub plane: Option<i32>,
 }
 
@@ -32,14 +29,11 @@ impl Position {
     }
 }
 
-/// The tile the server last put the local player on, which the client's `Position` only reaches once the walk animation gets there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerTile {
     pub x: i32,
     pub y: i32,
-    /// 0 is the ground floor; `None` when the projection offsets weren't found.
     pub plane: Option<i32>,
-    /// steps the server sent that the client hasn't finished walking yet (0 once the player model stands on `x`, `y`)
     pub steps: i32,
 }
 
@@ -78,7 +72,6 @@ pub struct GameState {
     pub position: Option<Position>,
     #[serde(default)]
     pub player_name: Option<String>,
-    /// The logged in account's normalized name; unlike `player_name` it is never the overridden display name.
     #[serde(default)]
     pub account_name: Option<String>,
     pub game_state: Option<i32>,

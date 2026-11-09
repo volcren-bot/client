@@ -107,22 +107,15 @@ pub struct Npc {
     pub y: i32,
     pub local_x: i32,
     pub local_y: i32,
-    // the animation id, -1 when it has none
     pub animation: i32,
-    // the model's height in units (the actor's logical height), -1 when it can't be read
     pub height: i32,
-    // the pose animation: the walk animation while the NPC moves, the stand one otherwise
     pub pose: i32,
-    // the spot animation (graphic) on the NPC, -1 when it has none
     pub graphic: i32,
-    // the NPC or player index it interacts with (fighting, facing after a talk), -1 for the other kind or none
     pub interacting_npc: i32,
     pub interacting_player: i32,
-    // the head icons the server set on it (an overhead prayer, ...), at most 8
     pub head_icons: Vec<HeadIcon>,
 }
 
-// An NPC's head icon: a sprite of a sprite archive (440 is the prayer icons, `headicons_prayer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadIcon {
     pub archive: i32,
@@ -131,7 +124,6 @@ pub struct HeadIcon {
 
 const MAX_HEAD_ICONS: u64 = 8;
 
-// The set (archive, sprite) pairs of the head icon object's two `std::vector<int>`s; none when one doesn't read as a vector.
 fn head_icons(memory: &impl Memory, layout: &WorldLayout, object: u64) -> Vec<HeadIcon> {
     let sprites = object + layout.head_icon_sprites as u64;
     let (Some(archives), Some(sprites)) = (
@@ -148,7 +140,6 @@ fn head_icons(memory: &impl Memory, layout: &WorldLayout, object: u64) -> Vec<He
         .collect()
 }
 
-// Byte offsets in an actor: model height, pose animation, and a pointer to the spot animation node (kind at 0x8, id at 0x20).
 const ACTOR_HEIGHT: u64 = 0x18;
 const ACTOR_POSE: u64 = 0x4b8;
 const ACTOR_SPOT_ANIM: u64 = 0x4c8;
@@ -164,27 +155,22 @@ pub struct Player {
     pub y: i32,
     pub local_x: i32,
     pub local_y: i32,
-    // As for `Npc`: the actor's model height (-1 when unknown), animation, pose and spot animation.
     pub height: i32,
     pub animation: i32,
     pub pose: i32,
     pub graphic: i32,
-    // The interaction's state (0 NPC, 1 loc, 2 gone, 3 done, -1 unknown), NPC index and loc tile (-1 if none).
     pub target_state: i32,
     pub target_npc: i32,
     pub target_x: i32,
     pub target_y: i32,
-    // The NPC or player index it interacts with, -1 for none; unlike `target_npc` it covers following players.
     pub interacting_npc: i32,
     pub interacting_player: i32,
 }
 
-// The interaction block in a player actor: state word, target NPC index and loc tile; it names the target, not the action.
 const PLAYER_TARGET_STATE: u64 = 0x3a4;
 const PLAYER_TARGET_NPC: u64 = 0x3a8;
 const PLAYER_TARGET_TILE: u64 = 0x3b0;
 
-// The actor an actor interacts with: the top byte is the kind (1 NPC, 2 player, 0 none), the next word its index.
 fn interacting(memory: &impl Memory, actor: u64) -> (i32, i32) {
     let kind = memory
         .i32(actor + PLAYER_TARGET_STATE)
@@ -217,10 +203,8 @@ fn player_target(memory: &impl Memory, player: u64) -> (i32, i32, i32, i32) {
     (state, npc, x, y)
 }
 
-// The longest span of an actor or projectile read in one go; a layout asking for more is read field by field.
 const MAX_OBJECT_SPAN: u64 = 0x1000;
 
-// The bytes from an object's start that cover every (offset, size) field read from it, 0 when that's over `MAX_OBJECT_SPAN`.
 fn span(fields: &[(u64, u64)]) -> usize {
     let end = fields
         .iter()
@@ -234,7 +218,6 @@ fn span(fields: &[(u64, u64)]) -> usize {
     }
 }
 
-// The span of an actor: the fields `read_actor` reads plus `own`.
 fn actor_span(layout: &WorldLayout, own: &[(u64, u64)]) -> usize {
     let shared = [
         (ACTOR_HEIGHT, 4),
@@ -248,7 +231,6 @@ fn actor_span(layout: &WorldLayout, own: &[(u64, u64)]) -> usize {
     span(&[&shared[..], own].concat())
 }
 
-// The fields `npcs` and `players` read from an actor besides the shared ones.
 fn npc_fields(layout: &WorldLayout) -> [(u64, u64); 3] {
     [
         (layout.npc_definition as u64, 8),
@@ -261,7 +243,6 @@ fn player_fields(layout: &WorldLayout) -> [(u64, u64); 2] {
     [(layout.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)]
 }
 
-// A `std::vector<int>` at `at`: where its data starts and how many it holds.
 fn int_vector(memory: &impl Memory, at: u64) -> Option<(u64, u64)> {
     let (begin, end) = (memory.u64(at)?, memory.u64(at + 8)?);
     Some((begin, end.checked_sub(begin)? / 4))
@@ -294,7 +275,6 @@ fn container_items(memory: &impl Memory, layout: &WorldLayout, node: u64) -> Opt
     )
 }
 
-// The container table's buckets, how many there are and the end sentinel.
 fn containers(memory: &impl Memory, layout: &WorldLayout) -> Option<(u64, u64, u64)> {
     let table = layout.module_base + layout.containers as u64;
     let buckets = memory.ptr(table + TABLE_BUCKETS)?;
@@ -327,7 +307,6 @@ pub fn item_container(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Op
     container_items(memory, layout, container_node(memory, layout, id)?)
 }
 
-/// One slot of a container: None when the client has no such container, an empty slot (item -1) past the end of one it has.
 pub fn item_slot(memory: &impl Memory, layout: &WorldLayout, id: i32, slot: i32) -> Option<Item> {
     let node = container_node(memory, layout, id)?;
     let read = |vector: u32| -> Option<i32> {
@@ -344,7 +323,6 @@ pub fn item_slot(memory: &impl Memory, layout: &WorldLayout, id: i32, slot: i32)
     })
 }
 
-/// Every item container the client holds, as (container id, items), by ascending id. A container the client has dropped is gone.
 pub fn item_containers(
     memory: &impl Memory,
     layout: &WorldLayout,
@@ -401,7 +379,6 @@ pub fn varc(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<i32> 
     None
 }
 
-// The client's own world view and the world tile its scene starts at.
 fn world_view(
     memory: &impl Memory,
     layout: &WorldLayout,
@@ -412,7 +389,6 @@ fn world_view(
     Some((view, i32_pair(memory, view + layout.base_x as u64)?))
 }
 
-// What NPCs and players share, all read from the actor itself.
 struct Actor {
     index: i32,
     x: i32,
@@ -461,7 +437,6 @@ fn read_actor(
     })
 }
 
-// The `count` actors whose indices are at `indices`, each copied in one read with its `own` fields and decoded by `decode`.
 fn actors<M: Memory, T>(
     memory: &M,
     layout: &WorldLayout,
@@ -473,7 +448,6 @@ fn actors<M: Memory, T>(
     if !(0..=MAX_ACTORS).contains(&count) {
         return None;
     }
-    // a table that can't be opened finds no actor, as each lookup would
     let table = Table::open(memory, table);
     let mut list = Snapshot::new(memory, count as usize * 4);
     list.load(indices);
@@ -541,32 +515,26 @@ pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
     )
 }
 
-// The NPC definition's size in tiles (its side), checked against NPCs of size 1, 2 and 3.
 const DEFINITION_SIZE: u64 = 0x20;
 const MAX_NPC_SIZE: i32 = 10;
 
-// A hitsplat on an actor: the splat type, the damage it shows and the client cycle it stops showing on (about 1 s after it lands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hitsplat {
-    // which of the four slots it is in; a hit keeps its slot until it is replaced
     pub slot: i32,
     pub kind: i32,
     pub damage: i32,
     pub cycle: i32,
 }
 
-// An actor keeps its last four hitsplats here, 12 bytes each: type, damage, cycle (-1 unused); found by watching hits.
 const ACTOR_HITSPLATS: u64 = 0x358;
 const HITSPLAT_SIZE: u64 = 12;
 const HITSPLAT_SLOTS: u64 = 4;
 
-// The actor with `index` in the table at offset `table` of the client's own world view.
 fn actor_at(memory: &impl Memory, layout: &WorldLayout, table: u32, index: i32) -> Option<u64> {
     let (view, _) = world_view(memory, layout, client(memory, layout)?)?;
     table_get(memory, view + table as u64, index)
 }
 
-/// The hitsplats in use on the NPC with `index` (None when gone); read every tick to see every hit.
 pub fn npc_hitsplats(
     memory: &impl Memory,
     layout: &WorldLayout,
@@ -575,7 +543,6 @@ pub fn npc_hitsplats(
     actor_hitsplats(memory, actor_at(memory, layout, layout.npc_table, index)?)
 }
 
-/// The hitsplats in use on the player with `index` (None when gone).
 pub fn player_hitsplats(
     memory: &impl Memory,
     layout: &WorldLayout,
@@ -601,7 +568,6 @@ fn actor_hitsplats(memory: &impl Memory, actor: u64) -> Option<Vec<Hitsplat>> {
     Some(splats)
 }
 
-/// The size in tiles of the NPC with `index`, from its definition; None when it's gone or the value is off.
 pub fn npc_size(memory: &impl Memory, layout: &WorldLayout, index: i32) -> Option<i32> {
     let npc = actor_at(memory, layout, layout.npc_table, index)?;
     let definition = memory.ptr(npc + layout.npc_definition as u64)?;
@@ -610,7 +576,6 @@ pub fn npc_size(memory: &impl Memory, layout: &WorldLayout, index: i32) -> Optio
         .filter(|s| (1..=MAX_NPC_SIZE).contains(s))
 }
 
-// Debug: the NPC actor with `index`, or its definition (address and first `count` words), to find fields.
 pub fn npc_words(
     memory: &impl Memory,
     layout: &WorldLayout,
@@ -627,7 +592,6 @@ pub fn npc_words(
     Some((at, memory.i32s(at, count)?))
 }
 
-// Debug: the player actor with `index` (its address and first `count` 4-byte words), to find fields.
 pub fn player_words(
     memory: &impl Memory,
     layout: &WorldLayout,
@@ -638,22 +602,16 @@ pub fn player_words(
     Some((player, memory.i32s(player, count)?))
 }
 
-// A world entity (RuneLite's `WorldEntity`): a moving sub-scene such as a boat, with a world view of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorldEntity {
-    // the id of the world view it carries
     pub view_id: i32,
-    // its config id (RuneLite's `WorldEntityConfig.getId`), -1 when it can't be read
     pub config_id: i32,
-    // where it is in the top-level scene, in fine units
     pub local_x: i32,
     pub local_y: i32,
 }
 
-// The top-level world view's id; the world views table is keyed by it.
 const TOP_LEVEL_VIEW: i32 = 0;
 const SCENE_LIMIT: i32 = SCENE_TILES << 7;
-// Where the top-level world view keeps its world entities and their fields; found by comparing a ship with land.
 const VIEW_WORLD_ENTITIES: u64 = 0xe0;
 const ENTITY_VIEW_ID: u64 = 0x2c;
 const ENTITY_CONFIG: u64 = 0x38;
@@ -668,7 +626,6 @@ pub fn world_entities(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<
         ipc::read::table_entries(memory, top + VIEW_WORLD_ENTITIES)
             .into_iter()
             .filter_map(|(view_id, entity)| {
-                // a stale or half-built entry names a different view than its key, or sits outside the scene
                 if memory.i32(entity + ENTITY_VIEW_ID)? != view_id
                     || memory.ptr(entity + ENTITY_VIEW)? != table_get(memory, views, view_id)?
                 {
@@ -693,7 +650,6 @@ pub fn world_entities(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<
     )
 }
 
-// Debug: the world views the client holds and, in the local player's, every offset that looks like a table with entries.
 pub fn world_debug(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<String>> {
     let client = client(memory, layout)?;
     let mut lines = Vec::new();
@@ -770,45 +726,36 @@ pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Projectile {
-    // the spot animation (graphic) id
     pub id: i32,
-    // the world tiles and planes it flies from and to
     pub source_x: i32,
     pub source_y: i32,
     pub source_plane: i32,
     pub target_x: i32,
     pub target_y: i32,
     pub target_plane: i32,
-    // the actors it flies from and to, -1 for none; a projectile follows its target actor, not the target tile
     pub source_npc: i32,
     pub source_player: i32,
     pub target_npc: i32,
     pub target_player: i32,
-    // heights above the ground at both ends, the launch slope and how far from the source it starts (fine units)
     pub start_height: i32,
     pub end_height: i32,
     pub slope: i32,
     pub start_pos: i32,
-    // client cycles (50 a second): when it starts moving, when it lands, and the client's now
     pub start_cycle: i32,
     pub end_cycle: i32,
     pub cycle: i32,
-    // whether it has started moving; until then the position below is the source tile's centre and z is 0
     pub moving: bool,
-    // where it is now: world tile, local fine coordinates, the client's z (negative is up) and orientation (0-2047)
     pub x: i32,
     pub y: i32,
     pub local_x: i32,
     pub local_y: i32,
     pub z: i32,
     pub orientation: i32,
-    // how high above the ground it is now: the start height until it moves; the injector works it out from the terrain
     pub height: i32,
 }
 
 const MAX_PROJECTILES: u64 = 512;
 
-// An actor reference as the client stores it: NPC index + 1, -(player index + 1), 0 for none.
 fn actor_ref(value: i32) -> (i32, i32) {
     match value {
         v if v > 0 => (v - 1, -1),
@@ -817,10 +764,8 @@ fn actor_ref(value: i32) -> (i32, i32) {
     }
 }
 
-// Where a client list's sentinel keeps its length.
 const LIST_COUNT: u64 = 0x10;
 
-// Visits each object of the client list at `head` (its sentinel), whose nodes hold the object pointer `object` bytes in.
 fn list_objects(
     memory: &impl Memory,
     head: u64,
@@ -945,42 +890,34 @@ pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projecti
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpotAnim {
-    // the spot animation id
     pub id: i32,
-    // the world tile and plane it is on
     pub x: i32,
     pub y: i32,
     pub plane: i32,
-    // the local fine coordinates (128 per tile) and the client's z: the tile's height minus the one the server asked for
     pub local_x: i32,
     pub local_y: i32,
     pub z: i32,
-    // client cycles (50 a second): when it starts playing and the client's now
     pub start_cycle: i32,
     pub cycle: i32,
-    // the world view it is in: 0 is the main world, any other is a moving sub-scene such as a boat
     pub view_id: i32,
 }
 
 const MAX_SPOT_ANIMS: u64 = 512;
-// The list holds shared pointers, the object pointer in the second slot after the node's links, as the projectile list's.
 const SPOT_ANIM_NODE: u64 = 0x18;
 
-// The spot animations of the main world and of the local player's world view when it differs (a boat).
 pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Option<Vec<SpotAnim>> {
     let (own, _) = local_player(memory, layout)?;
     let client = ipc::read::client(memory, layout)?;
     let own_id = memory.i32(client + layout.player.world_view_id as u64)?;
     let mut objects = Vec::new();
-    if own_id != TOP_LEVEL_VIEW {
-        // a main world that can't be read doesn't hide the player's own view
-        if let Some(top) = table_get(
+    if own_id != TOP_LEVEL_VIEW
+        && let Some(top) = table_get(
             memory,
             client + layout.player.world_views as u64,
             TOP_LEVEL_VIEW,
-        ) {
-            objects.extend(spot_anims_in(memory, layout, top, TOP_LEVEL_VIEW).unwrap_or_default());
-        }
+        )
+    {
+        objects.extend(spot_anims_in(memory, layout, top, TOP_LEVEL_VIEW).unwrap_or_default());
     }
     objects.extend(spot_anims_in(memory, layout, own, own_id)?);
     Some(objects)
@@ -1269,7 +1206,6 @@ mod tests {
         );
     }
 
-    // Records where each read it passes on starts; with `short`, passes only short reads so decoders read field by field.
     struct Recording<'a> {
         memory: &'a Fake,
         short: bool,
@@ -1286,7 +1222,6 @@ mod tests {
     #[test]
     fn actors_are_read_in_one_go_and_decode_the_same() {
         let mut m = grand_exchange();
-        // the fixture only holds the fields it sets: fill the rest of each actor, so its span reads at once
         let client = m.ptr(LAYOUT.module_base + LAYOUT.client as u64).unwrap();
         let (view, _) = world_view(&m, &LAYOUT, client).unwrap();
         let npc_span = actor_span(&LAYOUT, &npc_fields(&LAYOUT));
@@ -1378,7 +1313,6 @@ mod tests {
             ..Layout::default()
         };
         m.put_i32(LAYOUT.module_base + 0xe98c14, 1000);
-        // the list's sentinel and two nodes: a bolt on its way to the clerk, a spell waiting to leave for the player
         let head = CLIENT + 0xcc70;
         let (bolt_node, spell_node, bolt, spell) =
             (0x70_0000u64, 0x70_1000u64, 0x71_0000u64, 0x72_0000u64);
@@ -1457,7 +1391,6 @@ mod tests {
             ),
             (91, -1, 780, 1015, 1040)
         );
-        // until it leaves, a projectile sits on the centre of its source tile at its start height
         assert_eq!(
             (
                 spell.moving,
@@ -1514,7 +1447,6 @@ mod tests {
                 m.put_u64(row + y * 24 + 16, 0);
             }
         }
-        // tile (2, 1): a pile of two
         let list = rows + 2 * 0x100 + 24;
         let (first, second) = (0x20_0000u64, 0x20_1000u64);
         m.put_u64(list, first);
@@ -1571,7 +1503,6 @@ mod tests {
         m.put_i32(LAYOUT.module_base + 0xe98c14, 500);
         m.put_i32(view + 0x24, 3136);
         m.put_i32(view + 0x28, 2784);
-        // the sentinel and two nodes, the second one pointing back at it
         let head = view + 0x160;
         m.put_u64(head, first);
         m.put_u64(head + 0x10, 2);
@@ -1630,7 +1561,6 @@ mod tests {
         let mut m = Fake::default();
         m.put_u64(LAYOUT.module_base + LAYOUT.client as u64, client);
         m.put_i32(LAYOUT.module_base + 0xe98c14, 500);
-        // two views, the main world (0) and the boat the player is in (5): a table with one view each
         m.put_table(client + 0x300, 0x40_0000, &[(0, top), (5, boat)]);
         m.put_i32(client + 0x320, 5);
         m.put_i32(client + 0x324, 7);
@@ -1638,10 +1568,8 @@ mod tests {
         for (view, base) in [(top, 3136), (boat, 0)] {
             m.put_i32(view + 0x24, base);
             m.put_i32(view + 0x28, base);
-            // an empty list: the sentinel points at itself
             m.put_u64(view + 0x160, view + 0x160);
         }
-        // one spot anim in each view
         for (view, node, at, id) in [
             (top, 0x50_0000u64, 0x51_0000u64, 308),
             (boat, 0x52_0000, 0x53_0000, 86),

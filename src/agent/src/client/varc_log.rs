@@ -1,12 +1,8 @@
 use std::{
     collections::HashMap,
-    ffi::{c_void, CString},
+    ffi::c_void,
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{
-        atomic::{AtomicIsize, AtomicPtr, Ordering},
-        Mutex, OnceLock,
-    },
-    time::Instant,
+    sync::{Mutex, OnceLock},
 };
 
 use ipc::{
@@ -14,27 +10,15 @@ use ipc::{
     varc_log::{kind, varc_log_memory_name, Change, Log, LOG_SIZE, TEXT_SIZE},
 };
 use retour::GenericDetour;
-use windows::{
-    core::PCSTR,
-    Win32::{
-        Foundation::{CloseHandle, HANDLE},
-        System::{
-            Memory::{
-                CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
-                MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
-            },
-            Threading::GetCurrentProcessId,
-        },
-    },
-};
 
 use super::{
+    detour,
+    log::SharedLog,
     offsets::{VarcSetters, VARIANT_KIND, VARIANT_STRING},
     own::OwnMemory,
     unload::HookCall,
 };
 
-// A string is read from a buffer the client owns; this is far more than any varc string.
 const MAX_TEXT: u64 = 1 << 20;
 
 type SetInt = unsafe extern "system" fn(*mut c_void, i32, i32);
@@ -44,69 +28,21 @@ type SetObject = unsafe extern "system" fn(*mut c_void, i32, *const u8);
 static SET_INT: OnceLock<(GenericDetour<SetInt>, GetInt)> = OnceLock::new();
 static SET_OBJECT: OnceLock<GenericDetour<SetObject>> = OnceLock::new();
 
-// What each string varc was last seen set to, as the value before the next change.
 type Strings = Option<HashMap<i32, (Vec<u8>, u32)>>;
 static STRINGS: Mutex<Strings> = Mutex::new(None);
 
-static LOG: AtomicPtr<Log> = AtomicPtr::new(std::ptr::null_mut());
-static MAPPING: AtomicIsize = AtomicIsize::new(0);
-static START: OnceLock<Instant> = OnceLock::new();
+static LOG: SharedLog<Log> = SharedLog::new();
 
-fn open_log() -> bool {
-    if !LOG.load(Ordering::Acquire).is_null() {
-        return true;
-    }
-    let name = CString::new(varc_log_memory_name(unsafe { GetCurrentProcessId() })).unwrap();
-    unsafe {
-        let Ok(mapping) = CreateFileMappingA(
-            HANDLE::default(),
-            None,
-            PAGE_READWRITE,
-            0,
-            LOG_SIZE as u32,
-            PCSTR(name.as_ptr() as *const u8),
-        ) else {
-            println!("[Agent]: Cannot create the varc log shared memory.\r\n");
-            return false;
-        };
-        let view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, LOG_SIZE);
-        if view.Value.is_null() {
-            let _ = CloseHandle(mapping);
-            println!("[Agent]: Cannot map the varc log.\r\n");
-            return false;
-        }
-        ipc::varc_log::init(view.Value as *mut Log);
-        MAPPING.store(mapping.0 as isize, Ordering::Release);
-        LOG.store(view.Value as *mut Log, Ordering::Release);
-    }
-    START.get_or_init(Instant::now);
-    true
-}
-
-/// Closes the log. The hooks must be off and no hook call running.
 pub unsafe fn close() {
-    let log = LOG.swap(std::ptr::null_mut(), Ordering::AcqRel);
-    if !log.is_null() {
-        let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: log.cast() });
-    }
-    let mapping = MAPPING.swap(0, Ordering::AcqRel);
-    if mapping != 0 {
-        let _ = CloseHandle(HANDLE(mapping as *mut c_void));
-    }
+    LOG.close();
 }
 
 fn log(change: &Change) {
-    let log = LOG.load(Ordering::Acquire);
-    if log.is_null() {
-        return;
+    if let Some(log) = LOG.get() {
+        unsafe { ipc::varc_log::push(log, LOG.elapsed().as_millis() as u64, change) };
     }
-    let time_ms = START
-        .get()
-        .map_or(0, |start| start.elapsed().as_millis() as u64);
-    unsafe { ipc::varc_log::push(log, time_ms, change) };
 }
 
-// A string variant: the kind byte says so; the text is inline or behind a pointer at 0 with the length at 8.
 fn read_text(variant: u64) -> Option<(Vec<u8>, u32)> {
     let memory = OwnMemory;
     let mut tag = [0u8; 1];
@@ -120,7 +56,7 @@ fn read_text(variant: u64) -> Option<(Vec<u8>, u32)> {
     let (data, length) = if room[0] & 0x80 != 0 {
         (memory.u64(variant)?, memory.u64(variant + 8)?)
     } else {
-        (variant, 0x17 - room[0] as u64)
+        (variant, 0x17u64.checked_sub(room[0] as u64)?)
     };
     if length > MAX_TEXT {
         return None;
@@ -166,13 +102,11 @@ unsafe extern "system" fn set_object(varcs: *mut c_void, index: i32, variant: *c
                 return;
             };
             let strings = strings.get_or_insert_with(HashMap::new);
-            if strings
-                .get(&index)
-                .is_some_and(|(old_text, old_length)| *old_text == text && *old_length == length)
-            {
+            let new = (text, length);
+            if strings.get(&index) == Some(&new) {
                 return;
             }
-            let old = strings.insert(index, (text, length));
+            let old = strings.insert(index, new);
             let old_known = old.is_some();
             let (old_text, old_length) = old.unzip();
             log(&Change {
@@ -192,31 +126,22 @@ unsafe extern "system" fn set_object(varcs: *mut c_void, index: i32, variant: *c
 }
 
 pub unsafe fn hook(module_base: u64, rule: VarcSetters) {
-    if SET_INT.get().is_some() || !open_log() {
+    if SET_INT.get().is_some()
+        || !LOG.open(varc_log_memory_name, LOG_SIZE, "varc", ipc::varc_log::init)
+    {
         return;
     }
-    let at = |rva: u32| (module_base + rva as u64) as *const c_void;
-    let get: GetInt = std::mem::transmute(at(rule.get_int));
-    let int: SetInt = std::mem::transmute(at(rule.set_int));
-    let object: SetObject = std::mem::transmute(at(rule.set_object));
-    match (
-        GenericDetour::new(int, set_int),
-        GenericDetour::new(object, set_object),
-    ) {
-        (Ok(int), Ok(object)) => {
-            let _ = (SET_INT.set((int, get)), SET_OBJECT.set(object));
-        }
-        (int, object) => {
-            for error in [int.err(), object.err()].into_iter().flatten() {
-                println!("[Agent]: Failed to hook the varc setters: {error}.\r\n");
-            }
-            return;
-        }
-    }
-    match (
-        SET_INT.get().unwrap().0.enable(),
-        SET_OBJECT.get().unwrap().enable(),
-    ) {
+    let at = |rva: u32| module_base + rva as u64;
+    let what = "varc setters";
+    let (Some(int), Some(object)) = (
+        detour::create::<SetInt>(at(rule.set_int), set_int, what),
+        detour::create::<SetObject>(at(rule.set_object), set_object, what),
+    ) else {
+        return;
+    };
+    let (int, _) = SET_INT.get_or_init(|| (int, detour::function(at(rule.get_int))));
+    let object = SET_OBJECT.get_or_init(|| object);
+    match (int.enable(), object.enable()) {
         (Ok(()), Ok(())) => println!("[Agent]: Varc log hooked.\r\n"),
         (int, object) => println!(
             "[Agent]: Failed to enable the varc hooks: {:?} {:?}.\r\n",
@@ -226,35 +151,15 @@ pub unsafe fn hook(module_base: u64, rule: VarcSetters) {
     }
 }
 
-pub unsafe fn rehook() {
-    if let Some((detour, _)) = SET_INT.get() {
-        if !detour.is_enabled() {
-            let _ = detour.enable();
-        }
-    }
-    if let Some(detour) = SET_OBJECT.get() {
-        if !detour.is_enabled() {
-            let _ = detour.enable();
-        }
-    }
-}
-
 pub unsafe fn unhook() {
-    if let Some((detour, _)) = SET_INT.get() {
-        if detour.is_enabled() {
-            if let Err(error) = detour.disable() {
-                println!("[Agent]: Failed to disable the varc int hook: {error}.\r\n");
-            }
-        }
-    }
-    if let Some(detour) = SET_OBJECT.get() {
-        if detour.is_enabled() {
-            match detour.disable() {
-                Ok(()) => println!("[Agent]: Varc log unhooked.\r\n"),
-                Err(error) => {
-                    println!("[Agent]: Failed to disable the varc object hook: {error}.\r\n")
-                }
-            }
-        }
-    }
+    detour::disable(
+        SET_INT.get().map(|(detour, _)| detour),
+        "varc int hook",
+        None,
+    );
+    detour::disable(
+        SET_OBJECT.get(),
+        "varc object hook",
+        Some("Varc log unhooked"),
+    );
 }

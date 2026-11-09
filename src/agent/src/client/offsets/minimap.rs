@@ -1,4 +1,4 @@
-use super::{model::whole_function, *};
+use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Minimap {
@@ -12,16 +12,19 @@ pub struct Minimap {
 const CONTENT_TYPE: u64 = 1338;
 const SCENE_TILES: u64 = 104;
 
+fn functions_with(pe: &Pe, value: u32) -> Vec<u32> {
+    let mut seen = HashSet::new();
+    dword_hits(pe, value)
+        .into_iter()
+        .filter_map(|hit| pe.function_containing(hit))
+        .map(|(begin, _)| begin)
+        .filter(|&begin| seen.insert(begin))
+        .collect()
+}
+
 fn content_type_calls(pe: &Pe) -> Vec<(u32, u32)> {
     let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    for hit in dword_hits(pe, CONTENT_TYPE as u32) {
-        let Some((begin, _)) = pe.function_containing(hit) else {
-            continue;
-        };
-        if !seen.insert(begin) {
-            continue;
-        }
+    for begin in functions_with(pe, CONTENT_TYPE as u32) {
         let instrs = whole_function(pe, begin, 0x40000);
         for (at, _) in instrs.iter().enumerate().filter(|(_, i)| {
             i.mnemonic() == Mnemonic::Cmp
@@ -41,11 +44,8 @@ fn content_type_calls(pe: &Pe) -> Vec<(u32, u32)> {
                 continue;
             };
             let object = window[load].memory_displacement64() as u32;
-            if let Some(call) = window[load..]
-                .iter()
-                .find(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
-            {
-                found.push((object, call.near_branch_target() as u32));
+            if let Some(target) = window[load..].iter().find_map(call_target) {
+                found.push((object, target));
             }
         }
     }
@@ -222,19 +222,10 @@ fn destination_compares(instrs: &[Instruction], object: u32) -> Vec<u32> {
 }
 
 pub fn find_destination(pe: &Pe, object: u32) -> Result<u32, ScanError> {
-    let mut seen = HashSet::new();
-    let mut found = Vec::new();
-    for hit in dword_hits(pe, object) {
-        let Some((begin, _)) = pe.function_containing(hit) else {
-            continue;
-        };
-        if seen.insert(begin) {
-            found.extend(destination_compares(
-                &whole_function(pe, begin, 0x400),
-                object,
-            ));
-        }
-    }
+    let found = functions_with(pe, object)
+        .into_iter()
+        .flat_map(|begin| destination_compares(&whole_function(pe, begin, 0x400), object))
+        .collect();
     one(found)
 }
 
@@ -244,7 +235,6 @@ mod tests {
 
     #[test]
     fn matches_destination_setter() {
-        // Client::setDestination on build a2636a01 (0x14006a2f0)
         let code = [
             0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xec,
             0x30, 0x48, 0x8b, 0x81, 0xb0, 0xea, 0x40, 0x00, 0x41, 0x8b, 0xd9, 0x41, 0x8b, 0xf8,

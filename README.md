@@ -91,8 +91,7 @@ A DLL (`agent.dll`) loaded inside the game client process. It hooks the client's
 input, finds the game's internal data (player state, skills, varps, widgets, menus, scene
 models, ...) and publishes it into shared memory every frame. It also takes input requests (mouse
 moves, clicks, keys) and overlay drawings from the shared memory and applies them in the game.
-It exports the functions used to inject, unload and toggle input, and can be used as a
-[Simba](https://github.com/Villavu/Simba) plugin as well.
+The injector loads it and talks to it only through shared memory, named events and window messages.
 
 ### injector (`src/injector`)
 

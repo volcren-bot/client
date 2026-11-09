@@ -4,12 +4,10 @@ use std::{
     ffi::c_void,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
-        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
-        LazyLock, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, Ordering},
+        Mutex, OnceLock,
     },
 };
-
-use std::char::from_u32;
 
 use windows::{
     core::{BOOL, PCSTR},
@@ -59,10 +57,10 @@ use super::offsets::{
 use super::state::{LayoutMap, LAYOUT_MAP};
 use super::unload::HookCall;
 use crate::shared::{
-    memory::{MemoryManager, MEMORY_MANAGER},
+    memory::{memory_manager, try_memory_manager, MemoryManager, MEMORY_MANAGER},
     sync::event_listener,
     windows::{
-        WI_CACHE, WI_CONSOLE, WI_DETACH, WI_GAME_VALS, WI_ITEM_NAMES, WI_LOCS, WI_MENU, WI_MODEL,
+        WI_CACHE, WI_CONSOLE, WI_GAME_VALS, WI_ITEM_NAMES, WI_LOCS, WI_MENU, WI_MODEL,
         WI_MODIFIERS, WI_NAME, WI_PROJECT, WI_TOTAL_XP,
     },
 };
@@ -73,9 +71,9 @@ use ipc::state::{
 };
 use ipc::{cursor_style, overlay_mode};
 
-static KEYBOARD_MODIFIERS: LazyLock<Mutex<(bool, bool, bool)>> =
-    LazyLock::new(|| Mutex::new((false, false, false)));
-static LAST_CHAR: LazyLock<Mutex<i32>> = LazyLock::new(|| Mutex::new(0));
+const MODIFIER_KEYS: [u8; 3] = [0x10, 0x11, 0x12];
+static KEYBOARD_MODIFIERS: Mutex<[bool; 3]> = Mutex::new([false; 3]);
+static LAST_CHAR: AtomicU8 = AtomicU8::new(0);
 
 pub unsafe fn open_client_console() {
     let hwnd = GetConsoleWindow();
@@ -92,12 +90,10 @@ pub unsafe fn open_client_console() {
     }
 }
 
-//WndProc hook
 static HOOKED_HWND: AtomicIsize = AtomicIsize::new(0);
 static ORIGINAL_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 static WNDPROC_HOOKED: AtomicBool = AtomicBool::new(false);
 
-/// The render view whose window procedure is hooked, 0 before it is.
 pub fn hooked_window() -> isize {
     HOOKED_HWND.load(Ordering::SeqCst)
 }
@@ -111,9 +107,8 @@ unsafe fn call_original(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) ->
     CallWindowProcW(original, hwnd, msg, wparam, lparam)
 }
 
-fn get_modifier_lparam(key: i32, down: bool) -> LPARAM {
+fn modifier_lparam(key: u8, down: bool) -> LPARAM {
     let scancode = unsafe { MapVirtualKeyA(key as u32, MAPVK_VK_TO_VSC) };
-
     let mut lparam = 1 | (scancode << 16);
     if !down {
         lparam |= (1 << 30) | (1 << 31);
@@ -121,56 +116,33 @@ fn get_modifier_lparam(key: i32, down: bool) -> LPARAM {
     LPARAM(lparam as isize)
 }
 
-fn decode_modifiers(wparam: WPARAM) -> (bool, bool, bool) {
-    let value = wparam.0;
-    let shift = (value & (1 << 0)) != 0;
-    let ctrl = (value & (1 << 1)) != 0;
-    let alt = (value & (1 << 2)) != 0;
-    (shift, ctrl, alt)
+unsafe fn toggle_modifiers(hwnd: HWND, wparam: WPARAM) {
+    let mut held = KEYBOARD_MODIFIERS.lock().unwrap();
+    for (bit, (&key, held)) in MODIFIER_KEYS.iter().zip(held.iter_mut()).enumerate() {
+        if wparam.0 & (1 << bit) != 0 {
+            let msg = if *held { WM_KEYUP } else { WM_KEYDOWN };
+            let _ = call_original(
+                hwnd,
+                msg,
+                WPARAM(key as usize),
+                modifier_lparam(key, !*held),
+            );
+            *held = !*held;
+        }
+    }
 }
 
-unsafe fn get_updated_wparam(vkey: u32, shift: bool, ctrl: bool, alt: bool) -> WPARAM {
-    let scancode = MapVirtualKeyW(vkey, MAPVK_VK_TO_VSC);
-
+unsafe fn modified_char(vkey: u8, held: [bool; 3]) -> WPARAM {
+    let scancode = MapVirtualKeyW(vkey as u32, MAPVK_VK_TO_VSC);
     let mut keyboard_state = [0u8; 256];
     let _ = GetKeyboardState(&mut keyboard_state);
-
     keyboard_state[vkey as usize] = 0x80;
-
-    if shift {
-        keyboard_state[0x10_usize] = 0x80;
+    for (&key, _) in MODIFIER_KEYS.iter().zip(held).filter(|&(_, held)| held) {
+        keyboard_state[key as usize] = 0x80;
     }
-
-    if ctrl {
-        keyboard_state[0x11_usize] = 0x80;
-    }
-
-    if alt {
-        keyboard_state[0x12_usize] = 0x80;
-    }
-
     let mut buff = [0u16; 4];
-    let _ = ToUnicode(vkey, scancode, Some(&keyboard_state), &mut buff, 0);
-
-    match from_u32(buff[0] as u32) {
-        Some(unicode) => WPARAM(unicode as usize),
-        None => WPARAM(0),
-    }
-}
-
-fn rebuild_key(key: u8, shift: bool, ctrl: bool, alt: bool) -> u16 {
-    let mut modifiers: u8 = 0;
-    if shift {
-        modifiers |= 0x01;
-    }
-    if ctrl {
-        modifiers |= 0x02;
-    }
-    if alt {
-        modifiers |= 0x04;
-    }
-
-    ((modifiers as u16) << 8) | (key as u16)
+    let _ = ToUnicode(vkey as u32, scancode, Some(&keyboard_state), &mut buff, 0);
+    WPARAM(char::from_u32(buff[0] as u32).map_or(0, |c| c as usize))
 }
 
 unsafe extern "system" fn hooked_wndproc(
@@ -209,134 +181,41 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
         return LRESULT(0);
     };
     match msg {
-        WI_CONSOLE => {
-            open_client_console();
-            return LRESULT(0);
-        }
-        WI_MODIFIERS => {
-            let mut modifiers = KEYBOARD_MODIFIERS.lock().unwrap();
-            let (shift, ctrl, alt) = &mut *modifiers;
-            let (nshift, nctrl, nalt) = decode_modifiers(wparam);
-
-            if nshift {
-                let msg = if *shift { WM_KEYUP } else { WM_KEYDOWN };
-                let lparam = get_modifier_lparam(0x10, !*shift);
-                let _ = call_original(hwnd, msg, WPARAM(0x10), lparam);
-            }
-
-            if nctrl {
-                let msg = if *ctrl { WM_KEYUP } else { WM_KEYDOWN };
-                let lparam = get_modifier_lparam(0x11, !*ctrl);
-                let _ = call_original(hwnd, msg, WPARAM(0x11), lparam);
-            }
-
-            if nalt {
-                let msg = if *alt { WM_KEYUP } else { WM_KEYDOWN };
-                let lparam = get_modifier_lparam(0x12, !*alt);
-                let _ = call_original(hwnd, msg, WPARAM(0x12), lparam);
-            }
-
-            if nshift {
-                *shift = !*shift;
-            }
-            if nctrl {
-                *ctrl = !*ctrl;
-            }
-            if nalt {
-                *alt = !*alt;
-            }
-
-            return LRESULT(0);
-        }
-        WI_NAME => {
-            super::name::on_request();
-            return LRESULT(0);
-        }
-        WI_TOTAL_XP => {
-            super::total_xp::on_request();
-            return LRESULT(0);
-        }
-        WI_ITEM_NAMES => {
-            super::items::on_request();
-            return LRESULT(0);
-        }
-        WI_GAME_VALS => {
-            super::items::on_game_val_request();
-            return LRESULT(0);
-        }
-        WI_PROJECT => {
-            super::projection::on_request();
-            return LRESULT(0);
-        }
-        WI_MENU => {
-            super::menu::on_request();
-            return LRESULT(0);
-        }
-        WI_MODEL => {
-            super::model::on_request();
-            return LRESULT(0);
-        }
-        WI_LOCS => {
-            super::scene::on_locs_request();
-            return LRESULT(0);
-        }
-        WI_CACHE => {
-            super::cache::on_request();
-            return LRESULT(0);
-        }
-        WI_DETACH => {
-            unhook_wgl_swap_buffers();
-            super::name::unhook_decoder();
-            super::total_xp::unhook();
-            super::packets::unhook();
-            super::script_runs::unhook();
-            super::varc_log::unhook();
-            super::item_log::unhook();
-            super::focus::unhook();
-            unhook_wndproc();
-
-            return LRESULT(0);
-        }
+        WI_CONSOLE => open_client_console(),
+        WI_MODIFIERS => toggle_modifiers(hwnd, wparam),
+        WI_NAME => super::name::on_request(),
+        WI_TOTAL_XP => super::total_xp::on_request(),
+        WI_ITEM_NAMES => super::items::on_request(),
+        WI_GAME_VALS => super::items::on_game_val_request(),
+        WI_PROJECT => super::projection::on_request(),
+        WI_MENU => super::menu::on_request(),
+        WI_MODEL => super::model::on_request(),
+        WI_LOCS => super::scene::on_locs_request(),
+        WI_CACHE => super::cache::on_request(),
+        WM_KILLFOCUS | WM_IME_SETCONTEXT | WM_IME_NOTIFY => {}
         WM_KEYDOWN => {
-            let mut modifiers = KEYBOARD_MODIFIERS.lock().unwrap();
-            let (shift, ctrl, alt) = &mut *modifiers;
-            if *shift | *ctrl | *alt {
-                *LAST_CHAR.lock().unwrap() = wparam.0 as i32;
+            if KEYBOARD_MODIFIERS.lock().unwrap().contains(&true) {
+                LAST_CHAR.store(wparam.0 as u8, Ordering::Relaxed);
             }
-            WM_KEYDOWN
+            return call_original(hwnd, msg, wparam, lparam);
         }
         WM_CHAR => {
-            let mut modifiers = KEYBOARD_MODIFIERS.lock().unwrap();
-            let (shift, ctrl, alt) = &mut *modifiers;
-            if *shift | *ctrl | *alt {
-                let vkey = LAST_CHAR.lock().unwrap();
-                let key = rebuild_key(*vkey as u8, *shift, *ctrl, *alt);
-                let new_wparam = get_updated_wparam((key & 0xFF) as u32, *shift, *ctrl, *alt);
-                return call_original(hwnd, msg, new_wparam, lparam);
-            }
-
-            WM_CHAR
+            let held = *KEYBOARD_MODIFIERS.lock().unwrap();
+            let wparam = if held.contains(&true) {
+                modified_char(LAST_CHAR.load(Ordering::Relaxed), held)
+            } else {
+                wparam
+            };
+            return call_original(hwnd, msg, wparam, lparam);
         }
-        WM_KILLFOCUS => return LRESULT(0),
-        WM_IME_SETCONTEXT => return LRESULT(0),
-        WM_IME_NOTIFY => return LRESULT(0),
         WM_MOUSEMOVE => {
-            let x = (lparam.0 & 0xFFFF) as u16 as i32;
-            let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i32;
-
-            let mem_manager = MEMORY_MANAGER
-                .get()
-                .expect("[Agent]: Memory manager is not initialized!\r\n")
-                .lock()
-                .unwrap();
-            mem_manager.set_mouse_position(x, y);
-
-            WM_MOUSEMOVE
+            let (x, y) = (lparam.0 as u16 as i32, (lparam.0 >> 16) as u16 as i32);
+            memory_manager().set_mouse_position(x, y);
+            return call_original(hwnd, msg, wparam, lparam);
         }
-        _ => msg,
-    };
-
-    call_original(hwnd, msg, wparam, lparam)
+        _ => return call_original(hwnd, msg, wparam, lparam),
+    }
+    LRESULT(0)
 }
 
 unsafe fn hook_wndproc(hwnd: u64) {
@@ -369,7 +248,7 @@ pub unsafe fn wndproc_can_be_restored() -> bool {
     !WNDPROC_HOOKED.load(Ordering::SeqCst) || wndproc_is_ours()
 }
 
-pub unsafe fn unhook_wndproc() {
+unsafe fn unhook_wndproc() {
     if !wndproc_is_ours() {
         return;
     }
@@ -384,25 +263,18 @@ pub unsafe fn unhook_wndproc() {
     println!("[Agent]: WndProc successfully unhooked.\r\n");
 }
 
-//OpenGL Hook
 static ORIGINAL_WGL_SWAPBUFFERS: OnceLock<GenericDetour<unsafe extern "system" fn(HDC) -> BOOL>> =
     OnceLock::new();
 
 unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
     let _call = HookCall::enter();
-    let mut viewport = [0, 0, 0, 0];
+    let mut viewport = [0; 4];
     glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
-    // Save current state
     let mut prev_program: i32 = 0;
     let mut prev_vao: i32 = 0;
     glGetIntegerv(CURRENT_PROGRAM, &mut prev_program);
     glGetIntegerv(VERTEX_ARRAY_BINDING, &mut prev_vao);
-
-    let offset_x = viewport[0];
-    let offset_y = viewport[1];
-    let width = viewport[2];
-    let height = viewport[3];
-    let frame_size = width * height * 4;
+    let [offset_x, offset_y, width, height] = viewport;
 
     let mut client_rect = RECT::default();
     let hwnd = HWND(HOOKED_HWND.load(Ordering::SeqCst) as *mut c_void);
@@ -411,21 +283,12 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
     let offset_y_top_down = window_height - offset_y - height;
 
     let (mouse, dest, overlay, (cursor, cursor_color, cursor_size)) = {
-        let mem_manager = MEMORY_MANAGER
-            .get()
-            .expect("[Agent]: Memory manager is not initialized!\r\n")
-            .lock()
-            .unwrap();
+        let mem_manager = memory_manager();
         mem_manager.set_viewport(offset_x, offset_y, width, height, window_height);
-        // The injector paints the slot the serial doesn't select, so the shown one is never mid-paint.
-        let overlay = match mem_manager.overlay_mode() {
-            overlay_mode::OFF => None,
-            overlay_mode::EVERY_FRAME => Some((mem_manager.overlay_ptr(0), None)),
-            _ => {
-                let serial = mem_manager.overlay_serial();
-                Some((mem_manager.overlay_ptr(serial as usize & 1), Some(serial)))
-            }
-        };
+        let overlay = (mem_manager.overlay_mode() != overlay_mode::OFF).then(|| {
+            let serial = mem_manager.overlay_serial();
+            (mem_manager.overlay_ptr(serial as usize & 1), serial)
+        });
         let dest = mem_manager
             .capture_enabled()
             .then(|| mem_manager.image_ptr());
@@ -439,7 +302,7 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
 
     if load_opengl_extensions() {
         match dest {
-            Some(dest) => read_frame(offset_x, offset_y, width, height, frame_size, dest),
+            Some(dest) => read_frame(offset_x, offset_y, width, height, dest),
             None => release_frame_buffers(),
         }
 
@@ -461,18 +324,13 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
                 );
             }
         }
+        restore_state(prev_program, prev_vao);
     }
-
-    restore_state(prev_program, prev_vao);
 
     let original = ORIGINAL_WGL_SWAPBUFFERS.get().unwrap();
     let presented = original.call(hdc);
-    // after the swap, so a reader woken by it paints the overlay for the next frame from what this one showed
-    if let Some(memory) = MEMORY_MANAGER.get() {
-        memory
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .frame_presented();
+    if let Some(memory) = try_memory_manager() {
+        memory.frame_presented();
     }
     presented
 }
@@ -501,12 +359,9 @@ unsafe fn hook_wgl_swap_buffers() {
     println!("[Agent]: wglSwapBuffers successfully hooked.\r\n");
 }
 
-pub unsafe fn unhook_wgl_swap_buffers() {
-    if let Some(memory) = MEMORY_MANAGER.get() {
-        memory
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear_overlay();
+unsafe fn unhook_wgl_swap_buffers() {
+    if let Some(memory) = try_memory_manager() {
+        memory.clear_overlay();
     }
 
     let Some(detour) = ORIGINAL_WGL_SWAPBUFFERS.get() else {
@@ -522,12 +377,20 @@ pub unsafe fn unhook_wgl_swap_buffers() {
     }
 }
 
+pub unsafe fn unhook_all() {
+    super::focus::unhook();
+    unhook_wndproc();
+    unhook_wgl_swap_buffers();
+    super::name::unhook_decoder();
+    super::total_xp::unhook();
+    super::packets::unhook();
+    super::script_runs::unhook();
+    super::varc_log::unhook();
+    super::item_log::unhook();
+}
+
 pub(super) unsafe fn client_image<'a>() -> Option<&'a [u8]> {
     let base = GetModuleHandleA(PCSTR::null()).ok()?.0 as *const u8;
-    if base.is_null() {
-        return None;
-    }
-
     let e_lfanew = (base.add(0x3c) as *const u32).read_unaligned() as usize;
     let size_of_image = (base.add(e_lfanew + 24 + 56) as *const u32).read_unaligned() as usize;
     Some(std::slice::from_raw_parts(base, size_of_image))
@@ -547,15 +410,8 @@ fn found<T: std::fmt::Debug>(name: &str, result: Result<T, ScanError>) -> Option
 }
 
 unsafe fn find_offsets() {
-    let set_found = |found: bool| {
-        MEMORY_MANAGER
-            .get()
-            .expect("[Agent]: Memory manager is not initialized!\r\n")
-            .lock()
-            .unwrap()
-            .set_offsets_found(found)
-    };
-    let (Some(image), Ok(module)) = (client_image(), GetModuleHandleA(PCSTR::null())) else {
+    let set_found = |found: bool| memory_manager().set_offsets_found(found);
+    let Some(image) = client_image() else {
         println!("[Agent]: Client image not found.\r\n");
         set_found(false);
         return;
@@ -587,7 +443,6 @@ unsafe fn find_offsets() {
     let projectiles = found("Projectiles", find_projectiles(pe));
     let spot_anims = found("Spot animations", find_spot_anims(pe));
     let packets = found("Packets", find_packets(pe));
-    // not printed whole: it holds all 151 packets
     let packet_layouts = packets.and_then(|p| match find_packet_layouts(pe, &p) {
         Ok(layouts) => {
             println!(
@@ -604,6 +459,7 @@ unsafe fn find_offsets() {
     });
     let script_runs = found("Script runs", find_script_runs(pe));
     let varc_setters = found("Varc setters", find_varc_setters(pe));
+    let tick = player.zip(tick_count).map(|(p, offset)| (p.client, offset));
     let containers = find_item_containers(pe);
     let item_setter = containers
         .ok()
@@ -645,7 +501,7 @@ unsafe fn find_offsets() {
         println!("[Agent]: World found.\r\n");
     }
 
-    let module_base = module.0 as u64;
+    let module_base = image.as_ptr() as u64;
     let client = player.map_or(0, |p| p.client);
     let mut layout = Layout {
         module_base,
@@ -748,7 +604,6 @@ unsafe fn find_offsets() {
             reserved: 0,
         };
     }
-    // The minimap rule finds the focal point; both rules find the yaw, so they must agree.
     if let (Some(c), Some(m)) = (
         camera,
         minimap.filter(|m| camera.is_some_and(|c| c.yaw == m.angle)),
@@ -830,7 +685,6 @@ unsafe fn find_offsets() {
             };
         }
     }
-    // read through the world view, so it needs the world's client and actor layout
     if let Some(p) = projectiles.filter(|_| world.is_some()) {
         layout.found |= part::PROJECTILES;
         layout.projectiles = ProjectileLayout {
@@ -860,7 +714,6 @@ unsafe fn find_offsets() {
             reserved: 0,
         };
     }
-    // read through the local player's world view
     if let Some(g) = spot_anims.filter(|_| player.is_some()) {
         layout.found |= part::SPOT_ANIMS;
         layout.spot_anims = SpotAnimLayout {
@@ -874,7 +727,6 @@ unsafe fn find_offsets() {
             id: g.id,
         };
     }
-    // read on the local player, like its position
     if let Some(p) = path.filter(|_| layout.has(part::PLAYER)) {
         layout.found |= part::PATH;
         layout.path = PathLayout {
@@ -948,22 +800,13 @@ unsafe fn find_offsets() {
         super::packets::hook(module_base, rule, packet_layouts.as_ref());
     }
     if let Some(rule) = script_runs {
-        super::script_runs::hook(
-            module_base,
-            rule,
-            player.zip(tick_count).map(|(p, offset)| (p.client, offset)),
-        );
+        super::script_runs::hook(module_base, rule, tick);
     }
     if let Some(rule) = varc_setters {
         super::varc_log::hook(module_base, rule);
     }
     if let Some((rule, containers)) = item_setter {
-        super::item_log::hook(
-            module_base,
-            rule,
-            containers,
-            player.zip(tick_count).map(|(p, offset)| (p.client, offset)),
-        );
+        super::item_log::hook(module_base, rule, containers, tick);
     }
     if let Some(builder) = found("Item icon builder", find_item_icon(pe)) {
         super::cache::set_item_icon(module_base, builder);
@@ -1054,25 +897,6 @@ unsafe fn find_offsets() {
     );
 }
 
-//enable...
-pub unsafe fn reenable_hooks() {
-    let wgl_swapbuffers_detour = ORIGINAL_WGL_SWAPBUFFERS
-        .get()
-        .expect("[Agent]: wglSwapBuffers hook not found\r\n");
-
-    wgl_swapbuffers_detour
-        .enable()
-        .expect("[Agent]: Failed to enable wglSwapBuffers hook.\r\n");
-
-    super::name::rehook_decoder();
-    super::total_xp::rehook();
-    super::packets::rehook();
-    super::script_runs::rehook();
-    super::varc_log::rehook();
-    super::item_log::rehook();
-    hook_wndproc(HOOKED_HWND.load(Ordering::SeqCst) as u64);
-    super::focus::hook();
-}
 pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {
     let hwnd = lparam as u64;
 
@@ -1088,7 +912,7 @@ pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {
         hook_wgl_swap_buffers();
         find_offsets();
 
-        event_listener(hwnd, GetCurrentProcessId());
+        event_listener(GetCurrentProcessId());
     }));
 
     if result.is_err() {

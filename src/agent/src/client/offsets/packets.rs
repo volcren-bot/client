@@ -1,26 +1,17 @@
-use super::{model::whole_function, *};
+use super::*;
 
-/// The receive and send functions that see every packet, and where a packet keeps what the packet log records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Packets {
-    /// RVA of the function that pops the next received packet (the game thread calls it from the packet dispatcher)
     pub receive: u32,
-    /// the packet id in the `out` argument
     pub receive_opcode: u32,
-    /// the buffer object in the `out` argument
     pub receive_buffer: u32,
-    /// RVA of the function that sends a queued packet (on the network thread)
     pub send: u32,
-    /// the client packet id in the packet
     pub send_type: u32,
-    /// the buffer object in the packet
     pub send_buffer: u32,
-    /// the data pointer and the written length in a buffer object
     pub buffer_data: u32,
     pub buffer_cursor: u32,
 }
 
-// Where a buffer object keeps the length a payload was allocated with; no code shape names it, checked against the packet reader's size table.
 pub const BUFFER_SIZE: u32 = 8;
 
 fn imm1(i: &Instruction) -> Option<u64> {
@@ -38,14 +29,7 @@ fn imm1(i: &Instruction) -> Option<u64> {
     .then(|| i.immediate(1))
 }
 
-// The opcode writer `(buffer, opcode in dl, cipher)`: adds the cipher byte to the opcode and appends it to the buffer.
-struct Writer {
-    function: u32,
-    data: u32,
-    cursor: u32,
-}
-
-fn opcode_writer(function: u32, instrs: &[Instruction]) -> Option<Writer> {
+fn opcode_writer(instrs: &[Instruction]) -> Option<(u32, u32)> {
     let calls = instrs
         .iter()
         .filter(|i| i.mnemonic() == Mnemonic::Call)
@@ -100,14 +84,9 @@ fn opcode_writer(function: u32, instrs: &[Instruction]) -> Option<Writer> {
         .filter(|&d| d != cursor)
         .collect())
     .ok()?;
-    Some(Writer {
-        function,
-        data,
-        cursor,
-    })
+    Some((data, cursor))
 }
 
-// The packet constructor calls the writer with `lea rcx, [packet + buffer]` and stores the packet id.
 fn constructor_fields(instrs: &[Instruction], call: usize) -> Option<(u32, u32)> {
     let buffer = instrs[call.saturating_sub(6)..call]
         .iter()
@@ -151,7 +130,6 @@ fn constructor_fields(instrs: &[Instruction], call: usize) -> Option<(u32, u32)>
     Some((kind, buffer))
 }
 
-// The send function passes the packet's buffer data pointer and length to the socket write.
 fn is_sender(instrs: &[Instruction], data: u32, cursor: u32) -> bool {
     if instrs
         .iter()
@@ -171,7 +149,6 @@ fn is_sender(instrs: &[Instruction], data: u32, cursor: u32) -> bool {
         })
         .map(|i| i.op0_register());
     let packet: Vec<Register> = core::iter::once(Register::R8).chain(copies).collect();
-    // they are the arguments of the socket write (data in `rdx`, length in `r8`), which sets the sender apart from a copy of the packet
     let loads = |disp: u32, into: Register| {
         instrs.iter().any(|i| {
             i.op0_kind() == OpKind::Register
@@ -182,7 +159,6 @@ fn is_sender(instrs: &[Instruction], data: u32, cursor: u32) -> bool {
     loads(data, Register::RDX) && loads(cursor, Register::R8)
 }
 
-// The receive function: checks the connection state, compares the queue node's kind with 3 and 4, stores the packet id at the start of `out`.
 fn receive_fields(instrs: &[Instruction]) -> Option<(u32, u32)> {
     let state_is_3 = instrs.iter().take(6).any(|i| {
         i.mnemonic() == Mnemonic::Cmp
@@ -249,7 +225,7 @@ pub fn find_packets(pe: &Pe) -> Result<Packets, ScanError> {
         }
         let instrs = whole_function(pe, begin, end - begin);
         if end - begin <= 0x80 {
-            writers.extend(opcode_writer(begin, &instrs).map(|w| (w.function, w.data, w.cursor)));
+            writers.extend(opcode_writer(&instrs).map(|(data, cursor)| (begin, data, cursor)));
         }
         if end - begin <= 0x60 {
             small.push((begin, instrs));
@@ -259,7 +235,6 @@ pub fn find_packets(pe: &Pe) -> Result<Packets, ScanError> {
     }
     let (writer, data, cursor) = one(writers)?;
 
-    // the one place that builds a packet: it writes the opcode through the writer
     let sites: Vec<u32> = direct_calls(pe)
         .iter()
         .copied()
@@ -267,12 +242,7 @@ pub fn find_packets(pe: &Pe) -> Result<Packets, ScanError> {
         .map(|(site, _)| site)
         .collect();
     let site = one(sites)?;
-    let (begin, end) = pe.function_containing(site).ok_or(ScanError::NotFound)?;
-    let instrs = whole_function(pe, begin, end - begin);
-    let call = instrs
-        .iter()
-        .position(|i| i.ip() == site as u64)
-        .ok_or(ScanError::NotFound)?;
+    let (instrs, call) = site_function(pe, site).ok_or(ScanError::NotFound)?;
     let (send_type, send_buffer) = constructor_fields(&instrs, call).ok_or(ScanError::NotFound)?;
 
     let send = one(small

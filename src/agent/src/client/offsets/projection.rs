@@ -33,8 +33,7 @@ pub fn find_projection(pe: &Pe, client: u32) -> Result<Projection, ScanError> {
         .ok_or(ScanError::NotFound)?;
     let tile_height = instrs
         .iter()
-        .find(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
-        .map(|i| i.near_branch_target() as u32)
+        .find_map(call_target)
         .ok_or(ScanError::NotFound)?;
     Ok(Projection {
         world_to_screen,

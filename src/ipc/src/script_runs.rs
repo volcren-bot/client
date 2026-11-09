@@ -1,5 +1,3 @@
-//! The script log (`AGENT_SCRIPTS_<pid>`): event scripts run, in a `ring`; `log` must be an initialised `Log` unless noted.
-
 use crate::ring;
 use alloc::{format, string::String, vec::Vec};
 use core::{
@@ -11,23 +9,18 @@ pub fn script_runs_memory_name(pid: u32) -> String {
     format!("AGENT_SCRIPTS_{pid}")
 }
 
-/// Slots in the ring (a power of two): about 8 seconds of an idle client, which logs about 4000 entries a second.
 pub const SLOT_COUNT: usize = 32768;
 
-/// Arguments a slot keeps; `Entry::arg_count` is how many the event had.
 pub const ARG_COUNT: usize = 6;
 
 pub mod phase {
-    /// The script is about to run.
     pub const START: u8 = 0;
-    /// The script has finished.
     pub const END: u8 = 1;
 }
 
 pub mod arg_kind {
     pub const INT: u8 = 1;
     pub const STRING: u8 = 2;
-    /// Any other kind of argument (its value isn't kept).
     pub const OTHER: u8 = 0;
 }
 
@@ -36,7 +29,6 @@ pub struct Slot {
     commit: AtomicU64,
     time_us: u64,
     event_type: i32,
-    /// the game tick when the entry was logged, -1 when it couldn't be read
     tick: i32,
     arg_count: u16,
     depth: u8,
@@ -64,45 +56,34 @@ pub const LOG_SIZE: usize = core::mem::size_of::<Log>();
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub sequence: u64,
-    /// Microseconds since the agent created the log: for ordering entries and timing scripts, not a wall clock.
     pub time_us: u64,
     pub event_type: i32,
-    /// The game tick the entry was logged in.
     pub tick: Option<i32>,
-    /// `phase::START` or `phase::END`; an end has the same event type, depth and arguments as its start.
     pub phase: u8,
-    /// How many arguments the event had (`args` keeps the first `ARG_COUNT`).
     pub arg_count: u16,
-    /// 0 for a script started by the client, 1 and up for one started while another was running.
     pub depth: u8,
-    /// (kind from `arg_kind`, int value; 0 for anything but an int)
     pub args: Vec<(u8, i32)>,
 }
 
 pub type Page = ring::Page<Entry>;
 
-/// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));
 }
 
-/// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
     ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
 
-/// What to log about a script: the event it runs for and where it is.
 pub struct Run<'a> {
     pub phase: u8,
     pub event_type: i32,
     pub tick: Option<i32>,
     pub depth: u8,
     pub arg_count: u16,
-    /// (kind, int value) of the first arguments, of which `ARG_COUNT` are kept
     pub args: &'a [(u8, i32)],
 }
 
-/// Appends an entry.
 pub unsafe fn push(log: *const Log, time_us: u64, run: &Run) {
     let Run {
         phase,
@@ -128,7 +109,6 @@ pub unsafe fn push(log: *const Log, time_us: u64, run: &Run) {
     });
 }
 
-/// Copies out up to `limit` entries from `since` on (from the oldest if `since` is ahead).
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     ring::read_since(
         &(*log).header,
@@ -243,7 +223,6 @@ mod tests {
                 (phase::END, 25, 1)
             );
 
-            // reading on from `next` returns only what is new
             push(
                 memory.0,
                 30,

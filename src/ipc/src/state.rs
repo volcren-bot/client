@@ -200,9 +200,7 @@ pub struct WorldLayout {
     pub varc_kind: u32,
     pub run_energy: u32,
     pub weight: u32,
-    // the NPC's animation id (-1 when none)
     pub npc_animation: u32,
-    // the NPC's head icons object (0 when the rule failed) and where its sprite vector starts
     pub npc_head_icons: u32,
     pub head_icon_sprites: u32,
     pub reserved: u32,
@@ -253,7 +251,6 @@ pub struct GroundItemsLayout {
     pub id: u32,
 }
 
-// The chat history: `messages` and `cycle` are module RVAs, the rest message fields.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatLayout {
@@ -298,7 +295,6 @@ pub struct ProjectionLayout {
     pub decoration_height: u32,
 }
 
-// The scene's collision maps: a vector at `scene + maps`, `stride` apart, tile (x, y) at `[x + 1][y + 1]`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CollisionLayout {
@@ -306,14 +302,12 @@ pub struct CollisionLayout {
     pub stride: u32,
 }
 
-// The scene loader: the byte at `loader + instance_flag` is 1 in an instance.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SceneLoaderLayout {
     pub instance_flag: u32,
 }
 
-// The projectiles in flight: a circular list at `client + list`, plus the projectile field offsets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectileLayout {
@@ -343,7 +337,6 @@ pub struct ProjectileLayout {
     pub reserved: u32,
 }
 
-// The spot animations on tiles: a circular list at `world view + list`, plus the object field offsets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpotAnimLayout {
@@ -357,7 +350,6 @@ pub struct SpotAnimLayout {
     pub id: u32,
 }
 
-// An actor's path, newest scene tile first in `x` and `y` (`[i32; 10]` each); `length` is the steps left.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PathLayout {
@@ -370,7 +362,6 @@ pub struct PathLayout {
 pub mod collision_map {
     pub const WIDTH: usize = 0x8;
     pub const HEIGHT: usize = 0xc;
-    // an `array` of columns, each an inline 0x18 byte `array` of i32 flags
     pub const COLUMNS: usize = 0x10;
     pub const COLUMN_SIZE: usize = 0x18;
     pub const BORDER: usize = 1;
@@ -626,14 +617,10 @@ pub mod menu_status {
     pub const OTHER_THREAD: i32 = -2;
 }
 
-// The client's own cap (Java's 500). A crowded tile easily has 80 entries.
 pub const MENU_ENTRIES: usize = 500;
 pub const MENU_OPTION_SIZE: usize = 40;
-// Targets keep colour tags, and a "Use" target naming both items already passes 80 bytes.
 pub const MENU_TARGET_SIZE: usize = 256;
-// The client lays out at most 4 submenus deep (it refuses paths of 5 rows or more).
 pub const MENU_SUBMENUS: usize = 4;
-// Java's cap for a submenu (`new Menu(false)`).
 pub const MENU_SUBMENU_ENTRIES: usize = 64;
 
 pub mod menu_open {
@@ -661,7 +648,6 @@ pub struct MenuEntryInfo {
     pub kind: u8,
     pub category: u8,
     pub cancel: u8,
-    /// 1 when the row opens a submenu. Only known for the rows of an open menu.
     pub submenu: u8,
 }
 
@@ -688,7 +674,6 @@ pub struct MenuReply {
     pub sequence: u32,
     pub status: i32,
     pub count: u32,
-    /// Whether the client's choose-option menu is open: `menu_open::CLOSED`, `OPEN` or `UNKNOWN`.
     pub open: u32,
     pub entries: [MenuEntryInfo; MENU_ENTRIES],
     pub clicked: MenuEntryInfo,
@@ -696,20 +681,15 @@ pub struct MenuReply {
     pub click_y: i32,
     pub click_age: i32,
     pub has_click: u32,
-    /// The component waiting for a target (`action` is the item id, `kind` the mask); valid when `selected` is 1.
     pub selection: MenuEntryInfo,
-    /// 1 when agent knows where the client keeps the selected component.
     pub has_selection: u32,
     pub selected: u32,
-    /// The menu as the client lays it out. Only meaningful when `has_geometry` is 1.
     pub geometry: MenuGeometry,
     pub has_geometry: u32,
-    /// The open submenus, the one opened from the menu first; valid when `has_geometry` is 1.
     pub submenu_count: u32,
     pub submenus: [MenuSubmenu; MENU_SUBMENUS],
 }
 
-/// An open submenu: the row above that opened it (0 is the top), its rows top to bottom, and its layout.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuSubmenu {
@@ -778,7 +758,6 @@ pub mod model_status {
     pub const NOT_IN_GAME: i32 = -4;
     pub const NO_NPC: i32 = -5;
     pub const NO_MODEL: i32 = -6;
-    /// an `NPC_TYPE` request's animation is missing, skeletal (unsupported) or lacks the frame
     pub const BAD_ANIMATION: i32 = -7;
 }
 
@@ -789,7 +768,6 @@ pub mod model_target {
     pub const NPC: u32 = 0;
     pub const LOC: u32 = 1;
     pub const PLAYER: u32 = 2;
-    /// an NPC type's model built by the client, posed at a frame of an animation, at a place in the scene
     pub const NPC_TYPE: u32 = 3;
 }
 
@@ -802,7 +780,6 @@ pub struct ModelRequest {
     pub loc_x: i32,
     pub loc_y: i32,
     pub loc_id: i32,
-    /// `NPC_TYPE`: the NPC id, animation (-1 for none), frame, local fine x and y, and orientation
     pub type_id: i32,
     pub animation: i32,
     pub frame: i32,
@@ -821,13 +798,11 @@ pub mod loc_status {
 pub const MAX_LOCS: usize = 8192;
 pub const MAX_LOC_NAMES: usize = 1024;
 pub const LOC_NAME_SIZE: usize = 32;
-// `LocInfo::flags`: whether the client lets the loc be clicked (the minimap draws such walls red: doors), and its plane
 pub const LOC_CLICKABLE: u8 = 1;
 pub const LOC_PLANE_SHIFT: u8 = 1;
 pub const LOC_PLANE_MASK: u8 = 3;
 pub const NO_NAME: u16 = 0xffff;
 
-/// What a locs request asks for: a plane (0 to 3) or `PLAYER_PLANE` or `ALL_PLANES`, optionally `| CLICKABLE_ONLY`.
 pub mod locs_request {
     pub const PLAYER_PLANE: i32 = -1;
     pub const ALL_PLANES: i32 = 4;
@@ -851,7 +826,6 @@ pub struct LocInfo {
     pub decoration_height: i16,
 }
 
-/// Read-only requests the worker answers; the asker holds `worker_mutex_name` while waiting.
 pub mod worker_kind {
     pub const NPCS: u32 = 1;
     pub const PLAYERS: u32 = 2;
@@ -870,9 +844,7 @@ pub mod worker_kind {
 
 pub mod worker_status {
     pub const OK: i32 = 1;
-    /// The agent hasn't found what the request needs, or doesn't know the kind.
     pub const NOT_FOUND: i32 = -1;
-    /// The answer doesn't fit the reply buffer: read the memory through the client instead.
     pub const TOO_BIG: i32 = -3;
 }
 
@@ -886,7 +858,6 @@ pub struct WorkerRequest {
     pub reserved: u32,
 }
 
-/// `data[..length]` is the answer, encoded by the type the kind names. `sequence` echoes the request's.
 #[repr(C)]
 pub struct WorkerReply {
     pub sequence: u32,
@@ -922,7 +893,6 @@ pub struct ModelReply {
     pub corner_count: u32,
     pub hull_count: u32,
     pub face_count: u32,
-    /// `NPC_TYPE`: how many frames the animation has (0 without one)
     pub frame_count: u32,
     pub corners: [[f32; 2]; 8],
     pub hull: [[f32; 2]; MODEL_HULL],
@@ -952,14 +922,11 @@ pub mod cache_kind {
     pub const FILES: u32 = 0;
     pub const ARCHIVES: u32 = 1;
     pub const ARCHIVE_FILES: u32 = 2;
-    /// Item icons from the client's icon builder: `files` are `[id | flags, quantity]`, replies `0xAARRGGBB` pixels.
     pub const ITEM_ICONS: u32 = 3;
 }
 
-/// The size of an item icon, the one the client draws in its inventory.
 pub const ITEM_ICON_WIDTH: u32 = 36;
 pub const ITEM_ICON_HEIGHT: u32 = 32;
-/// Set in the id word of an `ITEM_ICONS` request to draw the quantity on the icon.
 pub const ITEM_ICON_SHOW_COUNT: i32 = 1 << 24;
 pub const ITEM_ICON_ID_MASK: i32 = ITEM_ICON_SHOW_COUNT - 1;
 
@@ -1096,19 +1063,16 @@ pub enum ReadError {
     Busy,
 }
 
-/// A handle to the shared memory block, valid for `'a`: the one place that vouches the pointer is a live mapping.
 #[derive(Clone, Copy)]
 pub struct Shared<'a> {
     ptr: NonNull<LayoutMemory>,
     view: PhantomData<&'a LayoutMemory>,
 }
 
-/// Accessors for a `field` sequence-locked by `sequence`: a request, a reply copied in, or a reply filled in place.
 macro_rules! seqlocked {
     ($sequence:ident, $field:ident: $ty:ty; request $write:ident, $read:ident($attempts:expr)) => {
         pub fn $write(self, value: &$ty) -> u32 {
             let this = self.this();
-            // SAFETY: the mapping is live (see `Shared`).
             unsafe {
                 seqlock_write(
                     addr_of_mut!((*this).$sequence),
@@ -1120,7 +1084,6 @@ macro_rules! seqlocked {
 
         pub fn $read(self) -> Option<(u32, $ty)> {
             let this = self.this();
-            // SAFETY: the mapping is live (see `Shared`).
             unsafe {
                 seqlock_read(
                     addr_of!((*this).$sequence),
@@ -1133,7 +1096,6 @@ macro_rules! seqlocked {
     ($sequence:ident, $field:ident: $ty:ty; reply $write:ident, $read:ident) => {
         pub fn $write(self, value: &$ty) {
             let this = self.this();
-            // SAFETY: the mapping is live (see `Shared`).
             unsafe {
                 seqlock_write(
                     addr_of_mut!((*this).$sequence),
@@ -1146,10 +1108,8 @@ macro_rules! seqlocked {
         seqlocked!($sequence, $field: $ty; read $read);
     };
     ($sequence:ident, $field:ident: $ty:ty; fill $write:ident) => {
-        /// Fills the reply in place, as it is too big for the caller's stack; `fill` must set every field.
         pub fn $write(self, fill: impl FnOnce(&mut $ty)) {
             let this = self.this();
-            // SAFETY: the mapping is live (see `Shared`).
             unsafe {
                 seqlock_write_with(
                     addr_of_mut!((*this).$sequence),
@@ -1162,7 +1122,6 @@ macro_rules! seqlocked {
     ($sequence:ident, $field:ident: $ty:ty; read $read:ident) => {
         pub fn $read(self, attempts: usize) -> Option<$ty> {
             let this = self.this();
-            // SAFETY: the mapping is live (see `Shared`).
             unsafe {
                 seqlock_read(
                     addr_of!((*this).$sequence),
@@ -1176,7 +1135,6 @@ macro_rules! seqlocked {
 }
 
 impl<'a> Shared<'a> {
-    /// Zeroes and stamps the block; `ptr` must be a writable, aligned, unshared mapping of `LAYOUT_SIZE` bytes.
     pub unsafe fn create(ptr: NonNull<LayoutMemory>) -> Self {
         let this = ptr.as_ptr();
         unsafe {
@@ -1186,7 +1144,6 @@ impl<'a> Shared<'a> {
         Self::attach(ptr)
     }
 
-    /// `ptr` must be a writable, aligned mapping of `LAYOUT_SIZE` bytes set up by `create`.
     pub unsafe fn attach(ptr: NonNull<LayoutMemory>) -> Self {
         Self {
             ptr,
@@ -1200,7 +1157,6 @@ impl<'a> Shared<'a> {
 
     pub fn write(self, layout: &Layout) {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_write(
                 addr_of_mut!((*this).sequence),
@@ -1233,7 +1189,6 @@ impl<'a> Shared<'a> {
 
     pub fn write_menu_request(self) -> u32 {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_write(
                 addr_of_mut!((*this).menu_request_sequence),
@@ -1245,7 +1200,6 @@ impl<'a> Shared<'a> {
 
     pub fn read_menu_request(self) -> Option<u32> {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_read(
                 addr_of!((*this).menu_request_sequence),
@@ -1256,10 +1210,8 @@ impl<'a> Shared<'a> {
         }
     }
 
-    /// `request` is a `locs_request` value.
     pub fn write_locs_request(self, request: i32) -> u32 {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_write(
                 addr_of_mut!((*this).locs_request_sequence),
@@ -1271,7 +1223,6 @@ impl<'a> Shared<'a> {
 
     pub fn read_locs_request(self) -> Option<(u32, i32)> {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_read(
                 addr_of!((*this).locs_request_sequence),
@@ -1283,7 +1234,6 @@ impl<'a> Shared<'a> {
 
     pub fn read_locs_reply_into(self, out: &mut LocsReply, attempts: usize) -> bool {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`); `out` is a separate, writable `LocsReply`.
         unsafe {
             seqlock_read_with(addr_of!((*this).locs_reply_sequence), attempts, || {
                 core::ptr::copy_nonoverlapping(addr_of!((*this).locs_reply), out, 1)
@@ -1292,10 +1242,8 @@ impl<'a> Shared<'a> {
         }
     }
 
-    /// The request sequence the reply answers, or `None` while the agent is writing it.
     pub fn worker_reply_answers(self) -> Option<u32> {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_read_with(addr_of!((*this).worker_reply_sequence), 1, || {
                 addr_of!((*this).worker_reply.sequence).read_volatile()
@@ -1304,10 +1252,8 @@ impl<'a> Shared<'a> {
         }
     }
 
-    /// Copies the answer to request `sequence` into `data` and returns its status; `None` if not that answer.
     pub fn read_worker_reply(self, sequence: u32, data: &mut Vec<u8>) -> Option<i32> {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`); at most `WORKER_DATA_SIZE` bytes are copied into the reserved `data`.
         unsafe {
             seqlock_read_with(addr_of!((*this).worker_reply_sequence), 1, || {
                 let reply = addr_of!((*this).worker_reply);
@@ -1335,7 +1281,6 @@ impl<'a> Shared<'a> {
 
     pub fn read_cache_reply_into(self, out: &mut CacheReply, attempts: usize) -> bool {
         let this = self.this();
-        // SAFETY: the mapping is live (see `Shared`); `out` is a separate, writable `CacheReply` and `used` is capped to its data.
         unsafe {
             let reply = addr_of!((*this).cache_reply);
             seqlock_read_with(addr_of!((*this).cache_reply_sequence), attempts, || {
@@ -1356,7 +1301,6 @@ impl<'a> Shared<'a> {
     }
 }
 
-/// A read-only handle, for mappings opened without write access.
 #[derive(Clone, Copy)]
 pub struct LayoutView<'a> {
     ptr: NonNull<LayoutMemory>,
@@ -1364,7 +1308,6 @@ pub struct LayoutView<'a> {
 }
 
 impl<'a> LayoutView<'a> {
-    /// `ptr` must be a readable, aligned mapping of `LAYOUT_SIZE` bytes.
     pub unsafe fn attach(ptr: NonNull<LayoutMemory>) -> Self {
         Self {
             ptr,
@@ -1374,7 +1317,6 @@ impl<'a> LayoutView<'a> {
 
     pub fn read(self, attempts: usize) -> Result<Layout, ReadError> {
         let this = self.ptr.as_ptr();
-        // SAFETY: `attach` promised a live mapping.
         unsafe {
             let protocol = addr_of!((*this).protocol).read_volatile();
             if protocol != PROTOCOL_VERSION as u32 {
@@ -1391,7 +1333,6 @@ impl<'a> LayoutView<'a> {
     }
 }
 
-/// Runs `fill` on `data` with `sequence` odd, then publishes the next even sequence and returns it.
 unsafe fn seqlock_write_with<T>(
     sequence: *mut u32,
     data: *mut T,
@@ -1410,7 +1351,6 @@ unsafe fn seqlock_write<T: Copy>(sequence: *mut u32, data: *mut T, value: &T) ->
     seqlock_write_with(sequence, data, |data| data.write_volatile(*value))
 }
 
-/// Runs `read` until `sequence` stays even across it, up to `attempts` times.
 unsafe fn seqlock_read_with<R>(
     sequence: *const u32,
     attempts: usize,
@@ -1446,7 +1386,6 @@ mod tests {
     use alloc::boxed::Box;
     use core::mem::{offset_of, size_of, MaybeUninit};
 
-    // On the heap: the layout is megabytes, more than a test thread's stack.
     fn memory() -> Box<MaybeUninit<LayoutMemory>> {
         Box::new_uninit()
     }
@@ -1460,7 +1399,6 @@ mod tests {
         assert_eq!(size_of::<SkillsLayout>(), 4 * 4);
         assert_eq!(size_of::<LoginLayout>(), 5 * 4);
         assert_eq!(size_of::<InterfaceLayout>(), 8 + 22 * 4);
-        // 27 u32s after the u64 module base, padded to 8 bytes
         assert_eq!(size_of::<WorldLayout>(), 128);
         assert_eq!(size_of::<WorldSelectLayout>(), 14 * 4);
         assert_eq!(offset_of!(Layout, interfaces), 16 + 16 + 24 + 16 + 20 + 4);
@@ -1484,7 +1422,6 @@ mod tests {
         let entry = MENU_OPTION_SIZE + MENU_TARGET_SIZE + 20;
         assert_eq!(size_of::<MenuEntryInfo>(), entry);
         assert_eq!(size_of::<MenuGeometry>(), 12 * 4);
-        // the menu geometry and its flag, then the submenus
         let submenu = 8 + 48 + MENU_SUBMENU_ENTRIES * entry;
         assert_eq!(size_of::<MenuSubmenu>(), submenu);
         assert_eq!(

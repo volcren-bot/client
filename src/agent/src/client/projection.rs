@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::OnceLock;
 
 use ipc::{
@@ -7,9 +6,10 @@ use ipc::{
 };
 
 use super::{
+    detour::function,
     offsets::Projection,
     own::{on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
 };
 
 type WorldToScreen =
@@ -19,15 +19,11 @@ type TileHeight = unsafe extern "system" fn(u64, u64, i32, i32, i32) -> i32;
 static PROJECTION: OnceLock<(WorldToScreen, TileHeight, Projection)> = OnceLock::new();
 
 pub unsafe fn set_projection(module_base: u64, rule: Projection) {
-    let world_to_screen: WorldToScreen =
-        std::mem::transmute((module_base + rule.world_to_screen as u64) as *const ());
-    let tile_height: TileHeight =
-        std::mem::transmute((module_base + rule.tile_height as u64) as *const ());
-    let _ = PROJECTION.set((world_to_screen, tile_height, rule));
-}
-
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
+    let _ = PROJECTION.set((
+        function(module_base + rule.world_to_screen as u64),
+        function(module_base + rule.tile_height as u64),
+        rule,
+    ));
 }
 
 pub struct Scene {
@@ -63,7 +59,6 @@ impl Scene {
             .ok_or(project_status::NOT_FOUND)?;
         let world_view = memory
             .ptr(client + rule.top_world_view as u64)
-            .filter(|&wv| wv != 0)
             .ok_or(project_status::NOT_FOUND)?;
         let plane = memory
             .i32(world_view + rule.plane as u64)
@@ -97,7 +92,7 @@ impl Scene {
 }
 
 pub fn on_request() {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let Some((sequence, request)) = shared.read_project_request() else {
         return;

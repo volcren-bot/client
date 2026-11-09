@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::{
     ffi::c_void,
     sync::{
@@ -14,9 +13,10 @@ use ipc::{
 use retour::GenericDetour;
 
 use super::{
+    detour,
     offsets::AppearanceDecoder,
     own::{note_game_thread, on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
     unload::HookCall,
 };
 
@@ -27,7 +27,6 @@ struct Kept {
     real: Option<[u8; 24]>,
 }
 
-#[derive(Default)]
 struct Keeper {
     kept: Option<Kept>,
     sequence: u32,
@@ -56,56 +55,31 @@ fn names(memory: &impl Memory, object: u64) -> Option<([u8; 24], [u8; 24])> {
         .then_some((display, clean))
 }
 
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
-}
-
 pub unsafe fn hook_decoder(module_base: u64, decoder: AppearanceDecoder) {
     if DECODER.get().is_some() {
         return;
     }
-    let target: Decode =
-        std::mem::transmute((module_base + decoder.function as u64) as *const c_void);
-    let detour = match GenericDetour::new(target, decoded) {
-        Ok(detour) => detour,
-        Err(error) => {
-            println!("[Agent]: Failed to hook the appearance decoder: {error}.\r\n");
-            return;
-        }
+    let Some(created) = detour::create::<Decode>(
+        module_base + decoder.function as u64,
+        decoded,
+        "appearance decoder",
+    ) else {
+        return;
     };
-    let _ = DECODER.set((detour, decoder.actor_id));
-    match DECODER.get().unwrap().0.enable() {
-        Ok(()) => println!("[Agent]: Appearance decoder hooked.\r\n"),
-        Err(error) => {
-            println!("[Agent]: Failed to enable the appearance decoder hook: {error}.\r\n")
-        }
-    }
-}
-
-pub unsafe fn rehook_decoder() {
-    if let Some((detour, _)) = DECODER.get() {
-        if !detour.is_enabled() {
-            let _ = detour.enable();
-        }
-    }
+    let (hooked, _) = DECODER.get_or_init(|| (created, decoder.actor_id));
+    detour::enable(
+        hooked,
+        "appearance decoder hook",
+        "Appearance decoder hooked",
+    );
 }
 
 pub unsafe fn unhook_decoder() {
-    let Some((detour, _)) = DECODER.get() else {
-        return;
-    };
-    if detour.is_enabled() {
-        match detour.disable() {
-            Ok(()) => println!("[Agent]: Appearance decoder unhooked.\r\n"),
-            Err(error) => {
-                println!("[Agent]: Failed to disable the appearance decoder hook: {error}.\r\n")
-            }
-        }
-    }
-}
-
-fn decoder_hooked() -> bool {
-    DECODER.get().is_some_and(|(detour, _)| detour.is_enabled())
+    detour::disable(
+        DECODER.get().map(|(detour, _)| detour),
+        "appearance decoder hook",
+        Some("Appearance decoder unhooked"),
+    );
 }
 
 unsafe extern "system" fn decoded(player: *mut c_void, buffer: *mut c_void) -> usize {
@@ -133,14 +107,14 @@ fn on_appearance(player: u64, actor_id: u32) {
     let Some(object) = memory.ptr(player + layout.world.player_name as u64) else {
         return;
     };
-    let status = apply(&mut keeper, &memory, object, &kept);
+    let status = apply(&mut keeper, &memory, object, &kept, Some(kept.display));
     let real = keeper.kept.and_then(|k| k.real);
     let sequence = keeper.sequence;
     report(&mut keeper, sequence, status, real);
 }
 
 pub fn on_request() {
-    let (Some(layout), Some(mapping)) = (LAYOUT.get(), shared()) else {
+    let (Some(layout), Some(mapping)) = (LAYOUT.get(), mapping()) else {
         return;
     };
     let shared = mapping.shared();
@@ -163,7 +137,7 @@ pub fn on_request() {
         report(&mut keeper, sequence, name_status::OFF, None);
         return;
     }
-    if !decoder_hooked() {
+    if !DECODER.get().is_some_and(|(detour, _)| detour.is_enabled()) {
         report(&mut keeper, sequence, name_status::NOT_FOUND, None);
         return;
     }
@@ -180,18 +154,14 @@ pub fn on_request() {
     keeper.kept = Some(kept);
     ACTIVE.store(true, Ordering::Release);
     let status = match local_name_object(&memory, layout) {
-        Some(object) => apply_shown(&mut keeper, &memory, object, &kept, shown),
+        Some(object) => apply(&mut keeper, &memory, object, &kept, shown),
         None => name_status::WAITING,
     };
     let real = keeper.kept.and_then(|k| k.real);
     report(&mut keeper, sequence, status, real);
 }
 
-fn apply(keeper: &mut Keeper, memory: &impl Memory, object: u64, kept: &Kept) -> i32 {
-    apply_shown(keeper, memory, object, kept, Some(kept.display))
-}
-
-fn apply_shown(
+fn apply(
     keeper: &mut Keeper,
     memory: &impl Memory,
     object: u64,
@@ -239,7 +209,7 @@ fn restore(keeper: &mut Keeper, memory: &impl Memory, layout: &Layout) {
 }
 
 fn report(keeper: &mut Keeper, sequence: u32, status: i32, real: Option<[u8; 24]>) {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let new = NameStatus {
         sequence,

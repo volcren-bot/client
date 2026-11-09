@@ -1,5 +1,3 @@
-//! The packet log (`AGENT_PACKETS_<pid>`): recent packets in a `ring`; `log` must be an initialised `Log` unless noted.
-
 use crate::ring;
 use alloc::{format, string::String, vec::Vec};
 use core::{
@@ -11,20 +9,16 @@ pub fn packets_memory_name(pid: u32) -> String {
     format!("AGENT_PACKETS_{pid}")
 }
 
-/// The auto-reset event the agent sets on each logged packet that the reader holding `slot` filters for.
 pub fn packet_wake_event_name(pid: u32, slot: u32) -> String {
     format!("AGENT_PACKETS_WAKE_{pid}_{slot}")
 }
 
-/// How many readers can wait for packets at once.
 pub const SUBSCRIBER_SLOTS: u32 = 32;
 
-/// Words of a subscriber's filter: one bit per direction and opcode below 256 (bit `direction * 256 + opcode`).
 pub const FILTER_WORDS: usize = 16;
 
 pub type Filter = [u32; FILTER_WORDS];
 
-/// The filter bit of a packet; opcodes from 256 up can't be filtered for (the client has 151 server packets).
 pub fn filter_bit(direction: u8, opcode: u16) -> Option<usize> {
     (direction <= direction::SENT && opcode < 256)
         .then(|| direction as usize * 256 + opcode as usize)
@@ -34,7 +28,6 @@ pub fn filter_has(filter: &Filter, direction: u8, opcode: u16) -> bool {
     filter_bit(direction, opcode).is_some_and(|bit| filter[bit / 32] & (1 << (bit % 32)) != 0)
 }
 
-/// Adds a packet to `filter`; false when the opcode can't be filtered for.
 pub fn filter_add(filter: &mut Filter, direction: u8, opcode: u16) -> bool {
     let Some(bit) = filter_bit(direction, opcode) else {
         return false;
@@ -43,16 +36,12 @@ pub fn filter_add(filter: &mut Filter, direction: u8, opcode: u16) -> bool {
     true
 }
 
-/// Slots in the ring (a power of two): about 7 minutes of an idle client's traffic, a few seconds of a busy one.
 pub const SLOT_COUNT: usize = 4096;
 
-/// Bytes of a packet's payload a slot keeps; `Entry::length` is the whole length.
 pub const PAYLOAD_SIZE: usize = 104;
 
 pub mod direction {
-    /// Server to client, as the game thread takes it off the queue: `opcode` is the server packet id, the payload has no framing.
     pub const RECEIVED: u8 = 0;
-    /// Client to server: `opcode` is the client packet id, the payload is what follows the opcode byte.
     pub const SENT: u8 = 1;
 }
 
@@ -76,12 +65,9 @@ impl ring::Slot for Slot {
 #[repr(C)]
 pub struct Log {
     header: ring::Header,
-    /// Bit `n` is set while a reader waits on `packet_wake_event_name(pid, n)` for the packets in `filters[n]`.
     subscribers: AtomicU32,
-    /// Sequence-locks `movement`: odd while written, 0 until first written.
     movement_sequence: AtomicU32,
     movement: [AtomicI32; MOVEMENT_FIELDS],
-    /// 1 once `publish_layouts` has filled `layouts`.
     layouts_ready: AtomicU32,
     reserved: [u8; 8],
     entries: [Slot; SLOT_COUNT],
@@ -89,16 +75,12 @@ pub struct Log {
     layouts: [LayoutSlot; LAYOUT_IDS],
 }
 
-/// Server packet ids a layout is kept for (the client has 151).
 pub const LAYOUT_IDS: usize = 256;
 
-/// Fields of one packet's layout that fit.
 pub const LAYOUT_FIELDS: usize = 16;
 
-/// `LayoutSlot::fields_count` for a packet whose layout isn't known.
 const NO_LAYOUT: u8 = 0xff;
 
-/// What the agent read from the client's code about one server packet: its size, and its fields as `encode_field` makes them.
 #[repr(C)]
 pub struct LayoutSlot {
     size: i32,
@@ -111,19 +93,14 @@ pub const LOG_SIZE: usize = core::mem::size_of::<Log>();
 
 const MOVEMENT_FIELDS: usize = 7;
 
-/// A tick the hook could not read, or the tile not having changed since the hook first saw it.
 pub const NO_TICK: i32 = -1;
 
-/// The local player's server tile and when it last changed, written by the receive hook before each packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Movement {
     pub x: i32,
     pub y: i32,
-    /// -1 when the plane offset wasn't found
     pub plane: i32,
-    /// the tick counter when the tile last changed (`NO_TICK` if it hasn't since the hook first saw it)
     pub moved_tick: i32,
-    /// the tile before that change
     pub from_x: i32,
     pub from_y: i32,
     pub from_plane: i32,
@@ -142,7 +119,6 @@ impl Movement {
         ]
     }
 
-    /// Whether the tile changed in the last tick that ended or the one being received; `tick` is the counter now.
     pub fn moving(&self, tick: i32) -> bool {
         self.moved_tick != NO_TICK && (0..=1).contains(&tick.wrapping_sub(self.moved_tick))
     }
@@ -151,18 +127,15 @@ impl Movement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub sequence: u64,
-    /// Milliseconds since the agent created the log: for ordering and spacing entries, not a wall clock.
     pub time_ms: u64,
     pub direction: u8,
     pub opcode: u16,
     pub length: u32,
-    /// The first `PAYLOAD_SIZE` bytes of the payload.
     pub payload: Vec<u8>,
 }
 
 pub type Page = ring::Page<Entry>;
 
-/// How a field is stored on the wire: each byte's position in the value (`shifts`), with `transform` on position 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub signed: bool,
@@ -170,19 +143,14 @@ pub struct Field {
     pub transform: Transform,
 }
 
-/// What the wire does to the low byte of a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transform {
     None = 0,
-    /// the wire byte is the value plus 128
     Add = 1,
-    /// the wire byte is the value negated
     Neg = 2,
-    /// the wire byte is 128 minus the value
     Sub = 3,
 }
 
-/// A field in two bytes: width, sign and transform, then the position of each wire byte in the value, two bits each.
 pub fn encode_field(field: &Field) -> Option<[u8; 2]> {
     let width = field.shifts.len();
     if !(1..=4).contains(&width) || field.shifts.iter().any(|&s| s > 3) {
@@ -218,7 +186,6 @@ pub fn decode_field(code: [u8; 2]) -> Option<Field> {
 }
 
 impl Field {
-    /// The loader's packet table spelling: `u8add`, `i16be`, `u24:2.0.1`.
     pub fn spelling(&self) -> String {
         let width = self.shifts.len();
         let order = if width == 1 {
@@ -243,7 +210,6 @@ impl Field {
             Transform::Neg => "neg",
             Transform::Sub => "sub",
         };
-        // a four byte value is always an int: there is nothing wider to extend it into
         format!(
             "{}{}{order}{transform}",
             if self.signed || width == 4 { "i" } else { "u" },
@@ -252,17 +218,13 @@ impl Field {
     }
 }
 
-/// One packet's size and layout as published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     pub opcode: u16,
-    /// -1: a length byte follows the id; -2: a length short
     pub size: i32,
-    /// `None` when the layout isn't known
     pub fields: Option<Vec<Field>>,
 }
 
-/// Publishes, once, what the agent found in the client's code; `layouts[id]` is for server packet `id`.
 pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field>>)]) {
     for (id, (size, fields)) in layouts.iter().enumerate().take(LAYOUT_IDS) {
         let slot = addr_of!((*log).layouts[id]) as *mut LayoutSlot;
@@ -287,7 +249,6 @@ pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field
         .store(layouts.len().min(LAYOUT_IDS) as u32 + 1, Ordering::Release);
 }
 
-/// What the agent published, `None` until it has. `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn read_layouts(log: *const Log) -> Option<Vec<Layout>> {
     let ready = (*log).layouts_ready.load(Ordering::Acquire) as usize;
     let count = ready.checked_sub(1)?;
@@ -313,17 +274,14 @@ pub unsafe fn read_layouts(log: *const Log) -> Option<Vec<Layout>> {
     )
 }
 
-/// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));
 }
 
-/// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
     ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
 
-/// Appends a packet, keeping the first `PAYLOAD_SIZE` bytes of `data`.
 pub unsafe fn push(
     log: *const Log,
     time_ms: u64,
@@ -343,7 +301,6 @@ pub unsafe fn push(
     });
 }
 
-/// Publishes the player's movement; one writer only (the game thread).
 pub unsafe fn set_movement(log: *const Log, movement: &Movement) {
     let sequence = (*log).movement_sequence.load(Ordering::Relaxed);
     (*log)
@@ -353,13 +310,11 @@ pub unsafe fn set_movement(log: *const Log, movement: &Movement) {
     for (field, value) in (*log).movement.iter().zip(movement.fields()) {
         field.store(value, Ordering::Relaxed);
     }
-    // even and never 0 again, so a reader can tell "written" from "never written"
     (*log)
         .movement_sequence
         .store((sequence | 1).wrapping_add(1).max(2), Ordering::Release);
 }
 
-/// The player's movement as last published; `None` before the first write or while the writer keeps tearing it.
 pub unsafe fn movement(log: *const Log) -> Option<Movement> {
     for _ in 0..100 {
         let before = (*log).movement_sequence.load(Ordering::Acquire);
@@ -388,7 +343,6 @@ pub unsafe fn movement(log: *const Log) -> Option<Movement> {
     None
 }
 
-/// The readers whose filter has this packet, as a bit mask of their slots.
 pub unsafe fn subscribers_for(log: *const Log, direction: u8, opcode: u16) -> u32 {
     let mask = (*log).subscribers.load(Ordering::Acquire);
     let Some(bit) = filter_bit(direction, opcode).filter(|_| mask != 0) else {
@@ -407,10 +361,8 @@ pub unsafe fn subscribers_for(log: *const Log, direction: u8, opcode: u16) -> u3
     wanted
 }
 
-/// Claims a free subscriber slot with an empty filter (None when full); `log` must be writable.
 pub unsafe fn subscribe(log: *const Log, mut create_event: impl FnMut(u32) -> bool) -> Option<u32> {
     ring::subscribe(&(*log).subscribers, SUBSCRIBER_SLOTS, |slot| {
-        // the event is ours alone, so nobody else writes this filter
         let created = create_event(slot);
         if created {
             set_filter(log, slot, &[0; FILTER_WORDS]);
@@ -419,24 +371,20 @@ pub unsafe fn subscribe(log: *const Log, mut create_event: impl FnMut(u32) -> bo
     })
 }
 
-/// Replaces the packets the reader holding `slot` is woken for; `log` must be writable.
 pub unsafe fn set_filter(log: *const Log, slot: u32, filter: &Filter) {
     for (word, &bits) in (*log).filters[slot as usize].iter().zip(filter) {
         word.store(bits, Ordering::Release);
     }
 }
 
-/// Gives a slot back; `log` must be writable.
 pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
     ring::unsubscribe(&(*log).subscribers, slot);
 }
 
-/// The sequence number the next packet will get.
 pub unsafe fn written(log: *const Log) -> u64 {
     (*log).header.written()
 }
 
-/// Copies out up to `limit` entries from `since` on (from the oldest if `since` is ahead).
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     ring::read_since(
         &(*log).header,
@@ -602,7 +550,6 @@ mod tests {
             assert_eq!(movement(memory.0), Some(standing));
             assert!(!standing.moving(500));
 
-            // moved at counter 100: moving while it is received and through the next tick
             let walked = Movement {
                 x: 3201,
                 moved_tick: 100,
@@ -638,7 +585,6 @@ mod tests {
         let memory = memory();
         unsafe {
             assert_eq!(subscribe(memory.0, |_| true), Some(0));
-            // slot 1 has a live event that isn't in the mask (another process's), so it is skipped
             assert_eq!(subscribe(memory.0, |slot| slot != 1), Some(2));
             assert_eq!(subscribers_for(memory.0, direction::RECEIVED, 2), 0);
 
@@ -651,7 +597,6 @@ mod tests {
             assert_eq!(subscribers_for(memory.0, direction::SENT, 75), 0b100);
             assert_eq!(subscribers_for(memory.0, direction::RECEIVED, 40), 0);
 
-            // a slot given back and claimed again starts with an empty filter
             unsubscribe(memory.0, 0);
             assert_eq!(subscribers_for(memory.0, direction::RECEIVED, 2), 0b100);
             assert_eq!(subscribe(memory.0, |_| true), Some(0));
@@ -694,7 +639,6 @@ mod tests {
             assert_eq!(page.entries[1].opcode, 75);
             assert!(page.entries[1].payload.is_empty());
 
-            // reading on from `next` returns only what is new
             push(memory.0, 12, direction::RECEIVED, 2, 0, &[]);
             let page = read_since(memory.0, page.next, 10);
             assert_eq!(

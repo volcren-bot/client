@@ -1,10 +1,8 @@
 use super::{
-    model::whole_function,
     scripts::{range_handler, switch_cases},
     *,
 };
 
-// The chat history, found through the script ops that read it: a global uid hash table whose values are message objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chat {
     pub messages: u32,
@@ -19,12 +17,9 @@ pub struct Chat {
 }
 
 const CHAT_OPS: u32 = 5000;
-// chat_gethistory_byuid: type, cycle, name, sender, text (with the timestamp the setting adds)
 const HISTORY_BY_UID: usize = 4;
-// native only: like chat_gethistory_byindex, but pushes the text as received and the timestamp
 const HISTORY_EX: usize = 30;
 const CLOCK_OPS: u32 = 3300;
-// clientclock: pushes the client cycle, 50 per second
 const CLIENT_CLOCK: usize = 0;
 
 fn case_code(pe: &Pe, cases: &[u32], case: usize) -> Option<Vec<Instruction>> {
@@ -35,18 +30,7 @@ fn case_code(pe: &Pe, cases: &[u32], case: usize) -> Option<Vec<Instruction>> {
         .filter(|&c| c > begin)
         .min()
         .unwrap_or(begin + 0x1000);
-    Some(
-        Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-            .into_iter()
-            .collect(),
-    )
-}
-
-fn field(i: &Instruction, base: Register) -> Option<u32> {
-    (i.op1_kind() == OpKind::Memory
-        && i.memory_base() == base
-        && i.memory_index() == Register::None)
-        .then(|| i.memory_displacement64() as u32)
+    Some(decode(pe.bytes(begin, end), begin))
 }
 
 fn uid_table(pe: &Pe, lookup: u32) -> Option<u32> {
@@ -80,18 +64,16 @@ struct History {
 }
 
 fn history(pe: &Pe, instrs: &[Instruction]) -> Option<History> {
-    let call = instrs
-        .iter()
-        .position(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)?;
-    let messages = uid_table(pe, instrs[call].near_branch_target() as u32)?;
-    let keep = instrs[call + 1..].iter().find(|i| {
+    let (call, target) = calls(instrs).next()?;
+    let messages = uid_table(pe, target)?;
+    let after = &instrs[call + 1..];
+    let keep = after.iter().find(|i| {
         i.mnemonic() == Mnemonic::Mov
             && i.op0_kind() == OpKind::Register
             && i.op1_kind() == OpKind::Register
             && i.op1_register() == Register::RAX
     })?;
     let message = keep.op0_register();
-    let after = &instrs[call + 1..];
     let ints: Vec<u32> = after
         .iter()
         .filter(|i| {
@@ -99,13 +81,13 @@ fn history(pe: &Pe, instrs: &[Instruction]) -> Option<History> {
                 && i.op0_kind() == OpKind::Register
                 && i.op0_register().size() == 4
         })
-        .filter_map(|i| field(i, message))
+        .filter_map(|i| memory_field(i, message))
         .collect();
     let mut strings: Vec<u32> = Vec::new();
     for offset in after
         .iter()
         .filter(|i| i.mnemonic() == Mnemonic::Lea)
-        .filter_map(|i| field(i, message))
+        .filter_map(|i| memory_field(i, message))
     {
         if !strings.contains(&offset) {
             strings.push(offset);
@@ -123,7 +105,6 @@ fn history(pe: &Pe, instrs: &[Instruction]) -> Option<History> {
     })
 }
 
-// The timestamp chooser: a call-mode switch whose branches return `lea rax,[message + stamp]`.
 fn stamps(pe: &Pe, function: u32) -> Option<(u32, u32)> {
     let instrs = whole_function(pe, function, 0x80);
     let branch = |compare: Mnemonic| {
@@ -174,7 +155,6 @@ pub fn find_chat(pe: &Pe) -> Result<Chat, ScanError> {
     } = history(pe, &by_uid).ok_or(ScanError::NotFound)?;
     let [name, sender, display] = strings;
 
-    // HISTORY_EX reads the same strings from another register, and the text as received after them
     let ex = case_code(pe, &cases, HISTORY_EX).ok_or(ScanError::NotFound)?;
     let mut leas: HashMap<Register, Vec<u32>> = HashMap::new();
     for i in ex.iter().filter(|i| {
@@ -192,11 +172,8 @@ pub fn find_chat(pe: &Pe) -> Result<Chat, ScanError> {
         .flat_map(|offsets| offsets.iter().copied().filter(|&o| o > display))
         .collect();
     let text = one(texts)?;
-    let calls = ex
-        .iter()
-        .filter(|i| i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64);
-    let (time_utc, time_local) = one(calls
-        .filter_map(|i| stamps(pe, i.near_branch_target() as u32))
+    let (time_utc, time_local) = one(calls(&ex)
+        .filter_map(|(_, target)| stamps(pe, target))
         .collect())?;
 
     Ok(Chat {

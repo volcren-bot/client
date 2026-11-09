@@ -4921,7 +4921,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     Ok(drawn)
 }
 
-// Paints the overlay into the slot not shown and flips `overlay_serial`; `keep` starts from what is shown, `hash` and `mode` skip repeats, and `EVERY_FRAME` is painted in place.
+// Paints the overlay into the slot not shown and flips `overlay_serial`; `keep` starts from what is shown, `hash` and `mode` skip repeats.
 fn with_overlay(
     pid: u32,
     mode: u8,
@@ -4962,12 +4962,6 @@ fn with_overlay(
         let hash_at = base.add(core::mem::offset_of!(Header, overlay_hash)) as *mut u64;
         let mode_at = base.add(core::mem::offset_of!(Header, overlay_mode));
         let current = *mode_at;
-
-        if current == overlay_mode::EVERY_FRAME {
-            paint(base.add(overlay_offset(0)), width, height);
-            UnmapViewOfFile(view);
-            return Ok(());
-        }
 
         // Never 0, which is what an unknown overlay holds.
         let hash = hash.map(|h| (h ^ (width as u64) << 32 ^ height as u64) | 1);

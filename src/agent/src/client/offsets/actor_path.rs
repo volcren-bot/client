@@ -1,6 +1,5 @@
-use super::{model::whole_function, *};
+use super::*;
 
-/// Where an actor keeps its path (Java `Actor.pathX`, `pathY`, `pathLength`): scene tiles, newest first, so entry 0 is the tile the server last put the actor on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ActorPath {
     pub x: u32,
@@ -18,7 +17,6 @@ fn is_store(i: &Instruction) -> bool {
         && i.op1_kind() == OpKind::Register
 }
 
-// The path reset `(actor, x in edx, y in r8d)` (Java `Player.ax`): zeroes the length, stores the tile as entry 0 and moves the actor onto it, `local = (size + 2 * tile) << 6` (`tile * 128 + size * 64`).
 fn path_reset(function: u32, instrs: &[Instruction], local_x: u32) -> Option<ActorPath> {
     if instrs.last()?.mnemonic() != Mnemonic::Ret
         || instrs
@@ -37,7 +35,6 @@ fn path_reset(function: u32, instrs: &[Instruction], local_x: u32) -> Option<Act
     let x = one(stores_of(Register::RDX)).ok()?;
     let y = one(stores_of(Register::R8)).ok()?;
 
-    // the length is the dword stored from a register while it holds the zero of `xor r, r`
     let mut zero: Vec<Register> = Vec::new();
     let mut zeroed = Vec::new();
     for i in instrs {
@@ -57,7 +54,6 @@ fn path_reset(function: u32, instrs: &[Instruction], local_x: u32) -> Option<Act
     }
     let length = one(zeroed).ok()?;
 
-    // both fine coordinates are rebuilt from the new tile: `lea r, [size + tile*2]`, `shl r, 6`, stored at local_x and local_x + 4
     let doubles = |tile: Register| {
         instrs.iter().any(|i| {
             i.mnemonic() == Mnemonic::Lea
@@ -92,13 +88,8 @@ fn path_reset(function: u32, instrs: &[Instruction], local_x: u32) -> Option<Act
         })
 }
 
-/// `local_x` is the actor's fine position field (`ActorPosition::x`).
 pub fn find_actor_path(pe: &Pe, local_x: u32) -> Result<ActorPath, ScanError> {
-    // the reset is a leaf with no `.pdata` entry, so the candidates are the targets of direct calls, each up to its first `ret`
-    let mut targets: Vec<u32> = direct_calls(pe).iter().map(|&(_, target)| target).collect();
-    targets.sort_unstable();
-    targets.dedup();
-    let found = targets
+    let found = call_targets(pe)
         .into_iter()
         .filter_map(|target| {
             let mut instrs = whole_function(pe, target, 0x60);

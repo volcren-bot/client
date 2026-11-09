@@ -73,7 +73,6 @@ pub fn read_string(memory: &impl Memory, address: u64) -> Option<String> {
         if len > 0 && !memory.read(ptr, &mut text) {
             return None;
         }
-        // valid UTF-8 is taken as is; only invalid input pays for the lossy copy
         Some(
             String::from_utf8(text)
                 .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
@@ -115,7 +114,6 @@ pub fn table_get(memory: &impl Memory, table: u64, key: i32) -> Option<u64> {
     Table::open(memory, table)?.get(memory, key)
 }
 
-/// A table `table_get` reads, its header read once for looking up many keys.
 #[derive(Clone, Copy)]
 pub struct Table {
     buckets: u64,
@@ -157,7 +155,6 @@ impl Table {
     }
 }
 
-/// A node's key, value and next pointer, in one read.
 fn read_node(memory: &impl Memory, node: u64) -> Option<(i32, u64, u64)> {
     let fields: [u8; NODE_SIZE] = read_array(memory, node)?;
     Some((
@@ -167,7 +164,6 @@ fn read_node(memory: &impl Memory, node: u64) -> Option<(i32, u64, u64)> {
     ))
 }
 
-/// Every (key, value) in a table `table_get` reads, in no order.
 pub fn table_entries(memory: &impl Memory, table: u64) -> Vec<(i32, u64)> {
     let Some(table) = Table::open(memory, table).filter(|t| t.count <= 1 << 16) else {
         return Vec::new();
@@ -203,7 +199,6 @@ pub fn local_player(memory: &impl Memory, layout: &Layout) -> Option<(u64, u64)>
     Some((view, player))
 }
 
-// The scene's map squares (an instance's source squares), found by shape through the scene loader's builder.
 const LOADER_SCAN: [usize; 3] = [0x8000, 0x4000, 0x2000];
 const LOADER_VIEW: u64 = 0x10;
 const LOADER_FIELDS: usize = 0x50;
@@ -218,7 +213,6 @@ pub fn map_regions(memory: &impl Memory, layout: &Layout) -> Option<Vec<[i32; 2]
     scene_loader(memory, client(memory, layout)?, view).map(|(_, regions)| regions)
 }
 
-/// The client's own flag for "this scene is an instance", read from the scene loader.
 pub fn in_instance(memory: &impl Memory, layout: &Layout) -> Option<bool> {
     if !layout.has(part::SCENE_LOADER) {
         return None;
@@ -237,7 +231,6 @@ fn scene_loader(memory: &impl Memory, client: u64, view: u64) -> Option<(u64, Ve
         let mut window = vec![0u8; n];
         memory.read(client, &mut window).then_some((n, window))
     })?;
-    // (loader, builder, regions)
     let mut found: Vec<(u64, u64, Vec<[i32; 2]>)> = Vec::new();
     for at in (0..scan).step_by(8) {
         let loader = le_u64(&window, at);
@@ -305,7 +298,6 @@ fn region_vector(
             let stride = stride as usize;
             let count = data.len() / stride;
             let square = |i: usize| (int(i * stride), int(i * stride + 4));
-            // zeroed memory would pass as square (0, 0), which is never loaded
             if (0..count).any(|i| {
                 let (x, y) = square(i);
                 !(0..REGION_LIMIT).contains(&x)
@@ -314,7 +306,6 @@ fn region_vector(
             }) {
                 return None;
             }
-            // the id field is wherever all of the records agree
             (8..stride - 3)
                 .step_by(4)
                 .any(|field| {
@@ -336,7 +327,6 @@ pub fn component(
     let manager = memory.ptr(client + layout.manager as u64)?;
     let groups = memory.ptr(manager + layout.groups as u64)?;
     let children = groups + group * interfaces::GROUP_SIZE as u64;
-    // the count and the data pointer are adjacent, so one read fetches both
     let header: [u8; 16] = read_array(memory, children + array::COUNT as u64)?;
     let count = le_u64(&header, 0);
     if child >= count {
@@ -367,7 +357,6 @@ pub fn local_name_object(memory: &impl Memory, layout: &Layout) -> Option<u64> {
 mod tests {
     use super::*;
 
-    // A fake process: one flat window starting at `base`.
     struct Fake {
         base: u64,
         bytes: Vec<u8>,
@@ -434,7 +423,6 @@ mod tests {
             Some("Grand Exchange Clerk, a long one")
         );
 
-        // invalid UTF-8 is replaced, on both forms
         m.put(0x1300, &short(b"a\xffb"));
         assert_eq!(read_string(&m, 0x1300).as_deref(), Some("a\u{fffd}b"));
         m.put(0x1200, b"x\xff\xfey");
@@ -445,7 +433,6 @@ mod tests {
             Some("x\u{fffd}\u{fffd}y")
         );
 
-        // oversized long strings and bad short lengths are rejected
         header[8..16].copy_from_slice(&4097u64.to_le_bytes());
         m.put(0x1180, &header);
         assert_eq!(read_string(&m, 0x1180), None);
@@ -456,7 +443,6 @@ mod tests {
         assert_eq!(read_string(&m, 0x0), None);
     }
 
-    // writes a vector of `stride`-byte square records and a (begin, end, capacity) header for it
     fn put_regions(
         m: &mut Fake,
         header: u64,
@@ -486,12 +472,10 @@ mod tests {
             Some(port.iter().map(|&(x, y)| [x, y]).collect())
         );
 
-        // a single record (an instance's source square) still has the shape
         let mut m = Fake::new(0x1000, 0x2000);
         put_regions(&mut m, 0x1108, 0x1800, 0x88, &[(47, 44)], 1);
         assert_eq!(find_map_regions(&m, 0x1000, 0x400), Some(vec![[47, 44]]));
 
-        // another record size and id field
         let mut m = Fake::new(0x1000, 0x2000);
         put_regions(&mut m, 0x1108, 0x1800, 0x40, &port, 8);
         assert_eq!(
@@ -503,24 +487,20 @@ mod tests {
     #[test]
     fn map_regions_needs_exactly_one_vector_that_agrees() {
         let squares = [(48, 43), (49, 44)];
-        // an id that doesn't match its square is not a region list
         let mut m = Fake::new(0x1000, 0x2000);
         put_regions(&mut m, 0x1108, 0x1800, 0x88, &squares, 4);
         m.put_i32(0x1800 + 16, 1);
         assert_eq!(find_map_regions(&m, 0x1000, 0x400), None);
 
-        // squares outside the map are not either
         let mut m = Fake::new(0x1000, 0x2000);
         put_regions(&mut m, 0x1108, 0x1800, 0x88, &[(300, 44)], 1);
         assert_eq!(find_map_regions(&m, 0x1000, 0x400), None);
 
-        // two vectors with the shape are ambiguous
         let mut m = Fake::new(0x1000, 0x2000);
         put_regions(&mut m, 0x1108, 0x1800, 0x88, &squares, 4);
         put_regions(&mut m, 0x1208, 0x1c00, 0x88, &squares, 4);
         assert_eq!(find_map_regions(&m, 0x1000, 0x400), None);
 
-        // nothing readable, or nothing there
         assert_eq!(find_map_regions(&m, 0x9000, 0x400), None);
         assert_eq!(
             find_map_regions(&Fake::new(0x1000, 0x2000), 0x1000, 0x400),
@@ -532,7 +512,6 @@ mod tests {
     fn map_regions_found_through_the_loader() {
         let view = 0x9000;
         let mut m = Fake::new(0x1000, 0x9000);
-        // the client's slot points at the loader, which points back at the view and out to a builder
         m.put_u64(0x1100, 0x4000);
         m.put_u64(0x4000 + 0x10, view);
         m.put_u64(0x4000 + 0x28, 0x6000);
@@ -543,14 +522,12 @@ mod tests {
             Some((0x4000, vec![[47, 44]]))
         );
 
-        // a pointer to something that doesn't point back at the view is not the loader
         let mut other = Fake::new(0x1000, 0x9000);
         other.put_u64(0x1100, 0x4000);
         other.put_u64(0x4000 + 0x28, 0x6000);
         put_regions(&mut other, 0x6068, 0x7000, 0x88, &[(47, 44)], 1);
         assert_eq!(scene_loader(&other, 0x1000, view), None);
 
-        // two builders with region lists are ambiguous
         m.put_u64(0x1108, 0x5000);
         m.put_u64(0x5000 + 0x10, view);
         m.put_u64(0x5000 + 0x28, 0x8000);
@@ -569,7 +546,6 @@ mod tests {
         let end = 0x1f00;
         m.put_u64(buckets + count * 8, end);
 
-        // keys 1 and 5 share bucket 1; node 0x1200 is first in that chain
         let (first, second) = (0x1200u64, 0x1300u64);
         m.put_u64(buckets + 8, first);
         m.put_i32(first, 1);
@@ -585,11 +561,9 @@ mod tests {
         assert_eq!(table_get(&m, table, -1), None);
         assert_eq!(table_get(&m, table, 2), None);
 
-        // a null value pointer reads as missing
         m.put_u64(second + NODE_VALUE, 0);
         assert_eq!(table_get(&m, table, 5), None);
 
-        // a chain that runs into the sentinel stops there
         m.put_u64(first + NODE_NEXT, end);
         assert_eq!(table_get(&m, table, 5), None);
     }
@@ -610,7 +584,6 @@ mod tests {
         m.put_u64(client + layout.manager as u64, manager);
         m.put_u64(manager + layout.groups as u64, groups);
 
-        // group 2 holds two children
         let group = groups + 2 * interfaces::GROUP_SIZE as u64;
         let elements = 0x1400;
         m.put_u64(group + array::COUNT as u64, 2);
@@ -627,7 +600,6 @@ mod tests {
             Some(node_at(1))
         );
         assert_eq!(component(&m, &layout, client, 2 << 16), Some(node_at(0)));
-        // child past the count, an unset group, and a mismatched id are all missing
         assert_eq!(component(&m, &layout, client, 2 << 16 | 2), None);
         assert_eq!(component(&m, &layout, client, 3 << 16), None);
         assert_eq!(component(&m, &layout, client, 2 << 16 | 3), None);

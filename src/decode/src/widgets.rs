@@ -36,10 +36,8 @@ pub struct Widget {
     pub scroll_width: i32,
     #[serde(default)]
     pub scroll_height: i32,
-    /// The first menu option ("Close", or a map marker's port), read at fixed offsets (build a2636a01).
     #[serde(default)]
     pub action: Option<String>,
-    /// The item shown (-1 for none) and its quantity; a bank placeholder shows 0 while its slot reads 1.
     #[serde(default = "minus_one")]
     pub item_id: i32,
     #[serde(default)]
@@ -101,7 +99,6 @@ impl<'a, M: Memory> Tree<'a, M> {
         i32_pair(self.memory, component + offset as u64)
     }
 
-    /// The component's own hidden flag, false when the layout has none.
     fn hidden(&self, component: u64) -> Option<bool> {
         if self.layout.hidden == 0 {
             return Some(false);
@@ -113,7 +110,6 @@ impl<'a, M: Memory> Tree<'a, M> {
         ipc::read::component(self.memory, self.layout, self.client, id)
     }
 
-    /// The component `group`:`child` and where it stands under `root`.
     fn placed(&self, root: i32, group: u16, child: u16) -> Option<(u64, (i32, i32, bool))> {
         let component = self.component((group as i32) << 16 | child as i32)?;
         Some((component, place(self, component, root)?))
@@ -126,7 +122,6 @@ impl<'a, M: Memory> Tree<'a, M> {
             .map(|&(parent, _)| parent)
     }
 
-    /// Each open sub-interface as (parent, group), read once per tree.
     fn sub_interfaces(&self) -> Option<&[(i32, i32)]> {
         self.opened
             .get_or_init(|| self.read_sub_interfaces())
@@ -158,7 +153,6 @@ impl<'a, M: Memory> Tree<'a, M> {
         Some(found)
     }
 
-    /// The index and component of each dynamic child of `parent`.
     fn children(&self, parent: u64) -> Option<Vec<(u64, u64)>> {
         let at = parent + self.layout.children as u64;
         let count = self.memory.u64(at)?;
@@ -197,7 +191,6 @@ pub fn sub_interfaces(memory: &impl Memory, layout: &InterfaceLayout) -> Option<
     listed_sub_interfaces(&Tree::open(memory, layout)?)
 }
 
-/// `root` and the group of each sub-interface, once each.
 fn open_groups(root: i32, sub_interfaces: &[SubInterface]) -> Vec<i32> {
     let mut groups = vec![root];
     for sub in sub_interfaces {
@@ -278,7 +271,6 @@ fn widget_at<M: Memory>(
     })
 }
 
-/// How many option slots the widget has, and the pointer to its first option's text (a NUL-terminated string).
 const ACTION_COUNT: u64 = 0x2e0;
 const ACTION_TEXT: u64 = 0x2e8;
 const MAX_ACTION: usize = 128;
@@ -290,13 +282,11 @@ fn action_at(memory: &impl Memory, component: u64) -> Option<String> {
     }
     let text = memory.ptr(component + ACTION_TEXT)?;
     let mut bytes = [0u8; MAX_ACTION];
-    // a string near the end of a mapping may not fill the buffer, so halve the read until it fits
     let mut len = MAX_ACTION;
     while len > 0 && !memory.read(text, &mut bytes[..len]) {
         len /= 2;
     }
     let end = bytes[..len].iter().position(|&b| b == 0)?;
-    // anything but plain text means the pointer isn't to an option
     let text = &bytes[..end];
     (end > 0 && text.iter().all(|&b| (0x20..0x7f).contains(&b)))
         .then(|| String::from_utf8_lossy(text).into_owned())
@@ -336,7 +326,6 @@ pub fn find_children(
     Some(children.into_iter().map(|(widget, _)| widget).collect())
 }
 
-/// The dynamic children of `parent`, which stands at `placed` (see `place`), with their components.
 fn dynamic_children<M: Memory>(
     tree: &Tree<M>,
     parent: u64,
@@ -354,13 +343,10 @@ fn dynamic_children<M: Memory>(
     Some(children)
 }
 
-/// Component fields read at fixed offsets, found by matching decoded cache definitions against memory (build a2636a01); redo after a client update.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetDetail {
     pub content_type: i32,
-    /// the widget's own hidden flag; `Widget::hidden` is also set when an ancestor is hidden
     pub self_hidden: bool,
-    /// the settings it was laid out from: positions and sizes, and the modes that say how they are used
     pub original_x: i32,
     pub original_y: i32,
     pub original_width: i32,
@@ -369,12 +355,10 @@ pub struct WidgetDetail {
     pub y_position_mode: i32,
     pub width_mode: i32,
     pub height_mode: i32,
-    /// where it was put in its parent, in client pixels (before the interface scale)
     pub relative_x: i32,
     pub relative_y: i32,
     pub relative_width: i32,
     pub relative_height: i32,
-    /// 255 is invisible, 0 opaque
     pub opacity: i32,
     pub font_id: i32,
     pub line_height: i32,
@@ -401,7 +385,6 @@ const DETAIL_X_ALIGNMENT: u64 = 0x18c;
 const DETAIL_TEXT_SHADOWED: u64 = 0x194;
 const DETAIL_ITEM_ID: u64 = 0xb38;
 const DETAIL_NO_CLICK_THROUGH: u64 = 0xb98;
-/// A component's model: its type (1 is a model id) and its id. Fixed offsets, like the `DETAIL_` ones.
 pub const MODEL_TYPE: u64 = 0xfc;
 pub const MODEL_ID: u64 = 0x100;
 
@@ -439,25 +422,20 @@ fn detail_at<M: Memory>(tree: &Tree<M>, component: u64) -> WidgetDetail {
     }
 }
 
-/// The model a component draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetModel {
-    /// 1 is a model id; a component drawing no model has -1 as its `id`.
     pub kind: i32,
     pub id: i32,
 }
 
-/// A widget of the inspector's tree: a component of an interface (static) or a child a script made for one (dynamic).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TreeWidget {
     pub widget: Widget,
     pub detail: WidgetDetail,
-    /// true for a dynamic child, which hangs off the component with id `owner`
     pub dynamic: bool,
     pub owner: i32,
 }
 
-/// Every open interface with all its components and dynamic children, linked by `parent` and `sub_interfaces`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WidgetTree {
     pub root: i32,
@@ -465,7 +443,6 @@ pub struct WidgetTree {
     pub widgets: Vec<TreeWidget>,
 }
 
-/// The most components one group is taken to hold.
 const MAX_GROUP: u64 = 1 << 14;
 
 fn group_size<M: Memory>(tree: &Tree<M>, group: i32) -> Option<u64> {
@@ -477,7 +454,6 @@ fn group_size<M: Memory>(tree: &Tree<M>, group: i32) -> Option<u64> {
     (count <= MAX_GROUP).then_some(count)
 }
 
-/// The id, index and address of every component of the open groups, for reverse engineering fields.
 pub fn component_addresses(
     memory: &impl Memory,
     layout: &InterfaceLayout,

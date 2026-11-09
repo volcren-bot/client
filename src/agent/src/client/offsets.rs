@@ -121,7 +121,6 @@ struct Section {
     size: usize,
 }
 
-// The client image parsed once for every rule: its code sections, functions and, scanned on first use, its direct calls.
 pub struct Pe<'a> {
     image: &'a [u8],
     code: Vec<Section>,
@@ -130,11 +129,137 @@ pub struct Pe<'a> {
     calls: OnceCell<Vec<(u32, u32)>>,
 }
 
-fn u16_at(data: &[u8], at: usize) -> Option<u16> {
+const UNW_FLAG_CHAININFO: u8 = 4;
+
+fn chunk_root(pe: &Pe, begin: u32) -> Option<u32> {
+    let mut begin = begin;
+    for _ in 0..8 {
+        let index = pe.raw_functions.partition_point(|&(b, _, _)| b < begin);
+        let &(b, _, unwind) = pe.raw_functions.get(index)?;
+        if b != begin {
+            return None;
+        }
+        let unwind = unwind as usize;
+        let flags = *pe.image.get(unwind)? >> 3;
+        if flags & UNW_FLAG_CHAININFO == 0 {
+            return Some(begin);
+        }
+        let codes = *pe.image.get(unwind + 2)? as usize;
+        begin = u32_at(pe.image, unwind + 4 + ((codes + 1) & !1) * 2)?;
+    }
+    None
+}
+
+fn function_head(pe: &Pe, begin: u32, end: u32, limit: usize) -> Vec<Instruction> {
+    Decoder::with_ip(
+        64,
+        pe.bytes(begin, end.max(begin)),
+        begin as u64,
+        DecoderOptions::NONE,
+    )
+    .into_iter()
+    .take(limit)
+    .collect()
+}
+
+fn function_instrs(pe: &Pe, begin: u32, end: u32) -> Vec<Instruction> {
+    function_head(pe, begin, end, usize::MAX)
+}
+
+fn before_padding(mut instrs: Vec<Instruction>) -> Vec<Instruction> {
+    if let Some(padding) = instrs
+        .windows(2)
+        .position(|w| w.iter().all(|i| i.mnemonic() == Mnemonic::Int3))
+    {
+        instrs.truncate(padding);
+    }
+    instrs
+}
+
+fn whole_function(pe: &Pe, begin: u32, max: u32) -> Vec<Instruction> {
+    let end = (begin + max).min(pe.image.len() as u32);
+    before_padding(function_instrs(pe, begin, end))
+}
+
+fn u64_at(data: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(data.get(at..at + 8)?.try_into().ok()?))
+}
+
+fn calls_to<'p>(pe: &'p Pe, target: u32) -> impl Iterator<Item = u32> + 'p {
+    direct_calls(pe)
+        .iter()
+        .filter(move |&&(_, t)| t == target)
+        .map(|&(site, _)| site)
+}
+
+struct Caller {
+    pub begin: u32,
+    pub end: u32,
+    pub instrs: Vec<Instruction>,
+    pub at: usize,
+}
+
+fn callers<'p>(pe: &'p Pe, target: u32) -> impl Iterator<Item = Caller> + 'p {
+    calls_to(pe, target).filter_map(|site| {
+        let (begin, end) = pe.function_containing(site)?;
+        let instrs = function_instrs(pe, begin, end);
+        let at = instrs.iter().position(|i| i.ip32() == site)?;
+        Some(Caller {
+            begin,
+            end,
+            instrs,
+            at,
+        })
+    })
+}
+
+fn calls(instrs: &[Instruction]) -> impl Iterator<Item = (usize, u32)> + '_ {
+    instrs
+        .iter()
+        .enumerate()
+        .filter_map(|(n, i)| Some((n, call_target(i)?)))
+}
+
+fn has_dword(code: &[u8], value: u32) -> bool {
+    code.windows(4).any(|w| w == value.to_le_bytes())
+}
+
+fn site_function(pe: &Pe, site: u32) -> Option<(Vec<Instruction>, usize)> {
+    let (begin, end) = pe.function_containing(site)?;
+    let instrs = whole_function(pe, begin, end - begin);
+    let at = instrs.iter().position(|i| i.ip() == site as u64)?;
+    Some((instrs, at))
+}
+
+fn rel32_branches<'p>(pe: &'p Pe, opcode: u8) -> impl Iterator<Item = (i64, i64)> + 'p {
+    pe.code_sections().flat_map(move |(rva, data)| {
+        data.windows(5)
+            .enumerate()
+            .filter(move |(_, window)| window[0] == opcode)
+            .map(move |(offset, window)| {
+                let site = (rva + offset) as i64;
+                let target = site + 5 + i32::from_le_bytes(window[1..5].try_into().unwrap()) as i64;
+                (site, target)
+            })
+    })
+}
+
+fn direct_jumps<'p>(pe: &'p Pe) -> impl Iterator<Item = (u32, u32)> + 'p {
+    rel32_branches(pe, 0xe9).map(|(site, target)| (site as u32, target as u32))
+}
+
+fn memory_field(i: &Instruction, base: Register) -> Option<u32> {
+    (i.op1_kind() == OpKind::Memory
+        && i.memory_base() == base
+        && i.memory_index() == Register::None)
+        .then(|| i.memory_displacement64() as u32)
+}
+
+pub(crate) fn u16_at(data: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?))
 }
 
-fn u32_at(data: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
 }
 
@@ -167,9 +292,7 @@ impl<'a> Pe<'a> {
         let mut raw_functions = Vec::with_capacity(exception_size / 12);
         let entries = image.get(exception_rva..exception_rva.checked_add(exception_size)?)?;
         for entry in entries.as_chunks::<12>().0 {
-            let begin = u32::from_le_bytes(entry[0..4].try_into().ok()?);
-            let end = u32::from_le_bytes(entry[4..8].try_into().ok()?);
-            let unwind = u32::from_le_bytes(entry[8..12].try_into().ok()?);
+            let (begin, end, unwind) = (u32_at(entry, 0)?, u32_at(entry, 4)?, u32_at(entry, 8)?);
             if end > begin {
                 functions.push((begin, end));
                 raw_functions.push((begin, end, unwind));
@@ -196,16 +319,83 @@ impl<'a> Pe<'a> {
     fn bytes(&self, begin: u32, end: u32) -> &[u8] {
         &self.image[begin as usize..end as usize]
     }
+
+    fn code_sections(&self) -> impl Iterator<Item = (usize, &'a [u8])> + '_ {
+        self.code
+            .iter()
+            .map(|s| (s.rva, &self.image[s.rva..s.rva + s.size]))
+    }
+
+    fn section_containing(&self, rva: usize) -> Option<&Section> {
+        self.code
+            .iter()
+            .find(|s| (s.rva..s.rva + s.size).contains(&rva))
+    }
+
+    fn in_code(&self, rva: usize) -> bool {
+        self.section_containing(rva).is_some()
+    }
+}
+
+fn instructions(code: &[u8], rva: u32) -> impl Iterator<Item = Instruction> + '_ {
+    Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE).into_iter()
+}
+
+fn decode(code: &[u8], rva: u32) -> Vec<Instruction> {
+    instructions(code, rva).collect()
+}
+
+fn call_target(i: &Instruction) -> Option<u32> {
+    (i.mnemonic() == Mnemonic::Call && i.op0_kind() == OpKind::NearBranch64)
+        .then(|| i.near_branch_target() as u32)
+}
+
+fn immediate(i: &Instruction) -> Option<u64> {
+    matches!(
+        i.op1_kind(),
+        OpKind::Immediate8
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64
+            | OpKind::Immediate32
+            | OpKind::Immediate32to64
+    )
+    .then(|| i.immediate(1))
+}
+
+fn imm32(i: &Instruction) -> Option<u32> {
+    matches!(i.op1_kind(), OpKind::Immediate8to32 | OpKind::Immediate32)
+        .then(|| i.immediate(1) as u32)
+}
+
+fn base_field(i: &Instruction) -> Option<Load> {
+    (i.memory_index() == Register::None
+        && !matches!(i.memory_base(), Register::None | Register::RIP))
+    .then(|| (i.memory_base(), i.memory_displacement64() as i64))
+}
+
+fn global_load(i: &Instruction) -> Option<(Register, u32)> {
+    (i.mnemonic() == Mnemonic::Mov
+        && i.op0_kind() == OpKind::Register
+        && i.op1_kind() == OpKind::Memory
+        && i.is_ip_rel_memory_operand())
+    .then(|| (i.op0_register(), i.ip_rel_memory_address() as u32))
+}
+
+fn global_store(i: &Instruction) -> Option<(Register, u32)> {
+    (i.mnemonic() == Mnemonic::Mov
+        && i.op0_kind() == OpKind::Memory
+        && i.is_ip_rel_memory_operand()
+        && i.op1_kind() == OpKind::Register)
+        .then(|| (i.op1_register(), i.ip_rel_memory_address() as u32))
 }
 
 fn dword_hits(pe: &Pe, value: u32) -> Vec<u32> {
     let needle = value.to_le_bytes();
     let mut hits = Vec::new();
-    for section in &pe.code {
-        let data = &pe.image[section.rva..section.rva + section.size];
+    for (rva, data) in pe.code_sections() {
         for (offset, window) in data.windows(4).enumerate() {
             if window == needle {
-                hits.push((section.rva + offset) as u32);
+                hits.push((rva + offset) as u32);
             }
         }
     }
@@ -215,23 +405,17 @@ fn dword_hits(pe: &Pe, value: u32) -> Vec<u32> {
 type Load = (Register, i64);
 
 fn compared_offsets(code: &[u8], rva: u32) -> (Vec<Load>, Vec<Load>) {
-    let mut decoder = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE);
     let mut loaded: HashMap<Register, Load> = HashMap::new();
     let (mut mins, mut maxs) = (Vec::new(), Vec::new());
 
-    while decoder.can_decode() {
-        let instr = decoder.decode();
-        if instr.is_invalid() {
-            continue;
-        }
-
+    for instr in instructions(code, rva).filter(|i| !i.is_invalid()) {
+        let reg = instr.op0_register().full_register32();
         match instr.mnemonic() {
             Mnemonic::Call => loaded.clear(),
             Mnemonic::Cmp
                 if instr.op0_kind() == OpKind::Register && instr.op1_kind() != OpKind::Register =>
             {
                 let value = instr.immediate(1) as u32;
-                let reg = instr.op0_register().full_register32();
                 if let Some(&load) = loaded.get(&reg) {
                     if value == LOCAL_MIN {
                         mins.push(load);
@@ -241,23 +425,17 @@ fn compared_offsets(code: &[u8], rva: u32) -> (Vec<Load>, Vec<Load>) {
                 }
             }
             Mnemonic::Mov
-                if instr.op0_kind() == OpKind::Register
-                    && instr.op1_kind() == OpKind::Memory
-                    && instr.memory_index() == Register::None
-                    && instr.memory_base() != Register::None
-                    && instr.memory_base() != Register::RIP =>
+                if instr.op0_kind() == OpKind::Register && instr.op1_kind() == OpKind::Memory =>
             {
-                let reg = instr.op0_register().full_register32();
-                loaded.insert(
-                    reg,
-                    (instr.memory_base(), instr.memory_displacement64() as i64),
-                );
+                match base_field(&instr) {
+                    Some(load) => loaded.insert(reg, load),
+                    None => loaded.remove(&reg),
+                };
             }
-            _ => {
-                if instr.op0_kind() == OpKind::Register {
-                    loaded.remove(&instr.op0_register().full_register32());
-                }
+            _ if instr.op0_kind() == OpKind::Register => {
+                loaded.remove(&reg);
             }
+            _ => {}
         }
     }
 
@@ -279,19 +457,16 @@ fn position_in(mins: &[Load], maxs: &[Load]) -> Option<(u32, u32)> {
 }
 
 fn world_base_in(code: &[u8], rva: u32) -> Option<u32> {
-    let mut subs = Vec::new();
-    let mut decoder = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE);
-    while decoder.can_decode() {
-        let instr = decoder.decode();
-        if instr.mnemonic() == Mnemonic::Sub
-            && instr.op0_kind() == OpKind::Register
-            && instr.op1_kind() == OpKind::Memory
-            && instr.memory_base() == Register::RAX
-            && instr.memory_index() == Register::None
-        {
-            subs.push(instr.memory_displacement64() as i64);
-        }
-    }
+    let subs: Vec<i64> = instructions(code, rva)
+        .filter(|i| {
+            i.mnemonic() == Mnemonic::Sub
+                && i.op0_kind() == OpKind::Register
+                && i.op1_kind() == OpKind::Memory
+                && i.memory_base() == Register::RAX
+                && i.memory_index() == Register::None
+        })
+        .map(|i| i.memory_displacement64() as i64)
+        .collect();
 
     let pairs: Vec<i64> = subs
         .iter()
@@ -334,40 +509,22 @@ pub fn find_actor_position(pe: &Pe) -> Result<ActorPosition, ScanError> {
         }
     }
 
-    match found.as_slice() {
-        [] => Err(ScanError::NotFound),
-        [only] => Ok(*only),
-        many => Err(ScanError::Ambiguous(many.len())),
-    }
+    single(&found)
 }
 
 fn field_compares(code: &[u8], rva: u32) -> HashMap<Load, HashSet<u32>> {
     let mut compares: HashMap<Load, HashSet<u32>> = HashMap::new();
     let mut loaded: HashMap<Register, Load> = HashMap::new();
-    let field = |instr: &Instruction| {
-        (instr.memory_index() == Register::None
-            && instr.memory_base() != Register::None
-            && instr.memory_base() != Register::RIP)
-            .then(|| (instr.memory_base(), instr.memory_displacement64() as i64))
-    };
 
-    for instr in Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE) {
-        let compares_immediate = instr.mnemonic() == Mnemonic::Cmp
-            && matches!(
-                instr.op1_kind(),
-                OpKind::Immediate8to32 | OpKind::Immediate32
-            );
-        if compares_immediate {
+    for instr in instructions(code, rva) {
+        if let Some(value) = imm32(&instr).filter(|_| instr.mnemonic() == Mnemonic::Cmp) {
             let compared = match instr.op0_kind() {
-                OpKind::Memory => field(&instr),
+                OpKind::Memory => base_field(&instr),
                 OpKind::Register => loaded.get(&instr.op0_register().full_register32()).copied(),
                 _ => None,
             };
             if let Some(load) = compared {
-                compares
-                    .entry(load)
-                    .or_default()
-                    .insert(instr.immediate(1) as u32);
+                compares.entry(load).or_default().insert(value);
             }
             continue;
         }
@@ -380,7 +537,7 @@ fn field_compares(code: &[u8], rva: u32) -> HashMap<Load, HashSet<u32>> {
                     && instr.op1_kind() == OpKind::Memory =>
             {
                 let reg = instr.op0_register().full_register32();
-                match field(&instr) {
+                match base_field(&instr) {
                     Some(load) => loaded.insert(reg, load),
                     None => loaded.remove(&reg),
                 };
@@ -403,32 +560,17 @@ pub fn find_game_state(pe: &Pe) -> Result<u32, ScanError> {
             }
         }
     }
-
-    match found.as_slice() {
-        [] => Err(ScanError::NotFound),
-        [only] => Ok(*only),
-        many => Err(ScanError::Ambiguous(many.len())),
-    }
+    single(&found)
 }
 
 fn decode_at(pe: &Pe, rva: u32, limit: usize) -> Vec<Instruction> {
-    let Some(section) = pe
-        .code
-        .iter()
-        .find(|s| (s.rva..s.rva + s.size).contains(&(rva as usize)))
-    else {
+    let Some(section) = pe.section_containing(rva as usize) else {
         return Vec::new();
     };
     let end = (section.rva + section.size).min(rva as usize + limit * 15);
-    Decoder::with_ip(
-        64,
-        &pe.image[rva as usize..end],
-        rva as u64,
-        DecoderOptions::NONE,
-    )
-    .into_iter()
-    .take(limit)
-    .collect()
+    instructions(&pe.image[rva as usize..end], rva)
+        .take(limit)
+        .collect()
 }
 
 fn load_from(instr: &Instruction, base: Register) -> Option<u32> {
@@ -496,31 +638,22 @@ fn hash_table_offset(pe: &Pe, rva: u32) -> Option<u32> {
     tables.next().is_none().then_some(table)
 }
 
-// Every `call rel32` into code, as (site, target), scanned once per image.
 fn direct_calls<'p>(pe: &'p Pe) -> &'p [(u32, u32)] {
     pe.calls.get_or_init(|| scan_direct_calls(pe))
 }
 
 fn scan_direct_calls(pe: &Pe) -> Vec<(u32, u32)> {
-    let mut calls = Vec::new();
-    for section in &pe.code {
-        let data = &pe.image[section.rva..section.rva + section.size];
-        for (offset, window) in data.windows(5).enumerate() {
-            if window[0] != 0xe8 {
-                continue;
-            }
-            let site = (section.rva + offset) as i64;
-            let target = site + 5 + i32::from_le_bytes(window[1..5].try_into().unwrap()) as i64;
-            if pe
-                .code
-                .iter()
-                .any(|s| (s.rva as i64..(s.rva + s.size) as i64).contains(&target))
-            {
-                calls.push((site as u32, target as u32));
-            }
-        }
-    }
-    calls
+    rel32_branches(pe, 0xe8)
+        .filter(|&(_, target)| usize::try_from(target).is_ok_and(|target| pe.in_code(target)))
+        .map(|(site, target)| (site as u32, target as u32))
+        .collect()
+}
+
+fn call_targets(pe: &Pe) -> Vec<u32> {
+    let mut targets: Vec<u32> = direct_calls(pe).iter().map(|&(_, target)| target).collect();
+    targets.sort_unstable();
+    targets.dedup();
+    targets
 }
 
 fn player_getter(pe: &Pe, call: u32) -> Option<(u32, u32)> {
@@ -576,13 +709,8 @@ fn client_global(pe: &Pe, offsets: &[u32]) -> Result<u32, ScanError> {
 
     let mut globals: HashMap<u32, usize> = HashMap::new();
     for (begin, end) in functions {
-        let mut decoder =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE);
         let mut loaded: HashMap<Register, u32> = HashMap::new();
-        for instr in &mut decoder {
-            if instr.is_invalid() {
-                continue;
-            }
+        for instr in instructions(pe.bytes(begin, end), begin).filter(|i| !i.is_invalid()) {
             if instr.op_kinds().any(|kind| kind == OpKind::Memory) {
                 let disp = instr.memory_displacement64() as u32;
                 if let Some(&global) = loaded.get(&instr.memory_base()) {
@@ -592,19 +720,15 @@ fn client_global(pe: &Pe, offsets: &[u32]) -> Result<u32, ScanError> {
                 }
             }
 
+            if let Some((reg, global)) = global_load(&instr).filter(|&(reg, _)| reg.size() == 8) {
+                loaded.insert(reg, global);
+                continue;
+            }
             match instr.mnemonic() {
                 Mnemonic::Call => VOLATILE.iter().for_each(|r| {
                     loaded.remove(r);
                 }),
                 Mnemonic::Ret | Mnemonic::Jmp => loaded.clear(),
-                Mnemonic::Mov
-                    if instr.op0_kind() == OpKind::Register
-                        && instr.op0_register().size() == 8
-                        && instr.op1_kind() == OpKind::Memory
-                        && instr.is_ip_rel_memory_operand() =>
-                {
-                    loaded.insert(instr.op0_register(), instr.ip_rel_memory_address() as u32);
-                }
                 _ if instr.op0_kind() == OpKind::Register => {
                     loaded.remove(&instr.op0_register().full_register());
                 }
@@ -613,29 +737,16 @@ fn client_global(pe: &Pe, offsets: &[u32]) -> Result<u32, ScanError> {
         }
     }
 
-    let mut globals = globals.into_iter();
-    match (globals.next(), globals.next()) {
-        (None, _) => Err(ScanError::NotFound),
-        (Some((global, _)), None) => Ok(global),
-        (Some(_), Some(_)) => Err(ScanError::Ambiguous(2 + globals.count())),
-    }
+    single(&globals.into_keys().collect::<Vec<_>>())
 }
 
 pub fn find_local_player(pe: &Pe) -> Result<LocalPlayer, ScanError> {
     let calls = direct_calls(pe);
-    let mut targets: Vec<u32> = calls.iter().map(|&(_, target)| target).collect();
-    targets.sort_unstable();
-    targets.dedup();
-
-    let getters: Vec<(u32, (u32, u32, u32))> = targets
+    let getters: Vec<(u32, (u32, u32, u32))> = call_targets(pe)
         .into_iter()
         .filter_map(|target| Some((target, world_view_getter(&decode_at(pe, target, 3))?)))
         .collect();
-    let (getter, (world_view_id, manager, lookup)) = match getters.as_slice() {
-        [] => return Err(ScanError::NotFound),
-        [only] => *only,
-        many => return Err(ScanError::Ambiguous(many.len())),
-    };
+    let (getter, (world_view_id, manager, lookup)) = single(&getters)?;
     let world_views = manager
         .checked_add(hash_table_offset(pe, lookup).ok_or(ScanError::NotFound)?)
         .ok_or(ScanError::NotFound)?;
@@ -668,22 +779,17 @@ pub fn find_local_player(pe: &Pe) -> Result<LocalPlayer, ScanError> {
 }
 
 fn registered_code(pe: &Pe, site: u32) -> Option<u32> {
-    let in_code = |rva: u32| {
-        pe.code
-            .iter()
-            .any(|s| (s.rva..s.rva + s.size).contains(&(rva as usize)))
-    };
     let code_lea = |i: &Instruction| {
         (i.mnemonic() == Mnemonic::Lea && i.is_ip_rel_memory_operand())
             .then(|| i.ip_rel_memory_address() as u32)
-            .filter(|&rva| in_code(rva))
+            .filter(|&rva| pe.in_code(rva as usize))
     };
     for instr in decode_at(pe, site, 12) {
         if let Some(code) = code_lea(&instr) {
             return Some(code);
         }
-        if instr.mnemonic() == Mnemonic::Call && instr.op0_kind() == OpKind::NearBranch64 {
-            let callee = decode_at(pe, instr.near_branch_target() as u32, 8);
+        if let Some(target) = call_target(&instr) {
+            let callee = decode_at(pe, target, 8);
             if let Some(code) = callee.iter().find_map(code_lea) {
                 return Some(code);
             }
@@ -705,13 +811,12 @@ fn lua_binding(pe: &Pe, name: &str) -> Result<u32, ScanError> {
         .collect();
 
     let mut implementations = HashSet::new();
-    for section in &pe.code {
-        let data = &pe.image[section.rva..section.rva + section.size];
+    for (rva, data) in pe.code_sections() {
         for (offset, w) in data.windows(7).enumerate() {
             if w[..3] != [0x48, 0x8d, 0x15] {
                 continue;
             }
-            let site = (section.rva + offset) as u32;
+            let site = (rva + offset) as u32;
             let target =
                 (site as i64 + 7 + i32::from_le_bytes(w[3..7].try_into().unwrap()) as i64) as u32;
             if !strings.contains(&target) {
@@ -721,25 +826,16 @@ fn lua_binding(pe: &Pe, name: &str) -> Result<u32, ScanError> {
         }
     }
 
-    let mut implementations = implementations.into_iter();
-    match (implementations.next(), implementations.len()) {
-        (None, _) => Err(ScanError::NotFound),
-        (Some(only), 0) => Ok(only),
-        (Some(_), more) => Err(ScanError::Ambiguous(1 + more)),
-    }
+    single(&implementations.into_iter().collect::<Vec<_>>())
 }
 
 fn global_field_getter(instrs: &[Instruction]) -> Option<(u32, u32)> {
     let [global, load, ret, ..] = instrs else {
         return None;
     };
-    let is_global = global.mnemonic() == Mnemonic::Mov
-        && global.op0_register() == Register::RAX
-        && global.op1_kind() == OpKind::Memory
-        && global.is_ip_rel_memory_operand();
+    let (_, global) = global_load(global).filter(|&(reg, _)| reg == Register::RAX)?;
     let disp = load_from(load, Register::RAX).filter(|_| load.op0_register() == Register::EAX)?;
-    (is_global && ret.mnemonic() == Mnemonic::Ret)
-        .then(|| (global.ip_rel_memory_address() as u32, disp))
+    (ret.mnemonic() == Mnemonic::Ret).then_some((global, disp))
 }
 
 pub fn find_tick_count(pe: &Pe, client: u32) -> Result<u32, ScanError> {
@@ -778,12 +874,7 @@ fn client_array_getter(instrs: &[Instruction], client: u32) -> Option<u32> {
     for instr in instrs {
         match instr.mnemonic() {
             Mnemonic::Ret => return None,
-            Mnemonic::Mov
-                if instr.op0_kind() == OpKind::Register
-                    && instr.op1_kind() == OpKind::Memory
-                    && instr.is_ip_rel_memory_operand()
-                    && instr.ip_rel_memory_address() as u32 == client =>
-            {
+            Mnemonic::Mov if global_load(instr).is_some_and(|(_, global)| global == client) => {
                 client_register = Some(instr.op0_register());
             }
             Mnemonic::Mov
@@ -839,26 +930,17 @@ pub struct LoginPanel {
     pub screen: u32,
 }
 
-fn login_box_writes(code: &[u8], rva: u32, panel_x: u32) -> Vec<(u32, u32)> {
-    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
-        .into_iter()
-        .collect();
-    let global_write = |instr: &Instruction, reg: Register| {
-        (instr.mnemonic() == Mnemonic::Mov
-            && instr.op0_kind() == OpKind::Memory
-            && instr.is_ip_rel_memory_operand()
-            && instr.op1_kind() == OpKind::Register
-            && instr.op1_register() == reg)
-            .then(|| instr.ip_rel_memory_address() as u32)
+fn login_box_writes(instrs: &[Instruction], panel_x: u32) -> Vec<(u32, u32)> {
+    let adds_immediate = |i: &Instruction, reg: Register| {
+        i.mnemonic() == Mnemonic::Add
+            && i.op0_kind() == OpKind::Register
+            && i.op0_register() == reg
+            && imm32(i).is_some()
     };
-    let add_immediate = |instr: &Instruction, reg: Register| {
-        instr.mnemonic() == Mnemonic::Add
-            && instr.op0_kind() == OpKind::Register
-            && instr.op0_register() == reg
-            && matches!(
-                instr.op1_kind(),
-                OpKind::Immediate8to32 | OpKind::Immediate32
-            )
+    let stores = |i: &Instruction, reg: Register| {
+        global_store(i)
+            .filter(|&(from, _)| from == reg)
+            .map(|(_, global)| global)
     };
 
     instrs
@@ -867,28 +949,17 @@ fn login_box_writes(code: &[u8], rva: u32, panel_x: u32) -> Vec<(u32, u32)> {
             let [load, add_box, box_write, add_center, center_write] = w else {
                 return None;
             };
-            let reg = load.op0_register();
-            let loads_panel_x = load.mnemonic() == Mnemonic::Mov
-                && load.op0_kind() == OpKind::Register
-                && reg.size() == 4
-                && load.op1_kind() == OpKind::Memory
-                && load.is_ip_rel_memory_operand()
-                && load.ip_rel_memory_address() as u32 == panel_x;
-            if !(loads_panel_x && add_immediate(add_box, reg) && add_immediate(add_center, reg)) {
+            let (reg, _) =
+                global_load(load).filter(|&(reg, global)| reg.size() == 4 && global == panel_x)?;
+            if !(adds_immediate(add_box, reg) && adds_immediate(add_center, reg)) {
                 return None;
             }
-            Some((
-                global_write(box_write, reg)?,
-                global_write(center_write, reg)?,
-            ))
+            Some((stores(box_write, reg)?, stores(center_write, reg)?))
         })
         .collect()
 }
 
-fn login_y_write(code: &[u8], rva: u32) -> Option<u32> {
-    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
-        .into_iter()
-        .collect();
+fn login_y_write(instrs: &[Instruction]) -> Option<u32> {
     let target = instrs.windows(2).find_map(|w| {
         let [set, store] = w else {
             return None;
@@ -898,12 +969,8 @@ fn login_y_write(code: &[u8], rva: u32) -> Option<u32> {
             && set.op0_register().size() == 4
             && matches!(set.op1_kind(), OpKind::Immediate32)
             && set.immediate(1) as u32 == LOGIN_Y_DEFAULT;
-        let stores = store.mnemonic() == Mnemonic::Mov
-            && store.op0_kind() == OpKind::Memory
-            && store.is_ip_rel_memory_operand()
-            && store.op1_kind() == OpKind::Register
-            && store.op1_register() == set.op0_register();
-        (sets_default && stores).then(|| store.ip_rel_memory_address() as u32)
+        let (from, global) = global_store(store)?;
+        (sets_default && from == set.op0_register()).then_some(global)
     })?;
 
     instrs.iter().enumerate().find_map(|(i, convert)| {
@@ -912,38 +979,21 @@ fn login_y_write(code: &[u8], rva: u32) -> Option<u32> {
         }
         let reg = convert.op0_register();
         instrs[i + 1..].iter().take(3).find_map(|store| {
-            let writes_global = store.mnemonic() == Mnemonic::Mov
-                && store.op0_kind() == OpKind::Memory
-                && store.is_ip_rel_memory_operand()
-                && store.op1_kind() == OpKind::Register
-                && store.op1_register() == reg;
-            writes_global
-                .then(|| store.ip_rel_memory_address() as u32)
-                .filter(|&y| y != target)
+            global_store(store)
+                .filter(|&(from, y)| from == reg && y != target)
+                .map(|(_, y)| y)
         })
     })
 }
 
-fn panel_x_write(code: &[u8], rva: u32) -> Option<u32> {
+fn panel_x_write(instrs: &[Instruction]) -> Option<u32> {
     const NEG_PANEL_WIDTH: u32 = LOGIN_PANEL_WIDTH.wrapping_neg();
-
-    let mut decoder = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE);
     let (mut since_subtract, mut since_divide) = (None::<u32>, None::<u32>);
 
-    while decoder.can_decode() {
-        let instr = decoder.decode();
-        if instr.is_invalid() {
-            continue;
-        }
-
+    for instr in instrs.iter().filter(|i| !i.is_invalid()) {
         if let Some(n) = since_divide {
-            let writes_global = instr.mnemonic() == Mnemonic::Mov
-                && instr.op0_kind() == OpKind::Memory
-                && instr.is_ip_rel_memory_operand()
-                && instr.op1_kind() == OpKind::Register
-                && instr.op1_register().size() == 4;
-            if writes_global {
-                return Some(instr.ip_rel_memory_address() as u32);
+            if let Some((_, global)) = global_store(instr).filter(|&(from, _)| from.size() == 4) {
+                return Some(global);
             }
             since_divide = (n < 20).then_some(n + 1);
         }
@@ -960,16 +1010,11 @@ fn panel_x_write(code: &[u8], rva: u32) -> Option<u32> {
             };
         }
 
-        let subtracts_panel_width = matches!(instr.mnemonic(), Mnemonic::Add | Mnemonic::Sub)
-            && matches!(
-                instr.op1_kind(),
-                OpKind::Immediate8to32 | OpKind::Immediate32
-            )
-            && match instr.mnemonic() {
-                Mnemonic::Add => instr.immediate(1) as u32 == NEG_PANEL_WIDTH,
-                Mnemonic::Sub => instr.immediate(1) as u32 == LOGIN_PANEL_WIDTH,
-                _ => false,
-            };
+        let subtracts_panel_width = match instr.mnemonic() {
+            Mnemonic::Add => imm32(instr) == Some(NEG_PANEL_WIDTH),
+            Mnemonic::Sub => imm32(instr) == Some(LOGIN_PANEL_WIDTH),
+            _ => false,
+        };
         if subtracts_panel_width {
             since_subtract = Some(0);
         }
@@ -977,21 +1022,15 @@ fn panel_x_write(code: &[u8], rva: u32) -> Option<u32> {
     None
 }
 
-fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
-    let mut decoder = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE);
+fn login_state_reads(instrs: &[Instruction], game_state: u32) -> Vec<u32> {
     let mut loaded: HashMap<Register, Load> = HashMap::new();
     let mut gated: Option<Register> = None;
     let mut window: Option<u32> = None;
     let mut pending_global: Option<(Register, u32)> = None;
     let mut found = Vec::new();
 
-    while decoder.can_decode() {
-        let instr = decoder.decode();
-        if instr.is_invalid() {
-            continue;
-        }
-
-        if let Some((reg, target)) = pending_global {
+    for instr in instrs.iter().filter(|i| !i.is_invalid()) {
+        if let Some((reg, target)) = pending_global.take() {
             let tests_itself = instr.mnemonic() == Mnemonic::Test
                 && instr.op0_kind() == OpKind::Register
                 && instr.op1_kind() == OpKind::Register
@@ -1001,18 +1040,10 @@ fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
                 found.push(target);
                 window = None;
             }
-            pending_global = None;
         }
 
         if let Some(n) = window {
-            let reads_global = instr.mnemonic() == Mnemonic::Mov
-                && instr.op0_kind() == OpKind::Register
-                && instr.op0_register().size() == 4
-                && instr.op1_kind() == OpKind::Memory
-                && instr.is_ip_rel_memory_operand();
-            if reads_global {
-                pending_global = Some((instr.op0_register(), instr.ip_rel_memory_address() as u32));
-            }
+            pending_global = global_load(instr).filter(|&(reg, _)| reg.size() == 4);
             window = (n < 15).then_some(n + 1);
         }
 
@@ -1022,39 +1053,25 @@ fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
         match instr.mnemonic() {
             Mnemonic::Call => loaded.clear(),
             Mnemonic::Sub
-                if matches!(
-                    instr.op1_kind(),
-                    OpKind::Immediate8to32 | OpKind::Immediate32
-                ) && instr.immediate(1) as u32 == 10
+                if imm32(instr) == Some(10)
                     && reg0.is_some_and(|reg| {
                         loaded.get(&reg).map(|&(_, disp)| disp) == Some(game_state as i64)
                     }) =>
             {
                 gated = reg0;
             }
-            Mnemonic::Cmp
-                if matches!(
-                    instr.op1_kind(),
-                    OpKind::Immediate8to32 | OpKind::Immediate32
-                ) && instr.immediate(1) as u32 == 1
-                    && reg0.is_some()
-                    && gated == reg0 =>
-            {
+            Mnemonic::Cmp if imm32(instr) == Some(1) && reg0.is_some() && gated == reg0 => {
                 window.get_or_insert(0);
                 gated = None;
             }
             Mnemonic::Mov
-                if instr.op0_kind() == OpKind::Register
-                    && instr.op1_kind() == OpKind::Memory
-                    && instr.memory_index() == Register::None
-                    && instr.memory_base() != Register::None
-                    && instr.memory_base() != Register::RIP =>
+                if instr.op0_kind() == OpKind::Register && instr.op1_kind() == OpKind::Memory =>
             {
                 let reg = instr.op0_register().full_register32();
-                loaded.insert(
-                    reg,
-                    (instr.memory_base(), instr.memory_displacement64() as i64),
-                );
+                match base_field(instr) {
+                    Some(load) => loaded.insert(reg, load),
+                    None => loaded.remove(&reg),
+                };
                 gated = gated.filter(|&g| g != reg);
             }
             _ => {
@@ -1068,39 +1085,23 @@ fn login_state_reads(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
     found
 }
 
-/// The login screen drawer checks "logging in" twice over: `cmp dword [client + game_state], 20; je; cmp dword [rip + screen], 20`, the game state and then the login screen's own index against `LOGGING_IN`. The global of the second compare is the screen index.
-// A compare whose second operand is this immediate (a `cmp [x], reg` has none, and reading it panics).
-fn compares_immediate(i: &Instruction, value: u64) -> bool {
-    matches!(
-        i.op1_kind(),
-        OpKind::Immediate8to32 | OpKind::Immediate32 | OpKind::Immediate8
-    ) && i.immediate(1) == value
-}
-
-fn login_screen_compares(code: &[u8], rva: u32, game_state: u32) -> Vec<u32> {
+fn login_screen_compares(instrs: &[Instruction], game_state: u32) -> Vec<u32> {
     const LOGGING_IN: u64 = 20;
-    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
-        .into_iter()
-        .collect();
+    let compares_dword = |i: &Instruction| {
+        i.mnemonic() == Mnemonic::Cmp
+            && i.op0_kind() == OpKind::Memory
+            && i.memory_size() == iced_x86::MemorySize::UInt32
+            && immediate(i) == Some(LOGGING_IN)
+    };
     instrs
         .windows(3)
         .filter_map(|w| {
             let [state, jump, screen] = w else {
                 return None;
             };
-            let compares_state = state.mnemonic() == Mnemonic::Cmp
-                && state.op0_kind() == OpKind::Memory
-                && state.memory_size() == iced_x86::MemorySize::UInt32
-                && state.memory_base() != Register::None
-                && state.memory_base() != Register::RIP
-                && state.memory_index() == Register::None
-                && state.memory_displacement64() == game_state as u64
-                && compares_immediate(state, LOGGING_IN);
-            let compares_screen = screen.mnemonic() == Mnemonic::Cmp
-                && screen.op0_kind() == OpKind::Memory
-                && screen.memory_size() == iced_x86::MemorySize::UInt32
-                && screen.is_ip_rel_memory_operand()
-                && compares_immediate(screen, LOGGING_IN);
+            let compares_state = compares_dword(state)
+                && base_field(state).is_some_and(|(_, disp)| disp == game_state as i64);
+            let compares_screen = compares_dword(screen) && screen.is_ip_rel_memory_operand();
             (compares_state && jump.mnemonic() == Mnemonic::Je && compares_screen)
                 .then(|| screen.ip_rel_memory_address() as u32)
         })
@@ -1111,19 +1112,18 @@ pub fn find_login_panel(pe: &Pe, game_state: u32) -> Result<LoginPanel, ScanErro
     let (mut panel_x_candidates, mut screen_candidates, mut y_candidates) =
         (Vec::new(), Vec::new(), Vec::new());
     for &(begin, end) in &pe.functions {
-        let code = pe.bytes(begin, end);
-        panel_x_candidates.extend(panel_x_write(code, begin));
-        // two shapes name the screen index: the gated read older builds have, and the double compare with "logging in"
-        screen_candidates.extend(login_state_reads(code, begin, game_state));
-        screen_candidates.extend(login_screen_compares(code, begin, game_state));
-        y_candidates.extend(login_y_write(code, begin));
+        let instrs = decode(pe.bytes(begin, end), begin);
+        panel_x_candidates.extend(panel_x_write(&instrs));
+        screen_candidates.extend(login_state_reads(&instrs, game_state));
+        screen_candidates.extend(login_screen_compares(&instrs, game_state));
+        y_candidates.extend(login_y_write(&instrs));
     }
 
     let panel_x = one(panel_x_candidates)?;
     let box_candidates = pe
         .functions
         .iter()
-        .flat_map(|&(begin, end)| login_box_writes(pe.bytes(begin, end), begin, panel_x))
+        .flat_map(|&(begin, end)| login_box_writes(&decode(pe.bytes(begin, end), begin), panel_x))
         .collect();
     let (box_x, center_x) = one(box_candidates)?;
 
@@ -1136,14 +1136,18 @@ pub fn find_login_panel(pe: &Pe, game_state: u32) -> Result<LoginPanel, ScanErro
     })
 }
 
-fn one<T: Ord + Copy>(mut candidates: Vec<T>) -> Result<T, ScanError> {
-    candidates.sort_unstable();
-    candidates.dedup();
-    match candidates.as_slice() {
+fn single<T: Copy>(found: &[T]) -> Result<T, ScanError> {
+    match found {
         [] => Err(ScanError::NotFound),
         [only] => Ok(*only),
         many => Err(ScanError::Ambiguous(many.len())),
     }
+}
+
+fn one<T: Ord + Copy>(mut candidates: Vec<T>) -> Result<T, ScanError> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    single(&candidates)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1178,10 +1182,7 @@ fn field_operand(instr: &Instruction, operand: u32) -> Option<u32> {
     .then(|| instr.memory_displacement64() as u32)
 }
 
-fn component_layout_function(code: &[u8], rva: u32) -> Option<(u32, u32, u32)> {
-    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
-        .into_iter()
-        .collect();
+fn component_layout_function(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
     let (mut scaled, mut subtracted, mut stored) = (Vec::new(), Vec::new(), Vec::new());
     for (i, instr) in instrs.iter().enumerate() {
         match instr.mnemonic() {
@@ -1229,10 +1230,7 @@ fn component_layout_function(code: &[u8], rva: u32) -> Option<(u32, u32, u32)> {
     (x != width && x != original_x).then_some((original_x, x, width))
 }
 
-fn component_tree_loop(code: &[u8], rva: u32, width: u32) -> Option<(u32, u32)> {
-    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
-        .into_iter()
-        .collect();
+fn component_tree_loop(instrs: &[Instruction], width: u32) -> Option<(u32, u32)> {
     let scroll = |w: u32| {
         instrs.windows(3).find_map(|win| {
             let [load, sub, cmp] = win else { return None };
@@ -1265,17 +1263,12 @@ fn component_tree_loop(code: &[u8], rva: u32, width: u32) -> Option<(u32, u32)> 
     Some((parent, scroll_x))
 }
 
-fn sub_interface_lookup(code: &[u8], rva: u32) -> Option<(u32, u32, u32)> {
-    let instrs: Vec<Instruction> = Decoder::with_ip(64, code, rva as u64, DecoderOptions::NONE)
-        .into_iter()
-        .collect();
+fn sub_interface_lookup(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
     instrs.windows(9).find_map(|win| {
         let [cmp, jne, load_id, rest @ ..] = win else {
             return None;
         };
-        let kind = (cmp.mnemonic() == Mnemonic::Cmp
-            && matches!(cmp.op1_kind(), OpKind::Immediate8to32 | OpKind::Immediate32)
-            && cmp.immediate(1) == 0)
+        let kind = (cmp.mnemonic() == Mnemonic::Cmp && imm32(cmp) == Some(0))
             .then(|| field_operand(cmp, 0))
             .flatten()?;
         if jne.mnemonic() != Mnemonic::Jne || load_id.mnemonic() != Mnemonic::Movsxd {
@@ -1324,11 +1317,11 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
     let mut layouts = Vec::new();
     let mut lookups = Vec::new();
     for &(begin, end) in &pe.functions {
-        let code = pe.bytes(begin, end);
-        if let Some(found) = component_layout_function(code, begin) {
+        let instrs = decode(pe.bytes(begin, end), begin);
+        if let Some(found) = component_layout_function(&instrs) {
             layouts.push((begin, found));
         }
-        lookups.extend(sub_interface_lookup(code, begin));
+        lookups.extend(sub_interface_lookup(&instrs));
     }
     let (layout_rva, (_, x, width)) = one(layouts)?;
     let (kind, id, sub_interfaces) = one(lookups)?;
@@ -1344,7 +1337,7 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
 
     let mut loops = Vec::new();
     for (_, (begin, end)) in callers_of(layout_rva) {
-        if let Some(found) = component_tree_loop(pe.bytes(begin, end), begin, width) {
+        if let Some(found) = component_tree_loop(&decode(pe.bytes(begin, end), begin), width) {
             loops.push((begin, found));
         }
     }
@@ -1411,10 +1404,7 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
     }
     let (root, canvas, ui_width) = one(root_candidates)?;
 
-    let mut targets: Vec<u32> = calls.iter().map(|&(_, t)| t).collect();
-    targets.sort_unstable();
-    targets.dedup();
-    let scales = targets.into_iter().filter_map(|t| {
+    let scales = call_targets(pe).into_iter().filter_map(|t| {
         let instrs = decode_at(pe, t, 6);
         let loads_canvas = instrs.first().is_some_and(|i| {
             i.op0_kind() == OpKind::Register
@@ -1510,7 +1500,10 @@ mod tests {
         let code = [
             0x05, 0x03, 0xfd, 0xff, 0xff, 0xd1, 0xf8, 0x89, 0x05, 0x00, 0x01, 0x00, 0x00,
         ];
-        assert_eq!(panel_x_write(&code, 0x1000), Some(0x1000 + 13 + 0x100));
+        assert_eq!(
+            panel_x_write(&decode(&code, 0x1000)),
+            Some(0x1000 + 13 + 0x100)
+        );
     }
 
     #[test]
@@ -1520,7 +1513,7 @@ mod tests {
             0x10, 0x8b, 0x0d, 0x50, 0x00, 0x00, 0x00, 0x85, 0xc9,
         ];
         assert_eq!(
-            login_state_reads(&code, 0x1000, 0x2160),
+            login_state_reads(&decode(&code, 0x1000), 0x2160),
             vec![0x1000 + 21 + 0x50]
         );
     }
@@ -1531,7 +1524,10 @@ mod tests {
             0x8b, 0x83, 0x10, 0x00, 0x00, 0x00, 0x83, 0xe8, 0x0a, 0x83, 0xf8, 0x01, 0x8b, 0x0d,
             0x50, 0x00, 0x00, 0x00, 0x85, 0xc9,
         ];
-        assert_eq!(login_state_reads(&code, 0x1000, 0x2160), Vec::<u32>::new());
+        assert_eq!(
+            login_state_reads(&decode(&code, 0x1000), 0x2160),
+            Vec::<u32>::new()
+        );
     }
 
     #[test]
@@ -1540,11 +1536,9 @@ mod tests {
             0x8b, 0x05, 0x00, 0x01, 0x00, 0x00, 0x05, 0xca, 0x00, 0x00, 0x00, 0x89, 0x05, 0x00,
             0x02, 0x00, 0x00, 0x05, 0xb4, 0x00, 0x00, 0x00, 0x89, 0x05, 0x00, 0x03, 0x00, 0x00,
         ];
-        assert_eq!(
-            login_box_writes(&code, 0x1000, 0x1106),
-            vec![(0x1211, 0x131c)]
-        );
-        assert_eq!(login_box_writes(&code, 0x1000, 0x1107), vec![]);
+        let instrs = decode(&code, 0x1000);
+        assert_eq!(login_box_writes(&instrs, 0x1106), vec![(0x1211, 0x131c)]);
+        assert_eq!(login_box_writes(&instrs, 0x1107), vec![]);
     }
 
     #[test]
@@ -1554,8 +1548,8 @@ mod tests {
             0xda, 0xf3, 0x0f, 0x11, 0x15, 0x50, 0x00, 0x00, 0x00, 0x89, 0x1d, 0x00, 0x02, 0x00,
             0x00,
         ];
-        assert_eq!(login_y_write(&code, 0x1000), Some(0x121d));
-        assert_eq!(login_y_write(&code[11..], 0x100b), None);
+        assert_eq!(login_y_write(&decode(&code, 0x1000)), Some(0x121d));
+        assert_eq!(login_y_write(&decode(&code[11..], 0x100b)), None);
     }
 
     #[test]
@@ -1990,8 +1984,7 @@ mod tests {
         assert_eq!(state_compare.memory_displacement64() as u32, game_state);
     }
 
-    /// The finder's value, printed; a finder that found nothing fails the build it ran on.
-    fn found<T: std::fmt::Debug, E: std::fmt::Debug>(
+    pub(super) fn found<T: std::fmt::Debug, E: std::fmt::Debug>(
         what: &str,
         build: &std::path::Path,
         result: Result<T, E>,
@@ -2002,7 +1995,6 @@ mod tests {
         value
     }
 
-    /// Runs `check` on each archived client build in `archive/` (skipped when there is none).
     pub(super) fn for_each_archived_build(mut check: impl FnMut(&std::path::Path, &Pe)) {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let manifest = if cfg!(windows) && manifest.starts_with('/') {
@@ -2030,10 +2022,7 @@ mod tests {
     #[test]
     fn finds_npc_head_icons_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let icons = find_npc_head_icons(pe).unwrap_or_else(|error| {
-                panic!("NPC head icons not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {icons:x?}", build.display());
+            let icons = found("NPC head icons", build, find_npc_head_icons(pe));
             assert_eq!(
                 (icons.field, icons.sprites),
                 (0x760, 0x48),
@@ -2049,12 +2038,11 @@ mod tests {
             let lookup = find_obj_type_lookup(pe).expect("item definition lookup");
             let names = find_actor_names(pe).expect("actor names");
             let model = find_npc_model(pe, names.npc_definition).expect("NPC model");
-            let types =
-                find_type_models(pe, lookup.function, model.get_model, names.npc_definition)
-                    .unwrap_or_else(|error| {
-                        panic!("type models not found in {}: {error:?}", build.display())
-                    });
-            println!("{}: {types:x?}", build.display());
+            let types = found(
+                "type models",
+                build,
+                find_type_models(pe, lookup.function, model.get_model, names.npc_definition),
+            );
             assert_eq!(
                 (types.seq_frame_count, types.seq_frames),
                 (0x48, 0x50),
@@ -2067,10 +2055,7 @@ mod tests {
     #[test]
     fn finds_instance_flag_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let flag = find_instance_flag(pe).unwrap_or_else(|error| {
-                panic!("instance flag not found in {}: {error:?}", build.display())
-            });
-            println!("{}: instance flag {flag:x}", build.display());
+            found("instance flag", build, find_instance_flag(pe));
         });
     }
 
@@ -2078,11 +2063,7 @@ mod tests {
     fn finds_actor_path_in_archived_builds() {
         for_each_archived_build(|build, pe| {
             let position = find_actor_position(pe).unwrap();
-            let path = find_actor_path(pe, position.x).unwrap_or_else(|error| {
-                panic!("actor path not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {path:x?}", build.display());
-            // ten ints of x, then ten of y, right after the length (Java's `new int[10]`)
+            let path = found("actor path", build, find_actor_path(pe, position.x));
             assert_eq!(
                 (path.length, path.x, path.y),
                 (0x3ec, 0x3f0, 0x418),
@@ -2095,11 +2076,7 @@ mod tests {
     #[test]
     fn finds_packets_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let packets = find_packets(pe).unwrap_or_else(|error| {
-                panic!("packets not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {packets:x?}", build.display());
-            // the layout is the same in every build; the addresses move with the code
+            let packets = found("packets", build, find_packets(pe));
             let name = build.file_name().unwrap().to_string_lossy();
             let (receive, send) = if name.contains("166231c8") {
                 (0x202740, 0x204010)
@@ -2127,11 +2104,7 @@ mod tests {
     #[test]
     fn finds_script_runs_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let runs = find_script_runs(pe).unwrap_or_else(|error| {
-                panic!("script runs not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {runs:x?}", build.display());
-            // the layout is the same in every build; the address moves with the code
+            let runs = found("script runs", build, find_script_runs(pe));
             let name = build.file_name().unwrap().to_string_lossy();
             let function = if name.contains("a2636a01") {
                 0x1995c0
@@ -2155,10 +2128,7 @@ mod tests {
     #[test]
     fn finds_varc_setters_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let setters = find_varc_setters(pe).unwrap_or_else(|error| {
-                panic!("varc setters not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {setters:x?}", build.display());
+            let setters = found("varc setters", build, find_varc_setters(pe));
             if build.to_string_lossy().contains("a2636a01") {
                 assert_eq!(
                     setters,
@@ -2177,16 +2147,8 @@ mod tests {
     #[test]
     fn finds_item_setter_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let containers = find_item_containers(pe).unwrap_or_else(|error| {
-                panic!(
-                    "item containers not found in {}: {error:?}",
-                    build.display()
-                )
-            });
-            let setter = find_item_setter(pe, &containers).unwrap_or_else(|error| {
-                panic!("item setter not found in {}: {error:?}", build.display())
-            });
-            println!("{}: item setter {setter:#x}", build.display());
+            let containers = found("item containers", build, find_item_containers(pe));
+            let setter = found("item setter", build, find_item_setter(pe, &containers));
             if build.to_string_lossy().contains("a2636a01") {
                 assert_eq!(setter, 0x30f60, "{}", build.display());
             }
@@ -2196,16 +2158,10 @@ mod tests {
     #[test]
     fn finds_every_offset_in_archived_builds() {
         for_each_archived_build(|build, pe| {
-            let game_state = find_game_state(pe).expect("game state not found");
-            let panel = find_login_panel(pe, game_state).unwrap_or_else(|error| {
-                panic!("login panel not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {panel:x?}", build.display());
-            let interfaces = find_interfaces(pe).unwrap_or_else(|error| {
-                panic!("interfaces not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {interfaces:x?}", build.display());
-            let player = find_local_player(pe).unwrap();
+            let game_state = found("game state", build, find_game_state(pe));
+            found("login panel", build, find_login_panel(pe, game_state));
+            let interfaces = found("interfaces", build, find_interfaces(pe));
+            let player = found("local player", build, find_local_player(pe));
             found("item containers", build, find_item_containers(pe));
             found("varcs", build, find_varcs(pe, player.client));
             found("run energy", build, find_run_energy(pe));
@@ -2215,108 +2171,52 @@ mod tests {
             found("component sprite", build, find_component_sprite(pe));
             found("component fields", build, find_component_fields(pe));
             let lookup = found("object type lookup", build, find_obj_type_lookup(pe));
-            found("projection", build, find_projection(pe, player.client));
+            let projection = found("projection", build, find_projection(pe, player.client));
             let menu = found("menu", build, find_menu(pe));
             let click = found("menu click", build, find_menu_click(pe, &menu));
             found("menu layout", build, find_menu_layout(pe, &click));
             found("selection", build, find_selection(pe, &menu));
-            let minimap = find_minimap(pe, player.client).unwrap_or_else(|error| {
-                panic!("minimap not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {minimap:x?}", build.display());
+            let minimap = found("minimap", build, find_minimap(pe, player.client));
             found("destination", build, find_destination(pe, minimap.object));
             found("ground items", build, find_ground_items(pe));
-            println!(
-                "{}: {:x?}",
-                build.display(),
-                find_projectiles(pe).unwrap_or_else(|error| panic!(
-                    "projectiles not found in {}: {error:?}",
-                    build.display()
-                ))
-            );
-            println!(
-                "{}: {:x?}",
-                build.display(),
-                find_spot_anims(pe).unwrap_or_else(|error| panic!(
-                    "spot animations not found in {}: {error:?}",
-                    build.display()
-                ))
-            );
-            println!(
-                "{}: {:x?}",
-                build.display(),
-                find_chat(pe).unwrap_or_else(|error| panic!(
-                    "chat not found in {}: {error:?}",
-                    build.display()
-                ))
-            );
-            let camera = find_camera(pe, player.client).unwrap_or_else(|error| {
-                panic!("camera not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {camera:x?}", build.display());
+            found("projectiles", build, find_projectiles(pe));
+            found("spot animations", build, find_spot_anims(pe));
+            found("chat", build, find_chat(pe));
+            let camera = found("camera", build, find_camera(pe, player.client));
             assert_eq!(camera.yaw, minimap.angle);
-            let world_select = find_world_select(pe, player.client).unwrap_or_else(|error| {
-                panic!("world select not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {world_select:x?}", build.display());
+            found("world select", build, find_world_select(pe, player.client));
             found(
                 "game vals",
                 build,
                 find_game_vals(pe, player.client, &lookup),
             );
-            {
-                found(
-                    "appearance decoder",
-                    build,
-                    find_appearance_decoder(pe, names.player_name, player.player_index),
-                );
-                let model = find_npc_model(pe, names.npc_definition).unwrap_or_else(|error| {
-                    panic!("NPC model not found in {}: {error:?}", build.display())
-                });
-                println!("{}: {model:x?}", build.display());
-                let vertices = find_model_vertices(pe, &model).unwrap_or_else(|error| {
-                    panic!("model vertices not found in {}: {error:?}", build.display())
-                });
-                println!("{}: {vertices:x?}", build.display());
-                let faces = find_model_faces(pe, &vertices).unwrap_or_else(|error| {
-                    panic!("model faces not found in {}: {error:?}", build.display())
-                });
-                println!("{}: {faces:x?}", build.display());
-                let orientation = find_actor_orientation(pe).unwrap_or_else(|error| {
-                    panic!(
-                        "actor orientation not found in {}: {error:?}",
-                        build.display()
-                    )
-                });
-                println!("{}: {orientation:x?}", build.display());
-                let height =
-                    find_animation_height(pe, names.npc_definition).unwrap_or_else(|error| {
-                        panic!(
-                            "animation height not found in {}: {error:?}",
-                            build.display()
-                        )
-                    });
-                println!("{}: animation height {height:x}", build.display());
-                let types =
-                    find_type_models(pe, lookup.function, model.get_model, names.npc_definition)
-                        .unwrap_or_else(|error| {
-                            panic!("type models not found in {}: {error:?}", build.display())
-                        });
-                println!("{}: {types:x?}", build.display());
-                assert_eq!(
-                    (types.seq_frame_count, types.seq_frames),
-                    (0x48, 0x50),
-                    "{}",
-                    build.display()
-                );
-            }
-            let scene = find_scene(pe).unwrap_or_else(|error| {
-                panic!("scene not found in {}: {error:?}", build.display())
-            });
-            println!("{}: {scene:x?}", build.display());
-            let collision = find_collision_maps(pe, &scene).unwrap_or_else(|error| {
-                panic!("collision maps not found in {}: {error:?}", build.display())
-            });
+            found(
+                "appearance decoder",
+                build,
+                find_appearance_decoder(pe, names.player_name, player.player_index),
+            );
+            let model = found("NPC model", build, find_npc_model(pe, names.npc_definition));
+            let vertices = found("model vertices", build, find_model_vertices(pe, &model));
+            found("model faces", build, find_model_faces(pe, &vertices));
+            found("actor orientation", build, find_actor_orientation(pe));
+            found(
+                "animation height",
+                build,
+                find_animation_height(pe, names.npc_definition),
+            );
+            let types = found(
+                "type models",
+                build,
+                find_type_models(pe, lookup.function, model.get_model, names.npc_definition),
+            );
+            assert_eq!(
+                (types.seq_frame_count, types.seq_frames),
+                (0x48, 0x50),
+                "{}",
+                build.display()
+            );
+            let scene = found("scene", build, find_scene(pe));
+            let collision = found("collision maps", build, find_collision_maps(pe, &scene));
             assert_eq!(
                 collision,
                 scene::CollisionMaps {
@@ -2324,33 +2224,24 @@ mod tests {
                     stride: 0x28
                 }
             );
-            let game = find_game_object_layout(pe, &scene).expect("game object layout");
-            println!("{}: {game:x?}", build.display());
-            println!(
-                "{}: {:x?}",
-                build.display(),
-                find_loc_configs(pe, &scene, &game).expect("loc configs")
+            let game = found(
+                "game object layout",
+                build,
+                find_game_object_layout(pe, &scene),
             );
-            let decoration = find_decoration_layout(pe, &scene).expect("decoration layout");
-            println!("{}: {decoration:x?}", build.display());
+            found("loc configs", build, find_loc_configs(pe, &scene, &game));
+            let decoration = found(
+                "decoration layout",
+                build,
+                find_decoration_layout(pe, &scene),
+            );
             found("item pile", build, find_item_pile(pe, &decoration));
-            println!(
-                "{}: {:x?}",
-                build.display(),
-                find_loc_names(pe).expect("loc names")
+            found("loc names", build, find_loc_names(pe));
+            found(
+                "local projection",
+                build,
+                find_local_projection(pe, player.client, interfaces.canvas, &projection, &scene),
             );
-            let interfaces = find_interfaces(pe).unwrap();
-            let projection = find_projection(pe, player.client).unwrap();
-            let local =
-                find_local_projection(pe, player.client, interfaces.canvas, &projection, &scene)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "local projection not found in {}: {error:?}",
-                            build.display()
-                        )
-                    });
-            println!("{}: {local:x?}", build.display());
-            {}
         });
     }
 }

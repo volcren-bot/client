@@ -28,10 +28,11 @@ pub(super) fn range_handler(pe: &Pe, upper: u32) -> Result<u32, ScanError> {
     };
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let code = pe.bytes(begin, end);
+        if !ranges.iter().all(|&r| has_dword(code, r)) {
+            continue;
+        }
+        let instrs = decode(code, begin);
         let values: HashSet<u32> = instrs.iter().filter_map(compares).collect();
         if !ranges.iter().all(|r| values.contains(r)) {
             continue;
@@ -39,7 +40,6 @@ pub(super) fn range_handler(pe: &Pe, upper: u32) -> Result<u32, ScanError> {
         let Some(at) = instrs.iter().position(|i| compares(i) == Some(upper)) else {
             continue;
         };
-        // a range's handler is called, or tail called by a jmp
         let branches = |i: &&Instruction| {
             matches!(i.mnemonic(), Mnemonic::Call | Mnemonic::Jmp)
                 && i.op0_kind() == OpKind::NearBranch64
@@ -52,12 +52,7 @@ pub(super) fn range_handler(pe: &Pe, upper: u32) -> Result<u32, ScanError> {
 }
 
 fn setter_case(pe: &Pe, handler: u32, case: u32) -> Result<u32, ScanError> {
-    switch_case(pe, handler, SETTERS, case)
-}
-
-// A range handler switches on the opcode (`add r32, -base; cmp r32, cases`) through an image-relative case table.
-pub(super) fn switch_case(pe: &Pe, handler: u32, base: u32, case: u32) -> Result<u32, ScanError> {
-    switch_cases(pe, handler, base)?
+    switch_cases(pe, handler, SETTERS)?
         .get(case as usize)
         .copied()
         .ok_or(ScanError::NotFound)
@@ -150,9 +145,9 @@ pub fn find_component_invalidate(pe: &Pe) -> Result<ComponentInvalidate, ScanErr
             && moves(b)
             && [a.op0_register(), b.op0_register()].contains(&Register::RCX)
             && [a.op0_register(), b.op0_register()].contains(&Register::RDX);
-        (args && call.mnemonic() == Mnemonic::Call && call.op0_kind() == OpKind::NearBranch64)
-            .then(|| invalidate_at(pe, call.near_branch_target() as u32))
-            .flatten()
+        call_target(call)
+            .filter(|_| args)
+            .and_then(|target| invalidate_at(pe, target))
     });
     let (function, holder_component) = found.ok_or(ScanError::NotFound)?;
     Ok(ComponentInvalidate {
@@ -164,25 +159,8 @@ pub fn find_component_invalidate(pe: &Pe) -> Result<ComponentInvalidate, ScanErr
 
 pub fn find_component_sprite(pe: &Pe) -> Result<u32, ScanError> {
     let case = setter_case(pe, setter_handler(pe)?, SET_GRAPHIC)?;
-    let instrs = decode_at(pe, case, 8);
-    instrs
-        .windows(2)
-        .take_while(|w| w[0].mnemonic() != Mnemonic::Jmp)
-        .find_map(|w| {
-            let [pop, store] = w else { return None };
-            let popped = pop.mnemonic() == Mnemonic::Mov
-                && pop.op0_kind() == OpKind::Register
-                && pop.op0_register().size() == 4
-                && pop.op1_kind() == OpKind::Memory
-                && pop.memory_index() != Register::None
-                && pop.memory_index_scale() == 4;
-            (popped
-                && store.mnemonic() == Mnemonic::Mov
-                && store.op1_kind() == OpKind::Register
-                && store.op1_register() == pop.op0_register())
-            .then(|| field_operand(store, 0))
-            .flatten()
-        })
+    popped_stores(&decode_at(pe, case, 8))
+        .next()
         .ok_or(ScanError::NotFound)
 }
 
@@ -215,12 +193,11 @@ fn hidden(pe: &Pe) -> Result<u32, ScanError> {
         .collect())
 }
 
-fn popped_store(instrs: &[Instruction]) -> Vec<(usize, u32)> {
+fn popped_stores(instrs: &[Instruction]) -> impl Iterator<Item = u32> + '_ {
     instrs
         .windows(2)
-        .enumerate()
-        .take_while(|(_, w)| w[0].mnemonic() != Mnemonic::Jmp)
-        .filter_map(|(at, w)| {
+        .take_while(|w| w[0].mnemonic() != Mnemonic::Jmp)
+        .filter_map(|w| {
             let popped = w[0].mnemonic() == Mnemonic::Mov
                 && w[0].op0_kind() == OpKind::Register
                 && w[0].op0_register().size() == 4
@@ -231,19 +208,15 @@ fn popped_store(instrs: &[Instruction]) -> Vec<(usize, u32)> {
                 && w[1].mnemonic() == Mnemonic::Mov
                 && w[1].op1_kind() == OpKind::Register
                 && w[1].op1_register() == w[0].op0_register())
-            .then(|| field_operand(&w[1], 0).map(|field| (at + 1, field)))
+            .then(|| field_operand(&w[1], 0))
             .flatten()
         })
-        .collect()
 }
 
 fn children(pe: &Pe) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = decode(pe.bytes(begin, end), begin);
         for (at, cmp) in instrs.iter().enumerate() {
             let Some(count) = field_operand(cmp, 0) else {
                 continue;
@@ -281,18 +254,14 @@ fn children(pe: &Pe) -> Result<u32, ScanError> {
 pub fn find_component_fields(pe: &Pe) -> Result<ComponentFields, ScanError> {
     let handler = setter_handler(pe)?;
     let colour = decode_at(pe, setter_case(pe, handler, SET_COLOUR)?, 8);
-    let text_color = one(popped_store(&colour)
-        .into_iter()
-        .map(|(_, field)| field)
-        .collect())?;
+    let text_color = one(popped_stores(&colour).collect())?;
 
-    // CC_SETSCROLLSIZE stores width then height, then compares the child index before reading the id's group half.
     let scroll = decode_at(pe, setter_case(pe, handler, SET_SCROLL_SIZE)?, 30);
-    let stores = popped_store(&scroll);
-    let [(_, scroll_width), (_, scroll_height), ..] = stores.as_slice() else {
+    let mut stores = popped_stores(&scroll);
+    let (Some(scroll_width), Some(scroll_height)) = (stores.next(), stores.next()) else {
         return Err(ScanError::NotFound);
     };
-    if *scroll_height != scroll_width + 4 {
+    if scroll_height != scroll_width + 4 {
         return Err(ScanError::NotFound);
     }
     let index = one(scroll
@@ -312,7 +281,7 @@ pub fn find_component_fields(pe: &Pe) -> Result<ComponentFields, ScanError> {
     Ok(ComponentFields {
         hidden: hidden(pe)?,
         text_color,
-        scroll_width: *scroll_width,
+        scroll_width,
         index,
         children: children(pe)?,
     })

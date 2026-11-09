@@ -1,5 +1,3 @@
-//! The varc log (`AGENT_VARCS_<pid>`): varc changes in a `ring`; `log` must be an initialised `Log` unless noted.
-
 use crate::ring;
 use alloc::{format, string::String, vec::Vec};
 use core::{
@@ -11,10 +9,8 @@ pub fn varc_log_memory_name(pid: u32) -> String {
     format!("AGENT_VARCS_{pid}")
 }
 
-/// Slots in the ring (a power of two): scripts change varcs a few times a second when idle, many more while the interface moves.
 pub const SLOT_COUNT: usize = 4096;
 
-/// Bytes of a string value a slot keeps (of the new and of the old one); `Entry::*_length` is the whole length.
 pub const TEXT_SIZE: usize = 60;
 
 pub mod kind {
@@ -30,7 +26,6 @@ pub struct Slot {
     old_int: i32,
     new_int: i32,
     kind: u8,
-    /// whether the old value is known (a string's isn't until the hook has seen it set once)
     old_known: u8,
     new_stored: u8,
     old_stored: u8,
@@ -55,11 +50,9 @@ pub struct Log {
 
 pub const LOG_SIZE: usize = core::mem::size_of::<Log>();
 
-/// One varc change: ints in `old_int`/`new_int`, strings in `old_text`/`new_text` (first `TEXT_SIZE` bytes plus the length).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub sequence: u64,
-    /// Milliseconds since the agent created the log: for ordering and spacing entries, not a wall clock.
     pub time_ms: u64,
     pub index: i32,
     pub kind: u8,
@@ -72,7 +65,6 @@ pub struct Entry {
     pub new_text: Vec<u8>,
 }
 
-/// A change to push: the same fields as an `Entry` without the log's own bookkeeping.
 pub struct Change<'a> {
     pub index: i32,
     pub kind: u8,
@@ -87,12 +79,10 @@ pub struct Change<'a> {
 
 pub type Page = ring::Page<Entry>;
 
-/// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
     ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));
 }
 
-/// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
     ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
@@ -101,7 +91,6 @@ unsafe fn read_text(source: *const [u8; TEXT_SIZE], stored: u8) -> Vec<u8> {
     read_volatile(source)[..(stored as usize).min(TEXT_SIZE)].to_vec()
 }
 
-/// Appends a change.
 pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
     let (old_text, old_stored) = ring::prefix::<TEXT_SIZE>(change.old_text);
     let (new_text, new_stored) = ring::prefix::<TEXT_SIZE>(change.new_text);
@@ -121,7 +110,6 @@ pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
     });
 }
 
-/// Copies out up to `limit` entries from `since` on (from the oldest if `since` is ahead).
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     ring::read_since(
         &(*log).header,
@@ -229,7 +217,6 @@ mod tests {
                 (kind::STRING, false, b"hello".as_slice(), 5)
             );
 
-            // reading on from `next` returns only what is new
             push(memory.0, 12, &int(5, 7, 8));
             let page = read_since(memory.0, page.next, 10);
             assert_eq!(

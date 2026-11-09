@@ -7,44 +7,8 @@ pub struct NpcModel {
     pub bounding_box: u32,
 }
 
-const UNW_FLAG_CHAININFO: u8 = 4;
-
-pub(super) fn chunk_root(pe: &Pe, begin: u32) -> Option<u32> {
-    let mut begin = begin;
-    for _ in 0..8 {
-        let index = pe.raw_functions.partition_point(|&(b, _, _)| b < begin);
-        let &(b, _, unwind) = pe.raw_functions.get(index)?;
-        if b != begin {
-            return None;
-        }
-        let unwind = unwind as usize;
-        let flags = *pe.image.get(unwind)? >> 3;
-        if flags & UNW_FLAG_CHAININFO == 0 {
-            return Some(begin);
-        }
-        let codes = *pe.image.get(unwind + 2)? as usize;
-        begin = u32_at(pe.image, unwind + 4 + ((codes + 1) & !1) * 2)?;
-    }
-    None
-}
-
 fn is_root(pe: &Pe, begin: u32) -> bool {
     chunk_root(pe, begin) == Some(begin)
-}
-
-pub(super) fn whole_function(pe: &Pe, begin: u32, max: u32) -> Vec<Instruction> {
-    let end = (begin + max).min(pe.image.len() as u32);
-    let mut instrs: Vec<Instruction> =
-        Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-            .into_iter()
-            .collect();
-    if let Some(padding) = instrs
-        .windows(2)
-        .position(|w| w.iter().all(|i| i.mnemonic() == Mnemonic::Int3))
-    {
-        instrs.truncate(padding);
-    }
-    instrs
 }
 
 pub(super) fn field_load(i: &Instruction, field: u32) -> Option<Register> {
@@ -81,10 +45,7 @@ fn sets_flag(i: &Instruction) -> Option<u32> {
 pub fn find_npc_model(pe: &Pe, npc_definition: u32) -> Result<NpcModel, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         for w in instrs.windows(4) {
             let Some(definition) = field_load(&w[0], npc_definition) else {
                 continue;
@@ -139,7 +100,6 @@ fn model_height(pe: &Pe, get_model: u32, bounding_box: u32) -> Option<(u32, u32)
             && i.memory_index() == Register::None
     })?;
     let height = instrs[at].memory_displacement64() as u32;
-    // `mov rax,[model]; mov rcx,model; call [rax+slot]` right before
     let slot = instrs[at.saturating_sub(3)..at].iter().find_map(|i| {
         (i.mnemonic() == Mnemonic::Call
             && i.op0_kind() == OpKind::Memory
@@ -175,7 +135,6 @@ fn bounds_cylinder(instrs: &[Instruction], height: u32, bounds_slot: u32) -> Opt
         .map(|i| (i.memory_base(), i.memory_displacement64() as u32))
         .collect();
     let (base, x) = pointer_loads.windows(3).find_map(|w| {
-        // negative displacements read as huge offsets, so the sums are checked
         (w[0].0 == w[1].0
             && w[1].0 == w[2].0
             && w[0].1.checked_add(0x18) == Some(w[1].1)
@@ -221,7 +180,6 @@ pub fn find_model_vertices(pe: &Pe, rule: &NpcModel) -> Result<ModelVertices, Sc
         let instrs = whole_function(pe, begin, 0x400);
         found.extend(bounds_cylinder(&instrs, height, bounds_slot));
     }
-    // the same layout from every model class, each with its own function
     let mut merged = *found.first().ok_or(ScanError::NotFound)?;
     let same = |v: &ModelVertices| {
         ModelVertices {
@@ -274,10 +232,7 @@ pub fn find_actor_orientation(pe: &Pe) -> Result<ActorOrientation, ScanError> {
         let Some((begin, end)) = pe.function_containing(at) else {
             continue;
         };
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         for (n, and) in instrs.iter().enumerate() {
             let masks = and.mnemonic() == Mnemonic::And
                 && and.op0_kind() == OpKind::Register
@@ -327,10 +282,7 @@ pub fn find_animation_height(pe: &Pe, npc_definition: u32) -> Result<u32, ScanEr
         if end - begin > 0x60 {
             continue;
         }
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = function_instrs(pe, begin, end);
         if !instrs
             .iter()
             .any(|i| field_load(i, npc_definition).is_some() && i.memory_base() == Register::RCX)
@@ -352,9 +304,8 @@ pub fn find_animation_height(pe: &Pe, npc_definition: u32) -> Result<u32, ScanEr
                 && w[1].op0_register() == Register::EAX
                 && w[1].op1_kind() == OpKind::Register
                 && w[1].op1_register() == default;
-            if w[0].mnemonic() == Mnemonic::Call && w[0].op0_kind() == OpKind::NearBranch64 && adds
-            {
-                found.push(w[0].near_branch_target() as u32);
+            if adds {
+                found.extend(call_target(&w[0]));
             }
         }
     }
@@ -371,8 +322,7 @@ pub struct ModelFaces {
 }
 
 fn model_faces(instrs: &[Instruction], vertices: &ModelVertices) -> Option<ModelFaces> {
-    let mut by_base: std::collections::HashMap<Register, (HashSet<u32>, HashSet<u32>)> =
-        Default::default();
+    let mut by_base: HashMap<Register, (HashSet<u32>, HashSet<u32>)> = Default::default();
     for i in instrs {
         if i.mnemonic() != Mnemonic::Mov
             || i.op0_kind() != OpKind::Register
@@ -417,7 +367,6 @@ pub fn find_model_faces(pe: &Pe, vertices: &ModelVertices) -> Result<ModelFaces,
             continue;
         }
         let instrs = whole_function(pe, begin, 0x300);
-        // a straight run of loads into the call's arguments, no loops
         if instrs.len() > 120
             || instrs
                 .iter()
@@ -439,8 +388,8 @@ pub fn render_slots(image: &[u8], function: u32) -> Vec<u32> {
     let mut found = Vec::new();
     for i in &instrs {
         let reg = (i.op0_kind() == OpKind::Register).then(|| i.op0_register().full_register());
-        match i.mnemonic() {
-            Mnemonic::Cmp
+        match (i.mnemonic(), reg) {
+            (Mnemonic::Cmp, _)
                 if i.op0_kind() == OpKind::Memory
                     && i.memory_size() == iced_x86::MemorySize::UInt64
                     && i.memory_index() == Register::None
@@ -457,37 +406,32 @@ pub fn render_slots(image: &[u8], function: u32) -> Vec<u32> {
                     }
                 }
             }
-            Mnemonic::Mov if i.op1_kind() == OpKind::Register && reg.is_some() => {
-                let source = offsets.get(&i.op1_register().full_register()).copied();
-                match source {
-                    Some(offset) => offsets.insert(reg.unwrap(), offset),
-                    None => offsets.remove(&reg.unwrap()),
+            (Mnemonic::Mov, Some(reg)) if i.op1_kind() == OpKind::Register => {
+                match offsets.get(&i.op1_register().full_register()).copied() {
+                    Some(offset) => offsets.insert(reg, offset),
+                    None => offsets.remove(&reg),
                 };
             }
-            Mnemonic::Add
-                if reg.is_some()
-                    && matches!(
-                        i.op1_kind(),
-                        OpKind::Immediate8to64 | OpKind::Immediate32to64
-                    ) =>
+            (Mnemonic::Add, Some(reg))
+                if matches!(
+                    i.op1_kind(),
+                    OpKind::Immediate8to64 | OpKind::Immediate32to64
+                ) =>
             {
-                if let Some(offset) = offsets.get_mut(&reg.unwrap()) {
+                if let Some(offset) = offsets.get_mut(&reg) {
                     *offset += i.immediate(1) as i64;
                 }
             }
-            Mnemonic::Lea if reg.is_some() && i.memory_index() == Register::None => {
+            (Mnemonic::Lea, Some(reg)) if i.memory_index() == Register::None => {
                 match offsets.get(&i.memory_base()).copied() {
-                    Some(base) => {
-                        offsets.insert(reg.unwrap(), base + i.memory_displacement64() as i64)
-                    }
-                    None => offsets.remove(&reg.unwrap()),
+                    Some(base) => offsets.insert(reg, base + i.memory_displacement64() as i64),
+                    None => offsets.remove(&reg),
                 };
             }
-            _ => {
-                if let Some(reg) = reg {
-                    offsets.remove(&reg);
-                }
+            (_, Some(reg)) => {
+                offsets.remove(&reg);
             }
+            _ => {}
         }
     }
     found

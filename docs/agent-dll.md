@@ -8,20 +8,20 @@ How offsets are found, and what is known about the client's internals: [reverse-
 
 1. **Load.** The injector copies the DLL to `%TEMP%\agent\<name>-<version>.dll` (so a new build can replace a loaded one) and injects it (`injector load <pid> <dll>`, or the loader's Load/Reload).
 2. **Start.** `client::hooks::start` runs on a new thread: find the client window (`JagRenderView`), run every `find_*` offset rule, install the hooks (`retour` detours), and point the client's `USER32!GetFocus` import at the agent (`client::focus`, below).
-3. **Every frame** (OpenGL swap hook): read game state into `AGENT_STATE_<pid>`, capture the frame if a reader turned `capture_enabled` on (only Simba reads pixels; Luau never does), draw the overlay (re-uploaded only when its serial changes, from the slot the serial selects, except Simba's), then after the real swap bump `frame_serial` and set `AGENT_FRAME_<pid>`. Rule results are logged to the client console and summarised in the header's `offsets_state`, which the loader shows.
+3. **Every frame** (OpenGL swap hook): read game state into `AGENT_STATE_<pid>`, capture the frame if a reader turned `capture_enabled` on (only `injector screenshot` reads pixels; Luau never does), draw the overlay (re-uploaded only when its serial changes, from the slot the serial selects), then after the real swap bump `frame_serial` and set `AGENT_FRAME_<pid>`. Rule results are logged to the client console and summarised in the header's `offsets_state`, which the loader shows.
 4. **Commands** arrive as custom window messages (`ipc::input::*_MESSAGE`) on the window-procedure hook: open console, set modifiers, set display name, offset total XP, resolve item/game-val names, project world points, read the menu, models, locs and the cache, and draw item icons (a cache request of kind `ITEM_ICONS`: the agent calls the client's own icon builder on the game thread, see "Item icons" in [reverse-engineering.md](reverse-engineering.md)). A locs request names a plane, or all of them, optionally only the clickable locs (`ipc::state::locs_request`); each loc carries its plane in its flags, and walls and decorations their shape and rotation from their config byte (`offsets::scene::find_loc_configs`, Java's `Scene.getConfig`).
 5. **Unload** on the named event `AGENT_UNLOAD_<pid>` (works with the window hook off): unhook, wait for hook calls to drain, stop the listener, close mappings, `FreeLibraryAndExitThread`.
 
-Input: real mouse input is blocked for `REAL_MOUSE_BLOCK_MS` after synthetic input (told apart by the `SYNTHETIC` flag), and input can be toggled. Keys work with another window focused: the client asks `GetFocus` before it takes a key and drops it unless its own window has the focus (mouse messages it takes either way), so `client::focus` patches the main module's import slot of `USER32!GetFocus` to answer with the render view. Only the client's own calls go through that slot, not Wine's or other DLLs'; the window procedure also swallows `WM_KILLFOCUS`. The slot is put back before the DLL unloads (`unload`, `WI_DETACH`).
+Input: real mouse input is blocked for `REAL_MOUSE_BLOCK_MS` after synthetic input (told apart by the `SYNTHETIC` flag). Keys work with another window focused: the client asks `GetFocus` before it takes a key and drops it unless its own window has the focus (mouse messages it takes either way), so `client::focus` patches the main module's import slot of `USER32!GetFocus` to answer with the render view. Only the client's own calls go through that slot, not Wine's or other DLLs'; the window procedure also swallows `WM_KILLFOCUS`. The slot is put back before the DLL unloads (`unload`).
 
-The DLL is also a [Simba](https://github.com/Villavu/Simba) plugin: `src/simba/` exports the Pascal tables (`GetFunctionInfo`, `GetTypeInfo`, ...) and `Inject`, `OpenConsole`, `GetInputState`, `SetInputState`.
+The DLL exports only `DllMain`: the injector loads it with `LoadLibraryW` and talks to it through shared memory, named events and window messages.
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `src/lib.rs` | DLL exports and the Simba export tables. |
-| `src/shared/` | `main.rs` DLL entry, `memory.rs` shared-memory manager, `sync.rs` unload event, `windows.rs` window and input helpers (`WI_*` message ids, `JagRenderView` lookup). |
+| `src/lib.rs` | Crate root. |
+| `src/shared/` | `main.rs` DLL entry, `memory.rs` shared-memory manager, `sync.rs` unload event, `windows.rs` the `WI_*` message ids and the `JagRenderView` lookup. |
 | `src/client/hooks.rs` | Hook installation, per-frame work, message handling. |
 | `src/client/focus.rs` | The `GetFocus` import patch: finds the slot by walking the main module's import descriptors (PE32+), writes it under `VirtualProtect`, restores it on unload. |
 | `src/client/offsets.rs`, `offsets/*.rs` | Offset rules, one module per feature. |
@@ -30,8 +30,9 @@ The DLL is also a [Simba](https://github.com/Villavu/Simba) plugin: `src/simba/`
 | `src/client/script_runs.rs` | The script log: creates `AGENT_SCRIPTS_<pid>` and detours the client's event script runner (rule in `offsets/script_runs.rs`; see "CS2 interpreter" in `reverse-engineering.md`). The hook runs on the game thread: it reads the event's type and first arguments and the client's tick counter, logs a start entry, calls through, then logs an end entry; a thread local counts nesting. The tick is read where the game thread writes it, so it is the tick the script ran in. Scripts started by the client without an event (by trigger lookup) aren't logged. |
 | `src/client/varc_log.rs` | The varc log: creates `AGENT_VARCS_<pid>` and detours the client's int and object (string) varc setters (rule in `offsets/varc_setters.rs`). An int's old value comes from the client's own getter before the call; a string's from what the hook last saw it set to. A set to the same value isn't logged. |
 | `src/client/item_log.rs` | The item log: creates `AGENT_ITEMS_<pid>` and detours the client's item container slot writer (rule in `offsets/item_setter.rs`, see "Item containers" in `reverse-engineering.md`). The hook runs on the game thread: it reads the slot's item and quantity before the call (`decode::world::item_slot`), calls through, and logs the change with the game tick unless the write left the slot as it was, then sets the wake event of every reader subscribed in the log header (a bit mask; usually none). |
+| `src/client/log.rs` | What the four logs share: `SharedLog` creates, maps and closes a log's shared memory, `wake` sets the event of each reader in a subscriber mask, `Tick` reads the client's tick counter. |
+| `src/client/detour.rs` | `retour` helpers: a typed function pointer from an address, and creating, enabling and disabling a detour with the agent's console messages. |
 | `src/client/*.rs` | Readers that use the rules' results (`state`, `scene`, `model`, `menu`, `items`, `cache`, `projection`, ...); `graphics.rs` does frame capture and overlay drawing. |
-| `src/simba/` | Simba plugin glue and per-pid input targets. |
 
 ## Gotchas
 

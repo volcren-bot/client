@@ -9,9 +9,8 @@ pub struct Camera {
 
 const CAM_FORCEANGLE: u32 = 5504;
 
-fn position(pe: &Pe, client: u32) -> Result<u32, ScanError> {
-    let instrs = decode_at(pe, lua_binding(pe, "worldToScreenCoord")?, 24);
-    let clients: HashSet<Register> = instrs
+fn client_registers(instrs: &[Instruction], client: u32) -> HashSet<Register> {
+    instrs
         .iter()
         .filter(|i| {
             i.mnemonic() == Mnemonic::Mov
@@ -19,7 +18,12 @@ fn position(pe: &Pe, client: u32) -> Result<u32, ScanError> {
                 && i.ip_rel_memory_address() as u32 == client
         })
         .map(|i| i.op0_register())
-        .collect();
+        .collect()
+}
+
+fn position(pe: &Pe, client: u32) -> Result<u32, ScanError> {
+    let instrs = decode_at(pe, lua_binding(pe, "worldToScreenCoord")?, 24);
+    let clients = client_registers(&instrs, client);
     let fields: Vec<u32> = instrs
         .iter()
         .filter(|i| {
@@ -42,30 +46,18 @@ fn angles(pe: &Pe, client: u32) -> Result<(u32, u32), ScanError> {
         let Some((begin, end)) = pe.function_containing(hit) else {
             continue;
         };
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
-        let clients: HashSet<Register> = instrs
-            .iter()
-            .filter(|i| {
-                i.mnemonic() == Mnemonic::Mov
-                    && i.is_ip_rel_memory_operand()
-                    && i.ip_rel_memory_address() as u32 == client
-            })
-            .map(|i| i.op0_register())
-            .collect();
-        let subtracts = |i: &Instruction, value: u64| {
+        let instrs = decode(pe.bytes(begin, end), begin);
+        let clients = client_registers(&instrs, client);
+        let subtracts = |i: &Instruction, value: u32| {
             i.mnemonic() == Mnemonic::Sub
                 && i.op0_kind() == OpKind::Register
-                && matches!(i.op1_kind(), OpKind::Immediate32 | OpKind::Immediate8to32)
-                && i.immediate(1) == value
+                && imm32(i) == Some(value)
         };
         let is_je =
             |i: &Instruction| i.mnemonic() == Mnemonic::Je && i.op0_kind() == OpKind::NearBranch64;
         for at in 0..instrs.len().saturating_sub(6) {
             let w = &instrs[at..at + 6];
-            if !(subtracts(&w[0], CAM_FORCEANGLE as u64)
+            if !(subtracts(&w[0], CAM_FORCEANGLE)
                 && is_je(&w[1])
                 && subtracts(&w[2], 1)
                 && is_je(&w[3])

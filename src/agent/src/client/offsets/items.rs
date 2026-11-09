@@ -36,10 +36,7 @@ pub(super) fn usertype_member(pe: &Pe, usertype: &str, member: &str) -> Result<u
 
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs: Vec<Instruction> =
-            Decoder::with_ip(64, pe.bytes(begin, end), begin as u64, DecoderOptions::NONE)
-                .into_iter()
-                .collect();
+        let instrs = decode(pe.bytes(begin, end), begin);
         if !instrs
             .iter()
             .filter_map(ip_lea)
@@ -98,10 +95,7 @@ fn string_fields_assigned(pe: &Pe, function: u32) -> Option<(HashSet<u32>, bool)
     let mut recursive = false;
     for w in instrs.windows(2) {
         let [lea, call] = w else { continue };
-        if call.mnemonic() == Mnemonic::Call
-            && call.op0_kind() == OpKind::NearBranch64
-            && call.near_branch_target() as u32 == function
-        {
+        if call_target(call) == Some(function) {
             recursive = true;
         }
         let field = lea.mnemonic() == Mnemonic::Lea
@@ -193,29 +187,6 @@ fn gamevals_index(pe: &Pe, client: u32) -> Result<u32, ScanError> {
         }
     }
     one(found)
-}
-
-fn direct_jumps(pe: &Pe) -> Vec<(u32, u32)> {
-    let mut jumps = Vec::new();
-    for section in &pe.code {
-        let data = &pe.image[section.rva..section.rva + section.size];
-        for (offset, window) in data.windows(5).enumerate() {
-            if window[0] != 0xe9 {
-                continue;
-            }
-            let site = (section.rva + offset) as i64;
-            let target = site + 5 + i32::from_le_bytes(window[1..5].try_into().unwrap()) as i64;
-            jumps.push((site as u32, target as u32));
-        }
-    }
-    jumps
-}
-
-fn memory_field(i: &Instruction, base: Register) -> Option<u32> {
-    (i.op1_kind() == OpKind::Memory
-        && i.memory_base() == base
-        && i.memory_index() == Register::None)
-        .then(|| i.memory_displacement64() as u32)
 }
 
 fn cache_table(pe: &Pe, reader: u32) -> Option<CacheTable> {

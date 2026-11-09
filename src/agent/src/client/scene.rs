@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
@@ -13,13 +12,14 @@ use ipc::{
 };
 
 use super::{
+    detour::function,
     hooks::client_image,
     model::Placement,
     offsets::{
         loc_kind, render_slots, DecorationLayout, GameObjectLayout, LocConfigs, LocNames, Scene,
     },
     own::{on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
 };
 
 const TAG_TYPE_SHIFT: u64 = 16;
@@ -43,7 +43,6 @@ pub struct Rules {
     pub game: GameObjectLayout,
     pub decoration: DecorationLayout,
     pub names: LocNames,
-    // where walls and decorations keep their shape and rotation; unknown (0xff) without it
     pub configs: Option<LocConfigs>,
     pub plane: u32,
     pub decoration_height: Option<u32>,
@@ -55,10 +54,6 @@ static SLOTS: Mutex<Option<HashMap<u64, Vec<u32>>>> = Mutex::new(None);
 
 pub fn set_scene(rules: Rules) {
     let _ = RULES.set(rules);
-}
-
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
 }
 
 struct View {
@@ -82,7 +77,6 @@ fn view(memory: &OwnMemory, rules: &Rules) -> Option<View> {
     })
 }
 
-/// The tile grid of one plane, read once so that walking every tile costs one read per tile.
 struct Tiles {
     plane: i32,
     size_x: i32,
@@ -120,11 +114,17 @@ impl Tiles {
     }
 }
 
+fn shape_rotation(config: i32) -> (u8, u8) {
+    (
+        (config & SHAPE_MASK) as u8,
+        ((config >> ROTATION_SHIFT) & 3) as u8,
+    )
+}
+
 fn loc_id(rules: &Rules, tag: u64) -> i32 {
     ((tag >> rules.scene.id_shift) & 0xffff) as i32
 }
 
-// Each slot, its kind and where its object keeps its config.
 fn single_slots(rules: &Rules) -> [(u32, u8, Option<u32>); 3] {
     let s = &rules.scene;
     let c = rules.configs;
@@ -164,8 +164,7 @@ fn game_objects(memory: &OwnMemory, rules: &Rules, tile: u64) -> Vec<(u64, u64)>
 }
 
 unsafe fn definition(memory: &OwnMemory, rules: &Rules, id: i32) -> Option<u64> {
-    let lookup: Lookup =
-        std::mem::transmute((rules.module_base + rules.names.lookup as u64) as *const ());
+    let lookup: Lookup = function(rules.module_base + rules.names.lookup as u64);
     memory.ptr(lookup(id) as u64 + 8).filter(|&d| d != 0)
 }
 
@@ -178,8 +177,7 @@ unsafe fn decoration_height(memory: &OwnMemory, rules: &Rules, id: i32) -> i16 {
 
 unsafe fn name(memory: &OwnMemory, rules: &Rules, id: i32) -> Option<String> {
     let n = &rules.names;
-    let transform: Transform =
-        std::mem::transmute((rules.module_base + n.transform as u64) as *const ());
+    let transform: Transform = function(rules.module_base + n.transform as u64);
     let mut definition = definition(memory, rules, id)?;
     if memory
         .u64(definition + n.transforms as u64)
@@ -219,8 +217,6 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
     reply.plane = view.plane;
     reply.base_x = view.base_x;
     reply.base_y = view.base_y;
-    reply.count = 0;
-    reply.name_count = 0;
 
     let mut names: HashMap<i32, u16> = HashMap::new();
     let mut decoration_heights: HashMap<i32, i16> = HashMap::new();
@@ -287,9 +283,8 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
                         let mut byte = [0u8];
                         memory.read(object + c as u64, &mut byte).then_some(byte[0])
                     });
-                    let (shape, rotation) = config.map_or((UNKNOWN, UNKNOWN), |c| {
-                        (c & SHAPE_MASK as u8, (c >> ROTATION_SHIFT) & 3)
-                    });
+                    let (shape, rotation) =
+                        config.map_or((UNKNOWN, UNKNOWN), |c| shape_rotation(c as i32));
                     push(
                         reply,
                         LocInfo {
@@ -313,19 +308,19 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
                     ) else {
                         continue;
                     };
-                    // listed on every tile it covers: keep its south-west one
                     if x1 != x || y1 != y {
                         continue;
                     }
-                    let config = memory.i32(object + rules.game.config as u64).unwrap_or(0);
+                    let (shape, rotation) =
+                        shape_rotation(memory.i32(object + rules.game.config as u64).unwrap_or(0));
                     push(
                         reply,
                         LocInfo {
                             kind: loc_kind::GAME,
                             size_x: (x2 - x1 + 1).clamp(1, 255) as u8,
                             size_y: (y2 - y1 + 1).clamp(1, 255) as u8,
-                            shape: (config & SHAPE_MASK) as u8,
-                            rotation: ((config >> ROTATION_SHIFT) & 3) as u8,
+                            shape,
+                            rotation,
                             ..base
                         },
                         tag,
@@ -341,7 +336,7 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
 }
 
 pub fn on_locs_request() {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let Some((sequence, request)) = shared.read_locs_request() else {
         return;
@@ -397,28 +392,24 @@ pub fn loc_renderables(kind: u8, x: i32, y: i32, id: i32) -> Option<Vec<(u64, Pl
             .filter(|&r| r != 0)?;
         return Some(vec![(renderable, at)]);
     }
-    // an item pile is placed like a decoration with no id in its tag (items are in the tile's ground item list)
-    let (object, pile) = if kind == loc_kind::ITEM_PILE {
-        (
-            memory
-                .ptr(tile + rules.item_pile? as u64)
-                .filter(|&o| o != 0)?,
-            true,
-        )
+    let object = if kind == loc_kind::ITEM_PILE {
+        memory
+            .ptr(tile + rules.item_pile? as u64)
+            .filter(|&o| o != 0)?
     } else {
         let (slot, _, _) = single_slots(rules)
             .into_iter()
             .find(|&(_, k, _)| k == kind)?;
-        (memory.ptr(tile + slot as u64).filter(|&o| o != 0)?, false)
-    };
-    if !pile
-        && memory
+        let object = memory.ptr(tile + slot as u64).filter(|&o| o != 0)?;
+        if memory
             .u64(object + s.tag as u64)
             .map(|tag| loc_id(rules, tag))
             != Some(id)
-    {
-        return None;
-    }
+        {
+            return None;
+        }
+        object
+    };
     let d = &rules.decoration;
     let field = |offset: u32| memory.i32(object + offset as u64);
     let at = Placement {
@@ -432,7 +423,6 @@ pub fn loc_renderables(kind: u8, x: i32, y: i32, id: i32) -> Option<Vec<(u64, Pl
         .enumerate()
         .filter_map(|(i, offset)| {
             let renderable = memory.ptr(object + offset as u64).filter(|&r| r != 0)?;
-            // wall decorations are drawn moved by their offsets, the second model by the second pair
             let at = if kind == loc_kind::WALL_DECORATION {
                 let shift = i as u32 * 8;
                 Placement {

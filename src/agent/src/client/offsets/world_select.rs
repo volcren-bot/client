@@ -28,17 +28,6 @@ const BOX_HEIGHT: u32 = 19;
 const PANEL_WIDTH: u32 = 765;
 const PANEL_HEIGHT: u32 = 480;
 
-fn function_instrs(pe: &Pe, begin: u32, end: u32) -> Vec<Instruction> {
-    Decoder::with_ip(
-        64,
-        pe.bytes(begin, end.max(begin)),
-        begin as u64,
-        DecoderOptions::NONE,
-    )
-    .into_iter()
-    .collect()
-}
-
 fn immediate(instr: &Instruction) -> Option<u32> {
     matches!(
         instr.op1_kind(),
@@ -51,31 +40,11 @@ fn immediate(instr: &Instruction) -> Option<u32> {
     .then(|| instr.immediate(1) as u32)
 }
 
-fn global_load(instr: &Instruction) -> Option<u32> {
-    (instr.mnemonic() == Mnemonic::Mov
-        && instr.op0_kind() == OpKind::Register
-        && instr.op1_kind() == OpKind::Memory
-        && instr.is_ip_rel_memory_operand())
-    .then(|| instr.ip_rel_memory_address() as u32)
-}
-
 fn global_store(instr: &Instruction) -> Option<u32> {
     (instr.mnemonic() == Mnemonic::Mov
         && instr.op0_kind() == OpKind::Memory
         && instr.is_ip_rel_memory_operand())
     .then(|| instr.ip_rel_memory_address() as u32)
-}
-
-fn field_of(instr: &Instruction, base: Register) -> Option<u32> {
-    (instr.op1_kind() == OpKind::Memory
-        && instr.memory_base() == base
-        && instr.memory_index() == Register::None)
-        .then(|| instr.memory_displacement64() as u32)
-}
-
-fn call_target(instr: &Instruction) -> Option<u32> {
-    (instr.mnemonic() == Mnemonic::Call && instr.op0_kind() == OpKind::NearBranch64)
-        .then(|| instr.near_branch_target() as u32)
 }
 
 fn layout_function(pe: &Pe) -> Result<(u32, u32), ScanError> {
@@ -101,11 +70,12 @@ fn layout_function(pe: &Pe) -> Result<(u32, u32), ScanError> {
         if !(stores(BOX_WIDTH) && stores(BOX_HEIGHT) && sets_height) {
             continue;
         }
-        let mut globals: Vec<u32> = instrs.iter().filter_map(global_load).collect();
-        globals.sort_unstable();
-        globals.dedup();
-        if let [count] = globals.as_slice() {
-            found.push((begin, *count));
+        if let Ok(count) = one(instrs
+            .iter()
+            .filter_map(|i| global_load(i).map(|(_, g)| g))
+            .collect())
+        {
+            found.push((begin, count));
         }
     }
     one(found)
@@ -113,17 +83,14 @@ fn layout_function(pe: &Pe) -> Result<(u32, u32), ScanError> {
 
 fn draw_function(pe: &Pe, layout: u32) -> Result<(u32, u32), ScanError> {
     let mut found = Vec::new();
-    for &(site, target) in direct_calls(pe) {
-        if target != layout {
-            continue;
-        }
-        let Some((begin, end)) = pe.function_containing(site) else {
-            continue;
-        };
-        let instrs = function_instrs(pe, begin, end);
-        let Some(at) = instrs.iter().position(|i| i.ip32() == site) else {
-            continue;
-        };
+    for Caller {
+        begin,
+        end,
+        instrs,
+        at,
+        ..
+    } in callers(pe, layout)
+    {
         let passes_global = at > 0 && {
             let lea = &instrs[at - 1];
             lea.mnemonic() == Mnemonic::Lea
@@ -148,15 +115,11 @@ fn hovered(instrs: &[Instruction]) -> Result<u32, ScanError> {
 }
 
 fn max_offset(instrs: &[Instruction]) -> Result<u32, ScanError> {
-    let divisions: Vec<usize> = instrs
+    one(instrs
         .iter()
         .enumerate()
         .filter(|(_, i)| i.mnemonic() == Mnemonic::Idiv)
-        .map(|(at, _)| at)
-        .collect();
-    one(divisions
-        .into_iter()
-        .filter_map(|at| instrs[at + 1..].iter().take(6).find_map(global_store))
+        .filter_map(|(at, _)| instrs[at + 1..].iter().take(6).find_map(global_store))
         .collect())
 }
 
@@ -175,8 +138,9 @@ fn world_loads(instrs: &[Instruction]) -> Result<(u32, Vec<(usize, Register)>), 
     };
     let loads: Vec<(u32, usize, Register)> = (0..instrs.len())
         .filter_map(|at| {
-            let global =
-                global_load(&instrs[at]).filter(|_| instrs[at].op0_register().size() == 8)?;
+            let global = global_load(&instrs[at])
+                .map(|(_, g)| g)
+                .filter(|_| instrs[at].op0_register().size() == 8)?;
             Some((global, at, element(at)?))
         })
         .collect();
@@ -195,7 +159,7 @@ fn flag_accessor(pe: &Pe, function: u32) -> Option<u32> {
     let [load, test, ..] = instrs.as_slice() else {
         return None;
     };
-    let disp = field_of(load, Register::RCX)?;
+    let disp = memory_field(load, Register::RCX)?;
     let same = test.op0_register().full_register() == load.op0_register().full_register();
     match (load.mnemonic(), test.mnemonic()) {
         (Mnemonic::Mov, Mnemonic::Shr)
@@ -219,7 +183,7 @@ fn world_fields(
 ) -> Result<(WorldFields, u32), ScanError> {
     let &(first, world) = loads.first().ok_or(ScanError::NotFound)?;
     let body = &instrs[first..];
-    let field = |i: &Instruction| field_of(i, world);
+    let field = |i: &Instruction| memory_field(i, world);
 
     let players = one(body
         .windows(2)
@@ -327,17 +291,7 @@ fn login_draw(
     format: u32,
 ) -> Result<(u32, u32, u32), ScanError> {
     let mut found = Vec::new();
-    for &(site, target) in direct_calls(pe) {
-        if target != draw {
-            continue;
-        }
-        let Some((begin, end)) = pe.function_containing(site) else {
-            continue;
-        };
-        let instrs = function_instrs(pe, begin, end);
-        let Some(at) = instrs.iter().position(|i| i.ip32() == site) else {
-            continue;
-        };
+    for Caller { instrs, at, .. } in callers(pe, draw) {
         let gated = instrs[at.saturating_sub(8)..at].iter().any(|i| {
             i.mnemonic() == Mnemonic::Cmp
                 && i.op0_kind() == OpKind::Memory
@@ -366,7 +320,7 @@ fn login_draw(
             }
             if i.mnemonic() == Mnemonic::Call {
                 client_regs.clear();
-            } else if global_load(i) == Some(client) {
+            } else if global_load(i).is_some_and(|(_, g)| g == client) {
                 client_regs.insert(i.op0_register().full_register());
             } else if i.op0_kind() == OpKind::Register {
                 client_regs.remove(&i.op0_register().full_register());
@@ -376,7 +330,9 @@ fn login_draw(
         let background = instrs
             .windows(3)
             .filter_map(|w| {
-                let global = global_load(&w[0]).filter(|_| w[0].op0_register().size() == 8)?;
+                let global = global_load(&w[0])
+                    .map(|(_, g)| g)
+                    .filter(|_| w[0].op0_register().size() == 8)?;
                 let height = load_from(&w[1], w[0].op0_register())
                     .filter(|_| w[1].op0_register().size() == 4)?;
                 let clamps = w[2].mnemonic() == Mnemonic::Cmp

@@ -14,13 +14,11 @@ use windows::Win32::{
     },
 };
 
-/// The mapped shared memory block, unmapped when the last `Arc` drops so borrowed `Shared`s can't outlive it.
 pub struct Mapping {
     view: NonNull<LayoutMemory>,
     mapping: HANDLE,
 }
 
-// SAFETY: plain shared memory only touched with atomics and volatile accesses, handle closed only on drop.
 unsafe impl Send for Mapping {}
 unsafe impl Sync for Mapping {}
 
@@ -43,7 +41,6 @@ impl Mapping {
             let _ = unsafe { CloseHandle(mapping) };
             return None;
         };
-        // SAFETY: a fresh page-aligned view of LAYOUT_SIZE bytes nobody else has yet, mapped until this `Mapping` drops.
         unsafe { Shared::create(block) };
         Some(Self {
             view: block,
@@ -52,7 +49,6 @@ impl Mapping {
     }
 
     pub fn shared(&self) -> Shared<'_> {
-        // SAFETY: `create` set the block up and `Drop` only unmaps it once no borrow of `self` is left.
         unsafe { Shared::attach(self.view) }
     }
 }
@@ -85,7 +81,6 @@ impl LayoutMap {
         }
     }
 
-    /// The mapped block, or `None` once `close` has run; the caller's `Arc` keeps the view mapped meanwhile.
     pub fn memory(&self) -> Option<Arc<Mapping>> {
         self.mapping
             .lock()
@@ -93,7 +88,6 @@ impl LayoutMap {
             .clone()
     }
 
-    /// Lets go of the block. It's unmapped as soon as nobody is using it any more.
     pub fn close(&self) {
         self.mapping
             .lock()
@@ -103,3 +97,7 @@ impl LayoutMap {
 }
 
 pub static LAYOUT_MAP: OnceLock<LayoutMap> = OnceLock::new();
+
+pub fn mapping() -> Option<Arc<Mapping>> {
+    LAYOUT_MAP.get().and_then(|map| map.memory())
+}

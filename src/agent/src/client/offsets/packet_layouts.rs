@@ -1,19 +1,13 @@
-use super::{model::whole_function, *};
-use iced_x86::{Decoder, DecoderOptions, MemorySize, Register};
+use super::*;
+use iced_x86::MemorySize;
 use ipc::packets::{Field, Transform};
 
-// What each server packet carries, read from the client's own code by running its packet read functions on probe bytes.
-
-/// The packet sizes, and the fields of each packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PacketLayouts {
-    /// The payload size per packet id: -1 a length byte follows, -2 a length short.
     pub sizes: Vec<i32>,
-    /// `None` when the layout isn't known.
     pub layouts: Vec<Option<Vec<Field>>>,
 }
 
-/// A read function: the bytes it takes, the shift of each in the result, and what it does to the low one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Read {
     shifts: Vec<u32>,
@@ -25,7 +19,6 @@ const DATA: u64 = 0x20000;
 const OBJECT_SIZE: usize = 0x40;
 const PROBE: usize = 8;
 
-/// Runs one read function on `bytes`, as `(rax, bytes taken)`. `None` for anything the interpreter doesn't know: calls, branches, pushes, stray memory.
 fn run(
     instrs: &[Instruction],
     data_at: u32,
@@ -122,13 +115,11 @@ fn run(
         }
     };
 
-    // The client tests byte order against this constant (0x03020100 on little endian), the only comparison a read function may make.
     let mut order_equal = None;
     let mut at = 0;
     for _ in 0..64 {
         let i = instrs.get(at)?;
         at += 1;
-        // operand value, with its size in bytes
         let value_of =
             |regs: &[u64; 16], object: &[u8; OBJECT_SIZE], n: u32| -> Option<(u64, usize)> {
                 match i.op_kind(n) {
@@ -162,7 +153,6 @@ fn run(
                     OpKind::Register => reg_set(regs, i.op0_register(), value),
                     OpKind::Memory => {
                         let at = address(regs, i)?;
-                        // only the object (the cursor) can be written
                         if !(OBJECT..OBJECT + OBJECT_SIZE as u64).contains(&at)
                             || at + size as u64 > OBJECT + OBJECT_SIZE as u64
                         {
@@ -185,11 +175,7 @@ fn run(
                 );
                 return Some((regs[0], cursor));
             }
-            Mnemonic::Mov => {
-                let (v, _) = value_of(&regs, &object, 1)?;
-                store(&mut regs, &mut object, v)?;
-            }
-            Mnemonic::Movzx => {
+            Mnemonic::Mov | Mnemonic::Movzx => {
                 let (v, _) = value_of(&regs, &object, 1)?;
                 store(&mut regs, &mut object, v)?;
             }
@@ -287,7 +273,6 @@ fn run(
             Mnemonic::Jne | Mnemonic::Je => {
                 let equal = order_equal?;
                 if equal == (i.mnemonic() == Mnemonic::Je) {
-                    // forward only, inside the function
                     let target = i.near_branch_target();
                     at = instrs.iter().position(|n| n.ip() == target)?.max(at);
                 }
@@ -299,7 +284,6 @@ fn run(
     None
 }
 
-/// Where a call really goes: the client's thunks are a lone `jmp` to the function.
 fn through_thunks(pe: &Pe, mut target: u32) -> u32 {
     for _ in 0..3 {
         let Some(bytes) = pe.image.get(target as usize..target as usize + 5) else {
@@ -317,10 +301,8 @@ fn through_thunks(pe: &Pe, mut target: u32) -> u32 {
     target
 }
 
-/// What a function at `begin` reads from a buffer object, when it is a plain fixed width read.
 fn classify_read(pe: &Pe, begin: u32, data_at: u32, cursor_at: u32) -> Option<Read> {
     let begin = through_thunks(pe, begin);
-    // leaf functions have no unwind entry, so the function's end is the padding after it
     let instrs = whole_function(pe, begin, 0x60);
     let probe = |bytes: [u8; PROBE]| run(&instrs, data_at, cursor_at, &bytes);
     let (zero, taken) = probe([0; PROBE])?;
@@ -329,7 +311,6 @@ fn classify_read(pe: &Pe, begin: u32, data_at: u32, cursor_at: u32) -> Option<Re
         return None;
     }
     let mask = (1u64 << (width * 8)) - 1;
-    // a byte of 1 at each position: the low byte moves the result by +1 or -1, any other by a power of 256
     let mut shifts = Vec::new();
     let mut low_step = None;
     for position in 0..width {
@@ -354,7 +335,6 @@ fn classify_read(pe: &Pe, begin: u32, data_at: u32, cursor_at: u32) -> Option<Re
     if shifts.iter().filter(|&&s| s == 0).count() != 1 {
         return None;
     }
-    // what the low byte does when it is 0 tells `x`, `x - 128`, `-x` and `128 - x` apart
     let transform = match (low_step?, zero & 0xff) {
         (true, 0) => Transform::None,
         (true, 0x80) => Transform::Add,
@@ -363,7 +343,6 @@ fn classify_read(pe: &Pe, begin: u32, data_at: u32, cursor_at: u32) -> Option<Re
         _ => return None,
     };
     let read = Read { shifts, transform };
-    // the model has to predict a few other inputs, or the function does something else
     for seed in [0x5au8, 0xa7, 0xff, 0x13] {
         let mut bytes = [0u8; PROBE];
         for (k, b) in bytes.iter_mut().enumerate().take(width) {
@@ -395,7 +374,6 @@ fn predict(read: &Read, bytes: &[u8; PROBE]) -> u64 {
     value
 }
 
-// The packet dispatcher's jump table: `cmp id, last; ja; lea base, image; mov r, [base + id*4 + table]; add r, base; jmp r`.
 fn jump_table(instrs: &[Instruction]) -> Option<(u32, usize)> {
     let jmp = instrs
         .iter()
@@ -430,40 +408,28 @@ fn jump_table(instrs: &[Instruction]) -> Option<(u32, usize)> {
     (count > 8 && count < 1024).then_some((table, count))
 }
 
-// The size table: int32 per packet id, indexed right after a `cmp id, count; jae` that guards it.
 fn size_table(pe: &Pe, count: usize) -> Option<u32> {
     let mut found = Vec::new();
-    for section in &pe.code {
-        let data = &pe.image[section.rva..section.rva + section.size];
+    for (rva, data) in pe.code_sections() {
         for at in 6..data.len().saturating_sub(7) {
-            // lea r64, [rip + rel32]
             if !matches!(data[at], 0x48 | 0x4c)
                 || data[at + 1] != 0x8d
                 || data[at + 2] & 0xc7 != 0x05
             {
                 continue;
             }
-            // right after `jae rel32`
             if data[at - 6] != 0x0f || data[at - 5] != 0x83 {
                 continue;
             }
             let rel = i32::from_le_bytes(data[at + 3..at + 7].try_into().unwrap()) as i64;
-            let target = (section.rva + at) as i64 + 7 + rel;
+            let target = (rva + at) as i64 + 7 + rel;
             let Some(table) = usize::try_from(target)
                 .ok()
                 .filter(|t| t + count * 4 <= pe.image.len())
             else {
                 continue;
             };
-            let sizes: Vec<i32> = (0..count)
-                .map(|k| {
-                    i32::from_le_bytes(
-                        pe.image[table + k * 4..table + k * 4 + 4]
-                            .try_into()
-                            .unwrap(),
-                    )
-                })
-                .collect();
+            let sizes = int_table(pe, table, count);
             if sizes.iter().all(|&s| (-2..=512).contains(&s))
                 && sizes.iter().collect::<HashSet<_>>().len() > 10
             {
@@ -474,15 +440,15 @@ fn size_table(pe: &Pe, count: usize) -> Option<u32> {
     one(found).ok()
 }
 
+fn int_table(pe: &Pe, at: usize, count: usize) -> Vec<i32> {
+    (0..count)
+        .map(|k| u32_at(pe.image, at + k * 4).unwrap() as i32)
+        .collect()
+}
+
 pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, ScanError> {
-    // the dispatcher: calls `receive` and jumps through a table
-    let sites: Vec<u32> = direct_calls(pe)
-        .iter()
-        .filter(|&&(_, target)| target == packets.receive)
-        .map(|&(site, _)| site)
-        .collect();
     let mut dispatchers = Vec::new();
-    for site in sites {
+    for site in calls_to(pe, packets.receive) {
         let Some((begin, end)) = pe.function_containing(site) else {
             continue;
         };
@@ -496,9 +462,7 @@ pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, 
         .map(|k| u32_at(pe.image, table as usize + k * 4).ok_or(ScanError::NotFound))
         .collect::<Result<_, _>>()?;
     let size_at = size_table(pe, count).ok_or(ScanError::NotFound)?;
-    let sizes: Vec<i32> = (0..count)
-        .map(|k| u32_at(pe.image, size_at as usize + k * 4).unwrap() as i32)
-        .collect();
+    let sizes = int_table(pe, size_at as usize, count);
 
     let (data_at, cursor_at) = (packets.buffer_data, packets.buffer_cursor);
     let mut reads: HashMap<u32, Option<Read>> = HashMap::new();
@@ -506,13 +470,14 @@ pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, 
     for (opcode, &case) in cases.iter().enumerate() {
         let end = (case as usize + 0x300).min(pe.image.len());
         let mut found = Vec::new();
-        let decoder = Decoder::with_ip(
+        let mut instrs = Decoder::with_ip(
             64,
             &pe.image[case as usize..end],
             case as u64,
             DecoderOptions::NONE,
-        );
-        let mut instrs = decoder.into_iter().peekable();
+        )
+        .into_iter()
+        .peekable();
         while let Some(i) = instrs.next() {
             match i.mnemonic() {
                 Mnemonic::Call if i.near_branch_target() != 0 => {
@@ -522,7 +487,6 @@ pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, 
                         .or_insert_with(|| classify_read(pe, target, data_at, cursor_at))
                         .clone();
                     if let Some(read) = read {
-                        // the caller widens the result: `movsx` says signed
                         let signed = matches!(instrs.peek(), Some(n) if matches!(n.mnemonic(), Mnemonic::Movsx | Mnemonic::Movsxd));
                         found.push(Field {
                             signed,
@@ -531,7 +495,6 @@ pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, 
                         });
                     }
                 }
-                // the first branch ends what a straight line can say
                 Mnemonic::Jmp | Mnemonic::Ret | Mnemonic::Int3 => break,
                 _ if i.flow_control() == iced_x86::FlowControl::ConditionalBranch => break,
                 _ => {}
@@ -561,7 +524,6 @@ mod tests {
     use super::*;
     use crate::client::offsets::tests::for_each_archived_build;
 
-    /// The packet table the loader ships, which was read from the Java client: `opcode -> (size, fields)`.
     fn java_table() -> HashMap<usize, (i32, Option<Vec<String>>)> {
         let manifest = env!("CARGO_MANIFEST_DIR");
         let manifest = if cfg!(windows) && manifest.starts_with('/') {
@@ -605,7 +567,6 @@ mod tests {
                     (Some(a), Some(b)) if a.iter().map(Field::spelling).eq(b.iter().cloned()) => {
                         same += 1
                     }
-                    // the client's own use of the value can differ from the Java client's about signedness
                     (Some(a), Some(b))
                         if a.iter()
                             .map(|k| k.spelling().replacen('i', "u", 1))

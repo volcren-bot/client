@@ -1,9 +1,11 @@
 pub mod cache;
+pub mod detour;
 pub mod focus;
 pub mod graphics;
 pub mod hooks;
 pub mod item_log;
 pub mod items;
+pub mod log;
 pub mod menu;
 pub mod model;
 pub mod name;

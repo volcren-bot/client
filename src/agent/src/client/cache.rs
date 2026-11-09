@@ -6,13 +6,14 @@ use ipc::{
         ITEM_ICON_SHOW_COUNT, ITEM_ICON_WIDTH,
     },
 };
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use super::{
+    detour::function,
     items::{game_vals, release, Reader, BUFFER_DATA, BUFFER_LENGTH},
-    offsets::{CacheTable, GameVals},
+    offsets::{u32_at, CacheTable, GameVals},
     own::{on_other_thread, OwnMemory, LAYOUT},
-    state::{Mapping, LAYOUT_MAP},
+    state::mapping,
 };
 
 const INDEX_SEARCH: i64 = 0x200;
@@ -20,7 +21,6 @@ const INDEX_ID: u64 = 0x10;
 const ENTRY_HASHED: usize = 0x18;
 const MAX_ENTRIES: u64 = 1 << 20;
 
-/// The client's item icon builder: `(out, id, quantity, border, shadow, text mode, noted, width, height, text)`, see `offsets::find_item_icon`.
 type IconBuilder = unsafe extern "system" fn(
     *mut [u64; 2],
     i32,
@@ -36,34 +36,26 @@ type IconBuilder = unsafe extern "system" fn(
 
 static ICON_BUILDER: OnceLock<IconBuilder> = OnceLock::new();
 
-/// What the inventory draws its items with: a one pixel border, the shadow, the number drawn or not.
 const ICON_BORDER: i32 = 1;
 const ICON_SHADOW: i32 = 0x30_2020;
 const ICON_TEXT_OFF: i32 = 0;
 const ICON_TEXT_COUNT: i32 = 1;
-/// The client's string: 0x17 inline bytes and a last byte holding the room left, so this is the empty string.
 const EMPTY_TEXT: [u8; 0x18] = {
     let mut text = [0u8; 0x18];
     text[0x17] = 0x17;
     text
 };
-/// The sprite the builder returns: its pixel count and the pixels, `0xAARRGGBB` words.
 const SPRITE_COUNT: u64 = 0x0;
 const SPRITE_PIXELS: u64 = 0x10;
 const ICON_BYTES: usize = (ITEM_ICON_WIDTH * ITEM_ICON_HEIGHT * 4) as usize;
 const MAX_ITEM_ID: i32 = 1 << 16;
 
 pub unsafe fn set_item_icon(module_base: u64, rva: u32) {
-    let builder: IconBuilder = std::mem::transmute((module_base + rva as u64) as *const ());
-    let _ = ICON_BUILDER.set(builder);
-}
-
-fn shared() -> Option<Arc<Mapping>> {
-    LAYOUT_MAP.get().and_then(|map| map.memory())
+    let _ = ICON_BUILDER.set(function(module_base + rva as u64));
 }
 
 pub fn on_request() {
-    let Some(mapping) = shared() else { return };
+    let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();
     let Some((sequence, request)) = shared.read_cache_request() else {
         return;
@@ -116,11 +108,11 @@ fn fill(reply: &mut CacheReply, request: &CacheRequest) -> i32 {
 }
 
 fn index_handle(memory: &OwnMemory, client: u64, rule: &GameVals, id: u32) -> Option<u64> {
-    let known = memory.ptr(client + rule.index as u64).filter(|&p| p != 0)?;
+    let known = memory.ptr(client + rule.index as u64)?;
     let vtable = memory.ptr(known)?;
     (-INDEX_SEARCH..INDEX_SEARCH).step_by(8).find_map(|delta| {
         let field = (client + rule.index as u64).checked_add_signed(delta)?;
-        let handle = memory.ptr(field).filter(|&p| p != 0)?;
+        let handle = memory.ptr(field)?;
         (memory.ptr(handle)? == vtable && memory.i32(handle + INDEX_ID)? as u32 == id)
             .then_some(handle)
     })
@@ -155,8 +147,12 @@ fn archive_table(memory: &OwnMemory, table: &CacheTable, index: u64) -> Option<V
     (count == 0 || memory.read(base, &mut entries)).then_some(entries)
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+fn archive_missing(entry: &[u8], table: &CacheTable) -> bool {
+    u32_at(entry, table.archive_missing as usize) == Some(u32::MAX)
+}
+
+fn hash_entry(hash: &mut u64, entry: &[u8]) {
+    fnv(hash, &entry[..ENTRY_HASHED.min(entry.len())]);
 }
 
 fn list_archives(
@@ -173,11 +169,11 @@ fn list_archives(
         .chunks_exact(table.archive_stride as usize)
         .enumerate()
     {
-        if u32_at(entry, table.archive_missing as usize) == Some(u32::MAX) {
+        if archive_missing(entry, table) {
             continue;
         }
         fnv(&mut hash, &(id as u32).to_le_bytes());
-        fnv(&mut hash, &entry[..ENTRY_HASHED.min(entry.len())]);
+        hash_entry(&mut hash, entry);
         if !put_id(reply, id as u32) {
             return cache_status::TOO_MANY;
         }
@@ -209,11 +205,11 @@ fn list_files(
     ) {
         return cache_status::NOT_FOUND;
     }
-    if u32_at(&entry, table.archive_missing as usize) == Some(u32::MAX) {
+    if archive_missing(&entry, table) {
         return cache_status::NO_ARCHIVE;
     }
     let mut hash = FNV_START;
-    fnv(&mut hash, &entry[..ENTRY_HASHED.min(entry.len())]);
+    hash_entry(&mut hash, &entry);
     reply.fingerprint = hash;
     let entry_u64 = |at: u32| {
         Some(u64::from_le_bytes(
@@ -246,6 +242,38 @@ fn list_files(
     cache_status::OK
 }
 
+enum Copied {
+    Bytes(usize),
+    Missing,
+    NoRoom,
+}
+
+fn copy_each(
+    reply: &mut CacheReply,
+    request: &CacheRequest,
+    mut copy: impl FnMut([i32; 2], &mut [u8]) -> Copied,
+) -> i32 {
+    let count = request.count as usize;
+    reply.count = count as u32;
+    let mut full = false;
+    for (slot, &pair) in reply.files[..count].iter_mut().zip(&request.files[..count]) {
+        slot.offset = reply.used;
+        slot.length = CACHE_FILE_NO_ROOM;
+        if full {
+            continue;
+        }
+        match copy(pair, &mut reply.data[reply.used as usize..CACHE_DATA_SIZE]) {
+            Copied::Bytes(length) => {
+                slot.length = length as i32;
+                reply.used += length as u32;
+            }
+            Copied::Missing => slot.length = CACHE_FILE_MISSING,
+            Copied::NoRoom => full = true,
+        }
+    }
+    cache_status::OK
+}
+
 unsafe fn read_files(
     memory: &OwnMemory,
     reader: Reader,
@@ -253,15 +281,7 @@ unsafe fn read_files(
     request: &CacheRequest,
     reply: &mut CacheReply,
 ) -> i32 {
-    let count = request.count as usize;
-    reply.count = count as u32;
-    let mut full = false;
-    for (slot, &[archive, file]) in reply.files[..count].iter_mut().zip(&request.files[..count]) {
-        slot.offset = reply.used;
-        slot.length = CACHE_FILE_NO_ROOM;
-        if full {
-            continue;
-        }
+    copy_each(reply, request, |[archive, file], room| {
         let mut out = [0u64; 2];
         reader(index, &mut out, archive, file, 0);
         let [control, buffer] = out;
@@ -271,45 +291,31 @@ unsafe fn read_files(
         let data = (buffer != 0)
             .then(|| memory.ptr(buffer + BUFFER_DATA))
             .flatten();
-        match (length, data) {
-            (Some(length), Some(data))
-                if length as usize <= CACHE_DATA_SIZE - reply.used as usize =>
-            {
-                let at = reply.used as usize;
-                if length == 0 || memory.read(data, &mut reply.data[at..at + length as usize]) {
-                    slot.length = length as i32;
-                    reply.used += length as u32;
+        let copied = match (length, data) {
+            (Some(length), Some(data)) if length as usize <= room.len() => {
+                if length == 0 || memory.read(data, &mut room[..length as usize]) {
+                    Copied::Bytes(length as usize)
                 } else {
-                    slot.length = CACHE_FILE_MISSING;
+                    Copied::Missing
                 }
             }
-            (Some(_), Some(_)) => full = true,
-            _ => slot.length = CACHE_FILE_MISSING,
-        }
+            (Some(_), Some(_)) => Copied::NoRoom,
+            _ => Copied::Missing,
+        };
         release(control);
-    }
-    cache_status::OK
+        copied
+    })
 }
 
-/// Draws each requested item through the client's icon builder, which caches them as the inventory's own draws do, and copies the pixels out.
 unsafe fn draw_icons(
     memory: &OwnMemory,
     builder: IconBuilder,
     request: &CacheRequest,
     reply: &mut CacheReply,
 ) -> i32 {
-    let count = request.count as usize;
-    reply.count = count as u32;
-    let mut full = false;
-    for (slot, &[id, quantity]) in reply.files[..count].iter_mut().zip(&request.files[..count]) {
-        slot.offset = reply.used;
-        slot.length = CACHE_FILE_NO_ROOM;
-        if full {
-            continue;
-        }
-        if ICON_BYTES > CACHE_DATA_SIZE - reply.used as usize {
-            full = true;
-            continue;
+    copy_each(reply, request, |[id, quantity], room| {
+        if ICON_BYTES > room.len() {
+            return Copied::NoRoom;
         }
         let text = if id & ITEM_ICON_SHOW_COUNT != 0 {
             ICON_TEXT_COUNT
@@ -317,10 +323,8 @@ unsafe fn draw_icons(
             ICON_TEXT_OFF
         };
         let id = id & ITEM_ICON_ID_MASK;
-        // the lookup gives a default definition for an id past the last item, which would draw as a stray icon
         if !(0..MAX_ITEM_ID).contains(&id) {
-            slot.length = CACHE_FILE_MISSING;
-            continue;
+            return Copied::Missing;
         }
         let mut out = [0u64; 2];
         builder(
@@ -336,21 +340,17 @@ unsafe fn draw_icons(
             EMPTY_TEXT.as_ptr(),
         );
         let [control, sprite] = out;
-        let pixels = (sprite != 0)
+        let copied = (sprite != 0)
             .then(|| memory.u64(sprite + SPRITE_COUNT))
             .flatten()
             .filter(|&count| count == (ITEM_ICON_WIDTH * ITEM_ICON_HEIGHT) as u64)
-            .and_then(|_| memory.ptr(sprite + SPRITE_PIXELS));
-        let at = reply.used as usize;
-        let copied =
-            pixels.is_some_and(|pixels| memory.read(pixels, &mut reply.data[at..at + ICON_BYTES]));
-        if copied {
-            slot.length = ICON_BYTES as i32;
-            reply.used += ICON_BYTES as u32;
-        } else {
-            slot.length = CACHE_FILE_MISSING;
-        }
+            .and_then(|_| memory.ptr(sprite + SPRITE_PIXELS))
+            .is_some_and(|pixels| memory.read(pixels, &mut room[..ICON_BYTES]));
         release(control);
-    }
-    cache_status::OK
+        if copied {
+            Copied::Bytes(ICON_BYTES)
+        } else {
+            Copied::Missing
+        }
+    })
 }

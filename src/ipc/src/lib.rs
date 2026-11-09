@@ -44,7 +44,6 @@ pub fn build_id(dll: &[u8]) -> [u8; VERSION_LEN] {
     id
 }
 
-/// The optional cursor mapping the injector creates before loading the agent: [style, r, g, b, size].
 pub const INITIAL_CURSOR_SIZE: usize = 5;
 
 pub fn initial_cursor_name(pid: u32) -> String {
@@ -55,27 +54,22 @@ pub fn unload_event_name(pid: u32) -> String {
     format!("AGENT_UNLOAD_{pid}")
 }
 
-/// Wakes the agent's worker thread to answer read-only requests without waiting for a frame.
 pub fn work_event_name(pid: u32) -> String {
     format!("AGENT_WORK_{pid}")
 }
 
-/// An auto-reset event the agent sets after writing the worker's answer, so the asker waits on it instead of polling.
 pub fn worker_reply_event_name(pid: u32) -> String {
     format!("AGENT_WORK_DONE_{pid}")
 }
 
-/// An auto-reset event the agent sets each presented frame, after bumping `Header::frame_serial`.
 pub fn frame_event_name(pid: u32) -> String {
     format!("AGENT_FRAME_{pid}")
 }
 
-/// Held by whoever has a request in the worker's single slot, from writing it to reading the answer.
 pub fn worker_mutex_name(pid: u32) -> String {
     format!("AGENT_WORKER_{pid}")
 }
 
-/// Held by whoever has a request in a window message's slot (`input::*_MESSAGE`) until it reads the answer.
 pub fn request_mutex_name(pid: u32, message: u32) -> String {
     format!("AGENT_REQUEST_{pid}_{message}")
 }
@@ -107,14 +101,11 @@ pub mod offsets_state {
     pub const NOT_FOUND: u8 = 2;
 }
 
-// How the agent uploads the overlay: Simba's slot 0 every frame, or slot `overlay_serial & 1` when the serial changes.
 pub mod overlay_mode {
     pub const OFF: u8 = 0;
-    pub const EVERY_FRAME: u8 = 1;
     pub const ON_SERIAL: u8 = 2;
 }
 
-// What the agent draws at the mouse position.
 pub mod cursor_style {
     pub const OFF: u8 = 0;
     pub const CROSS: u8 = 1;
@@ -122,7 +113,6 @@ pub mod cursor_style {
     pub const X: u8 = 3;
 }
 
-/// Flag, version and protocol: the bytes every protocol keeps, so a stale side can still be named.
 pub const PREAMBLE_SIZE: usize = 9;
 
 #[repr(C, packed)]
@@ -142,12 +132,10 @@ pub struct Header {
     pub offsets_state: u8,
     pub capture_enabled: u8,
     pub overlay_serial: u32,
-    // What the injector last painted (0: unknown), so it can skip an identical frame.
     pub overlay_hash: u64,
     pub cursor_style: u8,
     pub cursor_color: [u8; 3],
     pub cursor_size: u8,
-    // Bumped by the agent each time the client presents a frame (wrapping), then `frame_event_name` is set.
     pub frame_serial: u32,
 }
 

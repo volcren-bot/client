@@ -1,6 +1,5 @@
 pub use ipc::read::{Memory, read_string};
 
-/// The client's hash tables: the bucket array and its length in the header, each node's key at 0 and its value and next link.
 pub(crate) const TABLE_BUCKETS: u64 = 0x8;
 pub(crate) const TABLE_COUNT: u64 = 0x10;
 pub(crate) const NODE_VALUE: u64 = 0x10;
@@ -11,12 +10,10 @@ pub(crate) fn byte(memory: &impl Memory, address: u64) -> Option<u8> {
     memory.read(address, &mut b).then_some(b[0])
 }
 
-/// Two adjacent i32s, such as an x and its y, in one read.
 pub(crate) fn i32_pair(memory: &impl Memory, address: u64) -> Option<(i32, i32)> {
     memory.u64(address).map(|v| (v as i32, (v >> 32) as i32))
 }
 
-/// One object's bytes copied with a single read so its fields cost no more reads; reads outside the copy go to the memory underneath.
 pub struct Snapshot<'a, M: Memory> {
     memory: &'a M,
     base: u64,
@@ -25,7 +22,6 @@ pub struct Snapshot<'a, M: Memory> {
 }
 
 impl<'a, M: Memory> Snapshot<'a, M> {
-    /// Snapshots of `len` bytes over `memory`, taken with `load`; with `len` 0 every read goes through.
     pub fn new(memory: &'a M, len: usize) -> Self {
         Self {
             memory,
@@ -35,7 +31,6 @@ impl<'a, M: Memory> Snapshot<'a, M> {
         }
     }
 
-    /// Copies the span at `base`, replacing the last one.
     pub fn load(&mut self, base: u64) {
         self.base = base;
         self.len = if !self.bytes.is_empty() && self.memory.read(base, &mut self.bytes) {
@@ -83,7 +78,6 @@ impl Fake {
     pub fn put_short_string(&mut self, address: u64, text: &str) {
         self.put(address, &ipc::read::short_string(text.as_bytes()).unwrap());
     }
-    /// A one-bucket table of `entries` chained in order, its nodes from `nodes` and its buckets at `nodes + 0x1000`.
     pub fn put_table(&mut self, table: u64, nodes: u64, entries: &[(i32, u64)]) {
         let buckets = nodes + 0x1000;
         self.put_u64(table + TABLE_BUCKETS, buckets);
@@ -126,7 +120,6 @@ impl Memory for Fake {
     }
 }
 
-/// Counts the reads that reach it.
 #[cfg(test)]
 pub(crate) struct Counting<'a>(pub &'a Fake, pub std::cell::Cell<usize>);
 
@@ -157,7 +150,6 @@ mod tests {
             Some(u64::from_le_bytes([24, 25, 26, 27, 28, 29, 30, 31]))
         );
         assert_eq!(counting.1.get(), 1);
-        // past the end, straddling it and before it
         assert_eq!(snapshot.i32(0x200), Some(7));
         assert_eq!(snapshot.i32(0x11e), None);
         assert_eq!(snapshot.i32(0xfe), None);
