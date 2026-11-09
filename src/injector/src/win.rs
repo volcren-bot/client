@@ -3626,7 +3626,15 @@ const LABEL_SCALE: i32 = 2;
 const NPC_LABEL_DEFAULT_HEIGHT: i32 = 200;
 const NPC_LABEL_OFFSET: i32 = 40;
 const TEXT_LEFT: i32 = 8;
-const TEXT_TOP: i32 = 8;
+const UP_TEXT_HEIGHT: f32 = 20.0;
+const TEXT_MARGIN: i32 = 10;
+const TEXT_PADDING: i32 = 4;
+const TEXT_BACKGROUND: Rgba = Rgba {
+    r: 64,
+    g: 64,
+    b: 64,
+    a: 150,
+};
 const LAYERS: [&str; 22] = [
     "players",
     "world-entities",
@@ -3804,6 +3812,7 @@ struct Plan {
     texts: Vec<Text>,
     arrows: Vec<Arrow>,
     rects: Vec<Rect>,
+    backdrops: Vec<[i32; 4]>,
 }
 
 struct Rect {
@@ -4466,9 +4475,12 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         }
     }
 
-    let mut panel_y = TEXT_TOP;
+    let panel_top = (UP_TEXT_HEIGHT * state.ui_scale.unwrap_or(1.0)).ceil() as i32 + TEXT_MARGIN;
+    let mut panel_y = panel_top;
+    let mut panel_width = 0;
     let mut panel = |plan: &mut Plan, lines: Vec<String>| {
         for line in lines {
+            panel_width = panel_width.max(font.width(&line, LABEL_SCALE));
             plan.text(TEXT_LEFT, panel_y, line, TEXT_COLOR);
             panel_y += line_height;
         }
@@ -4538,10 +4550,30 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                 lines.extend(names.into_iter().map(str::to_string));
             }
             let (left, top) = (cursor[0] as i32 + 16, cursor[1] as i32 + 16);
+            let widest = lines
+                .iter()
+                .map(|line| font.width(line, LABEL_SCALE))
+                .max()
+                .unwrap_or(0);
+            plan.backdrops.push([
+                left - TEXT_PADDING,
+                top - 1,
+                widest + TEXT_PADDING * 2,
+                lines.len() as i32 * line_height,
+            ]);
             for (i, line) in lines.into_iter().enumerate() {
                 plan.text(left, top + i as i32 * line_height, line, TEXT_COLOR);
             }
         }
+    }
+
+    if panel_y > panel_top {
+        plan.backdrops.push([
+            TEXT_LEFT - TEXT_PADDING,
+            panel_top - 1,
+            panel_width + TEXT_PADDING * 2,
+            panel_y - panel_top,
+        ]);
     }
 
     let screen = if plan.points.is_empty() {
@@ -4578,6 +4610,9 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     }
     for text in &plan.texts {
         (text.x, text.y, &text.text, text.color).hash(&mut hasher);
+    }
+    for backdrop in &plan.backdrops {
+        backdrop.hash(&mut hasher);
     }
     for rect in &plan.rects {
         (rect.x, rect.y, rect.width, rect.height, rect.color).hash(&mut hasher);
@@ -4656,6 +4691,9 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                     draw_stroke(buf, width, height, line, rect.color);
                 }
             }
+            for &backdrop in &plan.backdrops {
+                fill_rect(buf, width, height, backdrop, TEXT_BACKGROUND);
+            }
             for text in &plan.texts {
                 draw_text(
                     buf,
@@ -4695,6 +4733,20 @@ unsafe fn draw_text(
     font.plot(text, left, top, LABEL_SCALE, |x, y| unsafe {
         put_pixel(buf, width, height, x, y, color)
     });
+}
+
+unsafe fn fill_rect(
+    buf: *mut u8,
+    width: i32,
+    height: i32,
+    [left, top, rect_width, rect_height]: [i32; 4],
+    color: Rgba,
+) {
+    for y in top..top + rect_height {
+        for x in left..left + rect_width {
+            unsafe { put_pixel(buf, width, height, x, y, color) };
+        }
+    }
 }
 
 unsafe fn draw_stroke(
