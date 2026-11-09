@@ -11,7 +11,7 @@ use std::{
 use flate2::read::GzDecoder;
 
 use super::{Kind, Progress, Release, download, own_exe, own_folder, release_file};
-use crate::api::Api;
+use crate::{api::Api, script::lock};
 
 const WORK_DIR: &str = ".update";
 const STAGE_DIR: &str = "stage";
@@ -63,7 +63,7 @@ pub fn prepare(
     let file = release_file(release)?;
     let work = install.join(WORK_DIR);
     let archive = download(api, file, &work, progress, repaint)?;
-    let _stage = STAGE.lock().unwrap_or_else(|e| e.into_inner());
+    let _stage = lock(&STAGE);
     progress.check()?;
     let stage = work.join(STAGE_DIR);
     let _ = fs::remove_dir_all(&stage);
@@ -73,12 +73,12 @@ pub fn prepare(
 
 pub fn apply(prepared: &Prepared) -> Result<(), String> {
     swap(&prepared.install)?;
-    *RELAUNCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(prepared.exe.clone());
+    *lock(&RELAUNCH) = Some(prepared.exe.clone());
     Ok(())
 }
 
 pub fn relaunch_after_exit() {
-    let exe = RELAUNCH.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let exe = lock(&RELAUNCH).take();
     if let Some(exe) = exe
         && let Err(error) = Command::new(&exe).args(env::args_os().skip(1)).spawn()
     {
@@ -168,6 +168,7 @@ mod tests {
     use super::{super::tests::*, *};
     use crate::{
         fake_api::{FakeServer, Reply},
+        session::sha256_hex,
         update::{File, Files},
     };
 
@@ -318,7 +319,7 @@ mod tests {
                 windows: None,
                 linux: Some(File {
                     path: "2026.11.05-abc1234/a.tar.gz".into(),
-                    sha256: sha256(&bytes),
+                    sha256: sha256_hex(&bytes),
                 }),
             },
         };

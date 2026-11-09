@@ -62,32 +62,22 @@ pub fn decrypt_file(
     name: &str,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
-    use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
-    let failed = || format!("Couldn't decrypt {name}.");
     let key = hex_decode(key_hex)
         .filter(|key| key.len() == 32)
         .ok_or("The server sent a key that can't be used.")?;
-    let key = LessSafeKey::new(
-        UnboundKey::new(&AES_256_GCM, &key)
-            .map_err(|_| "The server sent a key that can't be used.")?,
-    );
-    if sealed.len() < NONCE_LEN + AES_256_GCM.tag_len() {
-        return Err(failed());
-    }
-    let (nonce, body) = sealed.split_at(NONCE_LEN);
-    let nonce = Nonce::try_assume_unique_for_key(nonce).map_err(|_| failed())?;
     let aad = format!("volcren:{script_id}/{revision:09}/{name}");
-    let mut buffer = body.to_vec();
-    let plain_len = key
-        .open_in_place(nonce, Aad::from(aad.as_bytes()), &mut buffer)
-        .map_err(|_| failed())?
-        .len();
-    buffer.truncate(plain_len);
-    Ok(buffer)
+    crate::accounts::open_with(&key, aad.as_bytes(), sealed)
+        .ok_or_else(|| format!("Couldn't decrypt {name}."))
 }
 
 pub fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        text.push(char::from(DIGITS[usize::from(byte & 0xf)]));
+    }
+    text
 }
 
 pub fn hex_decode(text: &str) -> Option<Vec<u8>> {
@@ -477,6 +467,16 @@ mod tests {
         assert!(!revision_dir(&root, "s", 1).exists());
         assert!(!revision_dir(&root, "s", 2).exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        assert_eq!(
+            hex_decode(&hex_encode(&[0, 15, 255])),
+            Some(vec![0, 15, 255])
+        );
+        assert_eq!(hex_decode("abc"), None);
+        assert_eq!(hex_decode("zz"), None);
     }
 
     #[test]

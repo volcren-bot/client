@@ -30,7 +30,7 @@ pub fn bold_family() -> egui::FontFamily {
     egui::FontFamily::Name("fira_code_bold".into())
 }
 
-const BG_DARK: Color32 = Color32::from_rgb(0x16, 0x16, 0x1e);
+pub const BG_DARK: Color32 = Color32::from_rgb(0x16, 0x16, 0x1e);
 const BG: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x26);
 const BG_FLOAT: Color32 = Color32::from_rgb(0x1f, 0x23, 0x35);
 const BG_HL: Color32 = Color32::from_rgb(0x29, 0x2e, 0x42);
@@ -39,11 +39,43 @@ pub const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
 const FG_DARK: Color32 = Color32::from_rgb(0xa9, 0xb1, 0xd6);
 pub const COMMENT: Color32 = Color32::from_rgb(0x56, 0x5f, 0x89);
 pub const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
-const SEL: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
+pub const SEL: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
 pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
 pub const PURPLE: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
 pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
+pub const CYAN: Color32 = Color32::from_rgb(0x7d, 0xcf, 0xff);
+pub const ROW_HEIGHT: f32 = 28.0;
+
+pub fn table_header<'a>(
+    mut header: egui_extras::TableRow,
+    heads: impl IntoIterator<Item = &'a str>,
+) {
+    for head in heads {
+        header.col(|ui| {
+            ui.strong(head);
+        });
+    }
+}
+
+pub fn text_width(ui: &egui::Ui, font: &egui::FontId, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::WHITE)
+        .size()
+        .x
+}
+
+pub fn widest(ui: &egui::Ui, font: &egui::FontId, labels: &[&str]) -> f32 {
+    labels
+        .iter()
+        .map(|label| text_width(ui, font, label))
+        .fold(0.0, f32::max)
+}
+
+pub fn button_width(ui: &egui::Ui, font: &egui::FontId, labels: &[&str]) -> f32 {
+    widest(ui, font, labels) + 2.0 * ui.spacing().button_padding.x
+}
+
 pub fn credits(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::Response {
     let style = ui.style().clone();
     let size = ui.ctx().fonts_mut(|fonts| text.font_height(fonts, &style));

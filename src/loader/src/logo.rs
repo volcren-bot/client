@@ -1,4 +1,4 @@
-use crate::theme::{BLUE, FG, PURPLE, RED, YELLOW};
+use crate::theme::{BLUE, CYAN, FG, PURPLE, RED, YELLOW};
 use eframe::egui::{
     self, Color32, Rect,
     text::{LayoutJob, TextFormat},
@@ -68,7 +68,6 @@ const WORDMARK: [(Color32, &str); 6] = [
     ),
 ];
 
-const CYAN: Color32 = Color32::from_rgb(0x7d, 0xcf, 0xff);
 const ORANGE: Color32 = Color32::from_rgb(0xff, 0x9e, 0x64);
 
 const STRENGTH: f32 = 0.14;

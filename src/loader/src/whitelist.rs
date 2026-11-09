@@ -2,8 +2,8 @@ use eframe::egui;
 use injector::http;
 
 use crate::api::Config;
+use crate::theme::ROW_HEIGHT;
 
-const ROW_HEIGHT: f32 = 28.0;
 const ACTIONS_WIDTH: f32 = 90.0;
 const INPUT_WIDTH: f32 = 300.0;
 const MAX_USER_ENTRIES: usize = 200;
@@ -160,12 +160,8 @@ impl Page {
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(egui_extras::Column::remainder().clip(true))
             .column(egui_extras::Column::exact(ACTIONS_WIDTH))
-            .header(ROW_HEIGHT, |mut header| {
-                for head in ["Host", ""] {
-                    header.col(|ui| {
-                        ui.strong(head);
-                    });
-                }
+            .header(ROW_HEIGHT, |header| {
+                crate::theme::table_header(header, ["Host", ""])
             })
             .body(|body| {
                 body.rows(ROW_HEIGHT, rows.len(), |mut row| {

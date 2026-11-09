@@ -196,9 +196,12 @@ impl Inspector {
                                 Kind::VarcInt
                             },
                             name: change.index.to_string(),
-                            old: change.old.map_or("?".into(), |old| {
-                                if change.string { quote(&old) } else { old }
-                            }),
+                            old: change.old.map_or_else(
+                                || "?".into(),
+                                |old| {
+                                    if change.string { quote(&old) } else { old }
+                                },
+                            ),
                             new: if change.string {
                                 quote(&change.new)
                             } else {

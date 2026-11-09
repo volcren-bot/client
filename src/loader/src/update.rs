@@ -368,6 +368,7 @@ pub(crate) mod tests {
     use crate::{
         api::config::Config,
         fake_api::{FakeServer, Reply},
+        session::sha256_hex,
     };
 
     pub struct Keys {
@@ -409,10 +410,6 @@ pub(crate) mod tests {
             anon_key: "anon".into(),
             site_url: String::new(),
         })
-    }
-
-    pub fn sha256(bytes: &[u8]) -> String {
-        crate::session::sha256_hex(bytes)
     }
 
     pub fn temp_dir(name: &str) -> PathBuf {
@@ -548,7 +545,7 @@ pub(crate) mod tests {
         let dir = temp_dir("mismatch");
         let file = File {
             path: "1/a.tar.gz".into(),
-            sha256: sha256(b"something else"),
+            sha256: sha256_hex(b"something else"),
         };
         let result = download(&api(&server.url), &file, &dir, &Progress::default(), &|| {});
         assert!(result.unwrap_err().contains("checksum"));
@@ -561,7 +558,7 @@ pub(crate) mod tests {
         let dir = temp_dir("download");
         let file = File {
             path: "1/a.tar.gz".into(),
-            sha256: sha256(b"the package"),
+            sha256: sha256_hex(b"the package"),
         };
         let progress = Progress::default();
         let path = download(&api(&server.url), &file, &dir, &progress, &|| {}).unwrap();
@@ -575,7 +572,7 @@ pub(crate) mod tests {
         let dir = temp_dir("skipped");
         let file = File {
             path: "1/a.tar.gz".into(),
-            sha256: sha256(b"the package"),
+            sha256: sha256_hex(b"the package"),
         };
         let progress = Progress::default();
         progress.cancel();

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use eframe::egui;
 use ring::{
@@ -6,6 +6,9 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::session::{hex_decode, hex_encode};
+use crate::theme::ROW_HEIGHT;
 
 const KEYRING_SERVICE: &str = "volcren-loader";
 const KEYRING_USER: &str = "accounts-key";
@@ -15,7 +18,6 @@ const PIN_LEN: usize = 4;
 const HASH_SHOWN: usize = 12;
 const MARGIN: i8 = 16;
 const INPUT_WIDTH: f32 = 300.0;
-const ROW_HEIGHT: f32 = 28.0;
 const MIN_TEXT_WIDTH: f32 = 90.0;
 const ACCOUNT_REQUIRED: &str = "Enter the account name.";
 const PIN_INVALID: &str = "The bank pin is exactly 4 digits.";
@@ -63,20 +65,6 @@ pub fn valid_pin(pin: &str) -> bool {
     injector::bank_pin::parse_pin(pin).is_some()
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) || !text.is_ascii() {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-        .collect()
-}
-
 pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
     let sealing = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|e| e.to_string())?);
     let mut nonce = [0u8; NONCE_LEN];
@@ -97,20 +85,23 @@ pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub(crate) fn open(key: &[u8; 32], sealed: &[u8]) -> Option<Vec<u8>> {
-    if sealed.len() < NONCE_LEN {
-        return None;
-    }
-    let (nonce, rest) = sealed.split_at(NONCE_LEN);
+    open_with(key, AAD, sealed)
+}
+
+pub(crate) fn open_with(key: &[u8], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+    let (nonce, rest) = sealed.split_at_checked(NONCE_LEN)?;
     let opening = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).ok()?);
     let mut data = rest.to_vec();
-    let plain = opening
+    let plain_len = opening
         .open_in_place(
             Nonce::try_assume_unique_for_key(nonce).ok()?,
-            Aad::from(AAD),
+            Aad::from(aad),
             &mut data,
         )
-        .ok()?;
-    Some(plain.to_vec())
+        .ok()?
+        .len();
+    data.truncate(plain_len);
+    Some(data)
 }
 
 fn encode(key: &[u8; 32], entries: &[Entry]) -> Result<Vec<u8>, String> {
@@ -135,7 +126,7 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
 }
 
 fn parse_key(text: &str) -> Result<[u8; 32], String> {
-    unhex(text)
+    hex_decode(text)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(|| "the stored encryption key is malformed".to_owned())
 }
@@ -158,7 +149,7 @@ pub(crate) fn create_key() -> Result<[u8; 32], String> {
                 .fill(&mut fresh)
                 .map_err(|e| e.to_string())?;
             entry
-                .set_password(&hex(&fresh))
+                .set_password(&hex_encode(&fresh))
                 .map_err(|e| e.to_string())?;
             Ok(fresh)
         }
@@ -180,16 +171,7 @@ fn load() -> Result<Vec<Entry>, String> {
 fn store(entries: &[Entry]) -> Result<(), String> {
     let path = path().ok_or("no data folder on this system")?;
     let key = create_key()?;
-    write_sealed(&path, &encode(&key, entries)?)
-}
-
-pub(crate) fn write_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    crate::paths::write_atomic(&path, &encode(&key, entries)?)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -417,16 +399,7 @@ impl Accounts {
             ..
         } = self;
         let font = egui::TextStyle::Button.resolve(ui.style());
-        let button_width = ["Save", "Delete", "Sure?"]
-            .iter()
-            .map(|label| {
-                ui.painter()
-                    .layout_no_wrap((*label).into(), font.clone(), egui::Color32::WHITE)
-                    .size()
-                    .x
-            })
-            .fold(0.0, f32::max)
-            + 2.0 * ui.spacing().button_padding.x;
+        let button_width = crate::theme::button_width(ui, &font, &["Save", "Delete", "Sure?"]);
         let button_size = egui::vec2(button_width, 0.0);
         let spacing = ui.spacing().item_spacing;
         let row_actions = 2.0 * button_width + spacing.x;
@@ -450,12 +423,11 @@ impl Accounts {
             .column(text_column())
             .column(text_column())
             .column(egui_extras::Column::exact(actions_width))
-            .header(ROW_HEIGHT, |mut header| {
-                for head in ["Name", "Account hash", "Bank pin", "Lamp skill", ""] {
-                    header.col(|ui| {
-                        ui.strong(head);
-                    });
-                }
+            .header(ROW_HEIGHT, |header| {
+                crate::theme::table_header(
+                    header,
+                    ["Name", "Account hash", "Bank pin", "Lamp skill", ""],
+                )
             })
             .body(|body| {
                 body.rows(row_height, working.len(), |mut row| {
@@ -813,12 +785,5 @@ mod tests {
         assert_eq!(accounts.lamp_skill_for("set"), Ok(Some("Slayer".into())));
         assert_eq!(accounts.lamp_skill_for("unset"), Ok(None));
         assert_eq!(accounts.lamp_skill_for("nobody"), Ok(None));
-    }
-
-    #[test]
-    fn hex_round_trips() {
-        assert_eq!(unhex(&hex(&[0, 15, 255])), Some(vec![0, 15, 255]));
-        assert_eq!(unhex("abc"), None);
-        assert_eq!(unhex("zz"), None);
     }
 }

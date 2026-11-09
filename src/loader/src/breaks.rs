@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use injector::form::BreakPlan;
 
+use crate::theme::ROW_HEIGHT;
+
 #[derive(Default)]
 pub struct BreaksTracker {
     plan: Option<(BreakPlan, Instant)>,
@@ -115,7 +117,6 @@ fn number(
     changed
 }
 
-const ROW_HEIGHT: f32 = 28.0;
 const ACTIONS_WIDTH: f32 = 70.0;
 const VISIBLE_ROWS: usize = 5;
 
@@ -172,12 +173,8 @@ fn list(
         .column(egui_extras::Column::remainder().clip(true))
         .column(egui_extras::Column::remainder().clip(true))
         .column(egui_extras::Column::exact(ACTIONS_WIDTH))
-        .header(ROW_HEIGHT, |mut header| {
-            for head in heads.into_iter().chain([""]) {
-                header.col(|ui| {
-                    ui.strong(head);
-                });
-            }
+        .header(ROW_HEIGHT, |header| {
+            crate::theme::table_header(header, heads.into_iter().chain([""]))
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, rows, |mut r| {

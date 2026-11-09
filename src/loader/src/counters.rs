@@ -32,26 +32,27 @@ impl CountersTracker {
             .map(|c| (c.label.as_str(), c.value))
     }
 
+    fn ratio(&self, id: &str, show: impl FnOnce(f64, &str) -> String) -> String {
+        match self.label_of(id) {
+            Some((label, value)) if value > 0.0 => show(value, label),
+            _ => "-".into(),
+        }
+    }
+
     pub fn rows(&self) -> Vec<CounterRow> {
         let hours = self.read_at.as_secs_f64() / 3600.0;
         self.counters
             .iter()
             .map(|c| {
                 let per_hour = (c.hourly && hours > 0.0).then(|| c.value / hours);
-                let ratio = if let Some(of) = c.percent_of.as_deref() {
-                    Some(match self.label_of(of) {
-                        Some((label, whole)) if whole > 0.0 => {
-                            format!("{} of {label}", percent(c.value * 100.0 / whole))
-                        }
-                        _ => "-".into(),
-                    })
-                } else {
-                    c.per.as_deref().map(|per| match self.label_of(per) {
-                        Some((label, by)) if by > 0.0 => {
-                            format!("{} per {label}", number(c.value / by))
-                        }
-                        _ => "-".into(),
-                    })
+                let ratio = match (c.percent_of.as_deref(), c.per.as_deref()) {
+                    (Some(of), _) => Some(self.ratio(of, |whole, label| {
+                        format!("{} of {label}", percent(c.value * 100.0 / whole))
+                    })),
+                    (None, Some(per)) => Some(self.ratio(per, |by, label| {
+                        format!("{} per {label}", number(c.value / by))
+                    })),
+                    (None, None) => None,
                 };
                 CounterRow {
                     label: c.label.clone(),

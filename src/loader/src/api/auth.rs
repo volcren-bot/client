@@ -93,14 +93,19 @@ pub fn redirect_uri() -> String {
 }
 
 fn urlencode(text: &str) -> String {
-    text.bytes()
-        .map(|byte| match byte {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
+                encoded.push(char::from(byte));
             }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
 }
 
 pub fn bind() -> Result<TcpListener, String> {

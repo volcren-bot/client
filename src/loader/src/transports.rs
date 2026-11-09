@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use injector::transports::{self, Data, ItemName, Transport};
 
+use crate::script::lock;
+
 const BUNDLED_COMMIT: &str = "4fd7d4a220c06781145dd7ba21e9a1e46ed0fc27";
 const REPO: &str = "Skretzo/shortest-path";
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -145,17 +147,13 @@ fn bundled_only(file: &File) -> bool {
     BUNDLED_ONLY.contains(&file.name)
 }
 
-fn agent(user_agent: &str) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .user_agent(user_agent)
-        .build()
-        .into()
+fn agent() -> ureq::Agent {
+    crate::http::user_agent_builder(TIMEOUT).build().into()
 }
 
 fn write_versions(root: &Path, versions: &Versions) -> Result<(), String> {
     let text = serde_json::to_string_pretty(versions).map_err(|e| e.to_string())?;
-    write_file(&root.join("versions.json"), &text).map_err(|e| e.to_string())
+    crate::paths::write_atomic(&root.join("versions.json"), text.as_bytes())
 }
 
 fn parse_latest(body: &str) -> Result<Version, String> {
@@ -252,15 +250,6 @@ fn validate(file: &File, text: &str) -> Result<Parsed, String> {
     }
 }
 
-fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let temp = path.with_extension("tmp");
-    std::fs::write(&temp, text)?;
-    std::fs::rename(temp, path)
-}
-
 fn load(version: Option<(&Path, &str)>) -> Data {
     let mut data = Data::default();
     let mut whole = version.is_some();
@@ -354,7 +343,7 @@ fn update(
     }
     let dir = root.join(&new.commit);
     for (name, text) in &texts {
-        write_file(&dir.join(format!("{name}.tsv")), text).map_err(|e| e.to_string())?;
+        crate::paths::write_atomic(&dir.join(format!("{name}.tsv")), text.as_bytes())?;
     }
     versions.kept.insert(0, new.clone());
     versions.kept.truncate(KEPT_VERSIONS);
@@ -373,12 +362,10 @@ fn roll_back(root: &Path) -> Result<String, String> {
     versions.skip = Some(dropped.commit);
     write_versions(root, &versions)?;
     prune(root, &versions);
-    Ok(versions
-        .kept
-        .first()
-        .map_or("the bundled data".to_owned(), |v| {
-            short(&v.commit).to_owned()
-        }))
+    Ok(versions.kept.first().map_or_else(
+        || "the bundled data".to_owned(),
+        |v| short(&v.commit).to_owned(),
+    ))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -393,12 +380,6 @@ pub struct Status {
 static LOADED: Mutex<Option<String>> = Mutex::new(None);
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
-
-fn lock<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 fn reload(root: Option<&Path>, message: Option<String>) {
     let versions = root.map(read_versions).unwrap_or_default();
@@ -424,7 +405,7 @@ fn reload(root: Option<&Path>, message: Option<String>) {
 }
 
 fn check(root: &Path, by_hand: bool) {
-    let agent = agent(crate::paths::USER_AGENT);
+    let agent = agent();
     let message = match update(
         root,
         by_hand,
@@ -728,7 +709,7 @@ mod tests {
     #[ignore = "reaches upstream"]
     fn takes_the_real_newest_version() {
         let root = temp("real");
-        let agent = agent("volcren-loader/test");
+        let agent = agent();
         let checked = update(
             &root,
             true,

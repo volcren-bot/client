@@ -169,6 +169,14 @@ impl Api {
         Err(ApiError::Unauthorized)
     }
 
+    fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, ApiError> {
+        self.call("GET", path, query, None::<&()>)
+    }
+
+    fn post<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T, ApiError> {
+        self.call("POST", path, &[], Some(body))
+    }
+
     fn send<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -223,7 +231,7 @@ impl Api {
     }
 
     pub fn me(&self) -> Result<Me, ApiError> {
-        self.call::<Me>("GET", "/launcher/me", &[], None::<&()>)
+        self.get::<Me>("/launcher/me", &[])
     }
 
     pub fn scripts(
@@ -242,16 +250,14 @@ impl Api {
         if community {
             query.push(("community", "true"));
         }
-        self.call::<ScriptList>("GET", "/launcher/scripts", &query, None::<&()>)
+        self.get::<ScriptList>("/launcher/scripts", &query)
             .map(|list| list.scripts)
     }
 
     pub fn redeem(&self, code: &str) -> Result<Redeemed, ApiError> {
-        self.call(
-            "POST",
+        self.post(
             "/launcher/scripts/redeem",
-            &[],
-            Some(&serde_json::json!({ "code": code })),
+            &serde_json::json!({ "code": code }),
         )
     }
 
@@ -265,20 +271,16 @@ impl Api {
     }
 
     pub fn quote(&self, script_id: &str) -> Result<Quote, ApiError> {
-        self.call(
-            "GET",
+        self.get(
             &format!("/launcher/scripts/{}/quote", path_id(script_id, "script")?),
             &[],
-            None::<&()>,
         )
     }
 
     pub fn start_session(&self, script_id: &str) -> Result<StartedSession, ApiError> {
-        self.call(
-            "POST",
+        self.post(
             "/launcher/sessions",
-            &[],
-            Some(&serde_json::json!({ "script_id": script_id })),
+            &serde_json::json!({ "script_id": script_id }),
         )
     }
 
@@ -292,51 +294,40 @@ impl Api {
             path_id(session_id, "session")?
         );
         match stats {
-            Some(stats) => self.call(
-                "POST",
-                &path,
-                &[],
-                Some(&serde_json::json!({ "stats": stats })),
-            ),
-            None => self.call("POST", &path, &[], Some(&serde_json::json!({}))),
+            Some(stats) => self.post(&path, &serde_json::json!({ "stats": stats })),
+            None => self.post(&path, &serde_json::json!({})),
         }
     }
 
     pub fn end_session(&self, session_id: &str) -> Result<Ended, ApiError> {
-        self.call(
-            "POST",
+        self.post(
             &format!("/launcher/sessions/{}/end", path_id(session_id, "session")?),
-            &[],
-            Some(&serde_json::json!({})),
+            &serde_json::json!({}),
         )
     }
 
     pub fn recent_sessions(&self) -> Result<Vec<RecentSession>, ApiError> {
-        self.call::<RecentSessions>("GET", "/launcher/sessions", &[], None::<&()>)
+        self.get::<RecentSessions>("/launcher/sessions", &[])
             .map(|list| list.sessions)
     }
 
     pub fn score_session(&self, session_id: &str, score: u8) -> Result<Scored, ApiError> {
-        self.call(
-            "POST",
+        self.post(
             &format!(
                 "/launcher/sessions/{}/score",
                 path_id(session_id, "session")?
             ),
-            &[],
-            Some(&serde_json::json!({ "score": score })),
+            &serde_json::json!({ "score": score }),
         )
     }
 
     pub fn report_session(&self, session_id: &str, report: &Report) -> Result<Reported, ApiError> {
-        self.call(
-            "POST",
+        self.post(
             &format!(
                 "/launcher/sessions/{}/report",
                 path_id(session_id, "session")?
             ),
-            &[],
-            Some(report),
+            report,
         )
     }
 }

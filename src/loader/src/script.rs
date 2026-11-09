@@ -4,7 +4,7 @@ use std::{
     process::{Child, ChildStdin, ExitStatus, Stdio},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{Receiver, channel},
     },
     thread,
@@ -18,6 +18,9 @@ use crate::accounts::Accounts;
 use crate::api::Stats;
 use crate::whitelist::Whitelist;
 
+const STDERR_LINES: usize = 500;
+const MAX_HTTP_IN_FLIGHT: usize = 32;
+
 pub fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(PoisonError::into_inner)
 }
@@ -26,7 +29,7 @@ pub fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -57,9 +60,17 @@ fn reply(stdin: &Mutex<ChildStdin>, line: &str, what: &str) -> Result<(), String
 }
 
 fn answer_http(stdin: Arc<Mutex<ChildStdin>>, payload: &str, whitelist: Whitelist) {
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    if IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_HTTP_IN_FLIGHT {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        let busy = Err("http_request: too many requests at once".to_owned());
+        let _ = reply(&stdin, &injector::http::reply_line(&busy), "HTTP request");
+        return;
+    }
     let request = injector::http::parse_request(payload);
     thread::spawn(move || {
         let answer = request.and_then(|request| whitelist.perform(&request));
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         let _ = reply(&stdin, &injector::http::reply_line(&answer), "HTTP request");
     });
 }
@@ -258,9 +269,11 @@ impl Script {
         let stderr_writer = stderr.clone();
         thread::spawn(move || {
             for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
-                if let Ok(mut lines) = stderr_writer.lock() {
-                    lines.push(line);
+                let mut lines = lock(&stderr_writer);
+                if lines.len() >= 2 * STDERR_LINES {
+                    lines.drain(..STDERR_LINES);
                 }
+                lines.push(line);
             }
         });
 
@@ -284,7 +297,7 @@ impl Script {
         reply(&self.stdin, line, what)
     }
 
-    pub fn answer_form(&mut self, values: Option<serde_json::Value>) -> Result<(), String> {
+    pub fn answer_form(&self, values: Option<serde_json::Value>) -> Result<(), String> {
         let reply = match values {
             Some(values) => serde_json::json!({ "values": values }),
             None => serde_json::json!({ "cancelled": true }),
@@ -292,16 +305,16 @@ impl Script {
         self.reply(&reply.to_string(), "form")
     }
 
-    pub fn push_update(&mut self, values: &serde_json::Value) -> Result<(), String> {
+    pub fn push_update(&self, values: &serde_json::Value) -> Result<(), String> {
         self.reply(&injector::form::update_line(values), "settings update")
     }
 
-    pub fn push_antiban(&mut self, config: &injector::antiban::Config) -> Result<(), String> {
+    pub fn push_antiban(&self, config: &injector::antiban::Config) -> Result<(), String> {
         self.reply(&injector::antiban::line(config), "breaks update")
     }
 
     pub fn push_transport_settings(
-        &mut self,
+        &self,
         settings: &injector::transports::Settings,
     ) -> Result<(), String> {
         self.reply(
@@ -310,7 +323,7 @@ impl Script {
         )
     }
 
-    pub fn skip_next(&mut self, kind: &str, index: u32) -> Result<(), String> {
+    pub fn skip_next(&self, kind: &str, index: u32) -> Result<(), String> {
         self.reply(&injector::antiban::skip_line(kind, index), "skip")
     }
 
@@ -399,11 +412,10 @@ impl Script {
             let result = if status.success() {
                 Ok(())
             } else {
-                let detail = self
-                    .stderr
-                    .lock()
-                    .map(|lines| lines.join("\n"))
-                    .unwrap_or_default();
+                let detail = {
+                    let lines = lock(&self.stderr);
+                    lines[lines.len().saturating_sub(STDERR_LINES)..].join("\n")
+                };
                 Err(if detail.is_empty() {
                     format!("Script failed ({status}).")
                 } else {

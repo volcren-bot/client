@@ -39,9 +39,13 @@ const ANSI: [[u8; 3]; 16] = [
     [0x7d, 0xcf, 0xff],
     [0xc0, 0xca, 0xf5],
 ];
-const FG: [u8; 3] = [0xc0, 0xca, 0xf5];
-const BG: [u8; 3] = [0x16, 0x16, 0x1e];
-const SELECTION: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
+const FG: [u8; 3] = rgb_of(crate::theme::FG);
+const BG: [u8; 3] = rgb_of(crate::theme::BG_DARK);
+const SELECTION: Color32 = crate::theme::SEL;
+
+const fn rgb_of(color: Color32) -> [u8; 3] {
+    [color.r(), color.g(), color.b()]
+}
 
 fn default_rgb(index: usize) -> Rgb {
     let [r, g, b] = match index {
@@ -61,6 +65,15 @@ fn default_rgb(index: usize) -> Rgb {
         _ => FG,
     };
     Rgb { r, g, b }
+}
+
+fn pty_size(size: Size) -> PtySize {
+    PtySize {
+        rows: size.rows as u16,
+        cols: size.cols as u16,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
 }
 
 fn rgb([r, g, b]: [u8; 3]) -> Color32 {
@@ -137,12 +150,7 @@ struct Session {
 impl Session {
     fn spawn(ctx: &egui::Context, program: &str, size: Size) -> Result<Self, String> {
         let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: size.rows as u16,
-                cols: size.cols as u16,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .openpty(pty_size(size))
             .map_err(|e| e.to_string())?;
         let mut command = CommandBuilder::new(program);
         if let Ok(dir) = std::env::current_dir() {
@@ -210,12 +218,7 @@ impl Session {
         if let Ok(mut term) = self.term.lock() {
             term.resize(size);
         }
-        let _ = self.master.resize(PtySize {
-            rows: size.rows as u16,
-            cols: size.cols as u16,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        let _ = self.master.resize(pty_size(size));
     }
 }
 

@@ -89,7 +89,12 @@ impl Kind {
             _ => order
                 .strip_prefix(':')?
                 .split('.')
-                .map(|s| s.parse::<u8>().ok().map(|s| s * 8))
+                .map(|s| {
+                    s.parse::<u8>()
+                        .ok()
+                        .filter(|&s| usize::from(s) < bytes)
+                        .map(|s| s * 8)
+                })
                 .collect::<Option<_>>()?,
         };
         (shifts.len() == bytes && (2..=4).contains(&bytes)).then_some(Kind::Int {
@@ -130,20 +135,17 @@ fn parse(text: &str) -> Vec<Def> {
             let size = columns.next()?.parse().ok()?;
             let name = columns.next()?.to_string();
             let layout = columns.next()?;
-            let touches = columns
-                .next()
-                .unwrap_or("")
-                .split(',')
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect();
-            let field_names = columns
-                .next()
-                .unwrap_or("")
-                .split(',')
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect();
+            let mut list = || {
+                columns
+                    .next()
+                    .unwrap_or("")
+                    .split(',')
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            };
+            let touches = list();
+            let field_names = list();
             let fields = if layout.is_empty() {
                 None
             } else if layout == "-" {

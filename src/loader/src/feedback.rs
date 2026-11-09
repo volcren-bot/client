@@ -11,14 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::api::models::{RecentSession, Report};
+use crate::layouts::{EQUIPMENT_CONTAINER as EQUIPMENT, INVENTORY_CONTAINER as INVENTORY};
 
 pub const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
-pub const MAX_LOG_BYTES: usize = 256 * 1024;
+const MAX_LOG_BYTES: usize = 256 * 1024;
 pub const MAX_DESCRIPTION_CHARS: usize = 2000;
 pub const REFRESH_EVERY: Duration = Duration::from_secs(60);
 const REDACTED: &str = "[account]";
-const INVENTORY: i32 = 93;
-const EQUIPMENT: i32 = 94;
 
 pub struct Versions {
     pub agent: Option<String>,
@@ -147,7 +146,7 @@ pub fn names_of(state: &GameState) -> Vec<String> {
         .collect()
 }
 
-pub fn scrub(text: &str, names: &[String]) -> String {
+fn scrub(text: &str, names: &[String]) -> String {
     let mut keys: Vec<Vec<char>> = names
         .iter()
         .map(|name| normal(name))
@@ -254,7 +253,11 @@ pub fn read_snapshot(
     Some(snapshot(&state, &containers))
 }
 
-pub fn tail(lines: &[String], max_bytes: usize) -> String {
+pub fn scrubbed_log(log: &[String], names: &[String]) -> String {
+    scrub(&tail(log, MAX_LOG_BYTES), names)
+}
+
+fn tail(lines: &[String], max_bytes: usize) -> String {
     let mut kept = Vec::new();
     let mut size = 0;
     for line in lines.iter().rev() {
@@ -294,7 +297,7 @@ pub fn store_record(record: &Record) -> Result<(), String> {
     let key = crate::accounts::create_key()?;
     let plain = serde_json::to_vec(record).map_err(|e| e.to_string())?;
     let sealed = crate::accounts::seal(&key, &plain)?;
-    crate::accounts::write_sealed(&path, &sealed)
+    crate::paths::write_atomic(&path, &sealed)
 }
 
 pub fn load_record(session_id: &str) -> Option<Record> {
@@ -577,8 +580,7 @@ pub fn report(
     snapshot: Option<Value>,
     diagnostics: Value,
 ) -> Report {
-    let text = tail(log, MAX_LOG_BYTES);
-    let scrubbed = scrub(&text, names);
+    let scrubbed = scrubbed_log(log, names);
     Report {
         description,
         log: Some(scrubbed).filter(|log| !log.is_empty()),

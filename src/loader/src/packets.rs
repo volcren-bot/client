@@ -32,7 +32,7 @@ pub struct Filter {
     hide_unknown: bool,
 }
 
-fn words(text: &str) -> impl Iterator<Item = &str> {
+pub fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| c == ',' || c.is_whitespace())
         .filter(|word| !word.is_empty())
 }
@@ -300,14 +300,11 @@ pub fn leading_values(bytes: &[u8]) -> Vec<(&'static str, String)> {
     if let Some(&b) = bytes.first() {
         values.push(("byte", format!("{b} ({})", b as i8)));
     }
-    if let Some(b) = bytes.get(..2) {
-        values.push(("short", format!("{}", u16::from_be_bytes([b[0], b[1]]))));
+    if let Some(b) = bytes.first_chunk() {
+        values.push(("short", u16::from_be_bytes(*b).to_string()));
     }
-    if let Some(b) = bytes.get(..4) {
-        values.push((
-            "int",
-            format!("{}", i32::from_be_bytes([b[0], b[1], b[2], b[3]])),
-        ));
+    if let Some(b) = bytes.first_chunk() {
+        values.push(("int", i32::from_be_bytes(*b).to_string()));
     }
     values
 }

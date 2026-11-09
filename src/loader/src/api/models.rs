@@ -89,11 +89,7 @@ pub struct Removed {
 
 pub fn normalize_share_code(input: &str) -> Option<String> {
     let code = input.trim().to_ascii_lowercase();
-    (code.len() == 64
-        && code
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-    .then_some(code)
+    (code.len() == 64 && code.bytes().all(|b| b.is_ascii_hexdigit())).then_some(code)
 }
 
 impl Me {

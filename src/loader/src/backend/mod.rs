@@ -11,6 +11,20 @@ mod imp;
 mod imp;
 pub use imp::*;
 
+fn run_args(
+    command: &mut std::process::Command,
+    script: Option<impl AsRef<std::ffi::OsStr>>,
+    lib: Option<impl AsRef<std::ffi::OsStr>>,
+) {
+    command.arg("run");
+    if let Some(script) = script {
+        command.arg("--script").arg(script);
+        if let Some(lib) = lib {
+            command.arg("--lib").arg(lib);
+        }
+    }
+}
+
 pub const LOG_LINES: std::ops::RangeInclusive<usize> = 2000..=10_000;
 
 #[derive(Clone, Serialize, Deserialize)]

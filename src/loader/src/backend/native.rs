@@ -1,9 +1,6 @@
 use std::{path::Path, process::Command};
 
-use injector::{
-    Connection, Cursor, DisplayName, GameState, Input, Item, LoadReport, Npc, Overlay, PacketPage,
-    Player, Widget,
-};
+use injector::{Connection, Cursor, DisplayName, GameState, Item, LoadReport, Overlay, PacketPage};
 use serde::{Deserialize, Serialize};
 
 use super::{Scan, Settings, Target};
@@ -41,10 +38,6 @@ pub fn unload(target: &Target, _settings: &Settings) -> Result<(), String> {
 
 pub fn console(target: &Target, _settings: &Settings) -> Result<(), String> {
     injector::open_console(target.client.pid)
-}
-
-pub fn input(target: &Target, _settings: &Settings, input: &Input) -> Result<(), String> {
-    injector::send_input(target.client.pid, input)
 }
 
 pub fn draw(target: &Target, _settings: &Settings, overlay: &Overlay) -> Result<(), String> {
@@ -85,15 +78,6 @@ pub fn enum_def(
 
 pub fn varp(target: &Target, _settings: &Settings, id: usize) -> Result<Option<i32>, String> {
     injector::varp_value(target.client.pid, id)
-}
-
-pub fn widget(
-    target: &Target,
-    _settings: &Settings,
-    group: u16,
-    child: u16,
-) -> Result<Option<Widget>, String> {
-    injector::widget(target.client.pid, group, child)
 }
 
 pub fn item_container(
@@ -189,10 +173,6 @@ pub fn varbits_of(
     injector::varbits_of(target.client.pid, varp)
 }
 
-pub fn varc(target: &Target, _settings: &Settings, id: i32) -> Result<Option<i32>, String> {
-    injector::varc(target.client.pid, id)
-}
-
 pub fn scene_tiles_next_frame(
     target: &Target,
     _settings: &Settings,
@@ -200,14 +180,6 @@ pub fn scene_tiles_next_frame(
     after: u32,
 ) -> Result<Option<u32>, String> {
     injector::scene_tiles_next_frame(target.client.pid, layers, after)
-}
-
-pub fn npcs(target: &Target, _settings: &Settings) -> Result<Vec<Npc>, String> {
-    injector::npcs(target.client.pid)
-}
-
-pub fn players(target: &Target, _settings: &Settings) -> Result<Vec<Player>, String> {
-    injector::players(target.client.pid)
 }
 
 pub fn packets(target: &Target, _settings: &Settings, since: u64) -> Result<PacketPage, String> {
@@ -247,17 +219,11 @@ pub fn script_command(
     script: Option<&Path>,
     lib: Option<&Path>,
 ) -> Result<Command, String> {
-    if settings.helper.is_empty() || !Path::new(&settings.helper).is_file() {
+    if !Path::new(&settings.helper).is_file() {
         return Err("Set the path to injector.exe, scripts run in it.".into());
     }
     let mut command = Command::new(&settings.helper);
-    command.arg("run");
-    if let Some(script) = script {
-        command.arg("--script").arg(script);
-        if let Some(lib) = lib {
-            command.arg("--lib").arg(lib);
-        }
-    }
+    super::run_args(&mut command, script, lib);
     if let Some(target) = target {
         command.arg(target.client.pid.to_string());
     }

@@ -41,7 +41,8 @@ pub const EQUIPMENT_SIZE: usize = 15;
 pub const SECONDARY_AMMO_SLOT: usize = 14;
 const SECONDARY_AMMO_HINT: &str =
     "Ignored unless the account has a bolt pouch in its inventory or Dizana's quiver.";
-const INVENTORY_CONTAINER: i32 = 93;
+pub const INVENTORY_CONTAINER: i32 = 93;
+pub const EQUIPMENT_CONTAINER: i32 = 94;
 const CAPE_SLOT: i32 = 1;
 const BOLT_POUCH: i32 = 9433;
 const POUCH_EXTRA_BOLT_VARBIT: i32 = 2476;
@@ -308,7 +309,6 @@ impl Book {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellInfo {
-    pub index: u32,
     pub key: &'static str,
     pub name: &'static str,
     pub level: u32,
@@ -317,7 +317,6 @@ pub struct SpellInfo {
 }
 
 const fn spell(
-    index: u32,
     key: &'static str,
     name: &'static str,
     level: u32,
@@ -325,7 +324,6 @@ const fn spell(
     book: Book,
 ) -> SpellInfo {
     SpellInfo {
-        index,
         key,
         name,
         level,
@@ -335,77 +333,54 @@ const fn spell(
 }
 
 pub const AUTOCAST_SPELLS: [SpellInfo; 48] = [
-    spell(1, "wind_strike", "Wind Strike", 1, 15, Book::Standard),
-    spell(2, "water_strike", "Water Strike", 5, 17, Book::Standard),
-    spell(3, "earth_strike", "Earth Strike", 9, 19, Book::Standard),
-    spell(4, "fire_strike", "Fire Strike", 13, 21, Book::Standard),
-    spell(5, "wind_bolt", "Wind Bolt", 17, 23, Book::Standard),
-    spell(6, "water_bolt", "Water Bolt", 23, 26, Book::Standard),
-    spell(7, "earth_bolt", "Earth Bolt", 29, 29, Book::Standard),
-    spell(8, "fire_bolt", "Fire Bolt", 35, 32, Book::Standard),
-    spell(9, "wind_blast", "Wind Blast", 41, 35, Book::Standard),
-    spell(10, "water_blast", "Water Blast", 47, 38, Book::Standard),
-    spell(11, "earth_blast", "Earth Blast", 53, 40, Book::Standard),
-    spell(12, "fire_blast", "Fire Blast", 59, 44, Book::Standard),
-    spell(13, "wind_wave", "Wind Wave", 62, 46, Book::Standard),
-    spell(14, "water_wave", "Water Wave", 65, 48, Book::Standard),
-    spell(15, "earth_wave", "Earth Wave", 70, 51, Book::Standard),
-    spell(16, "fire_wave", "Fire Wave", 75, 52, Book::Standard),
+    spell("wind_strike", "Wind Strike", 1, 15, Book::Standard),
+    spell("water_strike", "Water Strike", 5, 17, Book::Standard),
+    spell("earth_strike", "Earth Strike", 9, 19, Book::Standard),
+    spell("fire_strike", "Fire Strike", 13, 21, Book::Standard),
+    spell("wind_bolt", "Wind Bolt", 17, 23, Book::Standard),
+    spell("water_bolt", "Water Bolt", 23, 26, Book::Standard),
+    spell("earth_bolt", "Earth Bolt", 29, 29, Book::Standard),
+    spell("fire_bolt", "Fire Bolt", 35, 32, Book::Standard),
+    spell("wind_blast", "Wind Blast", 41, 35, Book::Standard),
+    spell("water_blast", "Water Blast", 47, 38, Book::Standard),
+    spell("earth_blast", "Earth Blast", 53, 40, Book::Standard),
+    spell("fire_blast", "Fire Blast", 59, 44, Book::Standard),
+    spell("wind_wave", "Wind Wave", 62, 46, Book::Standard),
+    spell("water_wave", "Water Wave", 65, 48, Book::Standard),
+    spell("earth_wave", "Earth Wave", 70, 51, Book::Standard),
+    spell("fire_wave", "Fire Wave", 75, 52, Book::Standard),
+    spell("crumble_undead", "Crumble Undead", 39, 34, Book::Standard),
+    spell("magic_dart", "Magic Dart", 50, 324, Book::Standard),
+    spell("claws_of_guthix", "Claws of Guthix", 60, 60, Book::Standard),
     spell(
-        17,
-        "crumble_undead",
-        "Crumble Undead",
-        39,
-        34,
-        Book::Standard,
-    ),
-    spell(18, "magic_dart", "Magic Dart", 50, 324, Book::Standard),
-    spell(
-        19,
-        "claws_of_guthix",
-        "Claws of Guthix",
-        60,
-        60,
-        Book::Standard,
-    ),
-    spell(
-        20,
         "flames_of_zamorak",
         "Flames of Zamorak",
         60,
         59,
         Book::Standard,
     ),
-    spell(31, "smoke_rush", "Smoke Rush", 50, 329, Book::Ancient),
-    spell(32, "shadow_rush", "Shadow Rush", 52, 337, Book::Ancient),
-    spell(33, "blood_rush", "Blood Rush", 56, 333, Book::Ancient),
-    spell(34, "ice_rush", "Ice Rush", 58, 325, Book::Ancient),
-    spell(35, "smoke_burst", "Smoke Burst", 62, 330, Book::Ancient),
-    spell(36, "shadow_burst", "Shadow Burst", 64, 338, Book::Ancient),
-    spell(37, "blood_burst", "Blood Burst", 68, 334, Book::Ancient),
-    spell(38, "ice_burst", "Ice Burst", 70, 326, Book::Ancient),
-    spell(39, "smoke_blitz", "Smoke Blitz", 74, 331, Book::Ancient),
-    spell(40, "shadow_blitz", "Shadow Blitz", 76, 339, Book::Ancient),
-    spell(41, "blood_blitz", "Blood Blitz", 80, 335, Book::Ancient),
-    spell(42, "ice_blitz", "Ice Blitz", 82, 327, Book::Ancient),
-    spell(43, "smoke_barrage", "Smoke Barrage", 86, 332, Book::Ancient),
+    spell("smoke_rush", "Smoke Rush", 50, 329, Book::Ancient),
+    spell("shadow_rush", "Shadow Rush", 52, 337, Book::Ancient),
+    spell("blood_rush", "Blood Rush", 56, 333, Book::Ancient),
+    spell("ice_rush", "Ice Rush", 58, 325, Book::Ancient),
+    spell("smoke_burst", "Smoke Burst", 62, 330, Book::Ancient),
+    spell("shadow_burst", "Shadow Burst", 64, 338, Book::Ancient),
+    spell("blood_burst", "Blood Burst", 68, 334, Book::Ancient),
+    spell("ice_burst", "Ice Burst", 70, 326, Book::Ancient),
+    spell("smoke_blitz", "Smoke Blitz", 74, 331, Book::Ancient),
+    spell("shadow_blitz", "Shadow Blitz", 76, 339, Book::Ancient),
+    spell("blood_blitz", "Blood Blitz", 80, 335, Book::Ancient),
+    spell("ice_blitz", "Ice Blitz", 82, 327, Book::Ancient),
+    spell("smoke_barrage", "Smoke Barrage", 86, 332, Book::Ancient),
+    spell("shadow_barrage", "Shadow Barrage", 88, 340, Book::Ancient),
+    spell("blood_barrage", "Blood Barrage", 92, 336, Book::Ancient),
+    spell("ice_barrage", "Ice Barrage", 94, 328, Book::Ancient),
+    spell("iban_blast", "Iban Blast", 50, 53, Book::Standard),
+    spell("wind_surge", "Wind Surge", 81, 362, Book::Standard),
+    spell("water_surge", "Water Surge", 85, 363, Book::Standard),
+    spell("earth_surge", "Earth Surge", 90, 364, Book::Standard),
+    spell("fire_surge", "Fire Surge", 95, 365, Book::Standard),
     spell(
-        44,
-        "shadow_barrage",
-        "Shadow Barrage",
-        88,
-        340,
-        Book::Ancient,
-    ),
-    spell(45, "blood_barrage", "Blood Barrage", 92, 336, Book::Ancient),
-    spell(46, "ice_barrage", "Ice Barrage", 94, 328, Book::Ancient),
-    spell(47, "iban_blast", "Iban Blast", 50, 53, Book::Standard),
-    spell(48, "wind_surge", "Wind Surge", 81, 362, Book::Standard),
-    spell(49, "water_surge", "Water Surge", 85, 363, Book::Standard),
-    spell(50, "earth_surge", "Earth Surge", 90, 364, Book::Standard),
-    spell(51, "fire_surge", "Fire Surge", 95, 365, Book::Standard),
-    spell(
-        52,
         "saradomin_strike",
         "Saradomin Strike",
         60,
@@ -413,7 +388,6 @@ pub const AUTOCAST_SPELLS: [SpellInfo; 48] = [
         Book::Standard,
     ),
     spell(
-        53,
         "inferior_demonbane",
         "Inferior Demonbane",
         44,
@@ -421,38 +395,16 @@ pub const AUTOCAST_SPELLS: [SpellInfo; 48] = [
         Book::Arceuus,
     ),
     spell(
-        54,
         "superior_demonbane",
         "Superior Demonbane",
         62,
         1303,
         Book::Arceuus,
     ),
-    spell(
-        55,
-        "dark_demonbane",
-        "Dark Demonbane",
-        82,
-        1304,
-        Book::Arceuus,
-    ),
-    spell(
-        56,
-        "ghostly_grasp",
-        "Ghostly Grasp",
-        35,
-        1267,
-        Book::Arceuus,
-    ),
-    spell(
-        57,
-        "skeletal_grasp",
-        "Skeletal Grasp",
-        56,
-        1268,
-        Book::Arceuus,
-    ),
-    spell(58, "undead_grasp", "Undead Grasp", 79, 1269, Book::Arceuus),
+    spell("dark_demonbane", "Dark Demonbane", 82, 1304, Book::Arceuus),
+    spell("ghostly_grasp", "Ghostly Grasp", 35, 1267, Book::Arceuus),
+    spell("skeletal_grasp", "Skeletal Grasp", 56, 1268, Book::Arceuus),
+    spell("undead_grasp", "Undead Grasp", 79, 1269, Book::Arceuus),
 ];
 pub const AUTOCAST_WEAPON_CATEGORIES: [i32; 3] = [18, 21, 22];
 pub const WEAPON_CATEGORY_VARBIT: i32 = 357;
@@ -2203,7 +2155,7 @@ pub fn apply_inventory(draft: &mut Inventory, read: Read) {
             .slots
             .iter()
             .enumerate()
-            .filter_map(|(i, slot)| Some((i, slot.clone().filter(|item| item.locked)?)))
+            .filter_map(|(i, slot)| Some((i, slot.as_ref().filter(|item| item.locked)?.clone())))
             .collect();
         draft.slots = slots;
         draft.slots.resize(INVENTORY_SIZE, None);
@@ -2590,7 +2542,7 @@ mod tests {
         assert_eq!(value["spell"]["book"], "ancient");
         assert_eq!(value["spell"]["autocast"], true);
         assert_eq!(AUTOCAST_SPELLS.len(), 48);
-        assert_eq!(spell_info("fire_surge").map(|s| s.index), Some(51));
+        assert_eq!(spell_info("fire_surge").map(|s| s.level), Some(95));
     }
 
     #[test]

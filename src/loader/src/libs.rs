@@ -6,9 +6,14 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::{api::Api, session::sha256_hex, update::bucket_url};
+use crate::{
+    api::Api,
+    session::{get_ok, sha256_hex},
+    update::bucket_url,
+};
 
 const VERSION_FILE: &str = ".version";
+const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FILES: usize = 2000;
@@ -89,6 +94,8 @@ fn fetch_index(api: &Api) -> Result<Index, String> {
     }
     response
         .body_mut()
+        .with_config()
+        .limit(MAX_INDEX_BYTES)
         .read_json()
         .map_err(|e| format!("unexpected lib index: {e}"))
 }
@@ -101,17 +108,11 @@ fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
     {
         return Err("the lib manifest has a path that can't be used".into());
     }
-    let mut response = api
-        .agent()
-        .get(&bucket_url(api, &manifest.path))
-        .call()
-        .map_err(|e| format!("Couldn't download the script library: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Couldn't download the script library: the server answered {}.",
-            response.status()
-        ));
-    }
+    let mut response = get_ok(
+        api.agent(),
+        &bucket_url(api, &manifest.path),
+        "the script library",
+    )?;
     let bytes = response
         .body_mut()
         .with_config()

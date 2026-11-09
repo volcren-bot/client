@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     time::{Duration, Instant},
 };
 
@@ -105,7 +106,7 @@ impl Built {
                 None => roots.push(index),
             }
         }
-        links.sort_by_key(|&(parent, order, child)| (parent, order, child));
+        links.sort_unstable();
         for (parent, _, child) in links {
             nodes[parent].children.push(child);
         }
@@ -227,7 +228,7 @@ impl Inspector {
     pub fn identifier(&self, widget: &injector::Widget) -> String {
         let mut text = format!("{}.{}", widget.group, widget.child);
         if widget.index != -1 {
-            text.push_str(&format!("[{}]", widget.index));
+            let _ = write!(text, "[{}]", widget.index);
         }
         if let Some(name) = self.names.get(&widget.group) {
             text.push(' ');

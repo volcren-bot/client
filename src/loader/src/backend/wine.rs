@@ -10,8 +10,7 @@ use std::{
 };
 
 use injector::{
-    Client, Connection, Cursor, DisplayName, GameState, Input, Item, LoadReport, Npc, Overlay,
-    PacketPage, Player, Widget,
+    Client, Connection, Cursor, DisplayName, GameState, Item, LoadReport, Overlay, PacketPage,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -111,20 +110,29 @@ fn ensure_connection(
     helper: &Path,
 ) -> Result<Arc<Mutex<Server>>, String> {
     let registry = SERVERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut registry = registry
-        .lock()
-        .map_err(|_| "injector connection registry lock poisoned.".to_string())?;
+    let lock_registry = || {
+        registry
+            .lock()
+            .map_err(|_| "injector connection registry lock poisoned.".to_string())
+    };
     let key = (location.prefix.clone(), lane);
-    let alive = registry
-        .get(&key)
-        .is_some_and(|server| server.lock().is_ok_and(|mut server| server.alive()));
-    if !alive {
-        registry.insert(
-            key.clone(),
-            Arc::new(Mutex::new(Server::spawn(location, helper)?)),
-        );
+    let existing = lock_registry()?.get(&key).cloned();
+    if let Some(server) = &existing
+        && server.lock().is_ok_and(|mut server| server.alive())
+    {
+        return Ok(server.clone());
     }
-    Ok(registry.get(&key).expect("just ensured").clone())
+    let mut registry = lock_registry()?;
+    if let Some(current) = registry.get(&key)
+        && existing
+            .as_ref()
+            .is_none_or(|dead| !Arc::ptr_eq(dead, current))
+    {
+        return Ok(current.clone());
+    }
+    let server = Arc::new(Mutex::new(Server::spawn(location, helper)?));
+    registry.insert(key, server.clone());
+    Ok(server)
 }
 
 fn disconnect(lane: Lane, location: &Location) {
@@ -218,34 +226,12 @@ pub fn console(target: &Target, settings: &Settings) -> Result<(), String> {
     call(target, settings, "console", &[])
 }
 
-pub fn input(target: &Target, settings: &Settings, input: &Input) -> Result<(), String> {
-    let helper = helper(settings)?;
-    let args = input.args(target.client.pid);
-    run(
-        &target.location,
-        &helper,
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-}
-
 pub fn draw(target: &Target, settings: &Settings, overlay: &Overlay) -> Result<(), String> {
-    let helper = helper(settings)?;
-    let args = overlay.args(target.client.pid);
-    run(
-        &target.location,
-        &helper,
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    run_args(target, settings, &overlay.args(target.client.pid))
 }
 
 pub fn set_cursor(target: &Target, settings: &Settings, cursor: &Cursor) -> Result<(), String> {
-    let helper = helper(settings)?;
-    let args = cursor.args(target.client.pid);
-    run(
-        &target.location,
-        &helper,
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
+    run_args(target, settings, &cursor.args(target.client.pid))
 }
 
 pub fn connection(target: &Target, settings: &Settings) -> Result<Option<Connection>, String> {
@@ -292,20 +278,6 @@ pub fn varbits_of(
     call(target, settings, "varbits-of", &[&varp.to_string()])
 }
 
-pub fn widget(
-    target: &Target,
-    settings: &Settings,
-    group: u16,
-    child: u16,
-) -> Result<Option<Widget>, String> {
-    call(
-        target,
-        settings,
-        "widget",
-        &[&group.to_string(), &child.to_string()],
-    )
-}
-
 pub fn item_container(
     target: &Target,
     settings: &Settings,
@@ -331,12 +303,7 @@ pub fn game_val_names(
     kind: u32,
     ids: &[i32],
 ) -> Result<Vec<Option<String>>, String> {
-    let kind = kind.to_string();
-    let ids = id_strings(ids);
-    let rest: Vec<&str> = std::iter::once(kind.as_str())
-        .chain(ids.iter().map(String::as_str))
-        .collect();
-    call(target, settings, "game-vals", &rest)
+    call_ids(target, settings, "game-vals", &[&kind.to_string()], ids)
 }
 
 pub fn item_doses(
@@ -344,9 +311,7 @@ pub fn item_doses(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<injector::config::DoseFamily>>, String> {
-    let ids = id_strings(ids);
-    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
-    call(target, settings, "item-doses", &rest)
+    call_ids(target, settings, "item-doses", &[], ids)
 }
 
 pub fn item_stackable(
@@ -354,9 +319,7 @@ pub fn item_stackable(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<bool>>, String> {
-    let ids = id_strings(ids);
-    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
-    call(target, settings, "item-stackable", &rest)
+    call_ids(target, settings, "item-stackable", &[], ids)
 }
 
 pub fn item_icons(
@@ -375,8 +338,7 @@ pub fn item_icons(
             )
         })
         .collect();
-    let rest: Vec<&str> = icons.iter().map(String::as_str).collect();
-    call(target, settings, "item-icons", &rest)
+    call(target, settings, "item-icons", &strs(&icons))
 }
 
 pub fn sprites(
@@ -384,9 +346,7 @@ pub fn sprites(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<injector::Image>>, String> {
-    let ids = id_strings(ids);
-    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
-    call(target, settings, "sprites", &rest)
+    call_ids(target, settings, "sprites", &[], ids)
 }
 
 pub fn item_changes(
@@ -395,17 +355,13 @@ pub fn item_changes(
     since: u64,
     wait: std::time::Duration,
 ) -> Result<injector::ItemPage, String> {
-    let helper = helper(settings)?;
-    let (pid, since, wait) = (
-        target.client.pid.to_string(),
-        since.to_string(),
-        wait.as_millis().to_string(),
-    );
-    run_on(
+    let (since, wait) = (since.to_string(), wait.as_millis().to_string());
+    call_on(
         Lane::Events,
-        &target.location,
-        &helper,
-        &["item-changes", &pid, &since, &wait],
+        target,
+        settings,
+        "item-changes",
+        &[&since, &wait],
     )
 }
 
@@ -414,9 +370,7 @@ pub fn item_params(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<std::collections::BTreeMap<u32, injector::config::Value>>>, String> {
-    let ids = id_strings(ids);
-    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
-    call(target, settings, "item-params", &rest)
+    call_ids(target, settings, "item-params", &[], ids)
 }
 
 pub fn item_names(
@@ -424,13 +378,7 @@ pub fn item_names(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<String>>, String> {
-    let ids = id_strings(ids);
-    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
-    call(target, settings, "item-names", &rest)
-}
-
-pub fn varc(target: &Target, settings: &Settings, id: i32) -> Result<Option<i32>, String> {
-    call(target, settings, "varc", &[&id.to_string()])
+    call_ids(target, settings, "item-names", &[], ids)
 }
 
 pub fn scene_tiles_next_frame(
@@ -439,19 +387,10 @@ pub fn scene_tiles_next_frame(
     layers: &[&str],
     after: u32,
 ) -> Result<Option<u32>, String> {
-    let helper = helper(settings)?;
-    let (pid, after) = (target.client.pid.to_string(), after.to_string());
-    let mut args = vec!["tiles-next", &pid, &after];
-    args.extend_from_slice(layers);
-    run_on(Lane::Frames, &target.location, &helper, &args)
-}
-
-pub fn npcs(target: &Target, settings: &Settings) -> Result<Vec<Npc>, String> {
-    call(target, settings, "npcs", &[])
-}
-
-pub fn players(target: &Target, settings: &Settings) -> Result<Vec<Player>, String> {
-    call(target, settings, "players", &[])
+    let after = after.to_string();
+    let mut rest = vec![after.as_str()];
+    rest.extend_from_slice(layers);
+    call_on(Lane::Frames, target, settings, "tiles-next", &rest)
 }
 
 pub fn packets(target: &Target, settings: &Settings, since: u64) -> Result<PacketPage, String> {
@@ -489,23 +428,14 @@ pub fn script_command(
 ) -> Result<Command, String> {
     let Some(target) = target else {
         let mut command = Command::new(native_helper()?);
-        command.arg("run");
-        if let Some(script) = script {
-            command.arg("--script").arg(script);
-            if let Some(lib) = lib {
-                command.arg("--lib").arg(lib);
-            }
-        }
+        super::run_args(&mut command, script, lib);
         return Ok(command);
     };
     let mut command = wine_command(&target.location, &helper(settings)?);
-    command.arg("run");
-    if let Some(path) = script.and_then(|s| windows_path(&target.location.prefix, s).ok()) {
-        command.args(["--script", &path]);
-        if let Some(lib) = lib.and_then(|l| windows_path(&target.location.prefix, l).ok()) {
-            command.args(["--lib", &lib]);
-        }
-    }
+    let prefix = &target.location.prefix;
+    let script = script.and_then(|s| windows_path(prefix, s).ok());
+    let lib = lib.and_then(|l| windows_path(prefix, l).ok());
+    super::run_args(&mut command, script.as_deref(), lib.as_deref());
     command.arg(target.client.pid.to_string());
     Ok(command)
 }
@@ -522,7 +452,7 @@ fn native_helper() -> Result<PathBuf, String> {
 
 fn helper(settings: &Settings) -> Result<PathBuf, String> {
     let helper = PathBuf::from(&settings.helper);
-    if settings.helper.is_empty() || !helper.is_file() {
+    if !helper.is_file() {
         return Err(
             "Set the path to injector.exe, it's needed to reach clients running under Wine.".into(),
         );
@@ -667,15 +597,46 @@ fn call<T: DeserializeOwned>(
     verb: &str,
     rest: &[&str],
 ) -> Result<T, String> {
+    call_on(Lane::Main, target, settings, verb, rest)
+}
+
+fn call_on<T: DeserializeOwned>(
+    lane: Lane,
+    target: &Target,
+    settings: &Settings,
+    verb: &str,
+    rest: &[&str],
+) -> Result<T, String> {
     let helper = helper(settings)?;
     let pid = target.client.pid.to_string();
     let mut args = vec![verb, pid.as_str()];
     args.extend_from_slice(rest);
-    run(&target.location, &helper, &args)
+    run_on(lane, &target.location, &helper, &args)
 }
 
-fn id_strings(ids: &[i32]) -> Vec<String> {
-    ids.iter().map(i32::to_string).collect()
+fn call_ids<T: DeserializeOwned>(
+    target: &Target,
+    settings: &Settings,
+    verb: &str,
+    head: &[&str],
+    ids: &[i32],
+) -> Result<T, String> {
+    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
+    let mut rest = head.to_vec();
+    rest.extend(ids.iter().map(String::as_str));
+    call(target, settings, verb, &rest)
+}
+
+fn run_args<T: DeserializeOwned>(
+    target: &Target,
+    settings: &Settings,
+    args: &[String],
+) -> Result<T, String> {
+    run(&target.location, &helper(settings)?, &strs(args))
+}
+
+fn strs(strings: &[String]) -> Vec<&str> {
+    strings.iter().map(String::as_str).collect()
 }
 
 fn run<T: DeserializeOwned>(

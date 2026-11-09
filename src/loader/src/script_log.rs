@@ -92,11 +92,8 @@ pub struct Blacklist(Vec<i32>);
 
 impl Blacklist {
     pub fn parse(text: &str, names: &Names) -> Self {
-        let words = text
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|word| !word.is_empty());
         Self(
-            words
+            crate::packets::words(text)
                 .flat_map(|word| {
                     word.parse()
                         .map_or_else(|_| names.ids(word).to_vec(), |id| vec![id])

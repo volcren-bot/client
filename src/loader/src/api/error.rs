@@ -18,7 +18,6 @@ impl fmt::Display for ApiError {
         match self {
             Self::Unauthorized => write!(f, "You are signed out. Sign in again."),
             Self::SignedOut(why) => write!(f, "Signed out: {why}"),
-            Self::Forbidden(message) => write!(f, "{message}"),
             Self::InsufficientCredits {
                 required: Some(required),
             } => write!(
@@ -27,7 +26,9 @@ impl fmt::Display for ApiError {
                 credits_label(*required as f64)
             ),
             Self::InsufficientCredits { required: None } => write!(f, "Not enough CREDIT."),
-            Self::NotFound(message) | Self::Server(message) => write!(f, "{message}"),
+            Self::Forbidden(message) | Self::NotFound(message) | Self::Server(message) => {
+                write!(f, "{message}")
+            }
             Self::Network(message) => write!(f, "Can't reach Volcren: {message}"),
         }
     }

@@ -33,6 +33,7 @@ pub struct Snapshot {
 }
 
 const MAX_COPIES: i64 = 4096;
+const MAX_SLOTS: usize = 4096;
 
 pub type Delta = (i32, i32);
 
@@ -211,7 +212,10 @@ impl Inspector {
             if !change.old_known {
                 items.clear();
             }
-            let Ok(slot) = usize::try_from(change.slot) else {
+            let Some(slot) = usize::try_from(change.slot)
+                .ok()
+                .filter(|&slot| slot < MAX_SLOTS)
+            else {
                 continue;
             };
             while items.len() <= slot {

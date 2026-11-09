@@ -98,6 +98,7 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
         .parse()
         .map_err(|e| format!("\"{}\" isn't a URL: {e}", request.url))?;
     let first_host = host_of(&uri)?;
+    let first_https = uri.scheme_str() == Some("https");
     let mut method = request.method.to_ascii_uppercase();
     let mut body = request.body.as_deref();
     let mut headers = Vec::new();
@@ -117,7 +118,8 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
             .checked_sub(started.elapsed())
             .filter(|left| !left.is_zero())
             .ok_or("the request timed out")?;
-        let same_host = host_of(&uri)? == first_host;
+        let same_host =
+            host_of(&uri)? == first_host && (!first_https || uri.scheme_str() == Some("https"));
         let mut builder = http::Request::builder()
             .method(method.as_str())
             .uri(uri.clone());
