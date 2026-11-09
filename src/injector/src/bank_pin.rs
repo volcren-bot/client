@@ -1,6 +1,3 @@
-//! Types the bank PIN on the keypad (interface 213) so the PIN never reaches a script; the PIN lookup and clicks all happen here.
-
-// The keypad logic is only reached through `enter`, which needs a Windows client; the tests run it everywhere.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::{
@@ -20,7 +17,6 @@ const PROMPT: u16 = 10;
 const BUTTONS: [u16; 10] = [16, 18, 20, 22, 24, 26, 28, 30, 32, 34];
 const ORDINALS: [&str; 4] = ["FIRST", "SECOND", "THIRD", "FOURTH"];
 
-// Where each root interface keeps its modal, crm and floater sub-interfaces (the lib's `Toplevel.SLOTS`).
 const SLOTS: [(i32, [i32; 3]); 4] = [
     (161, [16, 17, 18]),
     (164, [16, 17, 18]),
@@ -28,7 +24,6 @@ const SLOTS: [(i32, [i32; 3]); 4] = [
     (548, [41, 42, 43]),
 ];
 
-// The chatbox's own interfaces (the lib's `Chatbox`): the modal slot of group 162, and the level up display wherever it is.
 const CHATBOX_GROUP: i32 = 162;
 const CHATBOX_MODAL: i32 = 568;
 const LEVELUP_DISPLAY: i32 = 233;
@@ -44,7 +39,6 @@ const ATTEMPTS: usize = 3;
 const PIN_LEN: usize = 4;
 const VK_SPACE: u8 = 0x20;
 
-// The lib's mouse defaults.
 const MOUSE: wind_mouse::Options = wind_mouse::Options {
     speed: 14.0,
     wind: 5.0,
@@ -54,22 +48,18 @@ const MOUSE: wind_mouse::Options = wind_mouse::Options {
 };
 const CLICK_HOLD_MS: (f64, f64) = (40.0, 220.0);
 const KEY_HOLD_MS: (f64, f64) = (30.0, 60.0);
-// Between digits: usually around a second, never under 0.3 s or over 1.8 s.
 const DIGIT_PAUSE_MS: (f64, f64) = (300.0, 1800.0);
 const DIGIT_PAUSE_MEAN_MS: f64 = 1000.0;
 const DIGIT_PAUSE_SPREAD_MS: f64 = 300.0;
 
-/// Asks the loader for the PIN saved for an account hash: the PIN, `None` if there is none, or why it can't say.
 pub type Lookup = Box<dyn FnMut(&str) -> Result<Option<String>, String> + Send>;
 
 static LOOKUP: Mutex<Option<Lookup>> = Mutex::new(None);
 
-/// Where `bank_pin_enter` gets PINs from. Without one every call is `no_pin`.
 pub fn set_lookup(lookup: Lookup) {
     *LOOKUP.lock().unwrap_or_else(PoisonError::into_inner) = Some(lookup);
 }
 
-/// SHA-256 of the account name as the client normalizes it, as lowercase hex; the loader keys its saved accounts by this.
 pub fn hash_name(account: &str) -> String {
     use sha2::{Digest, Sha256};
     let clean: String = account
@@ -84,10 +74,7 @@ pub fn hash_name(account: &str) -> String {
             }
         })
         .collect();
-    Sha256::digest(clean.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::hex_lower(&Sha256::digest(clean.as_bytes()))
 }
 
 pub fn parse_pin(pin: &str) -> Option<[u8; 4]> {
@@ -101,19 +88,12 @@ pub fn parse_pin(pin: &str) -> Option<[u8; 4]> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// The keypad is gone and the chat shows no complaint.
     Entered,
-    /// The keypad isn't open.
     Closed,
-    /// No PIN is saved for the logged in account, or this run has no loader to ask.
     NoPin,
-    /// The name of the logged in account isn't known, or the loader couldn't say (its accounts are locked, ...).
     Unavailable,
-    /// The client said the PIN was entered incorrectly several times.
     Locked,
-    /// Every attempt ended in "try again".
     Wrong,
-    /// The keypad didn't behave: buttons never loaded, a digit wasn't clicked.
     Failed,
 }
 
@@ -131,17 +111,14 @@ impl Outcome {
     }
 }
 
-/// What the loader had for the logged in account.
 enum Pin {
     Found([u8; 4]),
     None,
     Unavailable,
 }
 
-/// Enters the logged in account's PIN on the open keypad of client `pid`.
 #[cfg(windows)]
 pub fn enter(pid: u32, pace: &(dyn Pace + Sync)) -> Result<Outcome, String> {
-    // On a thread of its own: one menu read puts hundreds of KB on the stack, more than the main thread's smaller stack allows.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("bank-pin".into())
@@ -182,29 +159,22 @@ fn run(
     };
     match keypad.enter(pin) {
         Ok(outcome) => Ok(outcome),
-        // A cancelled run posts nothing more; to the script it is a keypad that wasn't entered.
         Err(Stop::Cancelled) => Ok(Outcome::Failed),
         Err(Stop::Error(error)) => Err(error),
     }
 }
 
-/// What the keypad reads from and posts to the client.
 trait Client {
     fn widget(&self, group: u16, child: u16) -> Result<Option<Widget>, String>;
     fn children(&self, group: u16, child: u16) -> Result<Option<Vec<Widget>>, String>;
     fn sub_interfaces(&self) -> Result<Option<Vec<SubInterface>>, String>;
     fn root_interface(&self) -> Result<Option<i32>, String>;
-    /// The logged in player's name as the game shows it.
-    /// The logged in account's name, which a display name override never changes.
     fn account_name(&self) -> Result<Option<String>, String>;
     fn mouse(&self) -> Option<(i32, i32)>;
-    /// The id of the menu's first entry, which is what a click would pick.
     fn hovered(&self) -> Result<Option<i32>, String>;
     fn send(&self, input: &Input) -> Result<(), String>;
-    /// False when cancelled.
     fn sleep(&self, duration: Duration) -> bool;
-    /// Darkens the keypad and says who is handling it (`true`), or takes that away again (`false`). Best effort.
-    fn cover(&self, _on: bool) {}
+    fn cover(&self, on: bool);
 }
 
 #[cfg(windows)]
@@ -249,7 +219,6 @@ impl Client for Live<'_> {
             let _ = crate::draw(self.pid, &crate::Overlay::Clear);
             return;
         }
-        // the box around every visible part of the keypad
         let mut area: Option<[i32; 4]> = None;
         let mut child = 0;
         while let Ok(Some(part)) = crate::widget(self.pid, GROUP as u16, child) {
@@ -299,24 +268,20 @@ impl Keypad<'_> {
         }
     }
 
-    // A pause that is usually near `lo` and rarely near `hi` (the lib's `Random.left`).
     fn left(&mut self, (lo, hi): (f64, f64)) -> u64 {
         const CUTOFF: f64 = 5.0;
         let mut r = CUTOFF + 1.0;
         while r >= CUTOFF {
-            let u = self.rng.random().max(1.0e-300);
-            r = ((-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * self.rng.random()).cos()).abs();
+            r = self.normal().abs();
         }
         (r / CUTOFF * (hi - lo) + lo) as u64
     }
 
-    // A standard normal number.
     fn normal(&mut self) -> f64 {
         let u = self.rng.random().max(1.0e-300);
         (-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * self.rng.random()).cos()
     }
 
-    // A time bell-shaped around `mean` with standard deviation `spread`, redrawn until it is within `lo..=hi`.
     fn around(&mut self, mean: f64, spread: f64, (lo, hi): (f64, f64)) -> u64 {
         loop {
             let value = mean + spread * self.normal();
@@ -326,7 +291,6 @@ impl Keypad<'_> {
         }
     }
 
-    // A coordinate in `lo..lo + size`, bell-shaped around the middle (the lib's `Box.random_point_center`).
     fn around_center(&mut self, lo: i32, size: i32) -> i32 {
         let offset = (self.normal() * f64::from(size) / 6.0).round() as i32;
         (lo + size / 2 + offset).clamp(lo, lo + (size - 1).max(0))
@@ -365,7 +329,6 @@ impl Keypad<'_> {
             .any(|s| s.group == GROUP && s.parent_group == root && slots.contains(&s.parent_child)))
     }
 
-    // Every visible line of the chatbox's interfaces, lowercased.
     fn chat(&self) -> Step<String> {
         let Some(open) = self.client.sub_interfaces()? else {
             return Ok(String::new());
@@ -395,7 +358,6 @@ impl Keypad<'_> {
         Ok(lines.join("\n").to_lowercase())
     }
 
-    // The button for each digit; with nine known the tenth button's digit is the one left, and fewer than nine means the keypad is loading.
     fn buttons(&self) -> Step<[Option<Widget>; 10]> {
         let mouse = self.client.mouse();
         let mut found: [Option<Widget>; 10] = Default::default();
@@ -444,7 +406,6 @@ impl Keypad<'_> {
         Ok(self.is_open()? && self.buttons()?.iter().any(Option::is_none))
     }
 
-    // Which digit of the PIN the prompt asks for, 1 to 4, or 0 when it asks for none.
     fn digit_index(&self) -> Step<usize> {
         let prompt = self.client.widget(GROUP as u16, PROMPT)?;
         let Some(text) = prompt.filter(|p| !p.hidden).and_then(|p| p.text) else {
@@ -516,7 +477,6 @@ impl Keypad<'_> {
             if !self.click_digit(pin[index - 1])? {
                 return Ok(false);
             }
-            // a pause between clicks, usually short
             if index < PIN_LEN {
                 let pause = self.around(DIGIT_PAUSE_MEAN_MS, DIGIT_PAUSE_SPREAD_MS, DIGIT_PAUSE_MS);
                 self.sleep(pause)?;
@@ -611,7 +571,6 @@ mod tests {
 
     use super::*;
 
-    // A keypad with fixed button places: clicking the asked-for digit moves on, and a wrong digit says "try again" after four.
     struct Fake {
         pin: [u8; 4],
         position: Cell<usize>,
@@ -637,7 +596,6 @@ mod tests {
             }
         }
 
-        // Button `slot` shows the digit `(slot * 3 + 1) % 10`, laid out in a row of 40 wide boxes.
         fn digit_at(slot: usize) -> u8 {
             ((slot * 3 + 1) % 10) as u8
         }
@@ -704,7 +662,6 @@ mod tests {
             if i32::from(group) != GROUP {
                 return Ok(None);
             }
-            // like the client: the button under the mouse has its digit hidden and emptied
             Ok(BUTTONS.iter().position(|b| *b == child).map(|slot| {
                 if self.slot_under_mouse() == Some(slot) {
                     let mut digit = Self::text("");
@@ -806,7 +763,6 @@ mod tests {
         );
         assert_eq!(*fake.covers.borrow(), [true, false]);
 
-        // also when it gives up
         let fake = Fake::new([4, 7, 0, 3]);
         assert_eq!(
             run(&fake, &mut || Ok(Pin::Found([1, 1, 1, 1]))),
@@ -823,7 +779,6 @@ mod tests {
             run(&fake, &mut || Ok(Pin::Unavailable)),
             Ok(Outcome::Unavailable)
         );
-        // a closed keypad isn't worth asking the loader about
         fake.open.set(false);
         assert_eq!(
             run(&fake, &mut || panic!("asked for a PIN")),
@@ -855,7 +810,6 @@ mod tests {
         assert!(pauses.iter().all(|&ms| (300..=1800).contains(&ms)));
         let mean = pauses.iter().sum::<u64>() as f64 / pauses.len() as f64;
         assert!((950.0..1050.0).contains(&mean), "mean {mean}");
-        // most of them within a spread of the mean
         let near = pauses
             .iter()
             .filter(|&&ms| (700..=1300).contains(&ms))

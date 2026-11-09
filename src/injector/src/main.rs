@@ -1,414 +1,355 @@
-/// The stack the program runs on. Scripts nest Lua calls with Rust functions that have frames of several hundred kilobytes (the collision and cache readers), and the process's own main thread has
-/// only a megabyte or two (less than that under Wine), which a deep call from a script overflowed ("thread 'main' has overflowed its stack"). Reserving address space costs nothing until it is used.
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader, Read, Write},
+    path::PathBuf,
+    process::ExitCode,
+    sync::{Arc, Mutex, PoisonError, mpsc},
+};
+
+use injector::{antiban, form, http, transports};
+#[cfg(windows)]
+use {
+    serde::Serialize,
+    std::{path::Path, str::FromStr, time::Duration},
+};
+
 #[cfg(windows)]
 const STACK_BYTES: usize = 256 << 20;
 
 #[cfg(windows)]
-fn main() -> std::process::ExitCode {
+const PACKETS_PER_READ: usize = 1000;
+#[cfg(windows)]
+const SCRIPT_RUNS_PER_READ: usize = 2000;
+#[cfg(windows)]
+const VARC_CHANGES_PER_READ: usize = 1000;
+#[cfg(windows)]
+const ITEM_CHANGES_PER_READ: usize = 2000;
+#[cfg(windows)]
+const ITEM_CHANGES_MAX_WAIT_MS: u64 = 5000;
+
+#[cfg(windows)]
+fn main() -> ExitCode {
     match std::thread::Builder::new()
         .name("main".into())
         .stack_size(STACK_BYTES)
         .spawn(run)
     {
-        Ok(thread) => thread.join().unwrap_or(std::process::ExitCode::FAILURE),
+        Ok(thread) => thread.join().unwrap_or(ExitCode::FAILURE),
         Err(error) => {
             eprintln!("Couldn't start the main thread: {error}");
-            std::process::ExitCode::FAILURE
+            ExitCode::FAILURE
         }
     }
 }
 
 #[cfg(windows)]
-fn run() -> std::process::ExitCode {
-    use std::{
-        io::{BufRead, Write},
-        path::Path,
-    };
+fn json<T: Serialize>(result: Result<T, String>) -> String {
+    serde_json::to_string(&result).unwrap()
+}
 
-    // One read of the packet log; the loader polls often enough that a page is a second or two of a busy client.
-    const PACKETS_PER_READ: usize = 1000;
-    const SCRIPT_RUNS_PER_READ: usize = 2000;
-    const VARC_CHANGES_PER_READ: usize = 1000;
-    const ITEM_CHANGES_PER_READ: usize = 2000;
-    // The longest an `item-changes` call blocks for a change: the caller asks again, which also lets it notice it should stop.
-    const ITEM_CHANGES_MAX_WAIT_MS: u64 = 5000;
+#[cfg(windows)]
+fn reply<T: Serialize>(
+    result: Option<Result<T, String>>,
+    invalid: impl FnOnce() -> String,
+) -> String {
+    result.map_or_else(|| json::<()>(Err(invalid())), json)
+}
 
-    fn json<T: serde::Serialize>(result: Result<T, String>) -> String {
-        serde_json::to_string(&result).unwrap()
+#[cfg(windows)]
+fn checked<T: Serialize>(
+    args: &[&str],
+    what: &str,
+    run: impl FnOnce() -> Option<Result<T, String>>,
+) -> String {
+    reply(run(), || format!("Invalid {what}: {args:?}"))
+}
+
+#[cfg(windows)]
+fn with_pid<T: Serialize>(pid: &str, run: impl FnOnce(u32) -> Result<T, String>) -> String {
+    reply(num(pid).map(run), || format!("Invalid pid: {pid}"))
+}
+
+#[cfg(windows)]
+fn page<T: Serialize>(
+    pid: &str,
+    since: &str,
+    read: impl FnOnce(u32, u64) -> Result<T, String>,
+) -> String {
+    reply(
+        num(pid)
+            .zip(num(since))
+            .map(|(pid, since)| read(pid, since)),
+        || format!("Invalid pid or sequence number: {pid} {since}"),
+    )
+}
+
+#[cfg(windows)]
+fn num<T: FromStr>(text: &str) -> Option<T> {
+    text.parse().ok()
+}
+
+#[cfg(windows)]
+fn nums<T: FromStr>(texts: &[&str]) -> Option<Vec<T>> {
+    texts.iter().map(|text| num(text)).collect()
+}
+
+#[cfg(windows)]
+fn dispatch(args: &[&str]) -> String {
+    if let Some(input) = injector::Input::from_args(args) {
+        return json(input.and_then(|(pid, input)| injector::send_input(pid, &input)));
     }
-
-    fn dispatch(args: &[&str]) -> String {
-        if let Some(input) = injector::Input::from_args(args) {
-            return json(input.and_then(|(pid, input)| injector::send_input(pid, &input)));
-        }
-        if let Some(overlay) = injector::Overlay::from_args(args) {
-            return json(overlay.and_then(|(pid, overlay)| injector::draw(pid, &overlay)));
-        }
-        if let Some(cursor) = injector::Cursor::from_args(args) {
-            return json(cursor.and_then(|(pid, cursor)| injector::set_cursor(pid, &cursor)));
-        }
-        match args {
-            ["list"] => json(Ok(injector::list_clients())),
-            ["load", pid, dll, cursor @ ..] => {
-                match pid.parse() {
-                    Ok(pid) => {
-                        // The optional cursor is the `cursor` command's arguments after the pid.
-                        let cursor = match cursor {
-                            [] => Ok(None),
-                            rest => {
-                                let mut args = vec!["cursor", "0"];
-                                args.extend(rest);
-                                injector::Cursor::from_args(&args)
-                                    .transpose()
-                                    .map(|c| c.map(|(_, cursor)| cursor))
-                            }
-                        };
-                        json(cursor.and_then(|cursor| {
-                            injector::load(pid, Path::new(dll), cursor.as_ref())
-                        }))
-                    }
-                    Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
+    if let Some(overlay) = injector::Overlay::from_args(args) {
+        return json(overlay.and_then(|(pid, overlay)| injector::draw(pid, &overlay)));
+    }
+    if let Some(cursor) = injector::Cursor::from_args(args) {
+        return json(cursor.and_then(|(pid, cursor)| injector::set_cursor(pid, &cursor)));
+    }
+    match args {
+        ["list"] => json(Ok(injector::list_clients())),
+        ["load", pid, dll, cursor @ ..] => with_pid(pid, |pid| {
+            let cursor = match cursor {
+                [] => Ok(None),
+                rest => {
+                    let mut args = vec!["cursor", "0"];
+                    args.extend(rest);
+                    injector::Cursor::from_args(&args)
+                        .transpose()
+                        .map(|c| c.map(|(_, cursor)| cursor))
                 }
-            }
-            ["unload", pid] => match pid.parse() {
-                Ok(pid) => json(injector::unload(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["status", pid] => match pid.parse() {
-                Ok(pid) => json(Ok(injector::connection(pid))),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["console", pid] => match pid.parse() {
-                Ok(pid) => json(injector::open_console(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["state", pid] => match pid.parse() {
-                Ok(pid) => json(injector::game_state(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["name", pid, name] => match pid.parse() {
-                Ok(pid) => json(injector::set_display_name(pid, name)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["total-xp", pid, offset] => match pid.parse::<u32>() {
-                Ok(pid) => match *offset {
-                    "off" => json(injector::set_total_xp(pid, None)),
-                    "random" => json(injector::game_state(pid).and_then(|state| {
-                        let real: i64 = state
-                            .skills
-                            .iter()
-                            .flatten()
-                            .map(|s| s.xp.max(0) as i64)
-                            .sum();
-                        let seed = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(1, |d| d.as_nanos() as u64);
-                        injector::set_total_xp(
-                            pid,
-                            Some(injector::random_total_xp_offset(real, seed)),
-                        )
-                    })),
-                    offset => match offset.parse() {
-                        Ok(offset) => json(injector::set_total_xp(pid, Some(offset))),
-                        Err(_) => json::<()>(Err(format!(
-                            "Invalid offset: {offset} (a number, random or off)"
-                        ))),
-                    },
-                },
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["varps", pid] => match pid.parse() {
-                Ok(pid) => json(injector::varps(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["varp", pid, id] => match (pid.parse(), id.parse()) {
-                (Ok(pid), Ok(id)) => json(injector::varp_value(pid, id)),
-                _ => json::<()>(Err(format!("Invalid varp command: {args:?}"))),
-            },
-            ["varbit", pid, id] => match (pid.parse(), id.parse()) {
-                (Ok(pid), Ok(id)) => json(injector::varbit(pid, id)),
-                _ => json::<()>(Err(format!("Invalid varbit command: {args:?}"))),
-            },
-            ["varbits-of", pid, varp] => match (pid.parse(), varp.parse()) {
-                (Ok(pid), Ok(varp)) => json(injector::varbits_of(pid, varp)),
-                _ => json::<()>(Err(format!("Invalid varbits-of command (varp): {args:?}"))),
-            },
-            ["enum", pid, id] => match (pid.parse(), id.parse()) {
-                (Ok(pid), Ok(id)) => json(injector::enum_def(pid, id)),
-                _ => json::<()>(Err(format!("Invalid enum command: {args:?}"))),
-            },
-            ["item-params", pid, ids @ ..] => match (
-                pid.parse(),
-                ids.iter()
-                    .map(|id| id.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(ids)) => json(injector::item_params(pid, &ids)),
-                _ => json::<()>(Err(format!("Invalid item-params command: {args:?}"))),
-            },
-            ["containers", pid] => match pid.parse() {
-                Ok(pid) => json(injector::item_containers(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["widget-tree", pid] => match pid.parse() {
-                Ok(pid) => json(injector::widget_tree(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["container", pid, id] => match (pid.parse(), id.parse()) {
-                (Ok(pid), Ok(id)) => json(injector::item_container(pid, id)),
-                _ => json::<()>(Err(format!("Invalid container command: {args:?}"))),
-            },
-            ["project", pid, coords @ ..] => match (
-                pid.parse(),
-                coords
+            };
+            cursor.and_then(|cursor| injector::load(pid, Path::new(dll), cursor.as_ref()))
+        }),
+        ["unload", pid] => with_pid(pid, injector::unload),
+        ["status", pid] => with_pid(pid, |pid| Ok(injector::connection(pid))),
+        ["console", pid] => with_pid(pid, injector::open_console),
+        ["state", pid] => with_pid(pid, injector::game_state),
+        ["name", pid, name] => with_pid(pid, |pid| injector::set_display_name(pid, name)),
+        ["total-xp", pid, offset] => with_pid(pid, |pid| match *offset {
+            "off" => injector::set_total_xp(pid, None),
+            "random" => injector::game_state(pid).and_then(|state| {
+                let real: i64 = state
+                    .skills
                     .iter()
-                    .map(|c| c.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(c)) if c.len() % 3 == 0 => {
-                    let points: Vec<injector::projection::Point> = c
-                        .chunks(3)
-                        .map(|p| injector::projection::Point::new(p[0], p[1], p[2]))
-                        .collect();
-                    json(injector::project(
-                        pid,
-                        &points,
-                        injector::projection::Via::Auto,
-                    ))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid project command (x y height ...): {args:?}"
-                ))),
+                    .flatten()
+                    .map(|s| s.xp.max(0) as i64)
+                    .sum();
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(1, |d| d.as_nanos() as u64);
+                injector::set_total_xp(pid, Some(injector::random_total_xp_offset(real, seed)))
+            }),
+            offset => match offset.parse() {
+                Ok(offset) => injector::set_total_xp(pid, Some(offset)),
+                Err(_) => Err(format!(
+                    "Invalid offset: {offset} (a number, random or off)"
+                )),
             },
-            ["mem", pid, address, count] => match (
-                pid.parse(),
-                u64::from_str_radix(address.trim_start_matches("0x"), 16),
-                count.parse(),
-            ) {
-                (Ok(pid), Ok(address), Ok(count)) => {
-                    json(injector::memory_words(pid, address, count))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid mem command (pid hex-address count): {args:?}"
-                ))),
+        }),
+        ["varps", pid] => with_pid(pid, injector::varps),
+        ["varp", pid, id] => checked(args, "varp command", || {
+            Some(injector::varp_value(num(pid)?, num(id)?))
+        }),
+        ["varbit", pid, id] => checked(args, "varbit command", || {
+            Some(injector::varbit(num(pid)?, num(id)?))
+        }),
+        ["varbits-of", pid, varp] => checked(args, "varbits-of command (varp)", || {
+            Some(injector::varbits_of(num(pid)?, num(varp)?))
+        }),
+        ["enum", pid, id] => checked(args, "enum command", || {
+            Some(injector::enum_def(num(pid)?, num(id)?))
+        }),
+        ["item-params", pid, ids @ ..] => checked(args, "item-params command", || {
+            Some(injector::item_params(num(pid)?, &nums::<i32>(ids)?))
+        }),
+        ["containers", pid] => with_pid(pid, injector::item_containers),
+        ["widget-tree", pid] => with_pid(pid, injector::widget_tree),
+        ["container", pid, id] => checked(args, "container command", || {
+            Some(injector::item_container(num(pid)?, num(id)?))
+        }),
+        ["project", pid, coords @ ..] => checked(args, "project command (x y height ...)", || {
+            let pid = num(pid)?;
+            let coords = nums::<i32>(coords)?;
+            let (points, []) = coords.as_chunks::<3>() else {
+                return None;
+            };
+            let points: Vec<_> = points
+                .iter()
+                .map(|&[x, y, height]| injector::projection::Point::new(x, y, height))
+                .collect();
+            Some(injector::project(
+                pid,
+                &points,
+                injector::projection::Via::Auto,
+            ))
+        }),
+        ["mem", pid, address, count] => {
+            checked(args, "mem command (pid hex-address count)", || {
+                Some(injector::memory_words(
+                    num(pid)?,
+                    u64::from_str_radix(address.trim_start_matches("0x"), 16).ok()?,
+                    num(count)?,
+                ))
+            })
+        }
+        ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => {
+            checked(args, "npc-words command (pid index count [def])", || {
+                Some(injector::npc_words(
+                    num(pid)?,
+                    num(index)?,
+                    num(count)?,
+                    rest == ["def"],
+                ))
+            })
+        }
+        ["widget-words", pid, group, child, index, count] => checked(
+            args,
+            "widget-words command (pid group child index|-1 count)",
+            || {
+                Some(injector::widget_words(
+                    num(pid)?,
+                    num(group)?,
+                    num(child)?,
+                    num(index)?,
+                    num(count)?,
+                ))
             },
-            ["npc-words", pid, index, count, rest @ ..] if rest.len() <= 1 => {
-                match (pid.parse(), index.parse(), count.parse()) {
-                    (Ok(pid), Ok(index), Ok(count)) => {
-                        json(injector::npc_words(pid, index, count, rest == ["def"]))
-                    }
-                    _ => json::<()>(Err(format!(
-                        "Invalid npc-words command (pid index count [def]): {args:?}"
-                    ))),
-                }
-            }
-            ["widget-words", pid, group, child, index, count] => match (
-                pid.parse(),
-                group.parse(),
-                child.parse(),
-                index.parse(),
-                count.parse(),
-            ) {
-                (Ok(pid), Ok(group), Ok(child), Ok(index), Ok(count)) => {
-                    json(injector::widget_words(pid, group, child, index, count))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid widget-words command (pid group child index|-1 count): {args:?}"
-                ))),
-            },
-            ["widget-dump", pid, count] => match (pid.parse(), count.parse()) {
-                (Ok(pid), Ok(count)) => json(injector::widget_dump(pid, count)),
-                _ => json::<()>(Err(format!(
-                    "Invalid widget-dump command (pid count): {args:?}"
-                ))),
-            },
-            ["watch", pid, seconds, bytes] => match (pid.parse(), seconds.parse(), bytes.parse()) {
-                (Ok(pid), Ok(seconds), Ok(bytes)) => {
-                    json(injector::watch_client(pid, seconds, bytes))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid watch command (pid seconds bytes): {args:?}"
-                ))),
-            },
-            ["world-entities", pid] => match pid.parse() {
-                Ok(pid) => json(injector::world_entities(pid)),
-                _ => json::<()>(Err(format!("Invalid world-entities command: {args:?}"))),
-            },
-            ["world-debug", pid] => match pid.parse() {
-                Ok(pid) => json(injector::world_debug(pid)),
-                _ => json::<()>(Err(format!("Invalid world-debug command: {args:?}"))),
-            },
-            ["player-words", pid, index, count] => {
-                match (pid.parse(), index.parse(), count.parse()) {
-                    (Ok(pid), Ok(index), Ok(count)) => {
-                        json(injector::player_words(pid, index, count))
-                    }
-                    _ => json::<()>(Err(format!(
-                        "Invalid player-words command (pid index count): {args:?}"
-                    ))),
-                }
-            }
-            ["npc-model", pid, index] => match (pid.parse(), index.parse()) {
-                (Ok(pid), Ok(index)) => json(injector::npc_model(pid, index)),
-                _ => json::<()>(Err(format!("Invalid npc-model command: {args:?}"))),
-            },
-            ["player-model", pid, index] => match (pid.parse(), index.parse()) {
-                (Ok(pid), Ok(index)) => json(injector::player_model(pid, index)),
-                _ => json::<()>(Err(format!("Invalid player-model command: {args:?}"))),
-            },
-            ["cache-list", pid, index] => match (pid.parse(), index.parse()) {
-                (Ok(pid), Ok(index)) => json(injector::cache_archives(pid, index)),
-                _ => json::<()>(Err(format!(
-                    "Invalid cache-list command (index [archive]): {args:?}"
-                ))),
-            },
-            ["cache-list", pid, index, archive] => {
-                match (pid.parse(), index.parse(), archive.parse()) {
-                    (Ok(pid), Ok(index), Ok(archive)) => {
-                        json(injector::cache_archive_files(pid, index, archive))
-                    }
-                    _ => json::<()>(Err(format!(
-                        "Invalid cache-list command (index [archive]): {args:?}"
-                    ))),
-                }
-            }
-            ["cache-file", pid, index, archive, file, out] => {
-                match (pid.parse(), index.parse(), archive.parse(), file.parse()) {
-                    (Ok(pid), Ok(index), Ok(archive), Ok(file)) => json(
-                        injector::cache_files(pid, index, &[[archive, file]]).and_then(
-                            |mut files| {
-                                let data = files
-                                    .pop()
-                                    .flatten()
-                                    .ok_or_else(|| format!("no file {index}/{archive}/{file}"))?;
-                                std::fs::write(out, &data)
-                                    .map_err(|e| format!("Cannot write {out}: {e}"))?;
-                                Ok(data.len())
-                            },
-                        ),
-                    ),
-                    _ => json::<()>(Err(format!(
-                        "Invalid cache-file command (index archive file out): {args:?}"
-                    ))),
-                }
-            }
-            ["collision", pid, plane, x1, y1, x2, y2] => match (
-                pid.parse(),
-                plane.parse(),
-                x1.parse(),
-                y1.parse(),
-                x2.parse(),
-                y2.parse(),
-            ) {
-                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => {
-                    json(injector::collision_area(pid, plane, x1, y1, x2, y2))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid collision command (plane x1 y1 x2 y2): {args:?}"
-                ))),
-            },
-            ["path", pid, plane, x1, y1, x2, y2] => match (
-                pid.parse(),
-                plane.parse(),
-                x1.parse(),
-                y1.parse(),
-                x2.parse(),
-                y2.parse(),
-            ) {
-                (Ok(pid), Ok(plane), Ok(x1), Ok(y1), Ok(x2), Ok(y2)) => {
-                    json(injector::find_path(pid, plane, [x1, y1], [x2, y2], None))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid path command (plane x1 y1 x2 y2): {args:?}"
-                ))),
-            },
-            ["route", pid, x1, y1, x2, y2, rest @ ..] => match (
-                pid.parse(),
-                x1.parse(),
-                y1.parse(),
-                x2.parse(),
-                y2.parse(),
-                rest,
-            ) {
-                // an optional seed asks for a randomized route
-                (Ok(pid), Ok(x1), Ok(y1), Ok(x2), Ok(y2), []) => {
-                    json(injector::scene_route(pid, [x1, y1], [x2, y2], None))
-                }
-                (Ok(pid), Ok(x1), Ok(y1), Ok(x2), Ok(y2), [seed])
-                    if seed.parse::<u64>().is_ok() =>
-                {
-                    let options = injector::scene_graph::Options {
-                        seed: seed.parse().unwrap_or_default(),
+        ),
+        ["widget-dump", pid, count] => checked(args, "widget-dump command (pid count)", || {
+            Some(injector::widget_dump(num(pid)?, num(count)?))
+        }),
+        ["watch", pid, seconds, bytes] => {
+            checked(args, "watch command (pid seconds bytes)", || {
+                Some(injector::watch_client(
+                    num(pid)?,
+                    num(seconds)?,
+                    num(bytes)?,
+                ))
+            })
+        }
+        ["world-entities", pid] => checked(args, "world-entities command", || {
+            Some(injector::world_entities(num(pid)?))
+        }),
+        ["world-debug", pid] => checked(args, "world-debug command", || {
+            Some(injector::world_debug(num(pid)?))
+        }),
+        ["player-words", pid, index, count] => {
+            checked(args, "player-words command (pid index count)", || {
+                Some(injector::player_words(num(pid)?, num(index)?, num(count)?))
+            })
+        }
+        ["npc-model", pid, index] => checked(args, "npc-model command", || {
+            Some(injector::npc_model(num(pid)?, num(index)?))
+        }),
+        ["player-model", pid, index] => checked(args, "player-model command", || {
+            Some(injector::player_model(num(pid)?, num(index)?))
+        }),
+        ["cache-list", pid, index] => checked(args, "cache-list command (index [archive])", || {
+            Some(injector::cache_archives(num(pid)?, num(index)?))
+        }),
+        ["cache-list", pid, index, archive] => {
+            checked(args, "cache-list command (index [archive])", || {
+                Some(injector::cache_archive_files(
+                    num(pid)?,
+                    num(index)?,
+                    num(archive)?,
+                ))
+            })
+        }
+        ["cache-file", pid, index, archive, file, out] => {
+            checked(args, "cache-file command (index archive file out)", || {
+                let (pid, index, archive, file) =
+                    (num(pid)?, num(index)?, num(archive)?, num(file)?);
+                Some(
+                    injector::cache_files(pid, index, &[[archive, file]]).and_then(|mut files| {
+                        let data = files
+                            .pop()
+                            .flatten()
+                            .ok_or_else(|| format!("no file {index}/{archive}/{file}"))?;
+                        std::fs::write(out, &data)
+                            .map_err(|e| format!("Cannot write {out}: {e}"))?;
+                        Ok(data.len())
+                    }),
+                )
+            })
+        }
+        ["collision", pid, plane, x1, y1, x2, y2] => {
+            checked(args, "collision command (plane x1 y1 x2 y2)", || {
+                Some(injector::collision_area(
+                    num(pid)?,
+                    num(plane)?,
+                    num(x1)?,
+                    num(y1)?,
+                    num(x2)?,
+                    num(y2)?,
+                ))
+            })
+        }
+        ["path", pid, plane, x1, y1, x2, y2] => {
+            checked(args, "path command (plane x1 y1 x2 y2)", || {
+                Some(injector::find_path(
+                    num(pid)?,
+                    num(plane)?,
+                    [num(x1)?, num(y1)?],
+                    [num(x2)?, num(y2)?],
+                    None,
+                ))
+            })
+        }
+        ["route", pid, x1, y1, x2, y2, rest @ ..] => {
+            checked(args, "route command (x1 y1 x2 y2 [seed])", || {
+                let options = match rest {
+                    [] => None,
+                    [seed] => Some(injector::scene_graph::Options {
+                        seed: num(seed)?,
                         ..Default::default()
-                    };
-                    json(injector::scene_route(
-                        pid,
-                        [x1, y1],
-                        [x2, y2],
-                        Some(options),
-                    ))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid route command (x1 y1 x2 y2 [seed]): {args:?}"
-                ))),
-            },
-            ["scene-collision", pid] => match pid.parse() {
-                Ok(pid) => json(injector::scene_collision(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["locs", pid] => match pid.parse() {
-                Ok(pid) => json(injector::locs(pid, None)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["loc-model", pid, kind, x, y, id] => {
-                match (pid.parse(), kind.parse(), x.parse(), y.parse(), id.parse()) {
-                    (Ok(pid), Ok(kind), Ok(x), Ok(y), Ok(id)) => {
-                        json(injector::loc_model(pid, kind, x, y, id))
-                    }
-                    _ => json::<()>(Err(format!(
-                        "Invalid loc-model command (kind scene_x scene_y id): {args:?}"
-                    ))),
-                }
-            }
-            ["menu", pid] => match pid.parse() {
-                Ok(pid) => json(injector::menu(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["selected", pid] => match pid.parse() {
-                Ok(pid) => json(injector::selected_widget(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["interfaces", pid] => match pid.parse() {
-                Ok(pid) => json(injector::sub_interfaces(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["game-vals", pid, kind, ids @ ..] => match (
-                pid.parse(),
-                kind.parse(),
-                ids.iter()
-                    .map(|id| id.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(kind), Ok(ids)) => json(injector::game_val_names(pid, kind, &ids)),
-                _ => json::<()>(Err(format!("Invalid game-vals command: {args:?}"))),
-            },
-            ["item-names", pid, ids @ ..] => match (
-                pid.parse(),
-                ids.iter()
-                    .map(|id| id.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(ids)) => json(injector::item_names(pid, &ids)),
-                _ => json::<()>(Err(format!("Invalid item-names command: {args:?}"))),
-            },
-            ["item-icons", pid, icons @ ..] => match (
-                pid.parse(),
-                icons
+                    }),
+                    _ => return None,
+                };
+                Some(injector::scene_route(
+                    num(pid)?,
+                    [num(x1)?, num(y1)?],
+                    [num(x2)?, num(y2)?],
+                    options,
+                ))
+            })
+        }
+        ["scene-collision", pid] => with_pid(pid, injector::scene_collision),
+        ["locs", pid] => with_pid(pid, |pid| injector::locs(pid, None)),
+        ["loc-model", pid, kind, x, y, id] => {
+            checked(args, "loc-model command (kind scene_x scene_y id)", || {
+                Some(injector::loc_model(
+                    num(pid)?,
+                    num(kind)?,
+                    num(x)?,
+                    num(y)?,
+                    num(id)?,
+                ))
+            })
+        }
+        ["menu", pid] => with_pid(pid, injector::menu),
+        ["selected", pid] => with_pid(pid, injector::selected_widget),
+        ["interfaces", pid] => with_pid(pid, injector::sub_interfaces),
+        ["game-vals", pid, kind, ids @ ..] => checked(args, "game-vals command", || {
+            Some(injector::game_val_names(
+                num(pid)?,
+                num(kind)?,
+                &nums::<i32>(ids)?,
+            ))
+        }),
+        ["item-names", pid, ids @ ..] => checked(args, "item-names command", || {
+            Some(injector::item_names(num(pid)?, &nums::<i32>(ids)?))
+        }),
+        ["item-icons", pid, icons @ ..] => checked(
+            args,
+            "item-icons command (id[:quantity[:1 to draw the count]]...)",
+            || {
+                let pid = num(pid)?;
+                let icons = icons
                     .iter()
                     .map(|icon| {
                         let mut parts = icon.split(':');
-                        let id = parts.next()?.parse().ok()?;
-                        let quantity = parts.next().map_or(Some(1), |q| q.parse().ok())?;
+                        let id = num(parts.next()?)?;
+                        let quantity = parts.next().map_or(Some(1), num)?;
                         let show_count = parts.next().is_some_and(|c| c == "1");
                         Some(injector::ItemIconRequest {
                             id,
@@ -416,154 +357,88 @@ fn run() -> std::process::ExitCode {
                             show_count,
                         })
                     })
-                    .collect::<Option<Vec<_>>>(),
-            ) {
-                (Ok(pid), Some(icons)) => json(injector::item_icons(pid, &icons)),
-                _ => json::<()>(Err(format!(
-                    "Invalid item-icons command (id[:quantity[:1 to draw the count]]...): {args:?}"
-                ))),
+                    .collect::<Option<Vec<_>>>()?;
+                Some(injector::item_icons(pid, &icons))
             },
-            ["sprites", pid, ids @ ..] => match (
-                pid.parse(),
-                ids.iter()
-                    .map(|id| id.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(ids)) => json(injector::sprites(pid, &ids)),
-                _ => json::<()>(Err(format!("Invalid sprites command: {args:?}"))),
-            },
-            ["item-doses", pid, ids @ ..] => match (
-                pid.parse(),
-                ids.iter()
-                    .map(|id| id.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(ids)) => json(injector::item_doses(pid, &ids)),
-                _ => json::<()>(Err(format!("Invalid item-doses command: {args:?}"))),
-            },
-            ["item-stackable", pid, ids @ ..] => match (
-                pid.parse(),
-                ids.iter()
-                    .map(|id| id.parse())
-                    .collect::<Result<Vec<i32>, _>>(),
-            ) {
-                (Ok(pid), Ok(ids)) => json(injector::item_stackable(pid, &ids)),
-                _ => json::<()>(Err(format!("Invalid item-stackable command: {args:?}"))),
-            },
-            ["varc", pid, id] => match (pid.parse(), id.parse()) {
-                (Ok(pid), Ok(id)) => json(injector::varc(pid, id)),
-                _ => json::<()>(Err(format!("Invalid varc command: {args:?}"))),
-            },
-            ["tiles-next", pid, after, layers @ ..] => match (pid.parse(), after.parse()) {
-                (Ok(pid), Ok(after)) => json(injector::scene_tiles_next_frame(pid, layers, after)),
-                _ => json::<()>(Err(format!("Invalid tiles-next command: {args:?}"))),
-            },
-            ["tiles", pid, layers @ ..] => match pid.parse() {
-                Ok(pid) => json(injector::scene_tiles(pid, layers)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["npcs", pid] => match pid.parse() {
-                Ok(pid) => json(injector::npcs(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["projectiles", pid] => match pid.parse() {
-                Ok(pid) => json(injector::projectiles(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["spot-anims", pid] => match pid.parse() {
-                Ok(pid) => json(injector::spot_anims(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["packets", pid, since] => match (pid.parse(), since.parse()) {
-                (Ok(pid), Ok(since)) => json(injector::packets(pid, since, PACKETS_PER_READ)),
-                _ => json::<()>(Err(format!(
-                    "Invalid pid or sequence number: {pid} {since}"
-                ))),
-            },
-            ["packet-layouts", pid] => match pid.parse() {
-                Ok(pid) => json(injector::packet_layouts(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["scripts", pid, since] => match (pid.parse(), since.parse()) {
-                (Ok(pid), Ok(since)) => {
-                    json(injector::script_runs(pid, since, SCRIPT_RUNS_PER_READ))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid pid or sequence number: {pid} {since}"
-                ))),
-            },
-            ["varc-changes", pid, since] => match (pid.parse(), since.parse()) {
-                (Ok(pid), Ok(since)) => {
-                    json(injector::varc_changes(pid, since, VARC_CHANGES_PER_READ))
-                }
-                _ => json::<()>(Err(format!(
-                    "Invalid pid or sequence number: {pid} {since}"
-                ))),
-            },
-            ["item-changes", pid, since, rest @ ..] => match (
-                pid.parse(),
-                since.parse(),
-                rest.first().map_or(Ok(0u64), |wait| wait.parse()),
-            ) {
-                (Ok(pid), Ok(since), Ok(wait)) => json(injector::item_changes_wait(
-                    pid,
-                    since,
+        ),
+        ["sprites", pid, ids @ ..] => checked(args, "sprites command", || {
+            Some(injector::sprites(num(pid)?, &nums::<i32>(ids)?))
+        }),
+        ["item-doses", pid, ids @ ..] => checked(args, "item-doses command", || {
+            Some(injector::item_doses(num(pid)?, &nums::<i32>(ids)?))
+        }),
+        ["item-stackable", pid, ids @ ..] => checked(args, "item-stackable command", || {
+            Some(injector::item_stackable(num(pid)?, &nums::<i32>(ids)?))
+        }),
+        ["varc", pid, id] => checked(args, "varc command", || {
+            Some(injector::varc(num(pid)?, num(id)?))
+        }),
+        ["tiles-next", pid, after, layers @ ..] => checked(args, "tiles-next command", || {
+            Some(injector::scene_tiles_next_frame(
+                num(pid)?,
+                layers,
+                num(after)?,
+            ))
+        }),
+        ["tiles", pid, layers @ ..] => with_pid(pid, |pid| injector::scene_tiles(pid, layers)),
+        ["npcs", pid] => with_pid(pid, injector::npcs),
+        ["projectiles", pid] => with_pid(pid, injector::projectiles),
+        ["spot-anims", pid] => with_pid(pid, injector::spot_anims),
+        ["packets", pid, since] => page(pid, since, |pid, since| {
+            injector::packets(pid, since, PACKETS_PER_READ)
+        }),
+        ["packet-layouts", pid] => with_pid(pid, injector::packet_layouts),
+        ["scripts", pid, since] => page(pid, since, |pid, since| {
+            injector::script_runs(pid, since, SCRIPT_RUNS_PER_READ)
+        }),
+        ["varc-changes", pid, since] => page(pid, since, |pid, since| {
+            injector::varc_changes(pid, since, VARC_CHANGES_PER_READ)
+        }),
+        ["item-changes", pid, since, rest @ ..] => {
+            checked(args, "pid, sequence number or wait", || {
+                let wait = match rest.first() {
+                    Some(wait) => num::<u64>(wait)?,
+                    None => 0,
+                };
+                Some(injector::item_changes_wait(
+                    num(pid)?,
+                    num(since)?,
                     ITEM_CHANGES_PER_READ,
-                    std::time::Duration::from_millis(wait.min(ITEM_CHANGES_MAX_WAIT_MS)),
-                )),
-                _ => json::<()>(Err(format!(
-                    "Invalid pid, sequence number or wait: {args:?}"
-                ))),
-            },
-            ["chat", pid] => match pid.parse() {
-                Ok(pid) => json(injector::chat_messages(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["in-instance", pid] => match pid.parse() {
-                Ok(pid) => json(injector::in_instance(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["map-regions", pid] => match pid.parse() {
-                Ok(pid) => json(injector::map_regions(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["ground-items", pid] => match pid.parse() {
-                Ok(pid) => json(injector::ground_items(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["children", pid, group, child] => match (pid.parse(), group.parse(), child.parse()) {
-                (Ok(pid), Ok(group), Ok(child)) => {
-                    json(injector::widget_children(pid, group, child))
-                }
-                _ => json::<()>(Err(format!("Invalid children command: {args:?}"))),
-            },
-            ["world-select", pid] => match pid.parse() {
-                Ok(pid) => json(injector::world_select(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["players", pid] => match pid.parse() {
-                Ok(pid) => json(injector::players(pid)),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["screenshot", pid, path] => match pid.parse() {
-                Ok(pid) => json(injector::screenshot(pid, std::path::Path::new(path))),
-                Err(_) => json::<()>(Err(format!("Invalid pid: {pid}"))),
-            },
-            ["widget", pid, group, child] => match (pid.parse(), group.parse(), child.parse()) {
-                (Ok(pid), Ok(group), Ok(child)) => json(injector::widget(pid, group, child)),
-                _ => json::<()>(Err(format!("Invalid widget command: {args:?}"))),
-            },
-            _ => json::<()>(Err(format!("Unknown command: {args:?}"))),
+                    Duration::from_millis(wait.min(ITEM_CHANGES_MAX_WAIT_MS)),
+                ))
+            })
         }
+        ["chat", pid] => with_pid(pid, injector::chat_messages),
+        ["in-instance", pid] => with_pid(pid, injector::in_instance),
+        ["map-regions", pid] => with_pid(pid, injector::map_regions),
+        ["ground-items", pid] => with_pid(pid, injector::ground_items),
+        ["children", pid, group, child] => checked(args, "children command", || {
+            Some(injector::widget_children(
+                num(pid)?,
+                num(group)?,
+                num(child)?,
+            ))
+        }),
+        ["world-select", pid] => with_pid(pid, injector::world_select),
+        ["players", pid] => with_pid(pid, injector::players),
+        ["screenshot", pid, path] => {
+            with_pid(pid, |pid| injector::screenshot(pid, Path::new(path)))
+        }
+        ["widget", pid, group, child] => checked(args, "widget command", || {
+            Some(injector::widget(num(pid)?, num(group)?, num(child)?))
+        }),
+        _ => json::<()>(Err(format!("Unknown command: {args:?}"))),
     }
+}
 
+#[cfg(windows)]
+fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
     if args == ["serve"] {
-        let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
-        for line in stdin.lock().lines() {
+        for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if line.trim().is_empty() {
                 continue;
@@ -576,7 +451,7 @@ fn run() -> std::process::ExitCode {
                 break;
             }
         }
-        return std::process::ExitCode::SUCCESS;
+        return ExitCode::SUCCESS;
     }
 
     if let ["run", rest @ ..] = args.as_slice() {
@@ -609,14 +484,14 @@ fn run() -> std::process::ExitCode {
             "       injector overlay <pid> rect <x1> <y1> <x2> <y2> <r> <g> <b> <a> | overlay <pid> clear"
         );
         eprintln!("       injector serve | run [--script <path> [--lib <dir>]] [pid]");
-        return std::process::ExitCode::from(2);
+        return ExitCode::from(2);
     }
     println!("{}", dispatch(&args));
-    std::process::ExitCode::SUCCESS
+    ExitCode::SUCCESS
 }
 
 #[cfg(not(windows))]
-fn main() -> std::process::ExitCode {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if let ["run", rest @ ..] = args.as_slice()
@@ -625,18 +500,56 @@ fn main() -> std::process::ExitCode {
         return run_script(rest);
     }
     eprintln!("injector only runs on Windows or under Wine (except `run` with no pid).");
-    std::process::ExitCode::FAILURE
+    ExitCode::FAILURE
 }
 
-fn run_script(args: &[&str]) -> std::process::ExitCode {
-    use std::io::{Read, Write};
+fn unreadable(what: &str) -> ExitCode {
+    eprintln!("Couldn't read the {what} from stdin.");
+    ExitCode::from(2)
+}
 
+fn read_block(input: &mut impl Read, len: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    input.take(len as u64).read_to_end(&mut bytes).ok()?;
+    (bytes.len() == len).then_some(bytes)
+}
+
+fn apply_setting(line: &str) -> bool {
+    if let Some(payload) = line.strip_prefix(antiban::PREFIX) {
+        if let Some(config) = antiban::parse(payload) {
+            antiban::set(config);
+        }
+    } else if let Some(payload) = line.strip_prefix(transports::SETTINGS_PREFIX) {
+        if let Some(settings) = transports::parse_settings(payload) {
+            transports::set_settings(settings);
+        }
+    } else {
+        return false;
+    }
+    true
+}
+
+fn ask(replies: &Mutex<mpsc::Receiver<String>>, request: String) -> Result<String, String> {
+    {
+        let mut out = std::io::stdout().lock();
+        write!(out, "{request}{}", form::ENTRY_END)
+            .and_then(|()| out.flush())
+            .map_err(|e| e.to_string())?;
+    }
+    replies
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .recv()
+        .map_err(|_| "the loader closed the script's input".to_owned())
+}
+
+fn run_script(args: &[&str]) -> ExitCode {
     let (script_path, args) = match args {
-        ["--script", path, rest @ ..] => (Some(std::path::PathBuf::from(path)), rest),
+        ["--script", path, rest @ ..] => (Some(PathBuf::from(path)), rest),
         _ => (None, args),
     };
     let (lib_dir, args) = match args {
-        ["--lib", dir, rest @ ..] => (Some(std::path::PathBuf::from(dir)), rest),
+        ["--lib", dir, rest @ ..] => (Some(PathBuf::from(dir)), rest),
         _ => (None, args),
     };
     let pid = match args {
@@ -645,15 +558,14 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
             Ok(pid) => Some(pid),
             Err(_) => {
                 eprintln!("Invalid pid: {pid}");
-                return std::process::ExitCode::from(2);
+                return ExitCode::from(2);
             }
         },
         _ => {
             eprintln!("Usage: injector run [--script <path> [--lib <dir>]] [pid]");
-            return std::process::ExitCode::from(2);
+            return ExitCode::from(2);
         }
     };
-    // Scripts assume the agent is loaded (`connection()` always returns a connection), so refuse to start without it (or with a mismatched protocol).
     #[cfg(windows)]
     if let Some(pid) = pid {
         match injector::connection(pid) {
@@ -661,92 +573,63 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                 eprintln!(
                     "The agent isn't loaded in client {pid}. Load it first (`injector load <pid> <dll>`)."
                 );
-                return std::process::ExitCode::FAILURE;
+                return ExitCode::FAILURE;
             }
             Some(conn) => {
                 if let Some(problem) = conn.problem() {
                     eprintln!("Client {pid}: {problem}.");
-                    return std::process::ExitCode::FAILURE;
+                    return ExitCode::FAILURE;
                 }
             }
         }
     }
-    use injector::form::{self, SCRIPT_PREFIX};
-    use std::io::BufRead;
 
-    let mut input = std::io::BufReader::new(std::io::stdin());
+    let mut input = BufReader::new(std::io::stdin());
     let mut first = String::new();
     if input.read_line(&mut first).is_err() {
-        eprintln!("Couldn't read the script from stdin.");
-        return std::process::ExitCode::from(2);
+        return unreadable("script");
     }
-    // The loader says first what it answers: PIN requests and HTTP requests.
     let (mut loader_has_pins, mut loader_has_http) = (false, false);
     loop {
         match first.trim_end() {
             form::PINS_PREFIX => loader_has_pins = true,
-            injector::http::CAPABILITY_PREFIX => loader_has_http = true,
-            line if line.starts_with(injector::antiban::PREFIX) => {
-                if let Some(config) =
-                    injector::antiban::parse(&line[injector::antiban::PREFIX.len()..])
-                {
-                    injector::antiban::set(config);
-                }
-            }
-            line if line.starts_with(injector::transports::SETTINGS_PREFIX) => {
-                if let Some(settings) = injector::transports::parse_settings(
-                    &line[injector::transports::SETTINGS_PREFIX.len()..],
-                ) {
-                    injector::transports::set_settings(settings);
-                }
-            }
-            line if line.starts_with(injector::transports::PREFIX) => {
-                if let Some(data) =
-                    injector::transports::parse(&line[injector::transports::PREFIX.len()..])
-                {
-                    injector::transports::set(data);
+            http::CAPABILITY_PREFIX => loader_has_http = true,
+            line if apply_setting(line) => {}
+            line if line.starts_with(transports::PREFIX) => {
+                if let Some(data) = transports::parse(&line[transports::PREFIX.len()..]) {
+                    transports::set(data);
                 }
             }
             _ => break,
         }
         first.clear();
         if input.read_line(&mut first).is_err() {
-            eprintln!("Couldn't read the script from stdin.");
-            return std::process::ExitCode::from(2);
+            return unreadable("script");
         }
     }
-    // The script's other files can come first, so they never touch the disk.
-    let mut modules = std::collections::HashMap::new();
+    let mut modules = HashMap::new();
     if let Some(len) = first
         .strip_prefix(form::MODULES_PREFIX)
         .map(|len| len.trim().parse::<usize>())
     {
         let files = len.ok().and_then(|len| {
-            let mut bytes = vec![0u8; len];
-            input.read_exact(&mut bytes).ok()?;
-            serde_json::from_slice::<std::collections::HashMap<String, String>>(&bytes).ok()
+            serde_json::from_slice::<HashMap<String, String>>(&read_block(&mut input, len)?).ok()
         });
         first.clear();
         match files {
             Some(files) if input.read_line(&mut first).is_ok() => modules = files,
-            _ => {
-                eprintln!("Couldn't read the script's files from stdin.");
-                return std::process::ExitCode::from(2);
-            }
+            _ => return unreadable("script's files"),
         }
     }
     let (source, handler) = match first
-        .strip_prefix(SCRIPT_PREFIX)
+        .strip_prefix(form::SCRIPT_PREFIX)
         .map(|len| len.trim().parse::<usize>())
     {
         Some(Ok(len)) => {
-            let mut bytes = vec![0u8; len];
-            if input.read_exact(&mut bytes).is_err() {
-                eprintln!("Couldn't read the script from stdin.");
-                return std::process::ExitCode::from(2);
-            }
-            // Form, PIN and HTTP requests share stdin without interleaving, and a thread reads it to keep settings updates apart from replies.
-            let (replies_in, replies) = std::sync::mpsc::channel::<String>();
+            let Some(bytes) = read_block(&mut input, len) else {
+                return unreadable("script");
+            };
+            let (replies_in, replies) = mpsc::channel::<String>();
             std::thread::spawn(move || {
                 let mut line = String::new();
                 loop {
@@ -754,20 +637,12 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                     if !matches!(input.read_line(&mut line), Ok(read) if read > 0) {
                         break;
                     }
-                    if let Some(payload) = line.strip_prefix(injector::antiban::PREFIX) {
-                        if let Some(config) = injector::antiban::parse(payload) {
-                            injector::antiban::set(config);
-                        }
-                    } else if let Some(payload) =
-                        line.strip_prefix(injector::transports::SETTINGS_PREFIX)
-                    {
-                        if let Some(settings) = injector::transports::parse_settings(payload) {
-                            injector::transports::set_settings(settings);
-                        }
-                    } else if let Some(payload) = line.strip_prefix(injector::antiban::SKIP_PREFIX)
-                    {
-                        if let Some(skip) = injector::antiban::parse_skip(payload) {
-                            injector::antiban::push_skip(skip);
+                    if apply_setting(&line) {
+                        continue;
+                    }
+                    if let Some(payload) = line.strip_prefix(antiban::SKIP_PREFIX) {
+                        if let Some(skip) = antiban::parse_skip(payload) {
+                            antiban::push_skip(skip);
                         }
                     } else if let Some(payload) = line.strip_prefix(form::UPDATE_PREFIX) {
                         if let Some(values) = form::parse_update(payload) {
@@ -778,50 +653,31 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
                     }
                 }
             });
-            let input = std::sync::Arc::new(std::sync::Mutex::new(replies));
-            let ask = move |input: &std::sync::Mutex<std::sync::mpsc::Receiver<String>>,
-                            request: String|
-                  -> Result<String, String> {
-                {
-                    let mut out = std::io::stdout().lock();
-                    write!(out, "{request}{}", form::ENTRY_END)
-                        .and_then(|()| out.flush())
-                        .map_err(|e| e.to_string())?;
-                }
-                input
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .recv()
-                    .map_err(|_| "the loader closed the script's input".to_owned())
-            };
+            let replies = Arc::new(Mutex::new(replies));
             if loader_has_pins {
-                let pin_input = input.clone();
+                let pin_replies = replies.clone();
                 injector::bank_pin::set_lookup(Box::new(move |hash| {
-                    form::parse_pin_reply(&ask(&pin_input, form::pin_request_line(hash))?)
+                    form::parse_pin_reply(&ask(&pin_replies, form::pin_request_line(hash))?)
                 }));
-                let lamp_input = input.clone();
+                let lamp_replies = replies.clone();
                 injector::lamp::set_lookup(Box::new(move |hash| {
-                    form::parse_lamp_reply(&ask(&lamp_input, form::lamp_request_line(hash))?)
+                    form::parse_lamp_reply(&ask(&lamp_replies, form::lamp_request_line(hash))?)
                 }));
             }
             if loader_has_http {
-                let input = input.clone();
-                injector::http::set_handler(Box::new(move |request| {
-                    injector::http::parse_reply(&ask(
-                        &input,
-                        injector::http::request_line(request),
-                    )?)
+                let replies = replies.clone();
+                http::set_handler(Box::new(move |request| {
+                    http::parse_reply(&ask(&replies, http::request_line(request))?)
                 }));
             }
             let handler: form::FormHandler =
-                Box::new(move |spec| form::parse_reply(&ask(&input, form::request_line(spec))?));
+                Box::new(move |spec| form::parse_reply(&ask(&replies, form::request_line(spec))?));
             (String::from_utf8_lossy(&bytes).into_owned(), Some(handler))
         }
         _ => {
             let mut rest = String::new();
             if input.read_to_string(&mut rest).is_err() {
-                eprintln!("Couldn't read the script from stdin.");
-                return std::process::ExitCode::from(2);
+                return unreadable("script");
             }
             (first + &rest, None)
         }
@@ -850,10 +706,10 @@ fn run_script(args: &[&str]) -> std::process::ExitCode {
         modules,
     );
     match result {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
-            std::process::ExitCode::FAILURE
+            ExitCode::FAILURE
         }
     }
 }

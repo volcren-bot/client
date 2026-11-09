@@ -8,14 +8,12 @@ use crate::{
     async_input::{Blocking, Pace, Worker},
 };
 
-// What the async input worker runs: any input, or a pause between inputs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
     Input(Input),
     Wait(u32),
 }
 
-// What async jobs pressed and haven't released yet.
 #[derive(Default)]
 struct Held {
     buttons: Vec<MouseButton>,
@@ -61,7 +59,6 @@ impl Jobs {
         }
     }
 
-    // Lets go of the buttons and keys jobs left pressed, the last one pressed first.
     fn release(&self) {
         let held = std::mem::take(&mut *self.held.lock().unwrap_or_else(PoisonError::into_inner));
         for key in held.keys.into_iter().rev() {
@@ -79,7 +76,6 @@ impl Jobs {
     }
 }
 
-// A worker for `send`. When it is cancelled or shut down it releases every button and key its jobs left held.
 pub fn worker(
     send: impl Fn(&Input, &dyn Pace) -> Result<(), String> + Send + Sync + 'static,
 ) -> Worker<Job> {
@@ -153,7 +149,6 @@ mod tests {
             ]
         );
 
-        // Nothing is held any more.
         worker.cancel();
         assert_eq!(log.lock().unwrap().len(), 6);
     }

@@ -1,12 +1,5 @@
-//! The client's bitmap fonts, decoded from the cache: a metrics archive and a sprite archive of glyphs, with ids fixed for `P12_FULL`.
-
-// Only the Windows injector draws overlays, so on other hosts nothing here is called outside tests.
-#![cfg_attr(not(windows), allow(dead_code))]
-
-/// Index of the font metrics and of the sprite archive of each font.
 pub const FONTS_INDEX: u32 = 13;
 pub const SPRITES_INDEX: u32 = 8;
-/// `p12_full`, the 12pt font the game uses for chat and most labels.
 pub const P12_FULL: i32 = 495;
 
 const METRICS_LEN: usize = 257;
@@ -19,16 +12,13 @@ pub struct Glyph {
     pub offset_y: i32,
     pub width: i32,
     pub height: i32,
-    /// One byte per pixel, row by row. 255 is opaque, 0 is transparent.
     pub alpha: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Font {
     pub advances: [u8; 256],
-    pub ascent: i32,
     pub max_height: i32,
-    /// Indexed by character code.
     pub glyphs: Vec<Glyph>,
 }
 
@@ -40,8 +30,7 @@ impl Font {
                 metrics.len()
             ));
         }
-        let mut advances = [0u8; 256];
-        advances.copy_from_slice(&metrics[..256]);
+        let advances = metrics[..256].try_into().expect("checked length");
         let frames = decode_sprites(sprites)?;
         if frames.len() < 256 {
             return Err(format!("font has {} glyphs, expected 256", frames.len()));
@@ -60,13 +49,11 @@ impl Font {
             .collect();
         Ok(Self {
             advances,
-            ascent: metrics[256] as i32,
             max_height,
             glyphs,
         })
     }
 
-    /// Width of `text` in pixels at `scale`: the sum of the advances of its characters.
     pub fn width(&self, text: &str, scale: i32) -> i32 {
         text.bytes()
             .map(|c| self.advances[c as usize] as i32)
@@ -74,7 +61,6 @@ impl Font {
             * scale
     }
 
-    /// Calls `plot(x, y)` for each pixel of `text` drawn at `(x, y)` as `scale` blocks; non-printable ASCII is skipped.
     pub fn plot(&self, text: &str, x: i32, y: i32, scale: i32, mut plot: impl FnMut(i32, i32)) {
         let mut pen = x;
         for c in text.bytes() {
@@ -108,13 +94,10 @@ pub struct Frame {
     pub offset_x: i32,
     pub offset_y: i32,
     pub max_height: i32,
-    /// One byte per pixel, row by row. 255 is opaque, 0 is transparent.
     pub alpha: Vec<u8>,
-    /// Four bytes per pixel, row by row: the palette colour with the alpha above.
     pub rgba: Vec<u8>,
 }
 
-/// The frames of a sprite archive from the cache (index `SPRITES_INDEX`, one archive per sprite id), as the client draws them.
 pub fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
     let short = || "sprite archive is truncated".to_string();
     let u8_at = |at: usize| data.get(at).copied().ok_or_else(short);
@@ -122,7 +105,7 @@ pub fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
 
     let count = u16_at(data.len().checked_sub(2).ok_or_else(short)?)? as usize;
     let header = data.len().checked_sub(7 + count * 8).ok_or_else(short)?;
-    let height = u16_at(header + 2)? as i32;
+    let max_height = u16_at(header + 2)? as i32;
 
     let column = |base: usize| -> Vec<i32> {
         (0..count)
@@ -133,7 +116,6 @@ pub fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
     let offsets_y = column(header + 5 + count * 2);
     let widths = column(header + 5 + count * 4);
     let heights = column(header + 5 + count * 6);
-    // the palette sits right before the header; colour 0 is the transparent index
     let palette_len = u8_at(header + 4)? as usize + 1;
     let palette_at = header
         .checked_sub((palette_len - 1) * 3)
@@ -147,55 +129,30 @@ pub fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
     let mut frames = Vec::with_capacity(count);
     let mut at = 0;
     for i in 0..count {
-        let (frame_width, frame_height) = (widths[i], heights[i]);
-        let dimension = (frame_width * frame_height).max(0) as usize;
+        let (width, height) = (widths[i] as usize, heights[i] as usize);
         let flags = u8_at(at)?;
         at += 1;
         let vertical = flags & FLAG_VERTICAL != 0;
-        let indices = read_plane(
-            data,
-            &mut at,
-            frame_width,
-            frame_height,
-            vertical,
-            dimension,
-        )?;
-        let alphas = if flags & FLAG_ALPHA != 0 {
-            Some(read_plane(
-                data,
-                &mut at,
-                frame_width,
-                frame_height,
-                vertical,
-                dimension,
-            )?)
+        let indices = read_plane(data, &mut at, width, height, vertical)?;
+        let alpha = if flags & FLAG_ALPHA != 0 {
+            read_plane(data, &mut at, width, height, vertical)?
         } else {
-            None
+            indices
+                .iter()
+                .map(|&index| if index == 0 { 0 } else { 255 })
+                .collect()
         };
-        let alpha: Vec<u8> = indices
-            .iter()
-            .enumerate()
-            .map(|(j, &index)| match (index, &alphas) {
-                (0, Some(alphas)) => alphas[j],
-                (0, None) => 0,
-                (_, Some(alphas)) => alphas[j],
-                _ => 255,
-            })
-            .collect();
-        let rgba = indices
-            .iter()
-            .zip(&alpha)
-            .flat_map(|(&index, &a)| {
-                let [r, g, b] = palette.get(index as usize).copied().unwrap_or_default();
-                [r, g, b, a]
-            })
-            .collect();
+        let mut rgba = Vec::with_capacity(indices.len() * 4);
+        for (&index, &a) in indices.iter().zip(&alpha) {
+            let [r, g, b] = palette.get(index as usize).copied().unwrap_or_default();
+            rgba.extend_from_slice(&[r, g, b, a]);
+        }
         frames.push(Frame {
-            width: frame_width,
-            height: frame_height,
+            width: widths[i],
+            height: heights[i],
             offset_x: offsets_x[i],
             offset_y: offsets_y[i],
-            max_height: height,
+            max_height,
             alpha,
             rgba,
         });
@@ -203,28 +160,29 @@ pub fn decode_sprites(data: &[u8]) -> Result<Vec<Frame>, String> {
     Ok(frames)
 }
 
-/// One plane of a frame: `dimension` bytes, row by row or column by column.
 fn read_plane(
     data: &[u8],
     at: &mut usize,
-    width: i32,
-    height: i32,
+    width: usize,
+    height: usize,
     vertical: bool,
-    dimension: usize,
 ) -> Result<Vec<u8>, String> {
-    let short = || "sprite archive is truncated".to_string();
-    let bytes = data.get(*at..*at + dimension).ok_or_else(short)?;
-    let mut plane = vec![0u8; dimension];
-    if vertical {
-        let (w, h) = (width.max(0) as usize, height.max(0) as usize);
-        for j in 0..w {
-            for k in 0..h {
-                plane[w * k + j] = bytes[j * h + k];
+    let dimension = width * height;
+    let bytes = at
+        .checked_add(dimension)
+        .and_then(|end| data.get(*at..end))
+        .ok_or("sprite archive is truncated")?;
+    let plane = if vertical {
+        let mut plane = vec![0u8; dimension];
+        for j in 0..width {
+            for k in 0..height {
+                plane[width * k + j] = bytes[j * height + k];
             }
         }
+        plane
     } else {
-        plane.copy_from_slice(bytes);
-    }
+        bytes.to_vec()
+    };
     *at += dimension;
     Ok(plane)
 }
@@ -251,11 +209,20 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_bigger_than_the_archive_is_an_error() {
+        for flags in [0, FLAG_VERTICAL] {
+            let mut data = vec![flags];
+            data.extend_from_slice(&[0, 0, 0, 12, 0]);
+            data.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+            data.extend_from_slice(&[0, 1]);
+            assert!(decode_sprites(&data).is_err());
+        }
+    }
+
+    #[test]
     fn measures_text_by_advances() {
-        // Only the metrics are needed to measure, so this font is a hand-built single-glyph stub.
         let font = Font {
             advances: [4; 256],
-            ascent: 9,
             max_height: 12,
             glyphs: Vec::new(),
         };
@@ -264,7 +231,6 @@ mod tests {
         assert_eq!(font.width("", 1), 0);
     }
 
-    // Decodes the real p12_full from FONT_DATA_DIR (holding p12_metrics.bin and p12_sprite.bin); run with `--ignored --nocapture`.
     #[test]
     #[ignore]
     fn decodes_p12_full() {
@@ -275,8 +241,7 @@ mod tests {
         assert_eq!(font.glyphs.len(), 256);
         assert_eq!(font.advances[b'A' as usize] as i32, font.width("A", 1));
         println!(
-            "ascent {} max height {} width of 'Taiman' {}",
-            font.ascent,
+            "max height {} width of 'Taiman' {}",
             font.max_height,
             font.width("Taiman", 1)
         );

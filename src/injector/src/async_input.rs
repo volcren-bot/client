@@ -6,12 +6,9 @@ use std::{
     time::Duration,
 };
 
-// What input code sleeps and checks through, so it runs blocking or as a cancellable `Worker` job.
 pub trait Pace {
-    // True once the job was cancelled (or the worker is shutting down): finish what is held, post nothing new.
     fn cancelled(&self) -> bool;
 
-    // Sleeps for `duration`, or less if cancelled. Returns false when cancelled.
     fn sleep(&self, duration: Duration) -> bool;
 }
 
@@ -31,7 +28,6 @@ impl Pace for Blocking {
 struct State<J> {
     queue: VecDeque<J>,
     busy: bool,
-    // Bumped by `cancel`; a running job is cancelled when this no longer matches what it started under.
     generation: u64,
     closed: bool,
     error: Option<String>,
@@ -72,7 +68,6 @@ impl<J> Pace for Task<'_, J> {
     }
 }
 
-// One thread running queued jobs in order; `cancel` drops the queue, stops the running job and returns once idle.
 pub struct Worker<J> {
     shared: Arc<Shared<J>>,
     release: Box<dyn Fn() + Send + Sync>,
@@ -80,7 +75,6 @@ pub struct Worker<J> {
 }
 
 impl<J: Send + 'static> Worker<J> {
-    // `release` lets go of what jobs left held, on the caller's thread once the worker is idle, at every `cancel` and `shutdown`.
     pub fn new(
         run: impl Fn(&J, &dyn Pace) -> Result<(), String> + Send + 'static,
         release: impl Fn() + Send + Sync + 'static,
@@ -147,7 +141,6 @@ impl<J> Worker<J> {
         );
     }
 
-    // The error of the last job that failed, once.
     pub fn take_error(&self) -> Option<String> {
         self.shared.lock().error.take()
     }
@@ -248,7 +241,6 @@ mod tests {
                 let (ran, cleaned) = (ran.clone(), cleaned.clone());
                 move |_: &u32, pace| {
                     ran.fetch_add(1, Ordering::SeqCst);
-                    // Like a click: the button goes down, the hold is cut short, the button still goes up.
                     pace.sleep(Duration::from_secs(10));
                     cleaned.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -271,7 +263,6 @@ mod tests {
         );
         assert!(!worker.busy());
 
-        // The worker takes new jobs after a cancel.
         worker.push(2).unwrap();
         while ran.load(Ordering::SeqCst) < 2 {
             thread::yield_now();

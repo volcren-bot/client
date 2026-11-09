@@ -1,18 +1,12 @@
-//! Transports (teleport spells, levers, ...): the loader downloads Shortest Path's TSV files, parses them here, and sends the result to the script as one line, the way `antiban` config travels.
-//!
-//! Source: <https://github.com/Skretzo/shortest-path> (BSD-2-Clause), `src/main/resources/transports/*.tsv`. The format is described in its `Transport-TSV-format.md`:
-//! the first line is the header (an optional leading `#`), columns are found by header name, other `#` lines and blank lines are comments, and unknown columns are ignored.
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// A line the loader writes to the script's stdin: the parsed transports as JSON. Sent before the script starts.
 pub const PREFIX: &str = "\u{1e}TRANSPORTS ";
 
-/// A line the loader writes to the script's stdin: which types of transport the user turned off. Sent before the script starts, and later at any time.
 pub const SETTINGS_PREFIX: &str = "\u{1e}TRANSPORT_SETTINGS ";
 
-/// The types of transport the user can turn off on the loader's Settings page: the name scripts know them by, and the label.
 pub const TYPES: &[(&str, &str)] = &[
     ("spells", "Teleport spells"),
     ("home_teleports", "Home teleports"),
@@ -39,14 +33,13 @@ pub const TYPES: &[(&str, &str)] = &[
     ("shortcuts", "Agility shortcuts"),
 ];
 
-/// Which types of transport are off, by the names in `TYPES`. All are on by default.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub off: Vec<String>,
 }
 
-static SETTINGS: std::sync::Mutex<Option<Settings>> = std::sync::Mutex::new(None);
+static SETTINGS: Mutex<Settings> = Mutex::new(Settings { off: Vec::new() });
 
 pub fn settings_line(settings: &Settings) -> String {
     format!(
@@ -60,34 +53,26 @@ pub fn parse_settings(payload: &str) -> Option<Settings> {
 }
 
 pub fn set_settings(settings: Settings) {
-    *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(settings);
+    *lock(&SETTINGS) = settings;
 }
 
 pub fn current_settings() -> Settings {
-    SETTINGS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-        .unwrap_or_default()
+    lock(&SETTINGS).clone()
 }
 
-/// A skill the player needs, like `25 Magic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
     pub name: String,
     pub level: u32,
 }
 
-/// One varbit or varplayer test, like `4070=0`, `4560&8` or `892@30`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clause {
     pub id: u32,
-    /// `=`, `>`, `<`, `&` (all bits of the value set) or `@` (the value is minutes since the varp's wall-clock time).
     pub op: char,
     pub value: i64,
 }
 
-/// A tile, `x y plane`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tile {
     pub x: i32,
@@ -97,78 +82,56 @@ pub struct Tile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transport {
-    /// The file it came from, like `teleportation_spells`.
     pub kind: String,
-    /// Where it is used from. None means from anywhere (spells, items).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<Tile>,
-    /// Where it leads. None means this is an origin of a permutation (fairy rings and the like).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination: Option<Tile>,
-    /// The `Display info` column: for a spell, its name (with the destination for variants like `Varrock Teleport: Grand Exchange`).
     pub name: String,
-    /// Game ticks.
     pub duration: u32,
-    /// The highest wilderness level it can be used at.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wilderness: Option<u32>,
     pub skills: Vec<Skill>,
     pub quests: Vec<String>,
     pub varbits: Vec<Clause>,
     pub varps: Vec<Clause>,
-    /// The `Items` column, as written. Evaluated by the script (spells skip it: the game's own rune check is used).
     pub items: String,
     pub consumable: bool,
-    /// The `menuOption menuTarget objectID` column, as written (`Charter Trader Crewmember 1330`): what to click.
     #[serde(default)]
     pub menu: String,
-    /// The comment above the row when it states a requirement the columns can't, like `Port Phasmatys (varbit:217=7?ECTO_TOKEN=2)`; other comments are dropped.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
 }
 
-/// A named group of items from `item-variations.tsv`, like `COINS` or `AXE`: any of the ids counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemName {
     pub name: String,
     pub ids: Vec<u32>,
 }
 
-/// What the script receives.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Data {
-    /// Where the data came from: `online`, `cache` or `bundled`.
     pub source: String,
     pub transports: Vec<Transport>,
-    /// The named item groups the `Items` column uses.
     #[serde(default)]
     pub items: Vec<ItemName>,
-    /// Every way of changing plane (stairs, ladders, ropes, cave mouths, ...) from `transports.tsv`: the walk planner's, never given to scripts. Those with requirements are in
-    /// `transports` as well (kind `climb_gated`), where the script checks them and tells the planner which it may use.
     #[serde(default)]
     pub climbs: Vec<Transport>,
 }
 
-/// The kinds of the rows with requirements that the script gets to check: climbs, links, and shortcuts.
 pub const GATED_KIND: &str = "climb_gated";
 pub const LINK_GATED_KIND: &str = "link_gated";
-
 pub const SHORTCUT_GATED_KIND: &str = "shortcut_gated";
-
-/// The kind of the agility shortcuts (hops over an obstacle on the same plane, mostly): all of them ask for a level.
 pub const SHORTCUT_KIND: &str = "agility_shortcuts";
 
-/// The longest hop (tiles, the underground over the surface) a shortcut may make: the file also holds an Agility Pyramid doorway and stairs that teleport across the map, which a walk has no use for.
 pub const MAX_SHORTCUT_HOP: i32 = 70;
+pub const MAX_LINK_HOP: i32 = 15;
+pub const MAX_CLIMB_HOP: i32 = 350;
 
-/// Whether a row of the shortcuts file is one a walk can use: it has a click, and it hops no farther than `MAX_SHORTCUT_HOP`.
 pub fn is_shortcut(t: &Transport) -> bool {
-    !t.menu.trim().is_empty()
-        && !t.menu.contains(" -> ")
-        && hop(t).is_some_and(|hop| hop <= MAX_SHORTCUT_HOP)
+    clicks_object(t) && hop(t).is_some_and(|hop| hop <= MAX_SHORTCUT_HOP)
 }
 
-/// The menu option a row's menu starts with, "Climb-up" of "Climb-up Rope 51647". The data doesn't mark where it ends, and a few options are two words, the second of them lowercase like "Climb over Broken cart 28931".
 pub fn menu_option(menu: &str) -> Option<&str> {
     const SECOND_WORDS: &[&str] = &[
         "over", "on", "through", "up", "down", "to", "off", "in", "across",
@@ -185,25 +148,26 @@ pub fn menu_option(menu: &str) -> Option<&str> {
     }
 }
 
-/// The longest hop (tiles) of a link on one plane: a stile, a log, a door that is an object. Longer ones are far hops.
-pub const MAX_LINK_HOP: i32 = 15;
-
-/// The longest hop (tiles, the underground over the surface) of a climb: farther ones don't fit in the planner's box with the walk around them.
-pub const MAX_CLIMB_HOP: i32 = 350;
+fn underground(tile: Tile) -> bool {
+    tile.y >= crate::nav::UNDERGROUND
+}
 
 fn hop(t: &Transport) -> Option<i32> {
     let (o, d) = (t.origin?, t.destination?);
-    let folded = |y: i32| {
-        if y >= crate::nav::UNDERGROUND {
-            y - crate::nav::UNDERGROUND
+    let folded = |tile: Tile| {
+        if underground(tile) {
+            tile.y - crate::nav::UNDERGROUND
         } else {
-            y
+            tile.y
         }
     };
-    Some((o.x - d.x).abs().max((folded(o.y) - folded(d.y)).abs()))
+    Some((o.x - d.x).abs().max((folded(o) - folded(d)).abs()))
 }
 
-/// Entrances a walk has no business taking: boss rooms, minigames, and ways that drop you somewhere with no choice.
+fn clicks_object(t: &Transport) -> bool {
+    !t.menu.trim().is_empty() && !t.menu.contains(" -> ")
+}
+
 const LEFT_OUT: &[&str] = &[
     "Enter Door of Dinh 29322",
     "Channel Teleport Platform 36198",
@@ -215,25 +179,26 @@ const LEFT_OUT: &[&str] = &[
     "Slide Slope 5015",
 ];
 
-/// Whether a row is an item used on an object: "Use Rope -> Boulder 5842". The script takes them as whole trips, since the planner can only click an object's own options.
+fn left_out(t: &Transport) -> bool {
+    LEFT_OUT.contains(&t.menu.trim())
+}
+
 pub fn is_item_on(t: &Transport) -> bool {
     t.origin.is_some()
         && t.destination.is_some()
         && t.menu.starts_with("Use ")
         && t.menu.contains(" -> ")
-        && !LEFT_OUT.contains(&t.menu.trim())
+        && !left_out(t)
 }
 
-/// Whether a row goes too far for the planner: a tunnel, a cart, a ladder to another part of the map. The script takes them as whole trips. "Join Castle Wars" puts you in a minigame's lobby.
 pub fn is_far_hop(t: &Transport) -> bool {
     let Some(hop) = hop(t) else {
         return false;
     };
-    !t.menu.trim().is_empty()
+    clicks_object(t)
         && !t.menu.starts_with("Pay-toll")
-        && !t.menu.contains(" -> ")
         && !t.menu.starts_with("Join ")
-        && !LEFT_OUT.contains(&t.menu.trim())
+        && !left_out(t)
         && hop
             > if changes_plane(t) {
                 MAX_CLIMB_HOP
@@ -242,35 +207,25 @@ pub fn is_far_hop(t: &Transport) -> bool {
             }
 }
 
-/// Whether a row is a wall door that asks for something, a hop of one tile with "Open". Each row is one direction, and a guild's door often only asks on the way in.
 pub fn is_gated_door(t: &Transport) -> bool {
     gated(t) && !changes_plane(t) && hop(t) == Some(1) && t.menu.starts_with("Open ")
 }
 
-/// Whether a row is a way across something the walk can't step over, on one plane in one world: a hop of up to `MAX_LINK_HOP` tiles with a click (a Tree Door, a stile, a log, a web).
-/// A hop of one tile with "Open" is a wall door, which the planner opens by taking its walls away; toll barriers are the script's, since they cost something.
 pub fn is_link(t: &Transport) -> bool {
-    let (Some(o), Some(d)) = (t.origin, t.destination) else {
-        return false;
-    };
-    let hop = (o.x - d.x).abs().max((o.y - d.y).abs());
-    o.plane == d.plane
-        && (o.y >= crate::nav::UNDERGROUND) == (d.y >= crate::nav::UNDERGROUND)
-        && (1..=MAX_LINK_HOP).contains(&hop)
-        && !(hop == 1 && t.menu.starts_with("Open "))
-        && !t.menu.trim().is_empty()
+    !changes_plane(t)
+        && hop(t).is_some_and(|hop| {
+            (1..=MAX_LINK_HOP).contains(&hop) && !(hop == 1 && t.menu.starts_with("Open "))
+        })
+        && clicks_object(t)
         && !t.menu.starts_with("Pay-toll")
-        && !t.menu.contains(" -> ")
 }
 
-/// Whether a row is the planner's: it changes the plane or the world and isn't too far, or it is a link, or a door that asks for something.
 pub fn is_climb(t: &Transport) -> bool {
     (changes_plane(t) && !is_far_hop(t) && !t.menu.contains(" -> "))
         || is_link(t)
         || is_gated_door(t)
 }
 
-/// The kind a row that asks for something goes to the script under.
 pub fn gated_kind(t: &Transport) -> &'static str {
     if t.kind == SHORTCUT_KIND {
         SHORTCUT_GATED_KIND
@@ -281,12 +236,10 @@ pub fn gated_kind(t: &Transport) -> &'static str {
     }
 }
 
-/// Whether a tile is in the Wilderness, on the surface or below it.
 pub fn in_wilderness(x: i32, y: i32) -> bool {
     (2944..3392).contains(&x) && ((3523..3968).contains(&y) || (9918..10368).contains(&y))
 }
 
-/// Whether a row starts or ends in the Wilderness, like the ditch: a walk uses those only if it starts or ends there itself.
 pub fn touches_wilderness(t: &Transport) -> bool {
     [t.origin, t.destination]
         .into_iter()
@@ -294,7 +247,6 @@ pub fn touches_wilderness(t: &Transport) -> bool {
         .any(|tile| in_wilderness(tile.x, tile.y))
 }
 
-/// Whether a row asks for anything. A comment above it that states a requirement counts: the script decides what it means.
 pub fn gated(t: &Transport) -> bool {
     !(t.skills.is_empty()
         && t.quests.is_empty()
@@ -304,15 +256,13 @@ pub fn gated(t: &Transport) -> bool {
         && t.note.is_empty())
 }
 
-/// Whether a row changes the plane, or goes into or out of the underground (the copy of the map 6,400 tiles north, entered by the same plane).
 pub fn changes_plane(t: &Transport) -> bool {
     let (Some(o), Some(d)) = (t.origin, t.destination) else {
         return false;
     };
-    o.plane != d.plane || (o.y >= crate::nav::UNDERGROUND) != (d.y >= crate::nav::UNDERGROUND)
+    o.plane != d.plane || underground(o) != underground(d)
 }
 
-/// A climb's name in the lists of the ones the script allows: where from and where to.
 pub fn climb_key(t: &Transport) -> String {
     let (o, d) = (
         t.origin.expect("a climb has an origin"),
@@ -339,7 +289,6 @@ fn tile(text: &str) -> Result<Option<Tile>, String> {
     Ok(Some(Tile { x, y, plane }))
 }
 
-// "Max Total" and the like (the capes) are not levels: holding the cape proves them.
 fn skills(text: &str) -> Result<Vec<Skill>, String> {
     text.split(';')
         .map(str::trim)
@@ -358,7 +307,6 @@ fn skills(text: &str) -> Result<Vec<Skill>, String> {
         .collect()
 }
 
-/// `ID=V`, `ID>V`, `ID<V`, `ID&V` or `ID@V`, joined with `;`.
 fn clauses(text: &str) -> Result<Vec<Clause>, String> {
     text.split(';')
         .map(str::trim)
@@ -375,7 +323,6 @@ fn clauses(text: &str) -> Result<Vec<Clause>, String> {
         .collect()
 }
 
-/// The transports of one TSV file. A row that doesn't parse is skipped and named in the second part; a file without the columns it needs is an error.
 pub fn parse_file(kind: &str, text: &str) -> Result<(Vec<Transport>, Vec<String>), String> {
     let mut lines = text.lines().enumerate();
     let header = loop {
@@ -458,7 +405,6 @@ pub fn parse_file(kind: &str, text: &str) -> Result<(Vec<Transport>, Vec<String>
     Ok((found, skipped))
 }
 
-/// The named item groups of `item-variations.tsv`: `name`, then the comma-separated `ids` (the other columns, staves and off-hands, aren't needed). A row without a name or any id is skipped.
 pub fn parse_item_variations(text: &str) -> Result<Vec<ItemName>, String> {
     let mut lines = text.lines();
     let header = lines
@@ -506,40 +452,33 @@ pub fn line(data: &Data) -> String {
     )
 }
 
-/// The data of a `PREFIX` line, without the prefix.
 pub fn parse(payload: &str) -> Option<Data> {
     serde_json::from_str(payload.trim()).ok()
 }
 
-static CURRENT: std::sync::Mutex<(u64, Option<Data>)> = std::sync::Mutex::new((0, None));
+static CURRENT: Mutex<(u64, Option<Data>)> = Mutex::new((0, None));
 
-fn lock() -> std::sync::MutexGuard<'static, (u64, Option<Data>)> {
-    CURRENT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock<T>(mutex: &'static Mutex<T>) -> MutexGuard<'static, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Makes `data` the transports the script plans from; the version goes up.
 pub fn set(data: Data) {
-    let mut current = lock();
+    let mut current = lock(&CURRENT);
     current.0 += 1;
     current.1 = Some(data);
 }
 
-/// The version of the current data: it goes up whenever `set` replaces it.
 pub fn version() -> u64 {
-    lock().0
+    lock(&CURRENT).0
 }
 
-/// Runs `f` on the climbs of the current data (none if the loader sent nothing), without copying them.
 pub fn with_climbs<R>(f: impl FnOnce(&[Transport]) -> R) -> R {
-    let current = lock();
+    let current = lock(&CURRENT);
     f(current.1.as_ref().map_or(&[], |d| d.climbs.as_slice()))
 }
 
-/// `{ source, transports, items, version }`, without the planner's climbs: empty (source `none`) when the loader sent nothing.
 pub fn current_value() -> Value {
-    let current = lock();
+    let current = lock(&CURRENT);
     let data = current.1.as_ref();
     json!({
         "source": data.map_or("none", |d| d.source.as_str()),

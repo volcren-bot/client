@@ -30,25 +30,26 @@ const WHEEL_DELTA: i32 = 120;
 const BETWEEN_KEYS: Duration = Duration::from_millis(40);
 
 pub fn open_console(pid: u32) -> Result<(), String> {
-    let window = render_view(pid).ok_or("The client's JagRenderView window wasn't found.")?;
-    post(window, input::OPEN_CONSOLE_MESSAGE, 0, 0)
+    post_request(pid, input::OPEN_CONSOLE_MESSAGE)
 }
 
 pub fn post_request(pid: u32, message: u32) -> Result<(), String> {
-    let window = render_view(pid).ok_or("The client's JagRenderView window wasn't found.")?;
-    post(window, message, 0, 0)
+    post(window(pid)?, message, 0, 0)
+}
+
+fn window(pid: u32) -> Result<HWND, String> {
+    render_view(pid).ok_or_else(|| "The client's JagRenderView window wasn't found.".into())
 }
 
 pub fn send(pid: u32, input: &Input) -> Result<(), String> {
     send_with(pid, input, &Blocking)
 }
 
-// Sleeps go through `pace`, so a cancelled input stops early. A pressed button or key is still released.
 pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String> {
     if pace.cancelled() {
         return Ok(());
     }
-    let window = render_view(pid).ok_or("The client's JagRenderView window wasn't found.")?;
+    let window = window(pid)?;
     match input {
         Input::Move { x, y } => {
             let (ox, oy) = canvas_offset(pid);
@@ -82,9 +83,10 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
         Input::Button { button, down } => {
             let (x, y) = mouse_at(pid)?;
             let (down_message, up_message, held) = button_messages(*button);
-            match down {
-                true => post(window, down_message, held, point(x, y)),
-                false => post(window, up_message, 0, point(x, y)),
+            if *down {
+                post(window, down_message, held, point(x, y))
+            } else {
+                post(window, up_message, 0, point(x, y))
             }
         }
         Input::Scroll { notches } => {
@@ -182,8 +184,6 @@ fn point(x: i32, y: i32) -> LPARAM {
 }
 
 fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Result<(), String> {
-    // letters, digits and space by their own keys (the layout Wine reports can name another key for them); punctuation by the
-    // layout, which the client reads it through too
     let keys = text
         .chars()
         .map(|c| {
@@ -192,7 +192,6 @@ fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Resul
             }
             let mut units = [0u16; 2];
             match c.encode_utf16(&mut units) {
-                // a keypad key isn't taken as text by the client
                 [unit] => match unsafe { VkKeyScanW(*unit) } {
                     -1 => Err(format!("{c:?} can't be typed with this keyboard layout.")),
                     key if (0x60..=0x6f).contains(&(key as u16 & 0xff)) => {
@@ -233,7 +232,6 @@ fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Resul
     Ok(())
 }
 
-// Finding the window walks every top-level window, so the answer is kept until the window is gone.
 static RENDER_VIEWS: Mutex<Vec<(u32, usize)>> = Mutex::new(Vec::new());
 
 fn render_view(pid: u32) -> Option<HWND> {

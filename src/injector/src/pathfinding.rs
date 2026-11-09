@@ -1,18 +1,35 @@
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, hash_map::Entry},
+    collections::{BinaryHeap, HashMap, VecDeque, hash_map::Entry},
     hash::{BuildHasherDefault, Hasher},
 };
 
 use crate::collision::{Movement, WorldCollision, flag};
 
 const BLOCKS: u16 = Movement::BLOCKS;
-const STRAIGHT: u32 = 10;
-const DIAGONAL: u32 = 11;
-// what opening a door on the way adds, in tenths of a tile
-pub const DOOR_COST: u32 = 30;
+pub(crate) const STRAIGHT: u32 = 10;
+pub(crate) const DIAGONAL: u32 = 11;
+const DOOR_COST: u32 = 30;
 
-// Tile keys are never iterated, so a multiplicative hash is much cheaper than SipHash on the hot path.
+pub(crate) const DIRECTIONS: [(i32, i32); 8] = [
+    (-1, 0),
+    (1, 0),
+    (0, -1),
+    (0, 1),
+    (-1, -1),
+    (1, -1),
+    (-1, 1),
+    (1, 1),
+];
+
+pub(crate) fn step_cost(dx: i32, dy: i32) -> u32 {
+    if dx != 0 && dy != 0 {
+        DIAGONAL
+    } else {
+        STRAIGHT
+    }
+}
+
 #[derive(Default)]
 struct TileHasher(u64);
 
@@ -26,7 +43,7 @@ impl Hasher for TileHasher {
 
     fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
-            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+            self.write_u32(b as u32);
         }
     }
 
@@ -68,7 +85,6 @@ pub fn can_step(
     can_step_with(world, plane, x, y, dx, dy, false)
 }
 
-/// `can_step`, with every closed door open when `doors`.
 pub fn can_step_with(
     world: &WorldCollision<Movement>,
     plane: i32,
@@ -136,7 +152,6 @@ pub fn find_path(
     )
 }
 
-/// `find_path`; with `doors` it goes through closed doors as well, each costing `DOOR_COST` more.
 pub fn find_path_with(
     world: &WorldCollision<Movement>,
     plane: i32,
@@ -151,18 +166,17 @@ pub fn find_path_with(
             return Err(PathError::Blocked(t));
         }
     }
-    let goal = key(to);
-    // Best cost so far and the tile it came from.
+    let (start, goal) = (key(from), key(to));
     let mut seen: TileMap<(u32, u32)> = TileMap::default();
     let mut open = BinaryHeap::new();
-    seen.insert(key(from), (0, key(from)));
-    open.push((Reverse(estimate(from, to)), Reverse(0u32), key(from)));
+    seen.insert(start, (0, start));
+    open.push((Reverse(estimate(from, to)), Reverse(0u32), start));
     let mut expanded = 0;
     while let Some((_, Reverse(cost), at)) = open.pop() {
         if at == goal {
             let mut path = vec![tile(at)];
             let mut step = at;
-            while step != key(from) {
+            while step != start {
                 step = seen[&step].1;
                 path.push(tile(step));
             }
@@ -177,16 +191,7 @@ pub fn find_path_with(
             return Err(PathError::TooFar(max_tiles));
         }
         let (x, y) = tile(at);
-        for (dx, dy) in [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-        ] {
+        for (dx, dy) in DIRECTIONS {
             let door = if can_step(world, plane, x, y, dx, dy) {
                 0
             } else if doors
@@ -197,15 +202,9 @@ pub fn find_path_with(
             } else {
                 continue;
             };
-            let next = (x + dx, y + dy);
-            let cost = cost
-                + door
-                + if dx != 0 && dy != 0 {
-                    DIAGONAL
-                } else {
-                    STRAIGHT
-                };
-            match seen.entry(key(next)) {
+            let next = key((x + dx, y + dy));
+            let cost = cost + door + step_cost(dx, dy);
+            match seen.entry(next) {
                 Entry::Occupied(mut e) if e.get().0 > cost => {
                     e.insert((cost, at));
                 }
@@ -214,13 +213,16 @@ pub fn find_path_with(
                 }
                 _ => continue,
             }
-            open.push((Reverse(cost + estimate(next, to)), Reverse(cost), key(next)));
+            open.push((
+                Reverse(cost + estimate((x + dx, y + dy), to)),
+                Reverse(cost),
+                next,
+            ));
         }
     }
     Err(PathError::NoPath)
 }
 
-// The game's route finder for a walk click (breadth first over 128 x 128 around `from`, west/east/south/north first); unreachable targets end at the nearest tile within 10.
 pub mod route_mask {
     pub const WEST: u32 = 0x4024_0108;
     pub const EAST: u32 = 0x4024_0180;
@@ -232,7 +234,6 @@ pub mod route_mask {
     pub const NORTH_EAST: u32 = 0x4024_01e0;
 }
 
-// Whether the game's route finder can step from (x, y) by (dx, dy), as `game_route` checks inline.
 pub fn step_open(
     flags: &impl Fn(i32, i32) -> Option<u32>,
     x: i32,
@@ -264,93 +265,64 @@ const GRAPH: i32 = 128;
 const ALTERNATIVE_RADIUS: i32 = 10;
 const ALTERNATIVE_MAX_STEPS: u32 = 100;
 const START: u8 = 99;
+const BACK_NORTH: u8 = 1;
+const BACK_EAST: u8 = 2;
+const BACK_SOUTH: u8 = 4;
+const BACK_WEST: u8 = 8;
+const BACK: [u8; 8] = [
+    BACK_EAST,
+    BACK_WEST,
+    BACK_NORTH,
+    BACK_SOUTH,
+    BACK_EAST | BACK_NORTH,
+    BACK_WEST | BACK_NORTH,
+    BACK_EAST | BACK_SOUTH,
+    BACK_WEST | BACK_SOUTH,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Route {
-    // every tile walked, `from` first
     pub tiles: Vec<Tile>,
-    // false when the route ends elsewhere because `to` can't be reached
     pub reached: bool,
 }
 
-// `flags(x, y)` is the collision at a world tile, None (blocked) off the map.
 pub fn game_route(flags: impl Fn(i32, i32) -> Option<u32>, from: Tile, to: Tile) -> Option<Route> {
-    use route_mask::*;
-    let free = |x: i32, y: i32, mask: u32| flags(x, y).is_some_and(|f| f & mask == 0);
     let (ox, oy) = (from.0 - GRAPH / 2, from.1 - GRAPH / 2);
+    let on_graph =
+        |x: i32, y: i32| (0..GRAPH).contains(&(x - ox)) && (0..GRAPH).contains(&(y - oy));
     let index = |x: i32, y: i32| ((x - ox) * GRAPH + (y - oy)) as usize;
     let size = (GRAPH * GRAPH) as usize;
-    // the direction back to where the tile was reached from (Java's bits: 1 north, 2 east, 4 south, 8 west), and its steps
     let mut via = vec![0u8; size];
     let mut steps = vec![u32::MAX; size];
     via[index(from.0, from.1)] = START;
     steps[index(from.0, from.1)] = 0;
-    let mut queue = std::collections::VecDeque::from([from]);
+    let mut queue = VecDeque::from([from]);
     let mut reached = false;
     while let Some((x, y)) = queue.pop_front() {
         if (x, y) == to {
             reached = true;
             break;
         }
-        let (gx, gy) = (x - ox, y - oy);
         let next = steps[index(x, y)] + 1;
-        let (west, east, south, north) = (gx > 0, gx < GRAPH - 1, gy > 0, gy < GRAPH - 1);
-        // Moves are checked only when on the graph and not yet reached; `free` only reads, so skipping reached tiles changes nothing.
-        macro_rules! step {
-            ($inside:expr, $dx:expr, $dy:expr, $back:expr, $open:expr) => {
-                if $inside {
-                    let i = index(x + $dx, y + $dy);
-                    if via[i] == 0 && $open {
-                        via[i] = $back;
-                        steps[i] = next;
-                        queue.push_back((x + $dx, y + $dy));
-                    }
-                }
-            };
+        for ((dx, dy), back) in DIRECTIONS.into_iter().zip(BACK) {
+            let (nx, ny) = (x + dx, y + dy);
+            if !on_graph(nx, ny) {
+                continue;
+            }
+            let i = index(nx, ny);
+            if via[i] == 0 && step_open(&flags, x, y, dx, dy) {
+                via[i] = back;
+                steps[i] = next;
+                queue.push_back((nx, ny));
+            }
         }
-        step!(west, -1, 0, 2, free(x - 1, y, WEST));
-        step!(east, 1, 0, 8, free(x + 1, y, EAST));
-        step!(south, 0, -1, 1, free(x, y - 1, SOUTH));
-        step!(north, 0, 1, 4, free(x, y + 1, NORTH));
-        step!(
-            west && south,
-            -1,
-            -1,
-            3,
-            free(x - 1, y - 1, SOUTH_WEST) && free(x - 1, y, WEST) && free(x, y - 1, SOUTH)
-        );
-        step!(
-            east && south,
-            1,
-            -1,
-            9,
-            free(x + 1, y - 1, SOUTH_EAST) && free(x + 1, y, EAST) && free(x, y - 1, SOUTH)
-        );
-        step!(
-            west && north,
-            -1,
-            1,
-            6,
-            free(x - 1, y + 1, NORTH_WEST) && free(x - 1, y, WEST) && free(x, y + 1, NORTH)
-        );
-        step!(
-            east && north,
-            1,
-            1,
-            12,
-            free(x + 1, y + 1, NORTH_EAST) && free(x + 1, y, EAST) && free(x, y + 1, NORTH)
-        );
     }
     let mut end = to;
     if !reached {
         let mut best: Option<(i32, u32)> = None;
         for x in to.0 - ALTERNATIVE_RADIUS..=to.0 + ALTERNATIVE_RADIUS {
             for y in to.1 - ALTERNATIVE_RADIUS..=to.1 + ALTERNATIVE_RADIUS {
-                let (gx, gy) = (x - ox, y - oy);
-                if !(0..GRAPH).contains(&gx)
-                    || !(0..GRAPH).contains(&gy)
-                    || steps[index(x, y)] >= ALTERNATIVE_MAX_STEPS
-                {
+                if !on_graph(x, y) || steps[index(x, y)] >= ALTERNATIVE_MAX_STEPS {
                     continue;
                 }
                 let (dx, dy) = ((x - to.0).abs(), (y - to.1).abs());
@@ -367,14 +339,14 @@ pub fn game_route(flags: impl Fn(i32, i32) -> Option<u32>, from: Tile, to: Tile)
     let (mut x, mut y) = end;
     while (x, y) != from {
         let back = via[index(x, y)];
-        if back & 2 != 0 {
+        if back & BACK_EAST != 0 {
             x += 1;
-        } else if back & 8 != 0 {
+        } else if back & BACK_WEST != 0 {
             x -= 1;
         }
-        if back & 1 != 0 {
+        if back & BACK_NORTH != 0 {
             y += 1;
-        } else if back & 4 != 0 {
+        } else if back & BACK_SOUTH != 0 {
             y -= 1;
         }
         tiles.push((x, y));
@@ -386,31 +358,32 @@ pub fn game_route(flags: impl Fn(i32, i32) -> Option<u32>, from: Tile, to: Tile)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collision::{Cell, Square, region_id};
+    use crate::collision::region_id;
+
+    const BASE: i32 = 50 * 64;
+
+    fn empty() -> WorldCollision<Movement> {
+        let mut world = WorldCollision::<Movement>::default();
+        world.add_square(region_id(50, 50));
+        world
+    }
 
     fn square(rows: &[&str]) -> (WorldCollision<Movement>, i32, i32) {
-        let mut world = WorldCollision::<Movement>::default();
-        let region = region_id(50, 50);
-        world.add_square(region);
-        let mut tiles = Box::new([Movement::default(); 64 * 64]);
+        let mut world = empty();
         for (row, line) in rows.iter().enumerate() {
-            let y = rows.len() - 1 - row;
+            let y = (rows.len() - 1 - row) as i32;
             for (x, c) in line.chars().enumerate() {
                 if c == '#' {
-                    tiles[x * 64 + y] = Movement(BLOCKS);
+                    world.add(0, BASE + x as i32, BASE + y, flag::OBJECT);
                 }
             }
         }
-        world.set_square(0, region, Square::Tiles(tiles));
-        (world, 50 * 64, 50 * 64)
+        (world, BASE, BASE)
     }
 
     #[test]
     fn walks_around_a_wall() {
-        let (world, bx, by) = square(&[
-            ".....", //
-            ".###.", ".#...", ".#...",
-        ]);
+        let (world, bx, by) = square(&[".....", ".###.", ".#...", ".#..."]);
         let path = find_path(&world, 0, (bx, by), (bx + 2, by), 10_000).unwrap();
         assert_eq!(path.first(), Some(&(bx, by)));
         assert_eq!(path.last(), Some(&(bx + 2, by)));
@@ -421,22 +394,15 @@ mod tests {
                 "illegal step {w:?}"
             );
         }
-        // Up the west side to (1, 3), round the east end of the row at y 2, down to (2, 0): 11 steps, no corner cutting.
         assert_eq!(path.len(), 12, "{path:?}");
     }
 
     #[test]
     fn no_diagonal_through_a_corner() {
-        let (world, bx, by) = square(&[
-            "#.", //
-            "..",
-        ]);
+        let (world, bx, by) = square(&["#.", ".."]);
         assert!(!can_step(&world, 0, bx, by, 1, 1));
         assert!(can_step(&world, 0, bx, by, 1, 0));
-        let (world, bx, by) = square(&[
-            "#.", //
-            ".#",
-        ]);
+        let (world, bx, by) = square(&["#.", ".#"]);
         assert!(!can_step(&world, 0, bx, by, 1, 1));
     }
 
@@ -458,12 +424,10 @@ mod tests {
     #[test]
     fn game_route_prefers_west_east_south_north_then_diagonals() {
         let open = [".....", ".....", ".....", ".....", "....."];
-        // straight east: no tie to break
         assert_eq!(
             route(&open, (0, 2), (3, 2)).unwrap().tiles,
             vec![(0, 2), (1, 2), (2, 2), (3, 2)]
         );
-        // two steps north-east and one east: the BFS takes the diagonals last, so the east step first
         let r = route(&open, (0, 0), (3, 2)).unwrap();
         assert!(r.reached);
         assert_eq!(r.tiles, vec![(0, 0), (1, 0), (2, 1), (3, 2)]);
@@ -471,13 +435,9 @@ mod tests {
 
     #[test]
     fn game_route_goes_around_and_ends_near_unreachable_tiles() {
-        let rows = [
-            "..#..", //
-            "..#..", "..#..", ".....",
-        ];
+        let rows = ["..#..", "..#..", "..#..", "....."];
         let r = route(&rows, (0, 3), (4, 3)).unwrap();
         assert!(r.reached);
-        // down the west side, under the wall and up: 8 steps (no diagonal past the wall's end)
         assert_eq!(
             r.tiles,
             vec![
@@ -492,35 +452,28 @@ mod tests {
                 (4, 3)
             ]
         );
-        // a closed box: the nearest tile outside it
-        let rows = [
-            ".....", //
-            ".###.", ".#.#.", ".###.", ".....",
-        ];
+        let rows = [".....", ".###.", ".#.#.", ".###.", "....."];
         let r = route(&rows, (0, 0), (2, 2)).unwrap();
         assert!(!r.reached);
-        // (0, 2) and (2, 0) tie (4 away, 2 steps): the lower x wins
         assert_eq!(r.tiles.last(), Some(&(0, 2)));
-        // a blocked click: the nearest free tile
         let r = route(&rows, (0, 2), (1, 2)).unwrap();
         assert_eq!(r.tiles, vec![(0, 2)]);
     }
 
     #[test]
     fn goes_through_doors_when_asked() {
-        let mut world = WorldCollision::<Movement>::default();
-        let region = region_id(50, 50);
-        world.add_square(region);
-        let mut tiles = Box::new([Movement::default(); 64 * 64]);
-        // a column of walls on the east edge of x 0, the one at y 0 a door
+        let mut world = empty();
         for y in 0..64 {
-            let door = if y == 0 { flag::DOOR_EAST } else { 0 };
-            tiles[y] = Movement::default().with(flag::WALL_EAST | door);
-            tiles[64 + y] = Movement::default()
-                .with(flag::WALL_WEST | if y == 0 { flag::DOOR_WEST } else { 0 });
+            let door = |bit: u32| if y == 0 { bit } else { 0 };
+            world.add(0, BASE, BASE + y, flag::WALL_EAST | door(flag::DOOR_EAST));
+            world.add(
+                0,
+                BASE + 1,
+                BASE + y,
+                flag::WALL_WEST | door(flag::DOOR_WEST),
+            );
         }
-        world.set_square(0, region, Square::Tiles(tiles));
-        let (bx, by) = (50 * 64, 50 * 64);
+        let (bx, by) = (BASE, BASE);
         assert!(find_path(&world, 0, (bx, by + 3), (bx + 1, by + 3), 100_000).is_err());
         let path = find_path_with(
             &world,
@@ -540,15 +493,10 @@ mod tests {
 
     #[test]
     fn walls_block_both_sides() {
-        let mut world = WorldCollision::<Movement>::default();
-        let region = region_id(50, 50);
-        world.add_square(region);
-        let mut tiles = Box::new([Movement::default(); 64 * 64]);
-        // A wall on the east edge of (0, 0), as the client marks it on both tiles.
-        tiles[0] = Movement(flag::WALL_EAST as u16);
-        tiles[64] = Movement(flag::WALL_WEST as u16);
-        world.set_square(0, region, Square::Tiles(tiles));
-        let (bx, by) = (50 * 64, 50 * 64);
+        let mut world = empty();
+        world.add(0, BASE, BASE, flag::WALL_EAST);
+        world.add(0, BASE + 1, BASE, flag::WALL_WEST);
+        let (bx, by) = (BASE, BASE);
         assert!(!can_step(&world, 0, bx, by, 1, 0));
         assert!(!can_step(&world, 0, bx + 1, by, -1, 0));
         assert!(can_step(&world, 0, bx, by, 0, 1));

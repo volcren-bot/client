@@ -47,11 +47,6 @@ const PAINT_TRIANGLES: [[usize; 3]; 2] = [[1, 2, 3], [0, 1, 3]];
 type Vertex = [i32; 3];
 type Triangle = [Vertex; 3];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Failure {
-    Unavailable(String),
-}
-
 fn truncate(value: f32) -> i32 {
     if value.is_nan() || value >= 2_147_483_648.0 || value < -2_147_483_648.0 {
         i32::MIN
@@ -70,7 +65,6 @@ fn i32s<const N: usize>(memory: &impl Memory, address: u64) -> Option<[i32; N]> 
 
 const WINDOW_SIZE: usize = 512;
 
-// The fields of one object that lie near each other, fetched in a single read; others are read on their own.
 struct Window<'a, M: Memory> {
     memory: &'a M,
     base: u64,
@@ -81,7 +75,6 @@ struct Window<'a, M: Memory> {
 }
 
 impl<'a, M: Memory> Window<'a, M> {
-    // `fields` are the (offset, size) pairs the window will be asked for.
     fn new(memory: &'a M, base: u64, fields: &[(u64, u64)]) -> Self {
         let low = fields.iter().map(|f| f.0).min().unwrap_or(0);
         let high = fields.iter().map(|f| f.0 + f.1).max().unwrap_or(0);
@@ -128,36 +121,18 @@ impl<'a, M: Memory> Window<'a, M> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Camera {
-    pub position: [i32; 3],
-    pub trig: [f32; 4],
-    pub zoom: i32,
-    pub center: [i32; 2],
-    pub offset: [i32; 2],
-    pub canvas: [i32; 2],
-    pub ui: [i32; 2],
-    pub scale: f32,
-    // `ui / canvas` per axis, which every projected point scales by
+struct Camera {
+    position: [i32; 3],
+    trig: [f32; 4],
+    zoom: i32,
+    center: [i32; 2],
+    offset: [i32; 2],
+    scale: f32,
     ratio: [f32; 2],
 }
 
 impl Camera {
-    pub fn read(memory: &impl Memory, layout: &Layout, client: u64, scene: u64) -> Option<Self> {
-        let mut trig = [0u8; 16];
-        if !memory.read(scene + layout.projection.trig as u64, &mut trig) {
-            return None;
-        }
-        Self::read_with(memory, layout, client, trig)
-    }
-
-    // `read` with the scene's trig bytes already in hand.
-    fn read_with(
-        memory: &impl Memory,
-        layout: &Layout,
-        client: u64,
-        trig: [u8; 16],
-    ) -> Option<Self> {
+    fn read(memory: &impl Memory, layout: &Layout, client: u64, trig: [u8; 16]) -> Option<Self> {
         let p = &layout.projection;
         let canvas = memory.ptr(client + layout.interfaces.canvas as u64)?;
         let view = memory.ptr(canvas + p.view_holder as u64 + p.view as u64)?;
@@ -197,8 +172,6 @@ impl Camera {
                 view_fields.i32(p.view_offset_x as u64)?,
                 view_fields.i32(p.view_offset_y as u64)?,
             ],
-            canvas: canvas_size,
-            ui,
             scale: canvas_fields.f32(layout.interfaces.ui_scale as u64)?,
             ratio: [
                 ui[0] as f32 / canvas_size[0] as f32,
@@ -207,18 +180,7 @@ impl Camera {
         })
     }
 
-    pub fn project(&self, x: i32, y: i32, height: i32) -> [f32; 2] {
-        self.project_at(x, y, height).0
-    }
-
-    /// `project`, but `None` for a point closer to the camera than `NEAR_PLANE` or behind it, as RuneLite's `Perspective.localToCanvas`.
-    pub fn project_near(&self, x: i32, y: i32, height: i32) -> Option<[f32; 2]> {
-        let (screen, distance) = self.project_at(x, y, height);
-        (distance >= NEAR_PLANE).then_some(screen)
-    }
-
-    // The screen position and the distance along the view direction.
-    fn project_at(&self, x: i32, y: i32, height: i32) -> ([f32; 2], f32) {
+    fn project(&self, x: i32, y: i32, height: i32) -> ([f32; 2], f32) {
         let [sin_pitch, cos_pitch, sin_yaw, cos_yaw] = self.trig;
         let dx = x.wrapping_sub(self.position[0]) as f32;
         let dz = height.wrapping_sub(self.position[1]) as f32;
@@ -260,11 +222,6 @@ pub struct SceneKey {
     pub tiles: u64,
 }
 
-pub fn scene(memory: &impl Memory, layout: &Layout, client: u64) -> Option<SceneKey> {
-    scene_and_trig(memory, layout, client).map(|(key, _)| key)
-}
-
-// The scene's key and its trig bytes, which sit next to the heights pointer and so share its read.
 fn scene_and_trig(
     memory: &impl Memory,
     layout: &Layout,
@@ -273,11 +230,16 @@ fn scene_and_trig(
     let p = &layout.projection;
     let world_view = memory.ptr(client + p.top_world_view as u64)?;
     let has_player = layout.has(part::PLAYER);
-    let mut fields = vec![(p.scene as u64, 8), (p.plane as u64, 4)];
-    if has_player {
-        fields.push((layout.player.base_x as u64, 8));
-    }
-    let view = Window::new(memory, world_view, &fields);
+    let fields = [
+        (p.scene as u64, 8),
+        (p.plane as u64, 4),
+        (layout.player.base_x as u64, 8),
+    ];
+    let view = Window::new(
+        memory,
+        world_view,
+        &fields[..if has_player { 3 } else { 2 }],
+    );
     let scene = view
         .get(p.scene as u64)
         .map(u64::from_le_bytes)
@@ -333,12 +295,11 @@ impl Terrain {
         if !(1..=1024).contains(&size_x) || !(1..=1024).contains(&size_y) {
             return None;
         }
-        let tiles = (PLANES * size_x * size_y) as usize;
+        let count = (PLANES * size_x * size_y) as usize;
         let heights = memory.i32s(key.heights, (PLANES * (size_x + 1) * (size_y + 1)) as usize)?;
-        let tile_count = tiles;
-        let mut settings = vec![0u8; tiles];
+        let mut settings = vec![0u8; count];
         let settings_at = memory.ptr(key.scene + p.settings as u64)?;
-        let mut entries = vec![0u8; tiles * TILE_ENTRY_SIZE];
+        let mut entries = vec![0u8; count * TILE_ENTRY_SIZE];
         if !memory.read(settings_at, &mut settings) || !memory.read(key.tiles, &mut entries) {
             return None;
         }
@@ -360,7 +321,7 @@ impl Terrain {
             heights,
             settings,
             tiles,
-            meshes: vec![None; tile_count],
+            meshes: vec![None; count],
             decorations: HashMap::new(),
         })
     }
@@ -369,12 +330,10 @@ impl Terrain {
         self.key
     }
 
-    // The client's tile settings of a scene tile (`x`, `y` in scene coordinates), `None` off the scene.
     pub fn setting(&self, plane: i32, x: i32, y: i32) -> Option<u8> {
         self.tile_index(plane, x, y).map(|i| self.settings[i])
     }
 
-    // The size of the scene, in tiles.
     pub fn size(&self) -> [i32; 2] {
         self.size
     }
@@ -389,10 +348,13 @@ impl Terrain {
             .collect();
     }
 
+    fn in_scene(&self, x: i32, y: i32) -> bool {
+        (0..self.size[0]).contains(&x) && (0..self.size[1]).contains(&y)
+    }
+
     fn tile_index(&self, plane: i32, x: i32, y: i32) -> Option<usize> {
-        let [size_x, size_y] = self.size;
-        ((0..PLANES).contains(&plane) && (0..size_x).contains(&x) && (0..size_y).contains(&y))
-            .then(|| ((plane * size_x + x) * size_y + y) as usize)
+        ((0..PLANES).contains(&plane) && self.in_scene(x, y))
+            .then(|| ((plane * self.size[0] + x) * self.size[1] + y) as usize)
     }
 
     fn height(&self, plane: i32, x: i32, y: i32) -> i32 {
@@ -407,7 +369,6 @@ impl Terrain {
             .unwrap_or(0)
     }
 
-    // The tile's heights come from its own corners, which an edge point shares with the tile beyond: `ax`/`ay` can be 0 or TILE.
     fn bilinear(&self, x: i32, y: i32, plane: i32, (tx, ty): (i32, i32)) -> i32 {
         let bridge = plane < 3
             && self
@@ -447,7 +408,6 @@ impl Terrain {
             let count = (end.checked_sub(begin)? as usize / VERTEX_SIZE).min(MAX_TRIANGLES);
             let indices = memory.i32s(begin, count * 3)?;
             let vertex_count = usize::try_from(*indices.iter().max()?).ok()? + 1;
-            // A scene still loading can hold garbage here; a real tile model has far fewer vertices than triangles allow.
             if vertex_count > MAX_TRIANGLES * 3 {
                 return None;
             }
@@ -469,7 +429,6 @@ impl Terrain {
                 .collect();
         }
         memory.ptr(tile + p.tile_paint as u64)?;
-        // paint follows the heightmap of the tile's own plane, which differs under bridges
         let [x, y, plane] = i32s(memory, tile + p.tile_x as u64)?;
         let corners = PAINT_CORNERS.map(|[dx, dy]| {
             [
@@ -486,33 +445,18 @@ impl Terrain {
         )
     }
 
-    // The heightmap's height under (x, y), without tile models or decorations: what the client flies projectiles over.
     pub fn heightmap(&self, x: i32, y: i32, plane: i32) -> i32 {
         self.bilinear(x, y, plane, (x >> TILE_SHIFT, y >> TILE_SHIFT))
     }
 
-    // The heightmap under (x, y), 0 outside the scene.
     pub fn flat_ground(&self, x: i32, y: i32, plane: i32) -> i32 {
-        let [size_x, size_y] = self.size;
-        if (0..size_x).contains(&(x >> TILE_SHIFT)) && (0..size_y).contains(&(y >> TILE_SHIFT)) {
+        if self.in_scene(x >> TILE_SHIFT, y >> TILE_SHIFT) {
             self.heightmap(x, y, plane)
         } else {
             0
         }
     }
 
-    pub fn ground(
-        &mut self,
-        memory: &impl Memory,
-        layout: &Layout,
-        x: i32,
-        y: i32,
-        plane: i32,
-    ) -> i32 {
-        self.ground_on(memory, layout, x, y, plane, None)
-    }
-
-    // The ground under (x, y), from tile `on` if given, else the tile the point falls in (an edge falls in the tile beyond).
     pub fn ground_on(
         &mut self,
         memory: &impl Memory,
@@ -522,12 +466,11 @@ impl Terrain {
         plane: i32,
         on: Option<[i32; 2]>,
     ) -> i32 {
-        let [size_x, size_y] = self.size;
         let (tx, ty) = match on {
-            Some([tx, ty]) if (0..size_x).contains(&tx) && (0..size_y).contains(&ty) => (tx, ty),
+            Some([tx, ty]) if self.in_scene(tx, ty) => (tx, ty),
             _ => (x >> TILE_SHIFT, y >> TILE_SHIFT),
         };
-        if tx < 0 || ty < 0 || tx > size_x - 1 || ty > size_y - 1 {
+        if !self.in_scene(tx, ty) {
             return 0;
         }
         let Some(index) = self
@@ -582,19 +525,16 @@ fn barycentric(px: i32, py: i32, [a, b, c]: &Triangle) -> i32 {
     truncate(bh as f32 * wb + ah as f32 * wa + wc * ch as f32)
 }
 
-/// Nearer than this along the view direction a point is not drawn, as in RuneLite.
 pub const NEAR_PLANE: f32 = 50.0;
 
 pub type Decoration = ((i32, i32, i32), i32);
 
-/// A point to project: `x`, `y`, `z` (height above ground, negative up) and the `tile` whose ground it stands on (default: the tile under it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
     pub z: i32,
     pub tile: Option<[i32; 2]>,
-    /// Stand on the bare heightmap rather than the tile's model, as RuneLite's `Perspective.getTileHeight`.
     pub heightmap: bool,
 }
 
@@ -610,35 +550,34 @@ impl Point {
     }
 }
 
-// Reads the scene's terrain into `terrain` unless it already holds the shown scene; returns the scene's key.
 pub fn ensure_terrain(
     memory: &impl Memory,
     layout: &Layout,
     terrain: &mut Option<Terrain>,
     decorations: impl FnOnce() -> Vec<Decoration>,
-) -> Result<SceneKey, Failure> {
+) -> Result<(), String> {
+    let client = client(memory, layout)?;
+    scene_terrain(memory, layout, client, terrain, decorations).map(drop)
+}
+
+fn unavailable(what: &str) -> String {
+    format!("couldn't read the {what}")
+}
+
+fn client(memory: &impl Memory, layout: &Layout) -> Result<u64, String> {
     if !layout.has(NEEDS) {
-        return Err(Failure::Unavailable(
-            "agent didn't find what local projection reads".into(),
-        ));
+        return Err("agent didn't find what local projection reads".into());
     }
-    let client = read::client(memory, layout).ok_or_else(|| unavailable("client"))?;
-    let (key, _) = scene_terrain(memory, layout, client, terrain, decorations)?;
-    Ok(key)
+    read::client(memory, layout).ok_or_else(|| unavailable("client"))
 }
 
-fn unavailable(what: &str) -> Failure {
-    Failure::Unavailable(format!("couldn't read the {what}"))
-}
-
-// Reads the scene's key, and its terrain when the client shows another scene than `terrain` holds.
 fn scene_terrain(
     memory: &impl Memory,
     layout: &Layout,
     client: u64,
     terrain: &mut Option<Terrain>,
     decorations: impl FnOnce() -> Vec<Decoration>,
-) -> Result<(SceneKey, [u8; 16]), Failure> {
+) -> Result<(SceneKey, [u8; 16]), String> {
     let (key, trig) = scene_and_trig(memory, layout, client).ok_or_else(|| unavailable("scene"))?;
     if terrain.as_ref().is_none_or(|t| t.key() != key) {
         let mut fresh = Terrain::read(memory, layout, key).ok_or_else(|| unavailable("terrain"))?;
@@ -648,7 +587,6 @@ fn scene_terrain(
     Ok((key, trig))
 }
 
-/// Projects `points` with the client's camera, first moved by `shift` as it follows the player (fine x and y, and the plane they will stand on).
 pub fn project(
     memory: &impl Memory,
     layout: &Layout,
@@ -657,16 +595,11 @@ pub fn project(
     shift: Option<[i32; 3]>,
     clip: bool,
     decorations: impl FnOnce() -> Vec<Decoration>,
-) -> Result<Vec<[f32; 2]>, Failure> {
-    if !layout.has(NEEDS) {
-        return Err(Failure::Unavailable(
-            "agent didn't find what local projection reads".into(),
-        ));
-    }
-    let client = read::client(memory, layout).ok_or_else(|| unavailable("client"))?;
+) -> Result<Vec<[f32; 2]>, String> {
+    let client = client(memory, layout)?;
     let (key, trig) = scene_terrain(memory, layout, client, terrain, decorations)?;
     let mut camera =
-        Camera::read_with(memory, layout, client, trig).ok_or_else(|| unavailable("camera"))?;
+        Camera::read(memory, layout, client, trig).ok_or_else(|| unavailable("camera"))?;
     let terrain = terrain.as_mut().unwrap();
     if let Some([dx, dy, plane]) = shift {
         let [fx, _, fy] = i32s::<3>(memory, client + layout.camera.focal as u64)
@@ -695,14 +628,11 @@ pub fn project(
             } else {
                 terrain.ground_on(memory, layout, p.x, p.y, key.plane, p.tile)
             };
-            let height = ground.wrapping_add(p.z);
-            // a clipped point has no position, which no on-screen test passes
-            if clip {
-                camera
-                    .project_near(p.x, p.y, height)
-                    .unwrap_or([f32::NAN; 2])
+            let (screen, distance) = camera.project(p.x, p.y, ground.wrapping_add(p.z));
+            if !clip || distance >= NEAR_PLANE {
+                screen
             } else {
-                camera.project(p.x, p.y, height)
+                [f32::NAN; 2]
             }
         })
         .collect())
@@ -822,24 +752,30 @@ mod tests {
         }
     }
 
+    fn key(m: &Fake, layout: &Layout) -> SceneKey {
+        scene_and_trig(m, layout, CLIENT).unwrap().0
+    }
+
+    fn camera(m: &Fake, layout: &Layout) -> Camera {
+        let (_, trig) = scene_and_trig(m, layout, CLIENT).unwrap();
+        Camera::read(m, layout, CLIENT, trig).unwrap()
+    }
+
     fn ground(m: &Fake, layout: &Layout, x: i32, y: i32) -> i32 {
-        let key = scene(m, layout, CLIENT).unwrap();
-        Terrain::read(m, layout, key)
+        Terrain::read(m, layout, key(m, layout))
             .unwrap()
-            .ground(m, layout, x, y, 0)
+            .ground_on(m, layout, x, y, 0, None)
     }
 
     #[test]
     fn heightmap_between_corners() {
         let (m, layout) = world();
-        // tile (1, 2): corners -12 (SW), -22 (SE), -13 (NW), -23 (NE)
         assert_eq!(ground(&m, &layout, 128, 256), -12);
         assert_eq!(ground(&m, &layout, 192, 256), -17);
         assert_eq!(
             ground(&m, &layout, 192, 320),
             (((-17 * 64) + (-18 * 64)) >> 7)
         );
-        // outside the scene
         assert_eq!(ground(&m, &layout, -1, 0), 0);
         assert_eq!(ground(&m, &layout, SIZE * 128, 0), 0);
     }
@@ -855,13 +791,9 @@ mod tests {
     #[test]
     fn an_edge_takes_the_ground_of_the_tile_it_outlines() {
         let (mut m, layout) = world();
-        // tile (2, 2) is a bridge, so its heights come from plane 1; tile (1, 2) beside it is not
         m.put(SETTINGS + ((SIZE + 2) * SIZE + 2) as u64, &[BRIDGE]);
-        let key = scene(&m, &layout, CLIENT).unwrap();
-        let mut terrain = Terrain::read(&m, &layout, key).unwrap();
-        // the edge x = 256, halfway up: the bridge's ground by default, which is a different plane
-        assert_ne!(terrain.ground(&m, &layout, 256, 320, 0), -23);
-        // named as tile (1, 2)'s, it is interpolated from that tile's own corners: -22 and -23
+        let mut terrain = Terrain::read(&m, &layout, key(&m, &layout)).unwrap();
+        assert_ne!(terrain.ground_on(&m, &layout, 256, 320, 0, None), -23);
         assert_eq!(
             terrain.ground_on(&m, &layout, 256, 320, 0, Some([1, 2])),
             -23
@@ -873,7 +805,6 @@ mod tests {
         let (mut m, layout) = world();
         put_tile(&mut m, &layout, 0, 1, 2, TILE);
         m.put_u64(TILE + layout.projection.tile_paint as u64, 0x1);
-        // a bridge tile's paint lies on plane 1 even when listed on plane 0
         m.put_i32(TILE + layout.projection.tile_x as u64 + 8, 1);
         assert_eq!(ground(&m, &layout, 128, 256), -1012);
         assert_eq!(ground(&m, &layout, 255, 383), -1022);
@@ -905,7 +836,6 @@ mod tests {
             [vertices[0], vertices[2], vertices[3]],
         ];
         assert_eq!(ground(&m, &layout, 0, 0), -100);
-        // on the diagonal both hold it: the first wins
         assert_eq!(ground(&m, &layout, 64, 64), -200);
         assert_eq!(ground(&m, &layout, 96, 32), barycentric(96, 32, &first));
         assert_eq!(ground(&m, &layout, 0, 127), barycentric(0, 127, &second));
@@ -916,11 +846,10 @@ mod tests {
     fn decorations_lower_their_tile() {
         let (mut m, layout) = world();
         put_tile(&mut m, &layout, 0, 1, 2, TILE);
-        let key = scene(&m, &layout, CLIENT).unwrap();
-        let mut terrain = Terrain::read(&m, &layout, key).unwrap();
+        let mut terrain = Terrain::read(&m, &layout, key(&m, &layout)).unwrap();
         terrain.set_decorations([((0, 1, 2), 30), ((0, 2, 2), 0)]);
-        assert_eq!(terrain.ground(&m, &layout, 128, 256, 0), -42);
-        assert_eq!(terrain.ground(&m, &layout, 256, 256, 0), -22);
+        assert_eq!(terrain.ground_on(&m, &layout, 128, 256, 0, None), -42);
+        assert_eq!(terrain.ground_on(&m, &layout, 256, 256, 0, None), -22);
     }
 
     #[test]
@@ -942,7 +871,6 @@ mod tests {
         let (m, layout) = world();
         let mut terrain = None;
         let mut asked = 0;
-        // straight down from 1000 above (0, 0): across = dx, up = -depth = -dy, distance = dz
         let points = [[0, 0, 0], [100, 0, 0], [0, 200, 0], [128, 256, -88]]
             .map(|[x, y, z]| Point::new(x, y, z));
         let screen = project(&m, &layout, &mut terrain, &points, None, false, || {
@@ -950,11 +878,9 @@ mod tests {
             Vec::new()
         })
         .unwrap();
-        // x: trunc(500 * dx / dz) + 4 + 400, halved to interface units, doubled back to pixels
         assert_eq!(screen[0], [404.0, 302.0]);
         assert_eq!(screen[1], [454.0, 302.0]);
         assert_eq!(screen[2], [404.0, 202.0]);
-        // ground -12 and 88 up: 100 up, 900 below the camera
         let x = 500 * 128 / 900 + 404;
         let y = 2 + 300 - 500 * 256 / 900;
         assert_eq!(
@@ -999,13 +925,13 @@ mod tests {
             t.ground_on(&m, &layout, 192, 64, 0, None) - t.ground_on(&m, &layout, 64, 64, 0, None);
         assert_eq!(rise, -10);
         let ground = t.ground_on(&m, &layout, 300, 200, 0, None);
-        let mut camera = Camera::read(&m, &layout, CLIENT, SCENE).unwrap();
+        let mut camera = camera(&m, &layout);
         camera.position = [
             camera.position[0] + 128,
             camera.position[1] + rise,
             camera.position[2],
         ];
-        assert_eq!(shifted[0], camera.project(300, 200, ground - 40));
+        assert_eq!(shifted[0], camera.project(300, 200, ground - 40).0);
         assert_ne!(
             shifted,
             project(&m, &layout, &mut terrain, &points, None, false, Vec::new).unwrap()
@@ -1019,9 +945,8 @@ mod tests {
         assert_eq!(truncate(-3e9), i32::MIN);
         assert_eq!(truncate(-2.7), -2);
         let (m, layout) = world();
-        let camera = Camera::read(&m, &layout, CLIENT, SCENE).unwrap();
-        // at the camera itself: 0 / 0, which the client turns into i32::MIN pixels
-        let [x, y] = camera.project(0, 0, -1000);
+        let camera = camera(&m, &layout);
+        let [x, y] = camera.project(0, 0, -1000).0;
         assert!(x < -1e9 && y < -1e9);
     }
 
@@ -1029,7 +954,7 @@ mod tests {
     fn needs_the_parts() {
         let (m, mut layout) = world();
         layout.found &= !part::PROJECTION;
-        assert!(matches!(
+        assert_eq!(
             project(
                 &m,
                 &layout,
@@ -1039,7 +964,7 @@ mod tests {
                 false,
                 Vec::new
             ),
-            Err(Failure::Unavailable(_))
-        ));
+            Err("agent didn't find what local projection reads".to_string())
+        );
     }
 }

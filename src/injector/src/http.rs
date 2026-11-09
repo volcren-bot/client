@@ -1,5 +1,3 @@
-//! `http_request`: HTTP for scripts, done by the loader, which checks every URL against the user's whitelist outside the sandbox.
-
 use std::{
     collections::BTreeMap,
     sync::{Mutex, PoisonError},
@@ -7,18 +5,12 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The loader's second capability line, after `form::PINS_PREFIX`: it answers `REQUEST_PREFIX` lines.
 pub const CAPABILITY_PREFIX: &str = "\u{1e}HTTP";
-/// A line the injector writes for `http_request`: a JSON `Request`. The loader answers on the script's stdin with `reply_line`.
 pub const REQUEST_PREFIX: &str = "\u{1e}HTTPREQ ";
 
-/// A request waits this long when the script gives no timeout.
 pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
-/// The longest a script may make a request wait.
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
-/// The biggest request body, in bytes.
 pub const MAX_REQUEST_BODY: usize = 1 << 20;
-/// The biggest response body the loader reads, in bytes; a bigger one is an error.
 pub const MAX_RESPONSE_BODY: usize = 8 << 20;
 
 fn default_method() -> String {
@@ -29,7 +21,6 @@ fn default_timeout() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-/// What a script passes to `http_request`, and what goes to the loader.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub url: String,
@@ -39,13 +30,11 @@ pub struct Request {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub body: Option<String>,
-    /// Milliseconds the whole request may take, redirects included.
     #[serde(default = "default_timeout", rename = "timeout")]
     pub timeout_ms: u64,
 }
 
 impl Request {
-    /// Checks what the injector can without the whitelist, so a bad call fails in the script and not at the loader.
     pub fn validate(&self) -> Result<(), String> {
         if self.url.trim().is_empty() {
             return Err("http_request needs a url".into());
@@ -62,8 +51,7 @@ impl Request {
             .is_some_and(|body| body.len() > MAX_REQUEST_BODY)
         {
             return Err(format!(
-                "http_request: the body is over {} bytes",
-                MAX_REQUEST_BODY
+                "http_request: the body is over {MAX_REQUEST_BODY} bytes"
             ));
         }
         if self.timeout_ms == 0 || self.timeout_ms > MAX_TIMEOUT_MS {
@@ -75,7 +63,6 @@ impl Request {
     }
 }
 
-/// The server's answer: lowercase header names, repeated headers joined with ", ", and a text body (invalid UTF-8 becomes U+FFFD).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     pub status: u16,
@@ -92,12 +79,10 @@ pub fn request_line(request: &Request) -> String {
     )
 }
 
-/// The request of a `REQUEST_PREFIX` line, without the prefix.
 pub fn parse_request(payload: &str) -> Result<Request, String> {
     serde_json::from_str(payload).map_err(|e| format!("bad HTTP request from the script: {e}"))
 }
 
-/// The loader's answer to a request: the response, or why there is none (not whitelisted, no connection, ...).
 pub fn reply_line(answer: &Result<Response, String>) -> String {
     match answer {
         Ok(response) => serde_json::json!({ "response": response }),
@@ -119,7 +104,6 @@ pub fn parse_reply(line: &str) -> Result<Response, String> {
     serde_json::from_value(response).map_err(|e| format!("bad HTTP reply from the loader: {e}"))
 }
 
-/// Where `http_request` sends requests. Without one every call fails.
 pub type Handler = Box<dyn FnMut(&Request) -> Result<Response, String> + Send>;
 
 static HANDLER: Mutex<Option<Handler>> = Mutex::new(None);

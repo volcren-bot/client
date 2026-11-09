@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Compile lib/ into the injector, so piped scripts can `require` it. Without it, lib/ is only read from disk
-# relative to the script's own path (`injector run --script <path>`), and lib/ can live outside this repo.
 default = ["embedded-lib"]
 embedded-lib = []
 

@@ -1,6 +1,3 @@
-//! The panel drawn over the bank PIN keypad while `bank_pin_enter` runs, from art pre-rendered by `assets/make_bank_pin_art.sh`.
-
-// Only the Windows injector has an overlay to paint on, so on other hosts nothing here is called outside tests.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use crate::Rgba;
@@ -9,7 +6,6 @@ const LOGO: &[u8] = include_bytes!("../assets/bank_pin_logo.bin");
 const TITLE: &[u8] = include_bytes!("../assets/bank_pin_title.bin");
 const MESSAGE: &[u8] = include_bytes!("../assets/bank_pin_message.bin");
 
-/// Tokyo Night's background over the keypad, see-through enough to show it; the border is its `blue0`.
 const SHADE: Rgba = Rgba {
     r: 0x1a,
     g: 0x1b,
@@ -23,11 +19,9 @@ const BORDER: Rgba = Rgba {
     a: 255,
 };
 const BORDER_WIDTH: i32 = 2;
-/// From the panel's edge to the logo, and from the logo to the name.
 const MARGIN: i32 = 10;
 const GAP: i32 = 8;
 
-/// Straight alpha RGBA pixels, row by row, as the art files hold them: a u16 width and height, little endian, then the pixels.
 struct Art<'a> {
     width: i32,
     height: i32,
@@ -62,7 +56,6 @@ impl<'a> Art<'a> {
     }
 }
 
-/// `color` drawn over the shade, as one pixel with its own alpha, so the overlay shows the same as the two would.
 fn over_shade(color: Rgba) -> Rgba {
     let (a, shade) = (f32::from(color.a) / 255.0, f32::from(SHADE.a) / 255.0);
     let out = a + shade * (1.0 - a);
@@ -79,7 +72,6 @@ fn over_shade(color: Rgba) -> Rgba {
     }
 }
 
-/// Draws `art` with its top left at `(x, y)`, `width` pixels wide at most (shrunk to fit, keeping its shape).
 fn blit(art: &Art, x: i32, y: i32, width: i32, put: &mut dyn FnMut(i32, i32, Rgba)) {
     let width = width.clamp(1, art.width);
     let height = (art.height * width / art.width).max(1);
@@ -93,7 +85,6 @@ fn blit(art: &Art, x: i32, y: i32, width: i32, put: &mut dyn FnMut(i32, i32, Rgb
     }
 }
 
-/// Paints the panel over `area` (`[x1, y1, x2, y2]`, canvas pixels) through `put(x, y, color)`.
 pub fn paint(area: [i32; 4], put: &mut dyn FnMut(i32, i32, Rgba)) {
     let [x1, y1, x2, y2] = area;
     for y in y1..=y2 {
@@ -133,7 +124,6 @@ mod tests {
 
     use super::*;
 
-    // Tokyo Night's foreground, what `make_bank_pin_art.sh` draws the message in.
     const MESSAGE_COLOR: Rgba = Rgba {
         r: 0xc0,
         g: 0xca,

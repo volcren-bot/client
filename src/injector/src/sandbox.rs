@@ -3,11 +3,11 @@ use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
     rc::Rc,
-    sync::Arc,
 };
 
 use mlua::{
-    FromLuaMulti, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, serde::SerializeOptions,
+    FromLuaMulti, IntoLua, IntoLuaMulti, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib,
+    serde::SerializeOptions,
 };
 use serde::Serialize;
 
@@ -39,6 +39,8 @@ use offline::*;
 
 #[cfg(not(windows))]
 mod offline {
+    use std::collections::BTreeMap;
+
     use crate::{
         ChatMessage, Connection, EntityModel, GameState, GroundItem, Input, Item, Loc, MenuClick,
         MenuEntry, MenuLayout, Npc, Overlay, Player, Projectile, SpotAnim, SubInterface, Widget,
@@ -85,245 +87,100 @@ mod offline {
     pub fn connection(_: u32) -> Option<Connection> {
         None
     }
-    pub fn game_state(_: u32) -> Result<GameState, String> {
-        Err(NO_WIN32.into())
+
+    macro_rules! unreachable_clients {
+        ($(fn $name:ident($($arg:ty),*) -> $value:ty;)*) => {
+            $(pub fn $name($(_: $arg),*) -> Result<$value, String> {
+                Err(NO_WIN32.into())
+            })*
+        };
     }
-    pub fn widget(_: u32, _: u16, _: u16) -> Result<Option<Widget>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn sub_interfaces(_: u32) -> Result<Option<Vec<SubInterface>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn menu(_: u32) -> Result<Vec<MenuEntry>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn menu_open(_: u32) -> Result<bool, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn menu_click(_: u32) -> Result<Option<MenuClick>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn menu_layout(_: u32) -> Result<Option<MenuLayout>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn selected_widget(_: u32) -> Result<Option<crate::SelectedWidget>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn project(
-        _: u32,
-        _: &[crate::projection::Point],
-        _: crate::projection::Via,
-    ) -> Result<Vec<[f32; 2]>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn project_moved(
-        _: u32,
-        _: &[crate::projection::Point],
-        _: [i32; 3],
-    ) -> Result<Vec<[f32; 2]>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn game_val_names(_: u32, _: u32, _: &[i32]) -> Result<Vec<Option<String>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn world_route(
-        _: u32,
-        _: crate::nav::Point,
-        _: crate::nav::Point,
-        _: &[String],
-    ) -> Result<crate::landmass::Route, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn widget_model(
-        _: u32,
-        _: u16,
-        _: u16,
-    ) -> Result<Option<decode::widgets::WidgetModel>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn item_names(_: u32, _: &[i32]) -> Result<Vec<Option<String>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn item_stackable(_: u32, _: &[i32]) -> Result<Vec<Option<bool>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn item_container(_: u32, _: i32) -> Result<Option<Vec<Item>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn varc(_: u32, _: i32) -> Result<Option<i32>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn varp_value(_: u32, _: usize) -> Result<Option<i32>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn varps(_: u32) -> Result<Option<Vec<i32>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn varbit(_: u32, _: i32) -> Result<Option<i32>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn landmasses(_: u32, _: &[[i32; 3]]) -> Result<Vec<u32>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn cache_files(_: u32, _: u32, _: &[[i32; 2]]) -> Result<Vec<Option<Vec<u8>>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn enum_def(_: u32, _: i32) -> Result<Option<crate::config::EnumDef>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn item_params(
-        _: u32,
-        _: &[i32],
-    ) -> Result<Vec<Option<std::collections::BTreeMap<u32, crate::config::Value>>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn npcs(_: u32) -> Result<Vec<Npc>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn npc_model(_: u32, _: i32) -> Result<Option<EntityModel>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn loc_model(_: u32, _: u8, _: i32, _: i32, _: i32) -> Result<Option<EntityModel>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn ground_items(_: u32) -> Result<Vec<GroundItem>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn projectiles(_: u32) -> Result<Vec<Projectile>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn spot_anims(_: u32) -> Result<Vec<SpotAnim>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn chat_messages(_: u32) -> Result<Vec<ChatMessage>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn locs(_: u32, _: Option<i32>) -> Result<Vec<Loc>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn loc_shown(_: u32, _: &[u32]) -> Result<Vec<crate::LocView>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn cache_locs(
-        _: u32,
-        _: [i32; 4],
-        _: &crate::CacheLocFilter,
-    ) -> Result<Vec<crate::CacheLoc>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn find_path(
-        _: u32,
-        _: i32,
-        _: [i32; 2],
-        _: [i32; 2],
-        _: Option<usize>,
-    ) -> Result<Vec<[i32; 2]>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn server_tile(_: u32) -> Result<Option<crate::ServerTile>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn movement(_: u32) -> Result<Option<crate::Movement>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn player_plane(_: u32) -> Result<i32, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn map_regions(_: u32) -> Result<Vec<[i32; 2]>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn in_instance(_: u32) -> Result<bool, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn npc_sizes(_: u32, _: &[i32]) -> Result<std::collections::BTreeMap<i32, i32>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn npc_hitsplats(
-        _: u32,
-        _: &[i32],
-    ) -> Result<std::collections::BTreeMap<i32, Vec<decode::world::Hitsplat>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn player_hitsplats(
-        _: u32,
-        _: &[i32],
-    ) -> Result<std::collections::BTreeMap<i32, Vec<decode::world::Hitsplat>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn client_cycle(_: u32) -> Result<i32, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn scene_collision(_: u32) -> Result<(i32, i32, i32, Vec<Vec<u32>>), String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn scene_route(
-        _: u32,
-        _: [i32; 2],
-        _: [i32; 2],
-        _: Option<crate::scene_graph::Options>,
-    ) -> Result<crate::pathfinding::Route, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn nav_plan(
-        _: u32,
-        _: crate::nav::Point,
-        _: crate::nav::Point,
-        _: &crate::nav::Request,
-    ) -> Result<crate::nav::NavPlan, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn npc_type_model(
-        _: u32,
-        _: i32,
-        _: i32,
-        _: i32,
-        _: (i32, i32),
-        _: i32,
-    ) -> Result<Option<EntityModel>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn player_model(_: u32, _: i32) -> Result<Option<EntityModel>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn players(_: u32) -> Result<Vec<Player>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn widget_children(_: u32, _: u16, _: u16) -> Result<Option<Vec<Widget>>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn world_select(_: u32) -> Result<Option<WorldSelect>, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn send_input(_: u32, _: &Input) -> Result<(), String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn send_input_with(_: u32, _: &Input, _: &dyn super::Pace) -> Result<(), String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn bank_pin_enter(
-        _: u32,
-        _: &(dyn super::Pace + Sync),
-    ) -> Result<crate::bank_pin::Outcome, String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn draw(_: u32, _: &Overlay) -> Result<(), String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn draw_batch(_: u32, _: &[Overlay]) -> Result<(), String> {
-        Err(NO_WIN32.into())
-    }
-    pub fn draw_lines(_: u32, _: &[[i32; 4]], _: crate::Rgba) -> Result<(), String> {
-        Err(NO_WIN32.into())
+
+    unreachable_clients! {
+        fn game_state(u32) -> GameState;
+        fn widget(u32, u16, u16) -> Option<Widget>;
+        fn sub_interfaces(u32) -> Option<Vec<SubInterface>>;
+        fn menu(u32) -> Vec<MenuEntry>;
+        fn menu_open(u32) -> bool;
+        fn menu_click(u32) -> Option<MenuClick>;
+        fn menu_layout(u32) -> Option<MenuLayout>;
+        fn selected_widget(u32) -> Option<crate::SelectedWidget>;
+        fn project(u32, &[crate::projection::Point], crate::projection::Via) -> Vec<[f32; 2]>;
+        fn project_moved(u32, &[crate::projection::Point], [i32; 3]) -> Vec<[f32; 2]>;
+        fn game_val_names(u32, u32, &[i32]) -> Vec<Option<String>>;
+        fn world_route(u32, crate::nav::Point, crate::nav::Point, &[String])
+            -> crate::landmass::Route;
+        fn widget_model(u32, u16, u16) -> Option<decode::widgets::WidgetModel>;
+        fn item_names(u32, &[i32]) -> Vec<Option<String>>;
+        fn item_stackable(u32, &[i32]) -> Vec<Option<bool>>;
+        fn item_container(u32, i32) -> Option<Vec<Item>>;
+        fn varc(u32, i32) -> Option<i32>;
+        fn varp_value(u32, usize) -> Option<i32>;
+        fn varps(u32) -> Option<Vec<i32>>;
+        fn varbit(u32, i32) -> Option<i32>;
+        fn landmasses(u32, &[[i32; 3]]) -> Vec<u32>;
+        fn cache_files(u32, u32, &[[i32; 2]]) -> Vec<Option<Vec<u8>>>;
+        fn enum_def(u32, i32) -> Option<crate::config::EnumDef>;
+        fn item_params(u32, &[i32]) -> Vec<Option<BTreeMap<u32, crate::config::Value>>>;
+        fn npcs(u32) -> Vec<Npc>;
+        fn npc_model(u32, i32) -> Option<EntityModel>;
+        fn loc_model(u32, u8, i32, i32, i32) -> Option<EntityModel>;
+        fn ground_items(u32) -> Vec<GroundItem>;
+        fn projectiles(u32) -> Vec<Projectile>;
+        fn spot_anims(u32) -> Vec<SpotAnim>;
+        fn chat_messages(u32) -> Vec<ChatMessage>;
+        fn locs(u32, Option<i32>) -> Vec<Loc>;
+        fn loc_shown(u32, &[u32]) -> Vec<crate::LocView>;
+        fn cache_locs(u32, [i32; 4], &crate::CacheLocFilter) -> Vec<crate::CacheLoc>;
+        fn find_path(u32, i32, [i32; 2], [i32; 2], Option<usize>) -> Vec<[i32; 2]>;
+        fn server_tile(u32) -> Option<crate::ServerTile>;
+        fn movement(u32) -> Option<crate::Movement>;
+        fn player_plane(u32) -> i32;
+        fn map_regions(u32) -> Vec<[i32; 2]>;
+        fn in_instance(u32) -> bool;
+        fn npc_sizes(u32, &[i32]) -> BTreeMap<i32, i32>;
+        fn npc_hitsplats(u32, &[i32]) -> BTreeMap<i32, Vec<decode::world::Hitsplat>>;
+        fn player_hitsplats(u32, &[i32]) -> BTreeMap<i32, Vec<decode::world::Hitsplat>>;
+        fn client_cycle(u32) -> i32;
+        fn scene_collision(u32) -> (i32, i32, i32, Vec<Vec<u32>>);
+        fn scene_route(u32, [i32; 2], [i32; 2], Option<crate::scene_graph::Options>)
+            -> crate::pathfinding::Route;
+        fn nav_plan(u32, crate::nav::Point, crate::nav::Point, &crate::nav::Request)
+            -> crate::nav::NavPlan;
+        fn npc_type_model(u32, i32, i32, i32, (i32, i32), i32) -> Option<EntityModel>;
+        fn player_model(u32, i32) -> Option<EntityModel>;
+        fn players(u32) -> Vec<Player>;
+        fn widget_children(u32, u16, u16) -> Option<Vec<Widget>>;
+        fn world_select(u32) -> Option<WorldSelect>;
+        fn send_input(u32, &Input) -> ();
+        fn send_input_with(u32, &Input, &dyn super::Pace) -> ();
+        fn bank_pin_enter(u32, &(dyn super::Pace + Sync)) -> crate::bank_pin::Outcome;
+        fn draw(u32, &Overlay) -> ();
+        fn draw_batch(u32, &[Overlay]) -> ();
+        fn draw_lines(u32, &[[i32; 4]], crate::Rgba) -> ();
     }
 }
 
 const NO_CLIENT: &str = "no client selected";
 const NO_AGENT: &str = "agent isn't loaded in the client";
+const ITEM_CHANGES_PER_WAKE: usize = 2000;
+const PACKETS_PER_WAKE: usize = ipc::packets::SLOT_COUNT;
+const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(u32::MAX as u64);
 
 #[derive(Serialize)]
 struct ScreenPoint {
     x: f32,
     y: f32,
+}
+
+impl From<[f32; 2]> for ScreenPoint {
+    fn from([x, y]: [f32; 2]) -> Self {
+        Self { x, y }
+    }
+}
+
+fn screen_points(points: Vec<[f32; 2]>) -> Vec<ScreenPoint> {
+    points.into_iter().map(ScreenPoint::from).collect()
 }
 
 #[derive(Serialize)]
@@ -338,42 +195,26 @@ struct ScriptModel {
 }
 
 fn script_model(m: crate::EntityModel) -> ScriptModel {
-    let points = |points: Vec<[f32; 2]>| {
-        points
-            .into_iter()
-            .map(|[x, y]| ScreenPoint { x, y })
-            .collect()
-    };
     ScriptModel {
         bounding_box: m.bounding_box,
         orientation: m.orientation,
         vertex_count: m.vertex_count,
-        corners: points(m.corners),
-        hull: points(m.hull),
+        corners: screen_points(m.corners),
+        hull: screen_points(m.hull),
         faces: m
             .faces
             .into_iter()
-            .map(|face| face.map(|[x, y]| ScreenPoint { x, y }))
+            .map(|face| face.map(ScreenPoint::from))
             .collect(),
         frame_count: m.frame_count,
     }
 }
 
-// An HTTP response as the script sees it.
 #[derive(Serialize)]
 struct ScriptResponse {
     ok: bool,
     #[serde(flatten)]
     response: crate::http::Response,
-}
-
-fn to_lua<T: Serialize>(lua: &Lua, value: &T) -> mlua::Result<mlua::Value> {
-    lua.to_value_with(
-        value,
-        SerializeOptions::new()
-            .serialize_none_to_null(false)
-            .serialize_unit_to_null(false),
-    )
 }
 
 #[derive(Serialize)]
@@ -388,7 +229,6 @@ struct SceneRoute {
     reached: bool,
 }
 
-// A part of the scene's collision map: `flags` column by column (west first), each column south first.
 #[derive(Serialize)]
 struct Collision {
     x: i32,
@@ -399,14 +239,207 @@ struct Collision {
     flags: Vec<u32>,
 }
 
-/// The registered item change and packet callbacks and the watchers that wake the script for them.
+#[derive(Serialize)]
+struct WorldRoute {
+    known: bool,
+    reachable: bool,
+    from: Option<crate::nav::NavTile>,
+    to: Option<crate::nav::NavTile>,
+}
+
+impl From<crate::landmass::Route> for WorldRoute {
+    fn from(route: crate::landmass::Route) -> Self {
+        use crate::landmass::Route;
+        let tile = |(x, y, plane): crate::nav::Point| Some(crate::nav::NavTile { x, y, plane });
+        let (known, reachable, from, to) = match route {
+            Route::Unknown => (false, true, None, None),
+            Route::None => (true, false, None, None),
+            Route::Walk => (true, true, None, None),
+            Route::Through(from, to) => (true, true, tile(from), tile(to)),
+        };
+        Self {
+            known,
+            reachable,
+            from,
+            to,
+        }
+    }
+}
+
+fn to_lua<T: Serialize>(lua: &Lua, value: &T) -> mlua::Result<mlua::Value> {
+    lua.to_value_with(
+        value,
+        SerializeOptions::new()
+            .serialize_none_to_null(false)
+            .serialize_unit_to_null(false),
+    )
+}
+
+fn need_client(pid: Option<u32>) -> mlua::Result<u32> {
+    pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))
+}
+
+fn get<T: mlua::FromLua>(table: &mlua::Table, key: &str) -> Result<T, String> {
+    table.get(key).map_err(|e| e.to_string())
+}
+
+fn tile_arg(table: &mlua::Table) -> Result<[i32; 2], String> {
+    Ok([get(table, "x")?, get(table, "y")?])
+}
+
+fn area_arg(table: &mlua::Table) -> Result<[i32; 4], String> {
+    Ok([
+        get(table, "x1")?,
+        get(table, "y1")?,
+        get(table, "x2")?,
+        get(table, "y2")?,
+    ])
+}
+
+fn point_arg(table: &mlua::Table, what: &str) -> Result<crate::nav::Point, String> {
+    let read = |field: &str| {
+        table
+            .get::<i32>(field)
+            .map_err(|e| format!("{what}'s {field}: {e}"))
+    };
+    Ok((read("x")?, read("y")?, read("plane")?))
+}
+
+fn rounded<K: IntoLua>(table: &mlua::Table, keys: [K; 4]) -> mlua::Result<[i32; 4]> {
+    let [a, b, c, d] = keys.map(|key| table.get::<f64>(key).map(|v| v.round() as i32));
+    Ok([a?, b?, c?, d?])
+}
+
+fn rgba(r: u8, g: u8, b: u8, a: Option<u8>) -> Rgba {
+    Rgba {
+        r,
+        g,
+        b,
+        a: a.unwrap_or(255),
+    }
+}
+
+fn shape(line: bool, [x1, y1, x2, y2]: [i32; 4], color: Rgba) -> Overlay {
+    if line {
+        Overlay::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+        }
+    } else {
+        Overlay::Rect {
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+        }
+    }
+}
+
+type ShapeArgs = (i32, i32, i32, i32, u8, u8, u8, Option<u8>);
+
+fn shape_args(line: bool, (x1, y1, x2, y2, r, g, b, a): ShapeArgs) -> Overlay {
+    shape(line, [x1, y1, x2, y2], rgba(r, g, b, a))
+}
+
+fn overlay_arg(table: &mlua::Table) -> mlua::Result<Overlay> {
+    let kind: String = table.get("kind")?;
+    if kind == "clear" {
+        return Ok(Overlay::Clear);
+    }
+    let corners = rounded(table, ["x1", "y1", "x2", "y2"])?;
+    let color = rgba(
+        table.get("r")?,
+        table.get("g")?,
+        table.get("b")?,
+        table.get("a")?,
+    );
+    match kind.as_str() {
+        "rect" => Ok(shape(false, corners, color)),
+        "line" => Ok(shape(true, corners, color)),
+        _ => Err(mlua::Error::RuntimeError(format!(
+            "unknown shape kind: {kind}"
+        ))),
+    }
+}
+
+fn fine_point(p: &mlua::Table) -> mlua::Result<crate::projection::Point> {
+    let tile = match p.get::<Option<mlua::Table>>("tile")? {
+        Some(t) => Some([t.get::<i32>("x")?, t.get::<i32>("y")?]),
+        None => None,
+    };
+    Ok(crate::projection::Point {
+        tile,
+        ..crate::projection::Point::new(
+            p.get("x")?,
+            p.get("y")?,
+            p.get::<Option<i32>>("z")?.unwrap_or(0),
+        )
+    })
+}
+
+fn scene_options(t: &mlua::Table) -> Result<crate::scene_graph::Options, String> {
+    let default = crate::scene_graph::Options::default();
+    let field = |name: &str| get::<Option<f64>>(t, name);
+    Ok(crate::scene_graph::Options {
+        seed: match field("seed")? {
+            Some(seed) => seed as u64,
+            None => crate::scene_graph::mix(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos() as u64),
+            ),
+        },
+        rnd: field("rnd")?.unwrap_or(default.rnd),
+        spacing: field("spacing")?.map_or(default.spacing, |v| v as i32),
+        jitter: field("jitter")?.map_or(default.jitter, |v| v as i32),
+        max_detour: field("max_detour")?.unwrap_or(default.max_detour),
+        offset: field("offset")?.map_or(default.offset, |v| v as i32),
+    })
+}
+
+fn nav_request(t: &mlua::Table) -> Result<crate::nav::Request, String> {
+    let mut request = crate::nav::Request::default();
+    let o = &mut request.options;
+    o.near = get::<Option<i32>>(t, "near")?.unwrap_or(o.near);
+    o.door_cost = get::<Option<u32>>(t, "door_cost")?.unwrap_or(o.door_cost);
+    o.climb_cost = get::<Option<u32>>(t, "climb_cost")?.unwrap_or(o.climb_cost);
+    o.shortcut_saving = get::<Option<f64>>(t, "shortcut_saving")?
+        .map_or(o.shortcut_saving, |tiles| (tiles.max(0.0) * 10.0) as u32);
+    o.rnd = get::<Option<f64>>(t, "rnd")?.unwrap_or(o.rnd);
+    o.seed = get::<Option<f64>>(t, "seed")?.map(|s| s as u64);
+    if let Some(options) = get(t, "door_options")? {
+        request.door_options = options;
+    }
+    if let Some(climbs) = get(t, "climbs")? {
+        request.climbs = climbs;
+    }
+    if let Some(keys) = get(t, "allow_climbs")? {
+        request.allow_climbs = keys;
+    }
+    if let Some(names) = get(t, "portal_names")? {
+        request.portal_names = names;
+    }
+    for loc in get::<Option<Vec<mlua::Table>>>(t, "avoid")?.unwrap_or_default() {
+        request.avoid.push((
+            get(&loc, "id")?,
+            get(&loc, "x")?,
+            get(&loc, "y")?,
+            get(&loc, "plane")?,
+        ));
+    }
+    Ok(request)
+}
+
 #[derive(Default)]
 struct Callbacks {
     items: Option<ItemWatcher>,
     item_callbacks: Vec<(u64, mlua::Function)>,
     packets: Option<PacketWatcher>,
     packet_callbacks: Vec<(u64, Filter, mlua::Function)>,
-    /// the packets a running `wait_packet` waits for, on top of the callbacks'
     waiting: Option<Filter>,
     last_id: u64,
 }
@@ -416,7 +449,11 @@ impl Callbacks {
         self.items.is_some() || self.packets.is_some()
     }
 
-    /// Makes the packet watcher filter for what the callbacks and a running wait want, and keeps it only while something does.
+    fn next_id(&mut self) -> u64 {
+        self.last_id += 1;
+        self.last_id
+    }
+
     fn refresh_packets(&mut self, pid: Option<u32>) -> mlua::Result<()> {
         let mut filter: Filter = self.waiting.unwrap_or_default();
         for (_, wanted, _) in &self.packet_callbacks {
@@ -429,34 +466,33 @@ impl Callbacks {
             self.packets = None;
             return Ok(());
         }
-        if self.packets.is_none() {
-            let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
-            self.packets = Some(PacketWatcher::new(pid).map_err(mlua::Error::RuntimeError)?);
-        }
-        self.packets.as_mut().unwrap().set_filter(filter);
+        let packets = match &mut self.packets {
+            Some(packets) => packets,
+            None => self
+                .packets
+                .insert(PacketWatcher::new(need_client(pid)?).map_err(mlua::Error::RuntimeError)?),
+        };
+        packets.set_filter(filter);
         Ok(())
     }
 }
 
-/// What a pump waits for besides the time running out.
 enum Until {
     Time,
     ItemChange,
-    /// a packet in the filter, from this sequence number on
     Packet(Filter, u64),
 }
 
-/// Waits up to `time`, calling every callback for each item change and packet logged meanwhile; returns the first item change or packet `until` asks for.
 fn pump_events(
     lua: &Lua,
     callbacks: &Rc<RefCell<Callbacks>>,
     time: std::time::Duration,
     until: &Until,
 ) -> mlua::Result<Option<mlua::Value>> {
-    let deadline = std::time::Instant::now() + time;
+    let now = std::time::Instant::now();
+    let deadline = now.checked_add(time).unwrap_or(now + MAX_WAIT);
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        // the borrow ends before any callback runs, so a callback may register or remove callbacks
         let (changes, packets) = {
             let mut callbacks = callbacks.borrow_mut();
             let callbacks = &mut *callbacks;
@@ -528,12 +564,6 @@ fn pump_events(
     }
 }
 
-/// Changes a callback pass handles at most per read: a bank opening logs a few hundred in one tick.
-const ITEM_CHANGES_PER_WAKE: usize = 2000;
-
-/// Log entries a callback pass reads at most, before filtering: the whole ring.
-const PACKETS_PER_WAKE: usize = ipc::packets::SLOT_COUNT;
-
 fn packet_to_lua(lua: &Lua, packet: &ipc::packets::Entry) -> mlua::Result<mlua::Value> {
     let table = lua.create_table()?;
     table.set("sequence", packet.sequence)?;
@@ -545,7 +575,6 @@ fn packet_to_lua(lua: &Lua, packet: &ipc::packets::Entry) -> mlua::Result<mlua::
     Ok(mlua::Value::Table(table))
 }
 
-/// The filter for a script's list of packet ids, received ones or, with `sent`, the ones the client sends.
 fn packet_filter(name: &str, opcodes: &[u16], sent: Option<bool>) -> mlua::Result<Filter> {
     let direction = if sent.unwrap_or(false) {
         ipc::packets::direction::SENT
@@ -568,7 +597,6 @@ fn packet_filter(name: &str, opcodes: &[u16], sent: Option<bool>) -> mlua::Resul
     Ok(filter)
 }
 
-// `scene` cut to `area` (x1, y1, x2, y2, corners included), or whole without one.
 fn collision_cut(
     scene: (i32, i32, i32, Vec<Vec<u32>>),
     area: Option<[i32; 4]>,
@@ -603,86 +631,18 @@ fn collision_cut(
     })
 }
 
-fn query<A: FromLuaMulti, T: Serialize>(
-    lua: &Lua,
-    pid: Option<u32>,
-    read: impl Fn(u32, A) -> Result<T, String> + Send + 'static,
-) -> mlua::Result<mlua::Function> {
-    lua.create_function(
-        move |lua, args: A| -> mlua::Result<(mlua::Value, Option<String>)> {
-            let Some(pid) = pid else {
-                return Ok((mlua::Value::Nil, Some(NO_CLIENT.into())));
-            };
-            match read(pid, args) {
-                Ok(value) => Ok((to_lua(lua, &value)?, None)),
-                Err(error) => Ok((mlua::Value::Nil, Some(error))),
-            }
-        },
-    )
-}
+type InputWorker = Option<Rc<Worker<Job>>>;
 
-fn action<A: FromLuaMulti>(
-    lua: &Lua,
-    pid: Option<u32>,
-    act: impl Fn(u32, A) -> mlua::Result<Result<(), String>> + Send + 'static,
-) -> mlua::Result<mlua::Function> {
-    lua.create_function(move |_, args: A| -> mlua::Result<()> {
-        let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
-        act(pid, args)?.map_err(mlua::Error::RuntimeError)
-    })
-}
-
-// Input the script started without waiting (`*_async`), run one at a time on a thread of its own.
-type InputWorker = Option<Arc<Worker<Job>>>;
-
-// Takes the mouse and keyboard back: stops async input, releases what is held, drops the queue and returns once idle.
 fn cancel_input(worker: &InputWorker) {
     if let Some(worker) = worker {
         worker.cancel();
     }
 }
 
-// Blocking input first takes the input back from any async input.
-fn input<A: FromLuaMulti>(
-    lua: &Lua,
-    pid: Option<u32>,
-    worker: &InputWorker,
-    make: impl Fn(A) -> mlua::Result<Input> + Send + 'static,
-) -> mlua::Result<mlua::Function> {
-    let worker = worker.clone();
-    action(lua, pid, move |pid, args| {
-        let input = make(args)?;
-        cancel_input(&worker);
-        Ok(send_input(pid, &input))
-    })
-}
-
-// Returns right away; the input runs after what is already queued.
-fn input_async<A: FromLuaMulti>(
-    lua: &Lua,
-    pid: Option<u32>,
-    worker: &InputWorker,
-    make: impl Fn(A) -> mlua::Result<Input> + Send + 'static,
-) -> mlua::Result<mlua::Function> {
-    let worker = worker.clone();
-    action(lua, pid, move |_, args| {
-        let input = make(args)?;
-        Ok(worker.as_ref().map_or(Err(NO_CLIENT.into()), |worker| {
-            worker.push(Job::Input(input))
-        }))
-    })
-}
-
-// A query of the live menu, run after taking the input back.
-fn menu_read<T: 'static>(
-    worker: &InputWorker,
-    read: fn(u32) -> Result<T, String>,
-) -> impl Fn(u32, ()) -> Result<T, String> + Send + 'static {
-    let worker = worker.clone();
-    move |pid, ()| {
-        cancel_input(&worker);
-        read(pid)
-    }
+fn queue(worker: &InputWorker, job: Job) -> Result<(), String> {
+    worker
+        .as_ref()
+        .map_or(Err(NO_CLIENT.into()), |worker| worker.push(job))
 }
 
 fn button_arg(name: Option<String>) -> mlua::Result<MouseButton> {
@@ -691,67 +651,202 @@ fn button_arg(name: Option<String>) -> mlua::Result<MouseButton> {
     })
 }
 
-// A `draw_batch` shape: `{ kind = "rect" | "line", x1, y1, x2, y2, r, g, b, a? }` or `{ kind = "clear" }`.
-fn overlay_arg(shape: &mlua::Table) -> mlua::Result<Overlay> {
-    let kind: String = shape.get("kind")?;
-    if kind == "clear" {
-        return Ok(Overlay::Clear);
-    }
-    let [x1, y1, x2, y2] =
-        ["x1", "y1", "x2", "y2"].map(|k| shape.get::<f64>(k).map(|v| v.round() as i32));
-    let (x1, y1, x2, y2) = (x1?, y1?, x2?, y2?);
-    let color = Rgba {
-        r: shape.get("r")?,
-        g: shape.get("g")?,
-        b: shape.get("b")?,
-        a: shape.get::<Option<u8>>("a")?.unwrap_or(255),
-    };
-    match kind.as_str() {
-        "rect" => Ok(Overlay::Rect {
-            x1,
-            y1,
-            x2,
-            y2,
-            color,
-        }),
-        "line" => Ok(Overlay::Line {
-            x1,
-            y1,
-            x2,
-            y2,
-            color,
-        }),
-        _ => Err(mlua::Error::RuntimeError(format!(
-            "unknown shape kind: {kind}"
-        ))),
-    }
+fn click_input(
+    (x, y, button, hold_ms): (i32, i32, Option<String>, Option<u32>),
+) -> mlua::Result<Input> {
+    Ok(Input::Click {
+        button: button_arg(button)?,
+        x,
+        y,
+        hold_ms: hold_ms.unwrap_or(crate::CLICK_HOLD_MS),
+    })
 }
 
-/// What `world_route` tells a script.
-#[derive(serde::Serialize)]
-struct WorldRoute {
-    known: bool,
-    reachable: bool,
-    from: Option<crate::nav::NavTile>,
-    to: Option<crate::nav::NavTile>,
+fn move_input((x, y): (i32, i32)) -> mlua::Result<Input> {
+    Ok(Input::Move { x, y })
 }
 
-impl From<crate::landmass::Route> for WorldRoute {
-    fn from(route: crate::landmass::Route) -> Self {
-        use crate::landmass::Route;
-        let tile = |(x, y, plane): crate::nav::Point| Some(crate::nav::NavTile { x, y, plane });
-        let (known, reachable, from, to) = match route {
-            Route::Unknown => (false, true, None, None),
-            Route::None => (true, false, None, None),
-            Route::Walk => (true, true, None, None),
-            Route::Through(from, to) => (true, true, tile(from), tile(to)),
-        };
-        Self {
-            known,
-            reachable,
-            from,
-            to,
-        }
+fn wind_mouse_input((x, y, options): (i32, i32, Option<mlua::Table>)) -> mlua::Result<Input> {
+    let mut opts = wind_mouse::Options::default();
+    if let Some(options) = options {
+        opts.speed = options.get::<Option<f64>>("speed")?.unwrap_or(opts.speed);
+        opts.wind = options.get::<Option<f64>>("wind")?.unwrap_or(opts.wind);
+        opts.gravity = options
+            .get::<Option<f64>>("gravity")?
+            .unwrap_or(opts.gravity);
+        opts.timeout_ms = options
+            .get::<Option<u32>>("timeout")?
+            .unwrap_or(opts.timeout_ms);
+        opts.pace = options.get::<Option<f64>>("pace")?.unwrap_or(opts.pace);
+    }
+    Ok(Input::WindMouse {
+        x,
+        y,
+        options: opts,
+    })
+}
+
+fn type_input((text, hold_ms): (String, Option<u32>)) -> mlua::Result<Input> {
+    Ok(Input::Type {
+        text,
+        hold_ms: hold_ms.unwrap_or(crate::KEY_HOLD_MS),
+    })
+}
+
+fn mouse_down_input(button: Option<String>) -> mlua::Result<Input> {
+    Ok(Input::Button {
+        button: button_arg(button)?,
+        down: true,
+    })
+}
+
+fn mouse_up_input(button: Option<String>) -> mlua::Result<Input> {
+    Ok(Input::Button {
+        button: button_arg(button)?,
+        down: false,
+    })
+}
+
+fn scroll_input(notches: i32) -> mlua::Result<Input> {
+    Ok(Input::Scroll { notches })
+}
+
+fn key_down_input(key: u8) -> mlua::Result<Input> {
+    Ok(Input::Key { key, down: true })
+}
+
+fn key_up_input(key: u8) -> mlua::Result<Input> {
+    Ok(Input::Key { key, down: false })
+}
+
+type Print = Rc<RefCell<dyn FnMut(String)>>;
+
+fn without_separators(text: &str) -> String {
+    text.replace('\u{1e}', "")
+}
+
+struct Sandbox<'a> {
+    lua: &'a Lua,
+    globals: mlua::Table,
+    pid: Option<u32>,
+    worker: InputWorker,
+}
+
+impl Sandbox<'_> {
+    fn set(&self, name: &str, function: mlua::Function) -> mlua::Result<()> {
+        self.globals.set(name, function)
+    }
+
+    fn printing<A: FromLuaMulti>(
+        &self,
+        name: &str,
+        print: &Print,
+        line: impl Fn(&Lua, A) -> mlua::Result<String> + 'static,
+    ) -> mlua::Result<()> {
+        let print = print.clone();
+        self.set(
+            name,
+            self.lua.create_function_mut(move |lua, args: A| {
+                let line = line(lua, args)?;
+                (print.borrow_mut())(line);
+                Ok(())
+            })?,
+        )
+    }
+
+    fn query_with<A: FromLuaMulti, T>(
+        &self,
+        name: &str,
+        read: impl Fn(u32, A) -> Result<T, String> + 'static,
+        convert: impl Fn(&Lua, T) -> mlua::Result<mlua::Value> + 'static,
+    ) -> mlua::Result<()> {
+        let pid = self.pid;
+        self.set(
+            name,
+            self.lua.create_function(
+                move |lua, args: A| -> mlua::Result<(mlua::Value, Option<String>)> {
+                    let Some(pid) = pid else {
+                        return Ok((mlua::Value::Nil, Some(NO_CLIENT.into())));
+                    };
+                    match read(pid, args) {
+                        Ok(value) => Ok((convert(lua, value)?, None)),
+                        Err(error) => Ok((mlua::Value::Nil, Some(error))),
+                    }
+                },
+            )?,
+        )
+    }
+
+    fn query<A: FromLuaMulti, T: Serialize>(
+        &self,
+        name: &str,
+        read: impl Fn(u32, A) -> Result<T, String> + 'static,
+    ) -> mlua::Result<()> {
+        self.query_with(name, read, |lua, value| to_lua(lua, &value))
+    }
+
+    fn menu_query<T: Serialize + 'static>(
+        &self,
+        name: &str,
+        read: fn(u32) -> Result<T, String>,
+    ) -> mlua::Result<()> {
+        let worker = self.worker.clone();
+        self.query(name, move |pid, ()| {
+            cancel_input(&worker);
+            read(pid)
+        })
+    }
+
+    fn action<A: FromLuaMulti>(
+        &self,
+        name: &str,
+        act: impl Fn(u32, A) -> mlua::Result<Result<(), String>> + 'static,
+    ) -> mlua::Result<()> {
+        let pid = self.pid;
+        self.set(
+            name,
+            self.lua
+                .create_function(move |_, args: A| -> mlua::Result<()> {
+                    act(need_client(pid)?, args)?.map_err(mlua::Error::RuntimeError)
+                })?,
+        )
+    }
+
+    fn input<A: FromLuaMulti + 'static>(
+        &self,
+        name: &str,
+        make: fn(A) -> mlua::Result<Input>,
+    ) -> mlua::Result<()> {
+        let worker = self.worker.clone();
+        self.action(name, move |pid, args| {
+            let input = make(args)?;
+            cancel_input(&worker);
+            Ok(send_input(pid, &input))
+        })
+    }
+
+    fn input_async<A: FromLuaMulti + 'static>(
+        &self,
+        name: &str,
+        make: fn(A) -> mlua::Result<Input>,
+    ) -> mlua::Result<()> {
+        let worker = self.worker.clone();
+        self.action(name, move |_, args| {
+            Ok(queue(&worker, Job::Input(make(args)?)))
+        })
+    }
+
+    fn with_worker<A: FromLuaMulti, R: IntoLuaMulti>(
+        &self,
+        name: &str,
+        call: impl Fn(Option<&Worker<Job>>, A) -> R + 'static,
+    ) -> mlua::Result<()> {
+        let worker = self.worker.clone();
+        self.set(
+            name,
+            self.lua
+                .create_function(move |_, args: A| Ok(call(worker.as_deref(), args)))?,
+        )
     }
 }
 
@@ -766,9 +861,8 @@ macro_rules! lib_module {
     };
 }
 
-// The lib/ shipped inside the injector; scripts that know their own path read lib/ from disk instead.
 #[cfg(feature = "embedded-lib")]
-pub const LIB_MODULES: &[(&str, &str, &str)] = &[
+const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("host", "host.luau"),
     lib_module!("game_state", "main/game_state.luau"),
     lib_module!("position", "main/position.luau"),
@@ -895,23 +989,7 @@ pub const LIB_MODULES: &[(&str, &str, &str)] = &[
 ];
 
 #[cfg(not(feature = "embedded-lib"))]
-pub const LIB_MODULES: &[(&str, &str, &str)] = &[];
-
-// A point for `project`: optional `z` and a `tile` (table with `x` and `y`) naming the tile it stands on.
-fn fine_point(p: &mlua::Table) -> mlua::Result<crate::projection::Point> {
-    let tile = match p.get::<Option<mlua::Table>>("tile")? {
-        Some(t) => Some([t.get::<i32>("x")?, t.get::<i32>("y")?]),
-        None => None,
-    };
-    Ok(crate::projection::Point {
-        tile,
-        ..crate::projection::Point::new(
-            p.get("x")?,
-            p.get("y")?,
-            p.get::<Option<i32>>("z")?.unwrap_or(0),
-        )
-    })
-}
+const LIB_MODULES: &[(&str, &str, &str)] = &[];
 
 fn module_name(path: &str) -> &str {
     let file = path.rsplit('/').next().unwrap_or(path);
@@ -920,7 +998,6 @@ fn module_name(path: &str) -> &str {
         .unwrap_or(file)
 }
 
-// Seconds since local midnight, with the milliseconds as the fraction.
 #[cfg(windows)]
 fn local_time_of_day() -> f64 {
     use windows_sys::Win32::{Foundation::SYSTEMTIME, System::SystemInformation::GetLocalTime};
@@ -946,16 +1023,6 @@ fn local_time_of_day() -> f64 {
         + f64::from(since_epoch.subsec_millis()) / 1000.0
 }
 
-pub fn run(
-    name: &str,
-    source: &str,
-    pid: Option<u32>,
-    print: impl FnMut(String) + 'static,
-) -> mlua::Result<()> {
-    run_with_form(name, source, pid, print, None, None, None)
-}
-
-// Resolves `.` and `..` by name only, so a module is cached under one path however it was reached.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -972,7 +1039,6 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-// The file `require("../lib/host")` names from `dir`; `memory` holds in-memory-only files by normalized path.
 fn find_module(
     dir: &Path,
     path: &str,
@@ -992,7 +1058,6 @@ fn find_module(
         .ok_or_else(|| candidates.into())
 }
 
-// A module that ships inside the injector (`LIB_MODULES`), looked up by its bare name.
 fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
     let name = module_name(path);
     let &(_, file, source) = LIB_MODULES
@@ -1002,7 +1067,6 @@ fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
             let known: Vec<&str> = LIB_MODULES.iter().map(|&(n, _, _)| n).collect();
             format!("module '{path}' not found, lib has: {}", known.join(", "))
         })?;
-    // For working on lib/ without rebuilding: VOLCREN_LIB_DIR points at a lib/ to read instead.
     let source = match std::env::var_os("VOLCREN_LIB_DIR") {
         Some(dir) => std::fs::read_to_string(Path::new(&dir).join(file))
             .map_err(|e| format!("VOLCREN_LIB_DIR: cannot read {file}: {e}"))?,
@@ -1011,12 +1075,10 @@ fn embedded_module(path: &str) -> Result<(&'static str, String), String> {
     Ok((file, source))
 }
 
-// `require("@lib/main/walker")` names `main/walker` in the lib root, matching the `lib` alias in the `.luaurc` files.
 fn lib_alias(path: &str) -> Option<&str> {
     path.strip_prefix("@lib/").filter(|rest| !rest.is_empty())
 }
 
-// What `require("../lib/main/walker")` asks for inside the lib, when the path names a `lib` folder: `main/walker`.
 fn lib_relative(path: &str) -> Option<&str> {
     let mut rest = path;
     let mut stepped = false;
@@ -1028,29 +1090,6 @@ fn lib_relative(path: &str) -> Option<&str> {
         .filter(|r| stepped && !r.is_empty())
 }
 
-// `script_path` is the script's file; `lib_dir` is the developer's lib folder, used instead of the one beside the script.
-pub fn run_with_form(
-    name: &str,
-    source: &str,
-    pid: Option<u32>,
-    print: impl FnMut(String) + 'static,
-    form: Option<crate::form::FormHandler>,
-    script_path: Option<&Path>,
-    lib_dir: Option<&Path>,
-) -> mlua::Result<()> {
-    run_with_modules(
-        name,
-        source,
-        pid,
-        print,
-        form,
-        script_path,
-        lib_dir,
-        HashMap::new(),
-    )
-}
-
-// `modules` are the script's other files kept in memory, found by `require("./name")` as if beside `script_path`.
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_modules(
     name: &str,
@@ -1066,24 +1105,27 @@ pub fn run_with_modules(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::BIT,
         LuaOptions::default(),
     )?;
-    let print: Rc<RefCell<dyn FnMut(String)>> = Rc::new(RefCell::new(print));
-    let globals = lua.globals();
-    let worker: InputWorker = pid.map(|pid| {
-        Arc::new(input_jobs::worker(move |input: &Input, pace: &dyn Pace| {
-            send_input_with(pid, input, pace)
-        }))
-    });
-    globals.set("dofile", mlua::Nil)?;
-    globals.set("loadfile", mlua::Nil)?;
+    let print: Print = Rc::new(RefCell::new(print));
+    let s = Sandbox {
+        lua: &lua,
+        globals: lua.globals(),
+        pid,
+        worker: pid.map(|pid| {
+            Rc::new(input_jobs::worker(move |input: &Input, pace: &dyn Pace| {
+                send_input_with(pid, input, pace)
+            }))
+        }),
+    };
+    s.globals.set("dofile", mlua::Nil)?;
+    s.globals.set("loadfile", mlua::Nil)?;
 
-    // Chunk name -> the directory its relative requires start from, for the script and every module read from disk.
+    let script_dir = script_path.and_then(Path::parent);
     let dirs: Rc<RefCell<HashMap<String, PathBuf>>> = Rc::default();
-    if let Some(dir) = script_path.and_then(Path::parent) {
+    if let Some(dir) = script_dir {
         dirs.borrow_mut()
             .insert(format!("={name}"), dir.to_path_buf());
     }
-
-    let memory: HashMap<PathBuf, String> = match script_path.and_then(Path::parent) {
+    let memory: HashMap<PathBuf, String> = match script_dir {
         Some(dir) => modules
             .into_iter()
             .map(|(file, text)| (normalize(&dir.join(file)), text))
@@ -1091,18 +1133,16 @@ pub fn run_with_modules(
         None => HashMap::new(),
     };
     let script_chunk = script_path.map(|_| format!("={name}"));
-    // Where `@lib/...` points from any file: the configured lib, else the one beside the script.
     let lib_root = lib_dir
         .map(Path::to_path_buf)
-        .or_else(|| script_path.and_then(Path::parent).map(|d| d.join("../lib")));
+        .or_else(|| script_dir.map(|d| d.join("../lib")));
     let lib_dir = lib_dir.map(Path::to_path_buf);
 
     let loaded = lua.create_table()?;
-    globals.set(
+    s.set(
         "require",
         lua.create_function(move |lua, path: String| {
             let alias = lib_alias(&path).map(str::to_string);
-            // Embedded lookups and error messages still see the `../lib/...` spelling.
             let path = match &alias {
                 Some(rest) => format!("../lib/{rest}"),
                 None => path,
@@ -1116,9 +1156,7 @@ pub fn run_with_modules(
                 .and_then(|chunk| dirs.borrow().get(&chunk).cloned())
                 .filter(|_| relative);
 
-            // The script's own `../lib/...` requires read from the configured lib folder; the modules inside it find each other as usual.
             let found = match (&alias, &lib_root, &lib_dir, lib_relative(&path)) {
-                // `@lib/...` means the same lib root whichever file asks, the script or a lib module.
                 (Some(rest), Some(root), _, _) => Some(find_module(root, rest, &memory)),
                 (_, _, Some(lib), Some(rest)) if from_script => {
                     Some(find_module(lib, rest, &memory))
@@ -1170,38 +1208,25 @@ pub fn run_with_modules(
         })?,
     )?;
 
-    let printer = print.clone();
-    globals.set(
-        "print",
-        lua.create_function_mut(move |_, args: MultiValue| {
-            let line: Vec<String> = args
-                .iter()
-                .map(|v| v.to_string().unwrap_or_else(|_| "?".into()))
-                .collect();
-            // U+001E starts the loader's own lines (`FORM`, `STATS`, `PINREQ`, ...); a script must not be able to write one.
-            (printer.borrow_mut())(line.join("\t").replace('\u{1e}', ""));
-            Ok(())
-        })?,
-    )?;
-    // The loader shows these under the skills in its XP Tracker tab and works out the rates itself; each call replaces the last.
-    let counters_print = print.clone();
-    globals.set(
-        "report_counters",
-        lua.create_function_mut(move |lua, counters: mlua::Value| {
-            let counters: Vec<crate::form::Counter> = lua
-                .from_value(counters)
-                .map_err(|e| mlua::Error::RuntimeError(format!("report_counters: {e}")))?;
-            if counters.iter().any(|c| !c.value.is_finite()) {
-                return Err(mlua::Error::RuntimeError(
-                    "report_counters: values must be finite numbers".into(),
-                ));
-            }
-            (counters_print.borrow_mut())(crate::form::counters_line(&counters));
-            Ok(())
-        })?,
-    )?;
-    // Biometrics: the hash and the per-account profile are computed here; the lib caches the profile.
-    globals.set(
+    s.printing("print", &print, |_, args: MultiValue| {
+        let line: Vec<String> = args
+            .iter()
+            .map(|v| v.to_string().unwrap_or_else(|_| "?".into()))
+            .collect();
+        Ok(without_separators(&line.join("\t")))
+    })?;
+    s.printing("report_counters", &print, |lua, counters: mlua::Value| {
+        let counters: Vec<crate::form::Counter> = lua
+            .from_value(counters)
+            .map_err(|e| mlua::Error::RuntimeError(format!("report_counters: {e}")))?;
+        if counters.iter().any(|c| !c.value.is_finite()) {
+            return Err(mlua::Error::RuntimeError(
+                "report_counters: values must be finite numbers".into(),
+            ));
+        }
+        Ok(crate::form::counters_line(&counters))
+    })?;
+    s.set(
         "murmur2a",
         lua.create_function(|_, (text, seed): (mlua::LuaString, Option<f64>)| {
             Ok(crate::biometrics::murmur2a(
@@ -1210,70 +1235,55 @@ pub fn run_with_modules(
             ))
         })?,
     )?;
-    globals.set(
+    s.set(
         "biometrics_profile",
         lua.create_function(|_, name: mlua::LuaString| {
             Ok(crate::biometrics::profile(&name.as_bytes()).to_vec())
         })?,
     )?;
-    // The loader shows these in its Breaks tab, in any run, and counts the times down itself.
-    let breaks_print = print.clone();
-    globals.set(
-        "report_breaks",
-        lua.create_function_mut(move |lua, plan: mlua::Value| {
-            let plan: crate::form::BreakPlan = lua
-                .from_value(plan)
-                .map_err(|e| mlua::Error::RuntimeError(format!("report_breaks: {e}")))?;
-            (breaks_print.borrow_mut())(crate::form::breaks_line(&plan));
-            Ok(())
-        })?,
-    )?;
-    // The loader shows these in its log in the warning color (yellow), for things the script wants noticed that aren't errors.
-    let warn_print = print.clone();
-    globals.set(
-        "report_warning",
-        lua.create_function_mut(move |_, text: mlua::LuaString| {
-            let text = String::from_utf8_lossy(&text.as_bytes()).replace('\u{1e}', "");
-            (warn_print.borrow_mut())(format!("{}{text}", crate::form::WARN_PREFIX));
-            Ok(())
-        })?,
-    )?;
-    // The loader sums these between heartbeats. Outside a store run it has nowhere to send them and drops them.
-    globals.set(
+    s.printing("report_breaks", &print, |lua, plan: mlua::Value| {
+        let plan: crate::form::BreakPlan = lua
+            .from_value(plan)
+            .map_err(|e| mlua::Error::RuntimeError(format!("report_breaks: {e}")))?;
+        Ok(crate::form::breaks_line(&plan))
+    })?;
+    s.printing("report_warning", &print, |_, text: mlua::LuaString| {
+        let text = without_separators(&String::from_utf8_lossy(&text.as_bytes()));
+        Ok(format!("{}{text}", crate::form::WARN_PREFIX))
+    })?;
+    s.printing(
         "report_stats",
-        lua.create_function_mut(
-            move |_, (experience, gold, custom): (f64, f64, Option<Vec<f64>>)| {
-                if !experience.is_finite() || !gold.is_finite() || experience < 0.0 {
-                    return Err(mlua::Error::RuntimeError(
-                        "report_stats: experience must be a number of 0 or more, and gold a number"
-                            .into(),
-                    ));
-                }
-                let custom: Vec<i64> = custom
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|value| value.round() as i64)
-                    .collect();
-                (print.borrow_mut())(crate::form::stats_line(
-                    experience.round() as i64,
-                    gold.round() as i64,
-                    &custom,
+        &print,
+        |_, (experience, gold, custom): (f64, f64, Option<Vec<f64>>)| {
+            if !experience.is_finite() || !gold.is_finite() || experience < 0.0 {
+                return Err(mlua::Error::RuntimeError(
+                    "report_stats: experience must be a number of 0 or more, and gold a number"
+                        .into(),
                 ));
-                Ok(())
-            },
-        )?,
+            }
+            let custom: Vec<i64> = custom
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| value.round() as i64)
+                .collect();
+            Ok(crate::form::stats_line(
+                experience.round() as i64,
+                gold.round() as i64,
+                &custom,
+            ))
+        },
     )?;
 
     let started = std::time::Instant::now();
-    globals.set(
+    s.set(
         "time",
         lua.create_function(move |_, (): ()| Ok(started.elapsed().as_secs_f64() * 1000.0))?,
     )?;
-    globals.set(
+    s.set(
         "clock",
         lua.create_function(|_, (): ()| Ok(local_time_of_day()))?,
     )?;
-    globals.set(
+    s.set(
         "unix_time",
         lua.create_function(|_, (): ()| {
             Ok(std::time::SystemTime::now()
@@ -1282,25 +1292,23 @@ pub fn run_with_modules(
         })?,
     )?;
 
-    // Item change and packet callbacks; they run inside `sleep`, `wait_item_change` and `wait_packet`, not interrupting the script.
     let events = Rc::new(RefCell::new(Callbacks::default()));
     let registry = events.clone();
-    globals.set(
+    s.set(
         "on_item_change",
         lua.create_function(move |_, callback: mlua::Function| {
-            let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
+            let pid = need_client(pid)?;
             let mut events = registry.borrow_mut();
             if events.items.is_none() {
                 events.items = Some(ItemWatcher::new(pid).map_err(mlua::Error::RuntimeError)?);
             }
-            events.last_id += 1;
-            let id = events.last_id;
+            let id = events.next_id();
             events.item_callbacks.push((id, callback));
             Ok(id)
         })?,
     )?;
     let registry = events.clone();
-    globals.set(
+    s.set(
         "off_item_change",
         lua.create_function(move |_, id: u64| {
             let mut events = registry.borrow_mut();
@@ -1313,7 +1321,7 @@ pub fn run_with_modules(
         })?,
     )?;
     let pump = events.clone();
-    globals.set(
+    s.set(
         "wait_item_change",
         lua.create_function(move |lua, ms: u64| {
             Ok(pump_events(
@@ -1326,14 +1334,13 @@ pub fn run_with_modules(
         })?,
     )?;
     let registry = events.clone();
-    globals.set(
+    s.set(
         "on_packet",
         lua.create_function(
             move |_, (opcodes, callback, sent): (Vec<u16>, mlua::Function, Option<bool>)| {
                 let filter = packet_filter("on_packet", &opcodes, sent)?;
                 let mut events = registry.borrow_mut();
-                events.last_id += 1;
-                let id = events.last_id;
+                let id = events.next_id();
                 events.packet_callbacks.push((id, filter, callback));
                 if let Err(error) = events.refresh_packets(pid) {
                     events.packet_callbacks.pop();
@@ -1344,7 +1351,7 @@ pub fn run_with_modules(
         )?,
     )?;
     let registry = events.clone();
-    globals.set(
+    s.set(
         "off_packet",
         lua.create_function(move |_, id: u64| {
             let mut events = registry.borrow_mut();
@@ -1355,12 +1362,11 @@ pub fn run_with_modules(
         })?,
     )?;
     let pump = events.clone();
-    globals.set(
+    s.set(
         "wait_packet",
         lua.create_function(
             move |lua, (opcodes, ms, sent): (Vec<u16>, u64, Option<bool>)| {
                 let filter = packet_filter("wait_packet", &opcodes, sent)?;
-                // only a packet logged from now on counts, not one waiting from before the call
                 let (previous, since) = {
                     let mut events = pump.borrow_mut();
                     let previous = events.waiting.replace(filter);
@@ -1370,10 +1376,7 @@ pub fn run_with_modules(
                     }
                     (
                         previous,
-                        events
-                            .packets
-                            .as_ref()
-                            .map_or(0, |watcher| watcher.written()),
+                        events.packets.as_ref().map_or(0, PacketWatcher::written),
                     )
                 };
                 let found = pump_events(
@@ -1390,7 +1393,7 @@ pub fn run_with_modules(
         )?,
     )?;
     let pump = events;
-    globals.set(
+    s.set(
         "sleep",
         lua.create_function(move |lua, ms: u64| {
             let time = std::time::Duration::from_millis(ms);
@@ -1403,49 +1406,34 @@ pub fn run_with_modules(
         })?,
     )?;
 
-    // Like `connection`, it needs the agent loaded and raises without it; what it returns always has a table.
-    globals.set(
+    s.set(
         "game_state",
         lua.create_function(move |lua, (): ()| -> mlua::Result<mlua::Value> {
-            let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
-            let state = game_state(pid).map_err(mlua::Error::RuntimeError)?;
+            let state = game_state(need_client(pid)?).map_err(mlua::Error::RuntimeError)?;
             to_lua(lua, &state)
         })?,
     )?;
-    // Scripts need the agent loaded, so a missing client or agent is an error and `connection()` always returns one.
-    globals.set(
+    s.set(
         "connection",
         lua.create_function(move |lua, (): ()| -> mlua::Result<mlua::Value> {
-            let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
-            let conn = connection(pid).ok_or_else(|| mlua::Error::RuntimeError(NO_AGENT.into()))?;
+            let conn = connection(need_client(pid)?)
+                .ok_or_else(|| mlua::Error::RuntimeError(NO_AGENT.into()))?;
             if let Some(problem) = conn.problem() {
                 return Err(mlua::Error::RuntimeError(problem));
             }
             to_lua(lua, &conn)
         })?,
     )?;
-    globals.set(
-        "widget",
-        query(&lua, pid, |pid, (group, child): (u16, u16)| {
-            widget(pid, group, child)
-        })?,
-    )?;
-    globals.set(
-        "widget_model",
-        query(&lua, pid, |pid, (group, child): (u16, u16)| {
-            widget_model(pid, group, child)
-        })?,
-    )?;
-    globals.set(
-        "item_container",
-        query(&lua, pid, |pid, id: i32| item_container(pid, id))?,
-    )?;
-    globals.set(
-        "sub_interfaces",
-        query(&lua, pid, |pid, (): ()| sub_interfaces(pid))?,
-    )?;
-    let form = std::cell::RefCell::new(form);
-    globals.set(
+    s.query("widget", |pid, (group, child): (u16, u16)| {
+        widget(pid, group, child)
+    })?;
+    s.query("widget_model", |pid, (group, child): (u16, u16)| {
+        widget_model(pid, group, child)
+    })?;
+    s.query("item_container", |pid, id: i32| item_container(pid, id))?;
+    s.query("sub_interfaces", |pid, (): ()| sub_interfaces(pid))?;
+    let form = RefCell::new(form);
+    s.set(
         "form",
         lua.create_function(
             move |lua, spec: mlua::Value| -> mlua::Result<(mlua::Value, Option<String>)> {
@@ -1462,31 +1450,27 @@ pub fn run_with_modules(
             },
         )?,
     )?;
-    // The values the user last updated the settings to while the script runs, or nil when there is nothing new.
-    globals.set(
+    s.set(
         "form_update",
         lua.create_function(|lua, (): ()| match crate::form::take_update() {
             Some(values) => to_lua(lua, &values),
             None => Ok(mlua::Value::Nil),
         })?,
     )?;
-    // The global break and sleep config, with a `version` that changes whenever the loader sends a new one.
-    globals.set(
+    s.set(
         "antiban_config",
         lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::current_value()))?,
     )?;
-    // Which types of transport the user turned off in the loader: `{ off = { names } }`.
-    globals.set(
+    s.set(
         "transport_settings",
         lua.create_function(|lua, (): ()| to_lua(lua, &crate::transports::current_settings()))?,
     )?;
-    // The transports (teleport spells, ...) the loader downloaded and parsed: `{ source, transports, version }`.
-    globals.set(
+    s.set(
         "transports",
         lua.create_function(|lua, (): ()| to_lua(lua, &crate::transports::current_value()))?,
     )?;
     #[cfg(test)]
-    globals.set(
+    s.set(
         "test_set_transports",
         lua.create_function(|_, json: String| {
             crate::transports::set(
@@ -1496,13 +1480,12 @@ pub fn run_with_modules(
             Ok(())
         })?,
     )?;
-    // The queued breaks and sleeps the user asked to skip once since the last call, as `{ kind, index }` (index from 0).
-    globals.set(
+    s.set(
         "antiban_skips",
         lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::take_skips()))?,
     )?;
     #[cfg(test)]
-    globals.set(
+    s.set(
         "test_skip",
         lua.create_function(|_, (kind, index): (String, u32)| {
             crate::antiban::push_skip(crate::antiban::Skip { kind, index });
@@ -1510,7 +1493,7 @@ pub fn run_with_modules(
         })?,
     )?;
     #[cfg(test)]
-    globals.set(
+    s.set(
         "test_set_antiban",
         lua.create_function(|_, json: String| {
             crate::antiban::set(
@@ -1520,550 +1503,254 @@ pub fn run_with_modules(
             Ok(())
         })?,
     )?;
-    // The live menu has to be read with the mouse still, so these take the input back first.
-    globals.set("menu", query(&lua, pid, menu_read(&worker, menu))?)?;
-    globals.set(
-        "menu_click",
-        query(&lua, pid, |pid, (): ()| menu_click(pid))?,
-    )?;
-    globals.set(
-        "menu_open",
-        query(&lua, pid, menu_read(&worker, menu_open))?,
-    )?;
-    globals.set(
-        "menu_layout",
-        query(&lua, pid, menu_read(&worker, menu_layout))?,
-    )?;
-    globals.set(
-        "selected_widget",
-        query(&lua, pid, |pid, (): ()| selected_widget(pid))?,
-    )?;
-    globals.set(
+    s.menu_query("menu", menu)?;
+    s.query("menu_click", |pid, (): ()| menu_click(pid))?;
+    s.menu_query("menu_open", menu_open)?;
+    s.menu_query("menu_layout", menu_layout)?;
+    s.query("selected_widget", |pid, (): ()| selected_widget(pid))?;
+    s.query(
         "project",
-        query(
-            &lua,
-            pid,
-            |pid, (points, via, shift): (Vec<mlua::Table>, Option<String>, Option<mlua::Table>)| {
-                let via = Via::parse(via.as_deref())?;
-                let points = points
-                    .iter()
-                    .map(fine_point)
-                    .collect::<mlua::Result<Vec<_>>>()
-                    .map_err(|e| e.to_string())?;
-                let screen = match shift {
-                    None => project(pid, &points, via)?,
-                    Some(_) if via == Via::Client => {
-                        return Err("the client's projection can't move the camera".into());
-                    }
-                    Some(s) => project_moved(
-                        pid,
-                        &points,
-                        [
-                            s.get("x").map_err(|e| e.to_string())?,
-                            s.get("y").map_err(|e| e.to_string())?,
-                            s.get::<Option<i32>>("plane")
-                                .map_err(|e| e.to_string())?
-                                .unwrap_or(-1),
-                        ],
-                    )?,
-                };
-                Ok(screen
-                    .into_iter()
-                    .map(|[x, y]| ScreenPoint { x, y })
-                    .collect::<Vec<_>>())
-            },
-        )?,
-    )?;
-    globals.set(
-        "game_val_name",
-        query(&lua, pid, |pid, (kind, id): (u32, i32)| {
-            Ok(game_val_names(pid, kind, &[id])?.pop().flatten())
-        })?,
-    )?;
-    globals.set(
-        "game_val_names",
-        query(&lua, pid, |pid, (kind, ids): (u32, Vec<i32>)| {
-            game_val_names(pid, kind, &ids)
-        })?,
-    )?;
-    globals.set(
-        "item_name",
-        query(&lua, pid, |pid, id: i32| {
-            Ok(item_names(pid, &[id])?.pop().flatten())
-        })?,
-    )?;
-    globals.set(
-        "item_names",
-        query(&lua, pid, |pid, ids: Vec<i32>| item_names(pid, &ids))?,
-    )?;
-    globals.set(
-        "item_stackable",
-        query(&lua, pid, |pid, ids: Vec<i32>| item_stackable(pid, &ids))?,
-    )?;
-    globals.set("varc", query(&lua, pid, |pid, id: i32| varc(pid, id))?)?;
-    globals.set(
-        "varp",
-        query(&lua, pid, |pid, id: usize| varp_value(pid, id))?,
-    )?;
-    globals.set("varps", query(&lua, pid, |pid, (): ()| varps(pid))?)?;
-    globals.set("varbit", query(&lua, pid, |pid, id: i32| varbit(pid, id))?)?;
-    globals.set(
-        "enum_def",
-        query(&lua, pid, |pid, id: i32| enum_def(pid, id))?,
-    )?;
-    // Several files of one cache index at once, `cache_files(index, { { archive, file }, ... })`: a list with a string of bytes for each file that exists and `false` for each that doesn't.
-    globals.set(
-        "cache_files",
-        lua.create_function(
-            move |lua,
-                  (index, wanted): (u32, Vec<[i32; 2]>)|
-                  -> mlua::Result<(mlua::Value, Option<String>)> {
-                let Some(pid) = pid else {
-                    return Ok((mlua::Value::Nil, Some(NO_CLIENT.into())));
-                };
-                match cache_files(pid, index, &wanted) {
-                    Ok(files) => {
-                        let list = lua.create_table()?;
-                        for (i, file) in files.into_iter().enumerate() {
-                            list.set(
-                                i + 1,
-                                match file {
-                                    Some(bytes) => mlua::Value::String(lua.create_string(&bytes)?),
-                                    None => mlua::Value::Boolean(false),
-                                },
-                            )?;
-                        }
-                        Ok((mlua::Value::Table(list), None))
-                    }
-                    Err(error) => Ok((mlua::Value::Nil, Some(error))),
-                }
-            },
-        )?,
-    )?;
-    // One file of the client's cache, as a Lua string of its bytes (nil when it doesn't exist): `cache_file(index, archive, file)`.
-    globals.set(
-        "cache_file",
-        lua.create_function(
-            move |lua,
-                  (index, archive, file): (u32, i32, i32)|
-                  -> mlua::Result<(mlua::Value, Option<String>)> {
-                let Some(pid) = pid else {
-                    return Ok((mlua::Value::Nil, Some(NO_CLIENT.into())));
-                };
-                match cache_files(pid, index, &[[archive, file]]) {
-                    Ok(mut files) => match files.pop().flatten() {
-                        Some(bytes) => Ok((mlua::Value::String(lua.create_string(&bytes)?), None)),
-                        None => Ok((mlua::Value::Nil, None)),
-                    },
-                    Err(error) => Ok((mlua::Value::Nil, Some(error))),
-                }
-            },
-        )?,
-    )?;
-    // The landmass number of each `{ x, y, plane }` (0: none, or not the surface): tiles with the same number can be walked between.
-    globals.set(
-        "landmasses",
-        query(&lua, pid, |pid, points: Vec<mlua::Table>| {
-            let read = |t: &mlua::Table, field: &str| -> Result<i32, String> {
-                t.get::<i32>(field)
-                    .map_err(|e| format!("a point's {field}: {e}"))
-            };
+        |pid, (points, via, shift): (Vec<mlua::Table>, Option<String>, Option<mlua::Table>)| {
+            let via = Via::parse(via.as_deref())?;
             let points = points
                 .iter()
-                .map(|t| Ok([read(t, "x")?, read(t, "y")?, read(t, "plane")?]))
-                .collect::<Result<Vec<[i32; 3]>, String>>()?;
-            landmasses(pid, &points)
-        })?,
+                .map(fine_point)
+                .collect::<mlua::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            let screen = match shift {
+                None => project(pid, &points, via)?,
+                Some(_) if via == Via::Client => {
+                    return Err("the client's projection can't move the camera".into());
+                }
+                Some(s) => project_moved(
+                    pid,
+                    &points,
+                    [
+                        get(&s, "x")?,
+                        get(&s, "y")?,
+                        get::<Option<i32>>(&s, "plane")?.unwrap_or(-1),
+                    ],
+                )?,
+            };
+            Ok(screen_points(screen))
+        },
     )?;
-    // Whether `to` can be reached from `from` by walking and climbing: `{ known, reachable, from, to }`, the last two being the first climb on the way when one is needed.
-    globals.set(
+    s.query("game_val_name", |pid, (kind, id): (u32, i32)| {
+        Ok(game_val_names(pid, kind, &[id])?.pop().flatten())
+    })?;
+    s.query("game_val_names", |pid, (kind, ids): (u32, Vec<i32>)| {
+        game_val_names(pid, kind, &ids)
+    })?;
+    s.query("item_name", |pid, id: i32| {
+        Ok(item_names(pid, &[id])?.pop().flatten())
+    })?;
+    s.query("item_names", |pid, ids: Vec<i32>| item_names(pid, &ids))?;
+    s.query("item_stackable", |pid, ids: Vec<i32>| {
+        item_stackable(pid, &ids)
+    })?;
+    s.query("varc", varc)?;
+    s.query("varp", varp_value)?;
+    s.query("varps", |pid, (): ()| varps(pid))?;
+    s.query("varbit", varbit)?;
+    s.query("enum_def", enum_def)?;
+    s.query_with(
+        "cache_files",
+        |pid, (index, wanted): (u32, Vec<[i32; 2]>)| cache_files(pid, index, &wanted),
+        |lua, files| {
+            let list = lua.create_table()?;
+            for (i, file) in files.into_iter().enumerate() {
+                list.set(
+                    i + 1,
+                    match file {
+                        Some(bytes) => mlua::Value::String(lua.create_string(&bytes)?),
+                        None => mlua::Value::Boolean(false),
+                    },
+                )?;
+            }
+            Ok(mlua::Value::Table(list))
+        },
+    )?;
+    s.query_with(
+        "cache_file",
+        |pid, (index, archive, file): (u32, i32, i32)| {
+            Ok(cache_files(pid, index, &[[archive, file]])?.pop().flatten())
+        },
+        |lua, file| match file {
+            Some(bytes) => Ok(mlua::Value::String(lua.create_string(&bytes)?)),
+            None => Ok(mlua::Value::Nil),
+        },
+    )?;
+    s.query("landmasses", |pid, points: Vec<mlua::Table>| {
+        let points = points
+            .iter()
+            .map(|t| point_arg(t, "a point").map(|(x, y, plane)| [x, y, plane]))
+            .collect::<Result<Vec<[i32; 3]>, String>>()?;
+        landmasses(pid, &points)
+    })?;
+    s.query(
         "world_route",
-        query(
-            &lua,
-            pid,
-            |pid, (from, to, allow): (mlua::Table, mlua::Table, Option<Vec<String>>)| {
-                let tile = |t: &mlua::Table| -> Result<crate::nav::Point, String> {
-                    let read = |field: &str| {
-                        t.get::<i32>(field)
-                            .map_err(|e| format!("a tile's {field}: {e}"))
-                    };
-                    Ok((read("x")?, read("y")?, read("plane")?))
-                };
-                let route = world_route(pid, tile(&from)?, tile(&to)?, &allow.unwrap_or_default())?;
-                Ok(WorldRoute::from(route))
-            },
-        )?,
+        |pid, (from, to, allow): (mlua::Table, mlua::Table, Option<Vec<String>>)| {
+            let route = world_route(
+                pid,
+                point_arg(&from, "a tile")?,
+                point_arg(&to, "a tile")?,
+                &allow.unwrap_or_default(),
+            )?;
+            Ok(WorldRoute::from(route))
+        },
     )?;
-    globals.set(
-        "item_params",
-        query(&lua, pid, |pid, ids: Vec<i32>| item_params(pid, &ids))?,
-    )?;
-    globals.set("npcs", query(&lua, pid, |pid, (): ()| npcs(pid))?)?;
-    globals.set(
-        "npc_model",
-        query(&lua, pid, |pid, index: i32| {
-            Ok(npc_model(pid, index)?.map(script_model))
-        })?,
-    )?;
-    globals.set(
-        "npc_sizes",
-        query(&lua, pid, |pid, indices: Vec<i32>| npc_sizes(pid, &indices))?,
-    )?;
-    globals.set(
-        "npc_hitsplats",
-        query(&lua, pid, |pid, indices: Vec<i32>| {
-            npc_hitsplats(pid, &indices)
-        })?,
-    )?;
-    globals.set(
-        "player_hitsplats",
-        query(&lua, pid, |pid, indices: Vec<i32>| {
-            player_hitsplats(pid, &indices)
-        })?,
-    )?;
-    globals.set(
-        "client_cycle",
-        query(&lua, pid, |pid, (): ()| client_cycle(pid))?,
-    )?;
-    globals.set(
-        "locs",
-        query(&lua, pid, |pid, plane: Option<i32>| locs(pid, plane))?,
-    )?;
-    globals.set(
-        "map_regions",
-        query(&lua, pid, |pid, (): ()| map_regions(pid))?,
-    )?;
-    globals.set(
-        "in_instance",
-        query(&lua, pid, |pid, (): ()| in_instance(pid))?,
-    )?;
-    globals.set(
-        "server_tile",
-        query(&lua, pid, |pid, (): ()| server_tile(pid))?,
-    )?;
-    globals.set("movement", query(&lua, pid, |pid, (): ()| movement(pid))?)?;
-    globals.set(
-        "ground_items",
-        query(&lua, pid, |pid, (): ()| ground_items(pid))?,
-    )?;
-    globals.set(
-        "projectiles",
-        query(&lua, pid, |pid, (): ()| projectiles(pid))?,
-    )?;
-    globals.set(
-        "spot_anims",
-        query(&lua, pid, |pid, (): ()| spot_anims(pid))?,
-    )?;
-    globals.set(
-        "chat_messages",
-        query(&lua, pid, |pid, (): ()| chat_messages(pid))?,
-    )?;
-    globals.set(
+    s.query("item_params", |pid, ids: Vec<i32>| item_params(pid, &ids))?;
+    s.query("npcs", |pid, (): ()| npcs(pid))?;
+    s.query("npc_model", |pid, index: i32| {
+        Ok(npc_model(pid, index)?.map(script_model))
+    })?;
+    s.query("npc_sizes", |pid, indices: Vec<i32>| {
+        npc_sizes(pid, &indices)
+    })?;
+    s.query("npc_hitsplats", |pid, indices: Vec<i32>| {
+        npc_hitsplats(pid, &indices)
+    })?;
+    s.query("player_hitsplats", |pid, indices: Vec<i32>| {
+        player_hitsplats(pid, &indices)
+    })?;
+    s.query("client_cycle", |pid, (): ()| client_cycle(pid))?;
+    s.query("locs", locs)?;
+    s.query("map_regions", |pid, (): ()| map_regions(pid))?;
+    s.query("in_instance", |pid, (): ()| in_instance(pid))?;
+    s.query("server_tile", |pid, (): ()| server_tile(pid))?;
+    s.query("movement", |pid, (): ()| movement(pid))?;
+    s.query("ground_items", |pid, (): ()| ground_items(pid))?;
+    s.query("projectiles", |pid, (): ()| projectiles(pid))?;
+    s.query("spot_anims", |pid, (): ()| spot_anims(pid))?;
+    s.query("chat_messages", |pid, (): ()| chat_messages(pid))?;
+    s.query(
         "find_path",
-        query(
-            &lua,
-            pid,
-            |pid,
-             (from, to, plane, max_tiles): (
-                mlua::Table,
-                mlua::Table,
-                Option<i32>,
-                Option<usize>,
-            )| {
-                let tile = |t: &mlua::Table| -> Result<[i32; 2], String> {
-                    Ok([
-                        t.get("x").map_err(|e| e.to_string())?,
-                        t.get("y").map_err(|e| e.to_string())?,
-                    ])
-                };
-                let plane = match plane {
+        |pid,
+         (from, to, plane, max_tiles): (
+            mlua::Table,
+            mlua::Table,
+            Option<i32>,
+            Option<usize>,
+        )| {
+            let plane = match plane {
+                Some(plane) => plane,
+                None => player_plane(pid)?,
+            };
+            Ok(
+                find_path(pid, plane, tile_arg(&from)?, tile_arg(&to)?, max_tiles)?
+                    .into_iter()
+                    .map(|[x, y]| PathTile { x, y })
+                    .collect::<Vec<_>>(),
+            )
+        },
+    )?;
+    s.query("loc_shown", |pid, ids: Vec<u32>| loc_shown(pid, &ids))?;
+    s.query(
+        "cache_locs",
+        |pid, (area, filter): (mlua::Table, Option<mlua::Table>)| {
+            let area = area_arg(&area)?;
+            let filter = match filter {
+                Some(t) => crate::CacheLocFilter {
+                    plane: get(&t, "plane")?,
+                    names: get(&t, "names")?,
+                    actions: get(&t, "actions")?,
+                },
+                None => crate::CacheLocFilter::default(),
+            };
+            cache_locs(pid, area, &filter)
+        },
+    )?;
+    s.query("collision", |pid, area: Option<mlua::Table>| {
+        let area = area.as_ref().map(area_arg).transpose()?;
+        collision_cut(scene_collision(pid)?, area)
+    })?;
+    s.query(
+        "scene_route",
+        |pid, (from, to, options): (mlua::Table, mlua::Table, Option<mlua::Table>)| {
+            let options = options.as_ref().map(scene_options);
+            let route = scene_route(pid, tile_arg(&from)?, tile_arg(&to)?, options.transpose()?)?;
+            Ok(SceneRoute {
+                tiles: route
+                    .tiles
+                    .into_iter()
+                    .map(|(x, y)| PathTile { x, y })
+                    .collect(),
+                reached: route.reached,
+            })
+        },
+    )?;
+    s.query(
+        "nav_plan",
+        |pid, (from, to, options): (mlua::Table, mlua::Table, Option<mlua::Table>)| {
+            let point = |t: &mlua::Table| -> Result<crate::nav::Point, String> {
+                let plane = match get(t, "plane")? {
                     Some(plane) => plane,
                     None => player_plane(pid)?,
                 };
-                Ok(find_path(pid, plane, tile(&from)?, tile(&to)?, max_tiles)?
-                    .into_iter()
-                    .map(|[x, y]| PathTile { x, y })
-                    .collect::<Vec<_>>())
-            },
-        )?,
-    )?;
-    // How objects look to the player now, by id: a multi-state object (a farming patch with a grown tree, say) shows the form its varbit picks, with that form's name and options
-    globals.set(
-        "loc_shown",
-        query(&lua, pid, |pid, ids: Vec<u32>| loc_shown(pid, &ids))?,
-    )?;
-    globals.set(
-        "cache_locs",
-        query(
-            &lua,
-            pid,
-            |pid, (area, filter): (mlua::Table, Option<mlua::Table>)| {
-                let corner = |name: &str| area.get::<i32>(name).map_err(|e| e.to_string());
-                let area = [corner("x1")?, corner("y1")?, corner("x2")?, corner("y2")?];
-                let filter = match filter {
-                    Some(t) => crate::CacheLocFilter {
-                        plane: t.get::<Option<i32>>("plane").map_err(|e| e.to_string())?,
-                        names: t
-                            .get::<Option<Vec<String>>>("names")
-                            .map_err(|e| e.to_string())?,
-                        actions: t
-                            .get::<Option<Vec<String>>>("actions")
-                            .map_err(|e| e.to_string())?,
-                    },
-                    None => crate::CacheLocFilter::default(),
-                };
-                cache_locs(pid, area, &filter)
-            },
-        )?,
-    )?;
-    globals.set(
-        "collision",
-        query(&lua, pid, |pid, area: Option<mlua::Table>| {
-            let area = match area {
-                Some(t) => {
-                    let corner = |name: &str| t.get::<i32>(name).map_err(|e| e.to_string());
-                    Some([corner("x1")?, corner("y1")?, corner("x2")?, corner("y2")?])
-                }
-                None => None,
+                Ok((get(t, "x")?, get(t, "y")?, plane))
             };
-            collision_cut(scene_collision(pid)?, area)
-        })?,
+            let request = match options {
+                Some(t) => nav_request(&t)?,
+                None => crate::nav::Request::default(),
+            };
+            nav_plan(pid, point(&from)?, point(&to)?, &request)
+        },
     )?;
-    globals.set(
-        "scene_route",
-        query(
-            &lua,
+    s.query("loc_model", |pid, loc: mlua::Table| {
+        let field = |name: &str| get::<i32>(&loc, name);
+        Ok(loc_model(
             pid,
-            |pid, (from, to, options): (mlua::Table, mlua::Table, Option<mlua::Table>)| {
-                let tile = |t: &mlua::Table| -> Result<[i32; 2], String> {
-                    Ok([
-                        t.get("x").map_err(|e| e.to_string())?,
-                        t.get("y").map_err(|e| e.to_string())?,
-                    ])
-                };
-                // a table asks for a randomized route, its fields override the defaults
-                let options = options.map(|t| -> Result<crate::scene_graph::Options, String> {
-                    let default = crate::scene_graph::Options::default();
-                    let field = |name: &str| t.get::<Option<f64>>(name).map_err(|e| e.to_string());
-                    Ok(crate::scene_graph::Options {
-                        seed: match field("seed")? {
-                            Some(seed) => seed as u64,
-                            None => crate::scene_graph::mix(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map_or(0, |d| d.as_nanos() as u64),
-                            ),
-                        },
-                        rnd: field("rnd")?.unwrap_or(default.rnd),
-                        spacing: field("spacing")?.map_or(default.spacing, |v| v as i32),
-                        jitter: field("jitter")?.map_or(default.jitter, |v| v as i32),
-                        max_detour: field("max_detour")?.unwrap_or(default.max_detour),
-                        offset: field("offset")?.map_or(default.offset, |v| v as i32),
-                    })
-                });
-                let route = scene_route(pid, tile(&from)?, tile(&to)?, options.transpose()?)?;
-                Ok(SceneRoute {
-                    tiles: route
-                        .tiles
-                        .into_iter()
-                        .map(|(x, y)| PathTile { x, y })
-                        .collect(),
-                    reached: route.reached,
-                })
-            },
-        )?,
-    )?;
-    globals.set(
-        "nav_plan",
-        query(
-            &lua,
-            pid,
-            |pid, (from, to, options): (mlua::Table, mlua::Table, Option<mlua::Table>)| {
-                let err = |e: mlua::Error| e.to_string();
-                let point = |t: &mlua::Table| -> Result<crate::nav::Point, String> {
-                    let plane = match t.get::<Option<i32>>("plane").map_err(err)? {
-                        Some(plane) => plane,
-                        None => player_plane(pid)?,
-                    };
-                    Ok((t.get("x").map_err(err)?, t.get("y").map_err(err)?, plane))
-                };
-                let mut request = crate::nav::Request::default();
-                if let Some(t) = options {
-                    let o = &mut request.options;
-                    o.near = t.get::<Option<i32>>("near").map_err(err)?.unwrap_or(o.near);
-                    o.door_cost = t
-                        .get::<Option<u32>>("door_cost")
-                        .map_err(err)?
-                        .unwrap_or(o.door_cost);
-                    o.climb_cost = t
-                        .get::<Option<u32>>("climb_cost")
-                        .map_err(err)?
-                        .unwrap_or(o.climb_cost);
-                    // the least (in tiles) an agility shortcut has to save over walking round
-                    o.shortcut_saving = t
-                        .get::<Option<f64>>("shortcut_saving")
-                        .map_err(err)?
-                        .map_or(o.shortcut_saving, |tiles| (tiles.max(0.0) * 10.0) as u32);
-                    o.rnd = t.get::<Option<f64>>("rnd").map_err(err)?.unwrap_or(o.rnd);
-                    o.seed = t.get::<Option<f64>>("seed").map_err(err)?.map(|s| s as u64);
-                    if let Some(options) =
-                        t.get::<Option<Vec<String>>>("door_options").map_err(err)?
-                    {
-                        request.door_options = options;
-                    }
-                    if let Some(climbs) = t.get::<Option<bool>>("climbs").map_err(err)? {
-                        request.climbs = climbs;
-                    }
-                    if let Some(keys) = t.get::<Option<Vec<String>>>("allow_climbs").map_err(err)? {
-                        request.allow_climbs = keys;
-                    }
-                    if let Some(names) =
-                        t.get::<Option<Vec<String>>>("portal_names").map_err(err)?
-                    {
-                        request.portal_names = names;
-                    }
-                    for loc in t
-                        .get::<Option<Vec<mlua::Table>>>("avoid")
-                        .map_err(err)?
-                        .unwrap_or_default()
-                    {
-                        let field = |name: &str| loc.get::<i32>(name).map_err(err);
-                        request.avoid.push((
-                            field("id")?,
-                            field("x")?,
-                            field("y")?,
-                            field("plane")?,
-                        ));
-                    }
-                }
-                nav_plan(pid, point(&from)?, point(&to)?, &request)
-            },
-        )?,
-    )?;
-    globals.set(
-        "loc_model",
-        query(&lua, pid, |pid, loc: mlua::Table| {
-            let field = |name: &str| loc.get::<i32>(name).map_err(|e| e.to_string());
-            Ok(loc_model(
-                pid,
-                field("kind")? as u8,
-                field("scene_x")?,
-                field("scene_y")?,
-                field("id")?,
-            )?
-            .map(script_model))
-        })?,
-    )?;
-    globals.set(
+            field("kind")? as u8,
+            field("scene_x")?,
+            field("scene_y")?,
+            field("id")?,
+        )?
+        .map(script_model))
+    })?;
+    s.query(
         "npc_type_model",
-        query(
-            &lua,
-            pid,
-            |pid,
-             (id, animation, frame, fine_x, fine_y, orientation): (
-                i32,
-                i32,
-                i32,
-                i32,
-                i32,
-                i32,
-            )| {
-                Ok(
-                    npc_type_model(pid, id, animation, frame, (fine_x, fine_y), orientation)?
-                        .map(script_model),
-                )
-            },
-        )?,
+        |pid,
+         (id, animation, frame, fine_x, fine_y, orientation): (
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+        )| {
+            Ok(
+                npc_type_model(pid, id, animation, frame, (fine_x, fine_y), orientation)?
+                    .map(script_model),
+            )
+        },
     )?;
-    globals.set("players", query(&lua, pid, |pid, (): ()| players(pid))?)?;
-    globals.set(
-        "player_model",
-        query(&lua, pid, |pid, index: i32| {
-            Ok(player_model(pid, index)?.map(script_model))
-        })?,
-    )?;
-    globals.set(
-        "world_select",
-        query(&lua, pid, |pid, (): ()| world_select(pid))?,
-    )?;
-    globals.set(
-        "widget_children",
-        query(&lua, pid, |pid, (group, child): (u16, u16)| {
-            widget_children(pid, group, child)
-        })?,
-    )?;
+    s.query("players", |pid, (): ()| players(pid))?;
+    s.query("player_model", |pid, index: i32| {
+        Ok(player_model(pid, index)?.map(script_model))
+    })?;
+    s.query("world_select", |pid, (): ()| world_select(pid))?;
+    s.query("widget_children", |pid, (group, child): (u16, u16)| {
+        widget_children(pid, group, child)
+    })?;
 
-    fn click_input(
-        (x, y, button, hold_ms): (i32, i32, Option<String>, Option<u32>),
-    ) -> mlua::Result<Input> {
-        Ok(Input::Click {
-            button: button_arg(button)?,
-            x,
-            y,
-            hold_ms: hold_ms.unwrap_or(crate::CLICK_HOLD_MS),
-        })
-    }
-    fn move_input((x, y): (i32, i32)) -> mlua::Result<Input> {
-        Ok(Input::Move { x, y })
-    }
-    fn wind_mouse_input((x, y, options): (i32, i32, Option<mlua::Table>)) -> mlua::Result<Input> {
-        let mut opts = wind_mouse::Options::default();
-        if let Some(options) = options {
-            opts.speed = options.get::<Option<f64>>("speed")?.unwrap_or(opts.speed);
-            opts.wind = options.get::<Option<f64>>("wind")?.unwrap_or(opts.wind);
-            opts.gravity = options
-                .get::<Option<f64>>("gravity")?
-                .unwrap_or(opts.gravity);
-            opts.timeout_ms = options
-                .get::<Option<u32>>("timeout")?
-                .unwrap_or(opts.timeout_ms);
-            opts.pace = options.get::<Option<f64>>("pace")?.unwrap_or(opts.pace);
-        }
-        Ok(Input::WindMouse {
-            x,
-            y,
-            options: opts,
-        })
-    }
-    fn type_input((text, hold_ms): (String, Option<u32>)) -> mlua::Result<Input> {
-        Ok(Input::Type {
-            text,
-            hold_ms: hold_ms.unwrap_or(crate::KEY_HOLD_MS),
-        })
-    }
-    // Enters the PIN the loader gave this run on the open bank PIN keypad; it takes no PIN and returns only how it went.
-    globals.set(
+    let worker = s.worker.clone();
+    s.set(
         "bank_pin_enter",
-        lua.create_function({
-            let worker = worker.clone();
-            move |_, (): ()| -> mlua::Result<&'static str> {
-                let pid = pid.ok_or_else(|| mlua::Error::RuntimeError(NO_CLIENT.into()))?;
-                cancel_input(&worker);
-                bank_pin_enter(pid, &crate::async_input::Blocking)
-                    .map(crate::bank_pin::Outcome::name)
-                    .map_err(mlua::Error::RuntimeError)
-            }
+        lua.create_function(move |_, (): ()| -> mlua::Result<&'static str> {
+            let pid = need_client(pid)?;
+            cancel_input(&worker);
+            bank_pin_enter(pid, &crate::async_input::Blocking)
+                .map(crate::bank_pin::Outcome::name)
+                .map_err(mlua::Error::RuntimeError)
         })?,
     )?;
-    // The skill the loader's Accounts page has set for spending the logged in account's lamps. The account is read here, as for the bank PIN: a script that named it could ask about any saved account.
-    globals.set(
-        "lamp_skill",
-        lua.create_function(move |_, (): ()| {
-            let skill = || -> Result<Option<String>, String> {
-                let pid = pid.ok_or(NO_CLIENT)?;
-                match game_state(pid)?.account_name {
-                    Some(account) => crate::lamp::skill_for(&account),
-                    None => Ok(None),
-                }
-            };
-            Ok(match skill() {
-                Ok(skill) => (skill, None),
-                Err(error) => (None, Some(error)),
-            })
-        })?,
-    )?;
-    // Makes the request through the loader, which only reaches the hosts the user whitelisted. Needs no client.
-    globals.set(
+    s.query("lamp_skill", |pid, (): ()| {
+        match game_state(pid)?.account_name {
+            Some(account) => crate::lamp::skill_for(&account),
+            None => Ok(None),
+        }
+    })?;
+    s.set(
         "http_request",
         lua.create_function(
             |lua, options: mlua::Value| -> mlua::Result<(mlua::Value, Option<String>)> {
@@ -2089,217 +1776,77 @@ pub fn run_with_modules(
             },
         )?,
     )?;
-    globals.set("click", input(&lua, pid, &worker, click_input)?)?;
-    globals.set("move", input(&lua, pid, &worker, move_input)?)?;
-    globals.set("wind_mouse", input(&lua, pid, &worker, wind_mouse_input)?)?;
-    globals.set("type_text", input(&lua, pid, &worker, type_input)?)?;
-    fn mouse_down_input(button: Option<String>) -> mlua::Result<Input> {
-        Ok(Input::Button {
-            button: button_arg(button)?,
-            down: true,
-        })
-    }
-    fn mouse_up_input(button: Option<String>) -> mlua::Result<Input> {
-        Ok(Input::Button {
-            button: button_arg(button)?,
-            down: false,
-        })
-    }
-    fn scroll_input(notches: i32) -> mlua::Result<Input> {
-        Ok(Input::Scroll { notches })
-    }
-    fn key_down_input(key: u8) -> mlua::Result<Input> {
-        Ok(Input::Key { key, down: true })
-    }
-    fn key_up_input(key: u8) -> mlua::Result<Input> {
-        Ok(Input::Key { key, down: false })
-    }
-    globals.set("mouse_down", input(&lua, pid, &worker, mouse_down_input)?)?;
-    globals.set("mouse_up", input(&lua, pid, &worker, mouse_up_input)?)?;
-    globals.set("scroll", input(&lua, pid, &worker, scroll_input)?)?;
-    globals.set("key_down", input(&lua, pid, &worker, key_down_input)?)?;
-    globals.set("key_up", input(&lua, pid, &worker, key_up_input)?)?;
 
-    // The same inputs without waiting; they queue in order and stop on the next blocking input, `input_cancel`, a live menu read or script end.
-    globals.set("click_async", input_async(&lua, pid, &worker, click_input)?)?;
-    globals.set("move_async", input_async(&lua, pid, &worker, move_input)?)?;
-    globals.set(
-        "wind_mouse_async",
-        input_async(&lua, pid, &worker, wind_mouse_input)?,
-    )?;
-    globals.set(
-        "type_text_async",
-        input_async(&lua, pid, &worker, type_input)?,
-    )?;
-    // Buttons and keys pressed this way stay down until released, cancelled or the script ends, last pressed released first.
-    globals.set(
-        "mouse_down_async",
-        input_async(&lua, pid, &worker, mouse_down_input)?,
-    )?;
-    globals.set(
-        "mouse_up_async",
-        input_async(&lua, pid, &worker, mouse_up_input)?,
-    )?;
-    globals.set(
-        "scroll_async",
-        input_async(&lua, pid, &worker, scroll_input)?,
-    )?;
-    globals.set(
-        "key_down_async",
-        input_async(&lua, pid, &worker, key_down_input)?,
-    )?;
-    globals.set(
-        "key_up_async",
-        input_async(&lua, pid, &worker, key_up_input)?,
-    )?;
-    // A pause in the queue, for holding a key or a button for a while.
-    globals.set(
-        "sleep_async",
-        action(&lua, pid, {
-            let worker = worker.clone();
-            move |_, ms: u32| {
-                Ok(worker
-                    .as_ref()
-                    .map_or(Err(NO_CLIENT.into()), |worker| worker.push(Job::Wait(ms))))
-            }
-        })?,
-    )?;
-    globals.set(
-        "input_busy",
-        lua.create_function({
-            let worker = worker.clone();
-            move |_, (): ()| Ok(worker.as_ref().is_some_and(|worker| worker.busy()))
-        })?,
-    )?;
-    // Returns the error of an async input that failed, if any.
-    globals.set(
-        "input_wait",
-        lua.create_function({
-            let worker = worker.clone();
-            move |_, (): ()| {
-                Ok(worker.as_ref().and_then(|worker| {
-                    worker.wait();
-                    worker.take_error()
-                }))
-            }
-        })?,
-    )?;
-    globals.set(
-        "input_error",
-        lua.create_function({
-            let worker = worker.clone();
-            move |_, (): ()| Ok(worker.as_ref().and_then(|worker| worker.take_error()))
-        })?,
-    )?;
-    globals.set(
-        "input_cancel",
-        lua.create_function({
-            let worker = worker.clone();
-            move |_, (): ()| {
-                cancel_input(&worker);
-                Ok(())
-            }
-        })?,
-    )?;
+    s.input("click", click_input)?;
+    s.input("move", move_input)?;
+    s.input("wind_mouse", wind_mouse_input)?;
+    s.input("type_text", type_input)?;
+    s.input("mouse_down", mouse_down_input)?;
+    s.input("mouse_up", mouse_up_input)?;
+    s.input("scroll", scroll_input)?;
+    s.input("key_down", key_down_input)?;
+    s.input("key_up", key_up_input)?;
+    s.input_async("click_async", click_input)?;
+    s.input_async("move_async", move_input)?;
+    s.input_async("wind_mouse_async", wind_mouse_input)?;
+    s.input_async("type_text_async", type_input)?;
+    s.input_async("mouse_down_async", mouse_down_input)?;
+    s.input_async("mouse_up_async", mouse_up_input)?;
+    s.input_async("scroll_async", scroll_input)?;
+    s.input_async("key_down_async", key_down_input)?;
+    s.input_async("key_up_async", key_up_input)?;
+    let worker = s.worker.clone();
+    s.action("sleep_async", move |_, ms: u32| {
+        Ok(queue(&worker, Job::Wait(ms)))
+    })?;
+    s.with_worker("input_busy", |worker, (): ()| {
+        worker.is_some_and(Worker::busy)
+    })?;
+    s.with_worker("input_wait", |worker, (): ()| {
+        worker.and_then(|worker| {
+            worker.wait();
+            worker.take_error()
+        })
+    })?;
+    s.with_worker("input_error", |worker, (): ()| {
+        worker.and_then(Worker::take_error)
+    })?;
+    s.with_worker("input_cancel", |worker, (): ()| {
+        if let Some(worker) = worker {
+            worker.cancel();
+        }
+    })?;
 
-    globals.set(
-        "draw_rect",
-        action(
-            &lua,
-            pid,
-            |pid, (x1, y1, x2, y2, r, g, b, a): (i32, i32, i32, i32, u8, u8, u8, Option<u8>)| {
-                let color = Rgba {
-                    r,
-                    g,
-                    b,
-                    a: a.unwrap_or(255),
-                };
-                Ok(draw(
-                    pid,
-                    &Overlay::Rect {
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        color,
-                    },
-                ))
-            },
-        )?,
-    )?;
-    globals.set(
-        "draw_line",
-        action(
-            &lua,
-            pid,
-            |pid, (x1, y1, x2, y2, r, g, b, a): (i32, i32, i32, i32, u8, u8, u8, Option<u8>)| {
-                let color = Rgba {
-                    r,
-                    g,
-                    b,
-                    a: a.unwrap_or(255),
-                };
-                Ok(draw(
-                    pid,
-                    &Overlay::Line {
-                        x1,
-                        y1,
-                        x2,
-                        y2,
-                        color,
-                    },
-                ))
-            },
-        )?,
-    )?;
-    globals.set(
+    s.action("draw_rect", |pid, args: ShapeArgs| {
+        Ok(draw(pid, &shape_args(false, args)))
+    })?;
+    s.action("draw_line", |pid, args: ShapeArgs| {
+        Ok(draw(pid, &shape_args(true, args)))
+    })?;
+    s.action(
         "draw_lines",
-        action(
-            &lua,
-            pid,
-            |pid, (lines, r, g, b, a): (Vec<mlua::Table>, u8, u8, u8, Option<u8>)| {
-                let lines = lines
-                    .iter()
-                    .map(|l| {
-                        Ok([1, 2, 3, 4]
-                            .map(|i| l.get::<f64>(i).map(|v| v.round() as i32))
-                            .into_iter()
-                            .collect::<mlua::Result<Vec<_>>>()?
-                            .try_into()
-                            .unwrap())
-                    })
-                    .collect::<mlua::Result<Vec<[i32; 4]>>>()?;
-                Ok(draw_lines(
-                    pid,
-                    &lines,
-                    Rgba {
-                        r,
-                        g,
-                        b,
-                        a: a.unwrap_or(255),
-                    },
-                ))
-            },
-        )?,
-    )?;
-    globals.set(
-        "clear_overlay",
-        action(&lua, pid, |pid, (): ()| Ok(draw(pid, &Overlay::Clear)))?,
-    )?;
-    globals.set(
-        "draw_batch",
-        action(&lua, pid, |pid, shapes: Vec<mlua::Table>| {
-            let overlays = shapes
+        |pid, (lines, r, g, b, a): (Vec<mlua::Table>, u8, u8, u8, Option<u8>)| {
+            let lines = lines
                 .iter()
-                .map(overlay_arg)
+                .map(|line| rounded(line, [1, 2, 3, 4]))
                 .collect::<mlua::Result<Vec<_>>>()?;
-            Ok(draw_batch(pid, &overlays))
-        })?,
+            Ok(draw_lines(pid, &lines, rgba(r, g, b, a)))
+        },
     )?;
+    s.action("clear_overlay", |pid, (): ()| {
+        Ok(draw(pid, &Overlay::Clear))
+    })?;
+    s.action("draw_batch", |pid, shapes: Vec<mlua::Table>| {
+        let overlays = shapes
+            .iter()
+            .map(overlay_arg)
+            .collect::<mlua::Result<Vec<_>>>()?;
+        Ok(draw_batch(pid, &overlays))
+    })?;
 
     lua.sandbox(true)?;
     let result = lua.load(source).set_name(format!("={name}")).exec();
-    if let Some(worker) = &worker {
+    if let Some(worker) = &s.worker {
         worker.shutdown();
     }
     result
@@ -2307,22 +1854,45 @@ pub fn run_with_modules(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
-
     use super::*;
 
-    fn run_lines(source: &str) -> (Vec<String>, mlua::Result<()>) {
+    fn run_collect(
+        name: &str,
+        source: &str,
+        script_path: Option<&Path>,
+        lib_dir: Option<&Path>,
+        modules: HashMap<String, String>,
+    ) -> (Vec<String>, mlua::Result<()>) {
         let lines = Rc::new(RefCell::new(Vec::new()));
         let collected = lines.clone();
-        let result = run("test.luau", source, None, move |line| {
-            collected.borrow_mut().push(line)
-        });
+        let result = run_with_modules(
+            name,
+            source,
+            None,
+            move |line| collected.borrow_mut().push(line),
+            None,
+            script_path,
+            lib_dir,
+            modules,
+        );
         (Rc::try_unwrap(lines).unwrap().into_inner(), result)
+    }
+
+    fn run_lines(source: &str) -> (Vec<String>, mlua::Result<()>) {
+        run_collect("test.luau", source, None, None, HashMap::new())
+    }
+
+    fn run_script_at(
+        path: &Path,
+        source: &str,
+        lib_dir: Option<&Path>,
+    ) -> (Vec<String>, mlua::Result<()>) {
+        let name = path.file_name().unwrap().to_string_lossy();
+        run_collect(&name, source, Some(path), lib_dir, HashMap::new())
     }
 
     #[test]
     fn collision_cut_clips_the_area_to_the_scene() {
-        // 3 columns of 2, the flag being x * 10 + y
         let scene = (
             100,
             200,
@@ -2347,7 +1917,6 @@ mod tests {
         );
         assert!(error("wait_packet({}, 10)").contains("no packets given"));
         assert!(error("on_packet({ 2 }, function() end)").contains(NO_CLIENT));
-        // the failed registration left nothing behind, so sleep is a plain sleep and off_packet knows no id
         let (lines, result) =
             run_lines("pcall(on_packet, { 2 }, function() end) sleep(1) print(off_packet(1))");
         result.unwrap();
@@ -2440,7 +2009,6 @@ mod tests {
         );
     }
 
-    // A scratch directory with `files` (path, contents) written under it.
     fn scratch(name: &str, files: &[(&str, &str)]) -> PathBuf {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/test-scratch")
@@ -2452,22 +2020,6 @@ mod tests {
             std::fs::write(file, contents).unwrap();
         }
         dir
-    }
-
-    fn run_script_at(path: &Path, source: &str) -> (Vec<String>, mlua::Result<()>) {
-        let lines = Rc::new(RefCell::new(Vec::new()));
-        let collected = lines.clone();
-        let name = path.file_name().unwrap().to_string_lossy();
-        let result = run_with_form(
-            &name,
-            source,
-            None,
-            move |line| collected.borrow_mut().push(line),
-            None,
-            Some(path),
-            None,
-        );
-        (Rc::try_unwrap(lines).unwrap().into_inner(), result)
     }
 
     #[test]
@@ -2489,24 +2041,10 @@ mod tests {
                 "return { name = 'deeper' }".to_owned(),
             ),
         ]);
-        let lines = Rc::new(RefCell::new(Vec::new()));
-        let collected = lines.clone();
         let source = "local Util = require('./util')\nprint(Util.name, Util.other, require('../lib/host').name, require('./util') == Util)";
-        let result = run_with_modules(
-            "run.luau",
-            source,
-            None,
-            move |line| collected.borrow_mut().push(line),
-            None,
-            Some(&script),
-            None,
-            modules,
-        );
+        let (lines, result) = run_collect("run.luau", source, Some(&script), None, modules);
         result.unwrap();
-        assert_eq!(
-            *lines.borrow(),
-            vec!["util\tdeeper\thost\ttrue".to_string()]
-        );
+        assert_eq!(lines, ["util\tdeeper\thost\ttrue"]);
         assert!(
             !dir.join("scripts/util.luau").exists(),
             "nothing is written out"
@@ -2532,6 +2070,7 @@ mod tests {
             &script,
             "local Walker = require('../lib/main/walker')\n\
              print(Walker.host == require('../lib/host'), Walker.host.name, Walker.lazy().name)",
+            None,
         );
         result.unwrap();
         assert_eq!(lines, ["true\thost\textra"]);
@@ -2555,29 +2094,10 @@ mod tests {
             &script,
             "local W = require('@lib/main/deep/walker')\n\
              print(W.host == require('../lib/host'), W.host.name, W.same.name)",
+            None,
         );
         result.unwrap();
         assert_eq!(lines, ["true\thost\tother"]);
-    }
-
-    fn run_script_with_lib(
-        path: &Path,
-        source: &str,
-        lib: &Path,
-    ) -> (Vec<String>, mlua::Result<()>) {
-        let lines = Rc::new(RefCell::new(Vec::new()));
-        let collected = lines.clone();
-        let name = path.file_name().unwrap().to_string_lossy();
-        let result = run_with_form(
-            &name,
-            source,
-            None,
-            move |line| collected.borrow_mut().push(line),
-            None,
-            Some(path),
-            Some(lib),
-        );
-        (Rc::try_unwrap(lines).unwrap().into_inner(), result)
     }
 
     #[test]
@@ -2615,12 +2135,11 @@ mod tests {
         let source = "print(require('../lib/host').name, require('../lib/main/walker').host.name)";
         let script = dir.join("scripts/run.luau");
 
-        let (lines, result) = run_script_with_lib(&script, source, &dir.join("mine"));
+        let (lines, result) = run_script_at(&script, source, Some(&dir.join("mine")));
         result.unwrap();
         assert_eq!(lines, ["mine\tmine"]);
 
-        // Without a lib folder, the lib beside the script is used as before.
-        let (lines, result) = run_script_at(&script, "print(require('../lib/host').name)");
+        let (lines, result) = run_script_at(&script, "print(require('../lib/host').name)", None);
         result.unwrap();
         assert_eq!(lines, ["beside"]);
     }
@@ -2634,10 +2153,10 @@ mod tests {
                 ("lib/nope.luau", "return {}"),
             ],
         );
-        let (_, result) = run_script_with_lib(
+        let (_, result) = run_script_at(
             &dir.join("scripts/run.luau"),
             "require('../lib/nope')",
-            &dir.join("mine"),
+            Some(&dir.join("mine")),
         );
         let error = result.unwrap_err().to_string();
         assert!(
@@ -2649,7 +2168,7 @@ mod tests {
     #[test]
     fn missing_relative_requires_name_what_was_tried() {
         let dir = scratch("requires_missing", &[]);
-        let (_, result) = run_script_at(&dir.join("run.luau"), "require('../lib/nope')");
+        let (_, result) = run_script_at(&dir.join("run.luau"), "require('../lib/nope')", None);
         let error = result.unwrap_err().to_string();
         assert!(
             error.contains("module '../lib/nope' not found, tried:"),
@@ -2661,7 +2180,7 @@ mod tests {
     #[test]
     fn errors_in_disk_modules_name_their_file() {
         let dir = scratch("requires_errors", &[("lib/bad.luau", "\nerror('boom')")]);
-        let (_, result) = run_script_at(&dir.join("run.luau"), "require('./lib/bad')");
+        let (_, result) = run_script_at(&dir.join("run.luau"), "require('./lib/bad')", None);
         let error = result.unwrap_err().to_string();
         assert!(error.contains("bad.luau:2: boom"), "{error}");
     }
@@ -2868,7 +2387,6 @@ mod tests {
              local Players = require('players')\n\
              print(Players.distance({ x = 0, y = 0 }, { x = 3, y = -5 }))",
         );
-        // The log line carries the time the script has been running, so only its prefix and message are fixed.
         assert!(
             lines[0].starts_with("[SidePanels][")
                 && lines[0].ends_with("]: unknown side panel: bank"),
@@ -2945,7 +2463,6 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
     }
 
-    // The only test that sets the global break config, so it can't race another.
     #[test]
     #[cfg(feature = "embedded-lib")]
     fn breaks_follow_the_loaders_config_and_keep_their_time_when_it_changes() {
@@ -2984,7 +2501,6 @@ mod tests {
         assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
     }
 
-    // The only test that sets the transports, so it can't race another.
     #[test]
     #[cfg(feature = "embedded-lib")]
     fn transports_come_from_the_loader_and_spell_names_split_into_option() {
@@ -3050,7 +2566,6 @@ mod tests {
         assert_eq!(lines.last().map(String::as_str), Some("ok"), "{lines:?}");
     }
 
-    // The game stood in for: rows, levels, what is held, and two landmasses split at x = 5000.
     #[cfg(feature = "embedded-lib")]
     const CHOOSER_STAGE: &str = r#"
 local Host = require('@lib/host')
@@ -3135,6 +2650,7 @@ assert(T.choose(shore, across) == nil, 'cut off by landmass but the planner gets
         );
     }
 
+    #[cfg(feature = "embedded-lib")]
     const RANDOMS_STAGE: &str = r#"
 local Host = require('@lib/host')
 local ChatOptions = require('@lib/main/interfaces/chatbox/chat_options')

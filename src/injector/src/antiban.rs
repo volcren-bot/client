@@ -1,36 +1,26 @@
-//! The global break and sleep config: the loader owns it and sends it to scripts, and a field left out is "Auto" (picked from biometrics).
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// A line the loader writes to the script's stdin: the config as JSON. Sent before the script starts, and later at any time.
 pub const PREFIX: &str = "\u{1e}ANTIBAN ";
 
-/// A stdin line from the loader when the user presses "Skip next" on a queued break or sleep, like `break 2` or `sleep 1`.
 pub const SKIP_PREFIX: &str = "\u{1e}SKIP ";
 
 const MINUTE: f64 = 60_000.0;
 
-/// A break taken about every `interval` ms, for about `length` ms. Times are in milliseconds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Break {
     pub interval: f64,
     pub length: f64,
-    /// Spread of the interval and length, as a fraction. Auto when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub randomness: Option<f64>,
-    /// Chance of logging out for it, 0 to 1. Auto when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logout_chance: Option<f64>,
 }
 
-/// A long break taken at a time of day.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Sleep {
-    /// "HH:MM" or "HH:MM:SS" on this computer's clock. Auto (the account's usual bedtime) when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<String>,
-    /// Auto (the account's usual sleep) when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,9 +32,7 @@ pub struct Sleep {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Off means no breaks, though sleeps may still be taken.
     pub breaks_enabled: bool,
-    /// Off means no sleeps, though breaks may still be taken.
     pub sleeps_enabled: bool,
     pub breaks: Vec<Break>,
     pub sleeps: Vec<Sleep>,
@@ -79,7 +67,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Whether every number is usable: finite, positive intervals and lengths, chances from 0 to 1, and valid sleep times of day.
     pub fn validate(&self) -> Result<(), String> {
         let fraction = |what: &str, value: Option<f64>| match value {
             Some(v) if !(0.0..=1.0).contains(&v) => Err(format!("{what} must be from 0 to 1")),
@@ -116,7 +103,6 @@ impl Config {
     }
 }
 
-/// Seconds since midnight of "HH:MM" or "HH:MM:SS".
 pub fn parse_time(text: &str) -> Option<u32> {
     let mut parts = text.split(':');
     let mut next = |max: u32| {
@@ -143,7 +129,6 @@ pub fn line(config: &Config) -> String {
     )
 }
 
-/// The config of a `PREFIX` line, without the prefix; none if it isn't a valid config.
 pub fn parse(payload: &str) -> Option<Config> {
     let config: Config = serde_json::from_str(payload.trim()).ok()?;
     config.validate().ok()?;
@@ -158,20 +143,17 @@ fn lock() -> std::sync::MutexGuard<'static, (u64, Option<Config>)> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Makes `config` the one the script plans from; the version goes up so the lib notices.
 pub fn set(config: Config) {
     let mut current = lock();
     current.0 += 1;
     current.1 = Some(config);
 }
 
-/// The config the loader last sent (or the default when it sent none) with a version that changes with every `set`.
 pub fn current() -> (u64, Config) {
     let current = lock();
     (current.0, current.1.clone().unwrap_or_default())
 }
 
-/// `current()` as the table the script reads: the config's fields and `version`.
 pub fn current_value() -> Value {
     let (version, config) = current();
     let mut value = serde_json::to_value(config).unwrap_or_else(|_| json!({}));
@@ -179,10 +161,8 @@ pub fn current_value() -> Value {
     value
 }
 
-/// A queued break or sleep to skip once.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Skip {
-    /// `"break"` or `"sleep"`.
     pub kind: String,
     pub index: u32,
 }
@@ -193,7 +173,6 @@ pub fn skip_line(kind: &str, index: u32) -> String {
     format!("{SKIP_PREFIX}{kind} {index}")
 }
 
-/// The skip of a `SKIP_PREFIX` line, without the prefix.
 pub fn parse_skip(payload: &str) -> Option<Skip> {
     let (kind, index) = payload.trim().split_once(' ')?;
     matches!(kind, "break" | "sleep").then_some(())?;
@@ -210,7 +189,6 @@ pub fn push_skip(skip: Skip) {
         .push(skip);
 }
 
-/// The skips asked for since the last call, oldest first.
 pub fn take_skips() -> Vec<Skip> {
     std::mem::take(
         &mut *SKIPS

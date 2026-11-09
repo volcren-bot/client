@@ -62,7 +62,7 @@ injector serve                                     JSON-lines server (the loader
 
 ## Luau sandbox
 
-`sandbox::run` / `run_with_form` create a Lua state bound to one pid, with `dofile` and `loadfile` removed and a sandboxed `require`. The globals are defined in `sandbox.rs`; scripts use them through the Luau lib's `host.luau` (a separate project), never raw.
+`sandbox::run_with_modules` creates a Lua state bound to one pid, with `dofile` and `loadfile` removed and a sandboxed `require`. The globals are defined in `sandbox.rs`; scripts use them through the Luau lib's `host.luau` (a separate project), never raw.
 
 - Queries and actions return `(result, err)`.
 - `connection` and `game_state` raise instead ("no client selected", "agent isn't loaded in the client"); `run <pid>` exits at startup when the agent is missing or on another protocol, so scripts never see a nil connection.

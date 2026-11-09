@@ -1,13 +1,9 @@
-// Devtools overlays that are plain logic over client data, kept apart from the Windows overlay so they can be tested.
-
 use crate::collision::flag;
 
-// The tile settings of a scene tile (`Constants.TILE_FLAG_*` in RuneLite).
 pub const TILE_FLAG_BRIDGE: u8 = 2;
 pub const TILE_FLAG_UNDER_ROOF: u8 = 4;
 pub const TILE_FLAG_VIS_BELOW: u8 = 8;
 
-// A tile's flag text: B bridge, V visible below, R under a roof; empty when none is set.
 pub fn tile_flag_text(bridge_above: bool, settings: u8) -> String {
     let mut text = String::new();
     if bridge_above {
@@ -22,7 +18,6 @@ pub fn tile_flag_text(bridge_above: bool, settings: u8) -> String {
     text
 }
 
-// The movement flags set in a tile's collision data, in RuneLite's `MovementFlag` order.
 pub fn movement_flag_names(data: u32) -> Vec<&'static str> {
     const FLAGS: [(&str, u32); 12] = [
         ("BLOCK_MOVEMENT_NORTH_WEST", flag::WALL_NORTH_WEST),
@@ -45,12 +40,10 @@ pub fn movement_flag_names(data: u32) -> Vec<&'static str> {
         .collect()
 }
 
-// The RuneLite region of a world tile: its region id, and its offset inside that region.
 pub fn region(x: i32, y: i32) -> (i32, i32, i32) {
     (((x >> 6) << 8) | (y >> 6), x & 0x3f, y & 0x3f)
 }
 
-// Whether there is a line of sight between two tiles as `WorldArea.hasLineOfSightTo`; unknown tiles don't block.
 pub fn line_of_sight(flags: impl Fn(i32, i32) -> u32, from: (i32, i32), to: (i32, i32)) -> bool {
     let (x1, y1) = from;
     let (x2, y2) = to;
@@ -61,7 +54,6 @@ pub fn line_of_sight(flags: impl Fn(i32, i32) -> u32, from: (i32, i32), to: (i32
     let (dx_abs, dy_abs) = (dx.abs(), dy.abs());
     let full = flag::OBJECT_PROJECTILE;
     let sight = |bit: u32| bit << flag::PROJECTILE_SHIFT;
-    // The flags that block a step along each axis, which the tile being entered must not have.
     let x_flags = full
         | if dx < 0 {
             sight(flag::WALL_EAST)
@@ -136,7 +128,6 @@ mod tests {
 
     #[test]
     fn a_wall_between_two_tiles_blocks_the_sight() {
-        // A wall on the west edge of tile (6, 5): walking east from (5, 5) enters that tile through it.
         let wall = |x: i32, y: i32| {
             if (x, y) == (6, 5) {
                 flag::WALL_WEST << flag::PROJECTILE_SHIFT
@@ -190,7 +181,6 @@ mod tests {
 
     #[test]
     fn regions_split_a_tile_into_its_region_and_offset() {
-        // Lumbridge castle is in region 50, 50 (3222, 3218).
         assert_eq!(region(3222, 3218), ((50 << 8) | 50, 3222 & 63, 3218 & 63));
     }
 }

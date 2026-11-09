@@ -1,5 +1,3 @@
-//! Config definitions from the cache's config index: enums and the params of items and varbits, decoded here so it tests without a client.
-
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +6,6 @@ pub const ENUM_ARCHIVE: i32 = 8;
 pub const OBJ_ARCHIVE: i32 = 10;
 pub const VARBIT_ARCHIVE: i32 = 14;
 
-/// An enum value or a param: ints (and the longs of `'l'` enums) or strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
@@ -24,7 +21,6 @@ pub struct EnumEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnumDef {
-    /// The script var type chars (`'i'` int, `'o'` obj, `'g'` enum, `'s'` string, ...).
     pub key_type: String,
     pub value_type: String,
     pub default: Option<Value>,
@@ -102,7 +98,6 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The client's strings are CP1252; it only differs from Latin-1 in 0x80..0xA0.
 fn cp1252(b: u8) -> char {
     const HIGH: [char; 32] = [
         '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
@@ -150,19 +145,14 @@ pub fn decode_enum(data: &[u8]) -> Option<EnumDef> {
     }
 }
 
-/// What an item definition says that the loader and scripts use: its name, params (opcode 249), whether it stacks and whether it is
-/// a note, placeholder or bought copy of another item (opcodes 98, 149 and 140 name the template it is drawn with).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ObjDef {
     pub name: Option<String>,
     pub params: BTreeMap<u32, Value>,
-    /// Opcode 11, or a noted item, which stacks whatever the plain item does.
     pub stackable: bool,
     pub copy: bool,
 }
 
-/// The base and number of a dose or charge item's name, `Prayer potion(4)` or `Black mask (10)`: the base keeps what precedes the
-/// bracket, so items of one family share it exactly.
 pub fn dose_of(name: &str) -> Option<(&str, u32)> {
     let inner = name.strip_suffix(')')?;
     let open = inner.rfind('(')?;
@@ -173,11 +163,8 @@ pub fn dose_of(name: &str) -> Option<(&str, u32)> {
     Some((&name[..open], digits.parse().ok()?))
 }
 
-/// The doses or charges of one item family, `(number, id)` by number.
 pub type DoseFamily = Vec<(u32, i32)>;
 
-/// For each of `wanted`'s names, the doses its family has (by number, the lowest id for each), from every item's `(id, name)`;
-/// `None` for a name without a dose number.
 pub fn dose_families<'a>(
     wanted: &[Option<&str>],
     items: impl IntoIterator<Item = (i32, &'a str)>,
@@ -208,7 +195,6 @@ pub fn dose_families<'a>(
         .collect()
 }
 
-/// The params (opcode 249) of an item definition; an unknown opcode fails the decode instead of misreading the rest.
 pub fn decode_obj_params(data: &[u8]) -> Option<BTreeMap<u32, Value>> {
     decode_obj(data).map(|def| def.params)
 }
@@ -313,7 +299,6 @@ mod tests {
 
     #[test]
     fn decodes_the_spellbook_varbit() {
-        // varbit 4070: varp 439, bits 0..1
         let def = decode_varbit(&hex("0101b7000100")).unwrap();
         assert_eq!(
             def,
@@ -338,7 +323,6 @@ mod tests {
 
     #[test]
     fn decodes_an_int_enum() {
-        // enum 1981: the spellbooks' enums
         let data =
             hex("0169026706000400000000000007be00000001000007bf00000002000007c000000003000007c100");
         let def = decode_enum(&data).unwrap();
@@ -389,7 +373,6 @@ mod tests {
 
     #[test]
     fn decodes_item_params_after_other_opcodes() {
-        // name "X", stackable, cost 5, params { 601 = "Wind Bolt", 596 = 14286869 }
         let data = hex(concat!(
             "025800",
             "0b",
@@ -410,14 +393,12 @@ mod tests {
     fn reads_whether_an_item_stacks() {
         assert!(decode_obj(&hex("0b00")).unwrap().stackable);
         assert!(!decode_obj(&hex("02580000")).unwrap().stackable);
-        // a note: its template is item 799
         assert!(decode_obj(&hex("62031f00")).unwrap().stackable);
         assert!(!decode_obj(&hex("62000000")).unwrap().stackable);
     }
 
     #[test]
     fn decodes_a_cache_spell_item() {
-        // obj 3281 (Wind Bolt) as the cache had it on 2026-10-16
         let data = hex(concat!(
             "2c00003f6e0ff9120100025957696e6420426f6c74000100025a41206c6f77206c6576656c20416972206d697373696c6500",
             "00000150000000000000025d000000000000025b000000000000025c000000110000025400da001500000255000000170000",
@@ -437,7 +418,6 @@ mod tests {
         let def = decode_obj(&hex("02580000")).unwrap();
         assert_eq!(def.name.as_deref(), Some("X"));
         assert!(!def.copy);
-        // a placeholder (template 14401) and a bought copy (template 1)
         assert!(decode_obj(&hex("95384100")).unwrap().copy);
         assert!(decode_obj(&hex("8c000100")).unwrap().copy);
         assert!(!decode_obj(&hex("95000000")).unwrap().copy);

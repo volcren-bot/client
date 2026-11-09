@@ -1,10 +1,6 @@
-//! The per-account biometric profile: a stable pseudo-random byte vector derived from the account name, read by the lib through `Host`.
-
 const M: u32 = 0x5bd1_e995;
 
-/// Number of 32 bit hash blocks in a profile.
 pub const BLOCKS: u32 = 6;
-/// Bytes in a profile, 4 per block.
 pub const PROFILE_LEN: usize = BLOCKS as usize * 4;
 
 fn mix(h: u32, k: u32) -> u32 {
@@ -13,7 +9,6 @@ fn mix(h: u32, k: u32) -> u32 {
     h.wrapping_mul(M) ^ k
 }
 
-/// MurmurHash2A, little endian, as the lib has always used it.
 pub fn murmur2a(text: &[u8], seed: u32) -> u32 {
     let mut h = seed;
     let (chunks, rest) = text.as_chunks::<4>();
@@ -31,7 +26,6 @@ pub fn murmur2a(text: &[u8], seed: u32) -> u32 {
     h ^ (h >> 15)
 }
 
-/// The profile of an account, each block hashed with its index as seed.
 pub fn profile(name: &[u8]) -> [u8; PROFILE_LEN] {
     let mut bytes = [0u8; PROFILE_LEN];
     for block in 0..BLOCKS {
@@ -45,7 +39,6 @@ pub fn profile(name: &[u8]) -> [u8; PROFILE_LEN] {
 mod tests {
     use super::*;
 
-    // Reference values come from the Luau implementation this replaced.
     #[test]
     fn hashes_match_the_old_luau() {
         assert_eq!(murmur2a(b"player", 0), 3594132001);

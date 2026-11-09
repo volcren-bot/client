@@ -1,12 +1,22 @@
 use std::time::Duration;
 
-pub use ipc::PROTOCOL_VERSION;
+pub use decode::{
+    GameState, Position, ServerTile,
+    chat::ChatMessage,
+    game_state_name, memory, state,
+    state::MAX_VARPS,
+    strip_tags, widgets,
+    widgets::{SubInterface, TreeWidget, Widget, WidgetDetail, WidgetTree},
+    worker, world,
+    world::{GroundItem, Item, Npc, Player, Projectile, SpotAnim},
+    world_select,
+    world_select::WorldSelect,
+};
 use ipc::{Header, Incompatible};
+pub use ipc::{PROTOCOL_VERSION, state::varp};
 use serde::{Deserialize, Serialize};
 
-/// What the sandbox offers the Luau lib, bumped when a global changes in a way a newer lib depends on.
 pub const HOST_API: u32 = 16;
-pub use ipc::state::varp;
 
 pub mod antiban;
 pub mod async_input;
@@ -32,12 +42,6 @@ pub mod scene_graph;
 pub mod transports;
 pub mod us_keys;
 pub mod wind_mouse;
-pub use decode::state::MAX_VARPS;
-pub use decode::widgets::{SubInterface, Widget};
-pub use decode::{
-    Camera, Chunk, GameState, Login, Minimap, Position, ServerTile, Skill, Tile, chat,
-    game_state_name, memory, state, strip_tags, widgets, worker, world, world_select,
-};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuRect {
@@ -47,7 +51,6 @@ pub struct MenuRect {
     pub height: i32,
 }
 
-/// The open right-click menu as the client lays it out, in interface units, with its scroll, mouse margin and open `submenus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuLayout {
     pub x: i32,
@@ -62,7 +65,6 @@ pub struct MenuLayout {
     pub submenus: Vec<MenuSubmenu>,
 }
 
-/// An open submenu: `row` is the row of the menu above that opened it (1 for the top), `entries` its rows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuSubmenu {
     pub row: u32,
@@ -86,21 +88,16 @@ pub struct MenuClick {
     pub age: i32,
 }
 
-/// The component waiting for a target (Java's `widgetSelected`): a selected spell or any op that asks for one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedWidget {
     pub verb: String,
     pub name: String,
     pub raw_name: String,
-    /// The packed component id, `group << 16 | child`.
     pub id: i32,
     pub group: i32,
     pub child: i32,
-    /// The dynamic child, -1 when the component itself was selected.
     pub index: i32,
-    /// The item the component shows, -1 for spells.
     pub item: i32,
-    /// What it can be used on: 1 ground items, 2 NPCs, 4 locs, 8 players, 16 self, 32 components.
     pub targets: u8,
 }
 
@@ -114,7 +111,6 @@ pub struct MenuEntry {
     pub action: i32,
     pub priority: i32,
     pub kind: u8,
-    /// Whether the row opens a submenu. Only known for the rows of an open menu.
     pub submenu: bool,
 }
 
@@ -127,11 +123,9 @@ pub struct EntityModel {
     pub hull: Vec<[f32; 2]>,
     pub face_count: u32,
     pub faces: Vec<[[f32; 2]; 3]>,
-    /// for an NPC type's model: how many frames its animation has (0 without one)
     pub frame_count: u32,
 }
 
-/// A loc placed on the map in the game cache, whether or not its map square is loaded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheLoc {
     pub id: i32,
@@ -139,30 +133,23 @@ pub struct CacheLoc {
     pub x: i32,
     pub y: i32,
     pub plane: i32,
-    /// The tiles it covers, turned with its rotation.
     pub size_x: u8,
     pub size_y: u8,
     pub shape: u8,
     pub rotation: u8,
-    /// The right-click options it has, in menu order.
     pub actions: Vec<String>,
 }
 
-/// An object as the player sees it now: a multi-state object (a farming patch, a door that opens) shows the form its varbit or varp picks. Empty for an id the cache doesn't know.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocView {
     pub name: String,
-    /// The right-click options it has now, in menu order.
     pub actions: Vec<String>,
 }
 
-/// What `cache_locs` keeps; every field that is `None` keeps everything.
 #[derive(Debug, Clone, Default)]
 pub struct CacheLocFilter {
     pub plane: Option<i32>,
-    /// Names to match (case-insensitive, part of the name).
     pub names: Option<Vec<String>>,
-    /// Options to match (case-insensitive, the whole option): a loc with any of them is kept.
     pub actions: Option<Vec<String>>,
 }
 
@@ -183,98 +170,68 @@ pub struct Loc {
     pub clickable: bool,
 }
 
-/// One packet of the client's packet log (`ipc::packets`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Packet {
     pub sequence: u64,
-    /// milliseconds since the agent started logging: only good for ordering and spacing packets
     pub time_ms: u64,
-    /// true for client to server
     pub sent: bool,
-    /// the packet id (received: server packet, sent: client packet)
     pub opcode: u16,
-    /// the whole payload length; a sent packet's variable length prefix counts, its opcode byte doesn't
     pub length: u32,
-    /// the start of the payload (up to `ipc::packets::PAYLOAD_SIZE` bytes) as lowercase hex
     pub payload: String,
 }
 
-/// What the agent read from the client's code about one server packet (`ipc::packets::Layout`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PacketLayout {
     pub opcode: u16,
-    /// the payload size: -1 a length byte follows, -2 a length short
     pub size: i32,
-    /// the fields in order as `u16leadd`, `i32:2.3.0.1` (the loader's packet table spelling); `None` when only the size is known
     pub fields: Option<Vec<String>>,
 }
 
-/// The local player's server tile and when it last changed, as the agent's receive hook saw it (`ipc::packets::Movement`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Movement {
     pub x: i32,
     pub y: i32,
     pub plane: Option<i32>,
-    /// the tile before the last change
     pub from_x: i32,
     pub from_y: i32,
     pub from_plane: Option<i32>,
-    /// the tile changed in the tick being received or in the last one that ended
     pub moving: bool,
-    /// the client's tick counter when the tile last changed; `None` if it hasn't since the agent first saw the player
     pub moved_tick: Option<i32>,
-    /// the client's tick counter now
     pub tick: i32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PacketPage {
     pub packets: Vec<Packet>,
-    /// pass this as `since` to read what comes after
     pub next: u64,
-    /// packets that were overwritten before they were read
     pub dropped: u64,
 }
 
-/// One entry of the script log (`ipc::script_runs`): a script the client ran for an event is logged when it starts and again when it ends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptRun {
     pub sequence: u64,
-    /// microseconds since the agent started logging: only good for ordering entries and timing scripts
     pub time_us: u64,
-    /// the game tick the entry was logged in
     pub tick: Option<i32>,
-    /// true for the entry made when the script ended (it repeats the start's event type, depth and arguments)
     pub end: bool,
-    /// the event's type: 76 for an ordinary script event; the component and menu events find their script by trigger instead
     pub event_type: i32,
-    /// how many arguments the event had (`args` has the first few)
     pub arg_count: u16,
-    /// 0 for a script the client started, 1 and up for one started while another was running
     pub depth: u8,
-    /// the first arguments: an int as its number, a string as `"…"` (its text isn't kept), anything else as `?`
     pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptPage {
     pub runs: Vec<ScriptRun>,
-    /// pass this as `since` to read what comes after
     pub next: u64,
-    /// runs that were overwritten before they were read
     pub dropped: u64,
 }
 
-/// One change of a client variable (`ipc::varc_log`): the scripts set a varc to a different value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VarcChange {
     pub sequence: u64,
-    /// milliseconds since the agent started logging: only good for ordering and spacing changes
     pub time_ms: u64,
     pub index: i32,
-    /// true for a string varc
     pub string: bool,
-    /// the value before, as text; none when it isn't known (a string varc's is known once it has been set since the agent loaded)
     pub old: Option<String>,
     pub new: String,
 }
@@ -282,23 +239,17 @@ pub struct VarcChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VarcPage {
     pub changes: Vec<VarcChange>,
-    /// pass this as `since` to read what comes after
     pub next: u64,
-    /// changes that were overwritten before they were read
     pub dropped: u64,
 }
 
-/// One change of an item container slot (`ipc::item_log`): the client wrote a different item or quantity into it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemChange {
     pub sequence: u64,
-    /// milliseconds since the agent started logging: only good for ordering and spacing changes
     pub time_ms: u64,
-    /// the game tick the client made the change in
     pub tick: Option<i32>,
     pub container: i32,
     pub slot: i32,
-    /// false when the container didn't exist before this write (an empty slot is item -1, quantity 0)
     pub old_known: bool,
     pub old_item: i32,
     pub old_quantity: i32,
@@ -309,16 +260,12 @@ pub struct ItemChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemPage {
     pub changes: Vec<ItemChange>,
-    /// pass this as `since` to read what comes after
     pub next: u64,
-    /// changes that were overwritten before they were read
     pub dropped: u64,
 }
 
-/// Pass this as `since` to `item_changes` to get no changes, only `next`: the point to read from for what happens from now on.
 pub const ITEM_CHANGES_NOW: u64 = u64::MAX;
 
-/// An item icon to draw: the item at a quantity, with the number drawn on it or not (the inventory draws it for stackable items).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemIconRequest {
     pub id: i32,
@@ -326,7 +273,6 @@ pub struct ItemIconRequest {
     pub show_count: bool,
 }
 
-/// A picture from the client: an item's icon as its inventory draws it, or a sprite of the cache; `width * height` RGBA pixels as hex (alpha 0 where transparent).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub width: u32,
@@ -334,7 +280,6 @@ pub struct Image {
     pub rgba: String,
 }
 
-/// Lowercase hex, two digits per byte.
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut hex = Vec::with_capacity(bytes.len() * 2);
@@ -368,11 +313,6 @@ impl Image {
     }
 }
 
-pub use decode::chat::ChatMessage;
-pub use decode::widgets::{TreeWidget, WidgetDetail, WidgetTree};
-pub use decode::world::{GroundItem, Hitsplat, Item, Npc, Player, Projectile, SpotAnim};
-pub use decode::world_select::{World, WorldSelect};
-
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
@@ -384,19 +324,19 @@ pub(crate) use win::paint_overlay;
 #[cfg(windows)]
 pub use win::{
     ItemWatcher, PacketWatcher, cache_archive_files, cache_archives, cache_files, cache_locs,
-    chat_messages, clickable_locs, client_cycle, collision_area, connection, draw, draw_batch,
-    draw_lines, enum_def, find_path, game_state, game_val_names, ground_items, in_instance,
-    item_changes, item_changes_wait, item_container, item_containers, item_doses, item_icons,
-    item_names, item_params, item_stackable, landmasses, list_clients, load, loc_model, loc_shown,
-    locs, map_regions, memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
+    chat_messages, client_cycle, collision_area, connection, draw, draw_batch, draw_lines,
+    enum_def, find_path, game_state, game_val_names, ground_items, in_instance, item_changes,
+    item_changes_wait, item_container, item_containers, item_doses, item_icons, item_names,
+    item_params, item_stackable, landmasses, list_clients, load, loc_model, loc_shown, locs,
+    map_regions, memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
     npc_hitsplats, npc_model, npc_sizes, npc_type_model, npc_words, npcs, packet_layouts, packets,
     player_hitsplats, player_model, player_plane, player_words, players, project, project_moved,
     projectiles, scene_collision, scene_route, scene_tiles, scene_tiles_next_frame, screenshot,
     script_runs, selected_widget, server_tile, set_cursor, set_display_name, set_total_xp,
-    spot_anims, sprites, sub_interfaces, unload, varbit, varbit_def, varbits_of, varc,
-    varc_changes, varp_value, varps, wait_watchers, watch_client, widget, widget_children,
-    widget_dump, widget_model, widget_tree, widget_words, world_debug, world_entities,
-    world_movement, world_route, world_select,
+    spot_anims, sprites, sub_interfaces, unload, varbit, varbits_of, varc, varc_changes,
+    varp_value, varps, wait_watchers, watch_client, widget, widget_children, widget_dump,
+    widget_model, widget_tree, widget_words, world_debug, world_entities, world_route,
+    world_select,
 };
 
 pub const MODULE_PREFIX: &str = "agent";
@@ -416,7 +356,6 @@ pub struct Client {
     pub loaded: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
-    /// Another bot that already controls this client; it can be listed but never injected.
     #[serde(default)]
     pub foreign_bot: Option<String>,
 }
@@ -465,7 +404,6 @@ impl Connection {
         self.protocol == ipc::PROTOCOL_VERSION
     }
 
-    /// Why a script can't use this agent, if it can't.
     pub fn problem(&self) -> Option<String> {
         (!self.is_compatible()).then(|| {
             format!("the agent runs protocol {}, this is {}: restart the client and load a matching agent", self.protocol, ipc::PROTOCOL_VERSION)
@@ -504,6 +442,38 @@ impl MouseButton {
             "middle" => Ok(Self::Middle),
             other => Err(format!("Invalid button: {other} (left, right or middle)")),
         }
+    }
+}
+
+fn parse_pid(pid: &str) -> Result<u32, String> {
+    pid.parse().map_err(|_| format!("Invalid pid: {pid}"))
+}
+
+fn number(s: &str) -> Result<i32, String> {
+    s.parse().map_err(|_| format!("Invalid number: {s}"))
+}
+
+fn real(s: &str) -> Result<f64, String> {
+    s.parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| format!("Invalid number: {s}"))
+}
+
+fn byte(s: &str) -> Result<u8, String> {
+    s.parse()
+        .map_err(|_| format!("Invalid color component: {s}"))
+}
+
+fn hold(s: &str) -> Result<u32, String> {
+    s.parse().map_err(|_| format!("Invalid hold time: {s}"))
+}
+
+fn down(s: &str) -> Result<bool, String> {
+    match s {
+        "down" => Ok(true),
+        "up" => Ok(false),
+        other => Err(format!("Invalid button/key state: {other} (down or up)")),
     }
 }
 
@@ -588,138 +558,73 @@ impl Input {
     }
 
     pub fn from_args(args: &[&str]) -> Option<Result<(u32, Self), String>> {
-        let number = |s: &str| s.parse::<i32>().map_err(|_| format!("Invalid number: {s}"));
-        let real = |s: &str| {
-            s.parse::<f64>()
-                .ok()
-                .filter(|v| v.is_finite())
-                .ok_or_else(|| format!("Invalid number: {s}"))
+        let [command, pid, rest @ ..] = args else {
+            return None;
         };
-        let down = |s: &str| match s {
-            "down" => Ok(true),
-            "up" => Ok(false),
-            other => Err(format!("Invalid button/key state: {other} (down or up)")),
-        };
-        let parse = |pid: &str, input: Result<Self, String>| -> Result<(u32, Self), String> {
-            Ok((
-                pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?,
-                input?,
-            ))
-        };
-        Some(match args {
-            ["move", pid, x, y] => parse(
-                pid,
-                (|| {
-                    Ok(Self::Move {
-                        x: number(x)?,
-                        y: number(y)?,
-                    })
-                })(),
-            ),
-            [
-                "wind_mouse",
-                pid,
-                x,
-                y,
-                speed,
-                wind,
-                gravity,
-                timeout_ms,
-                pace,
-            ] => parse(
-                pid,
-                (|| {
-                    let options = wind_mouse::Options {
-                        speed: real(speed)?,
-                        wind: real(wind)?,
-                        gravity: real(gravity)?,
-                        timeout_ms: timeout_ms
-                            .parse()
-                            .map_err(|_| format!("Invalid timeout: {timeout_ms}"))?,
-                        pace: real(pace)?,
-                    };
-                    Ok(Self::WindMouse {
-                        x: number(x)?,
-                        y: number(y)?,
-                        options,
-                    })
-                })(),
-            ),
-            ["click", pid, button, x, y] => parse(
-                pid,
-                (|| {
-                    Ok(Self::Click {
-                        button: MouseButton::parse(button)?,
-                        x: number(x)?,
-                        y: number(y)?,
-                        hold_ms: CLICK_HOLD_MS,
-                    })
-                })(),
-            ),
-            ["click", pid, button, x, y, hold_ms] => parse(
-                pid,
-                (|| {
-                    let hold_ms = hold_ms
+        let input = Self::parse(command, rest).transpose()?;
+        Some(parse_pid(pid).and_then(|pid| Ok((pid, input?))))
+    }
+
+    fn parse(command: &str, args: &[&str]) -> Result<Option<Self>, String> {
+        Ok(Some(match (command, args) {
+            ("move", [x, y]) => Self::Move {
+                x: number(x)?,
+                y: number(y)?,
+            },
+            ("wind_mouse", [x, y, speed, wind, gravity, timeout_ms, pace]) => {
+                let options = wind_mouse::Options {
+                    speed: real(speed)?,
+                    wind: real(wind)?,
+                    gravity: real(gravity)?,
+                    timeout_ms: timeout_ms
                         .parse()
-                        .map_err(|_| format!("Invalid hold time: {hold_ms}"))?;
-                    Ok(Self::Click {
-                        button: MouseButton::parse(button)?,
-                        x: number(x)?,
-                        y: number(y)?,
-                        hold_ms,
-                    })
-                })(),
-            ),
-            ["button", pid, button, state] => parse(
-                pid,
-                (|| {
-                    Ok(Self::Button {
-                        button: MouseButton::parse(button)?,
-                        down: down(state)?,
-                    })
-                })(),
-            ),
-            ["scroll", pid, notches] => parse(
-                pid,
-                (|| {
-                    Ok(Self::Scroll {
-                        notches: number(notches)?,
-                    })
-                })(),
-            ),
-            ["key", pid, key, state] => parse(
-                pid,
-                (|| {
-                    let key = key
-                        .parse()
-                        .map_err(|_| format!("Invalid key code: {key} (0-255)"))?;
-                    Ok(Self::Key {
-                        key,
-                        down: down(state)?,
-                    })
-                })(),
-            ),
-            ["type", pid, text] => parse(
-                pid,
-                Ok(Self::Type {
-                    text: text.to_string(),
-                    hold_ms: KEY_HOLD_MS,
-                }),
-            ),
-            ["type", pid, text, hold_ms] => parse(
-                pid,
-                (|| {
-                    let hold_ms = hold_ms
-                        .parse()
-                        .map_err(|_| format!("Invalid hold time: {hold_ms}"))?;
-                    Ok(Self::Type {
-                        text: text.to_string(),
-                        hold_ms,
-                    })
-                })(),
-            ),
-            _ => return None,
-        })
+                        .map_err(|_| format!("Invalid timeout: {timeout_ms}"))?,
+                    pace: real(pace)?,
+                };
+                Self::WindMouse {
+                    x: number(x)?,
+                    y: number(y)?,
+                    options,
+                }
+            }
+            ("click", [button, x, y]) => Self::Click {
+                button: MouseButton::parse(button)?,
+                x: number(x)?,
+                y: number(y)?,
+                hold_ms: CLICK_HOLD_MS,
+            },
+            ("click", [button, x, y, hold_ms]) => {
+                let hold_ms = hold(hold_ms)?;
+                Self::Click {
+                    button: MouseButton::parse(button)?,
+                    x: number(x)?,
+                    y: number(y)?,
+                    hold_ms,
+                }
+            }
+            ("button", [button, state]) => Self::Button {
+                button: MouseButton::parse(button)?,
+                down: down(state)?,
+            },
+            ("scroll", [notches]) => Self::Scroll {
+                notches: number(notches)?,
+            },
+            ("key", [key, state]) => Self::Key {
+                key: key
+                    .parse()
+                    .map_err(|_| format!("Invalid key code: {key} (0-255)"))?,
+                down: down(state)?,
+            },
+            ("type", [text]) => Self::Type {
+                text: text.to_string(),
+                hold_ms: KEY_HOLD_MS,
+            },
+            ("type", [text, hold_ms]) => Self::Type {
+                text: text.to_string(),
+                hold_ms: hold(hold_ms)?,
+            },
+            _ => return Ok(None),
+        }))
     }
 }
 
@@ -790,55 +695,44 @@ impl Overlay {
     }
 
     pub fn from_args(args: &[&str]) -> Option<Result<(u32, Self), String>> {
-        let number = |s: &str| s.parse::<i32>().map_err(|_| format!("Invalid number: {s}"));
-        let byte = |s: &str| {
-            s.parse::<u8>()
-                .map_err(|_| format!("Invalid color component: {s}"))
+        let ["overlay", pid, rest @ ..] = args else {
+            return None;
         };
-        let parse = |pid: &str, overlay: Result<Self, String>| -> Result<(u32, Self), String> {
-            Ok((
-                pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?,
-                overlay?,
-            ))
-        };
-        Some(match args {
-            ["overlay", pid, "rect", x1, y1, x2, y2, r, g, b, a] => parse(
-                pid,
-                (|| {
-                    Ok(Self::Rect {
-                        x1: number(x1)?,
-                        y1: number(y1)?,
-                        x2: number(x2)?,
-                        y2: number(y2)?,
-                        color: Rgba {
-                            r: byte(r)?,
-                            g: byte(g)?,
-                            b: byte(b)?,
-                            a: byte(a)?,
-                        },
-                    })
-                })(),
-            ),
-            ["overlay", pid, "line", x1, y1, x2, y2, r, g, b, a] => parse(
-                pid,
-                (|| {
-                    Ok(Self::Line {
-                        x1: number(x1)?,
-                        y1: number(y1)?,
-                        x2: number(x2)?,
-                        y2: number(y2)?,
-                        color: Rgba {
-                            r: byte(r)?,
-                            g: byte(g)?,
-                            b: byte(b)?,
-                            a: byte(a)?,
-                        },
-                    })
-                })(),
-            ),
-            ["overlay", pid, "clear"] => parse(pid, Ok(Self::Clear)),
-            _ => return None,
-        })
+        let overlay = Self::parse(rest).transpose()?;
+        Some(parse_pid(pid).and_then(|pid| Ok((pid, overlay?))))
+    }
+
+    fn parse(args: &[&str]) -> Result<Option<Self>, String> {
+        Ok(Some(match args {
+            [kind @ ("rect" | "line"), x1, y1, x2, y2, r, g, b, a] => {
+                let (x1, y1, x2, y2) = (number(x1)?, number(y1)?, number(x2)?, number(y2)?);
+                let color = Rgba {
+                    r: byte(r)?,
+                    g: byte(g)?,
+                    b: byte(b)?,
+                    a: byte(a)?,
+                };
+                if *kind == "line" {
+                    Self::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                    }
+                } else {
+                    Self::Rect {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        color,
+                    }
+                }
+            }
+            ["clear"] => Self::Clear,
+            _ => return Ok(None),
+        }))
     }
 }
 
@@ -861,7 +755,6 @@ impl CursorStyle {
     }
 }
 
-/// What the agent draws at the mouse position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
     pub style: CursorStyle,
@@ -893,23 +786,18 @@ impl Cursor {
         let ["cursor", pid, style, r, g, b, size] = args else {
             return None;
         };
-        let byte = |s: &str| {
-            s.parse::<u8>()
-                .map_err(|_| format!("Invalid color component: {s}"))
+        let style = match *style {
+            "off" => CursorStyle::Off,
+            "cross" => CursorStyle::Cross,
+            "dot" => CursorStyle::Dot,
+            "x" => CursorStyle::X,
+            other => {
+                return Some(Err(format!(
+                    "Invalid cursor style: {other} (off, cross, dot or x)"
+                )));
+            }
         };
-        Some((|| {
-            let style = match *style {
-                "off" => CursorStyle::Off,
-                "cross" => CursorStyle::Cross,
-                "dot" => CursorStyle::Dot,
-                "x" => CursorStyle::X,
-                other => {
-                    return Err(format!(
-                        "Invalid cursor style: {other} (off, cross, dot or x)"
-                    ));
-                }
-            };
-            let pid = pid.parse().map_err(|_| format!("Invalid pid: {pid}"))?;
+        Some(parse_pid(pid).and_then(|pid| {
             Ok((
                 pid,
                 Self {
@@ -918,7 +806,7 @@ impl Cursor {
                     size: byte(size)?,
                 },
             ))
-        })())
+        }))
     }
 }
 
@@ -961,6 +849,8 @@ pub fn random_total_xp_offset(real: i64, seed: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use decode::Chunk;
+
     use super::*;
 
     #[test]

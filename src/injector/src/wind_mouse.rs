@@ -11,7 +11,6 @@
 
 use std::{
     f64::consts::PI,
-    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,7 +28,6 @@ pub struct Options {
     pub wind: f64,
     pub gravity: f64,
     pub timeout_ms: u32,
-    /// Divides the wait between the points of a move: 1.2 moves 20% faster along the same path.
     pub pace: f64,
 }
 
@@ -45,19 +43,6 @@ impl Default for Options {
     }
 }
 
-pub fn run(
-    start: Option<(f64, f64)>,
-    dest: (i32, i32),
-    options: &Options,
-    post: impl FnMut(i32, i32) -> Result<(), String>,
-) -> Result<(), String> {
-    run_with(start, dest, options, post, |duration| {
-        thread::sleep(duration);
-        true
-    })
-}
-
-// `sleep` returns false when the move was cancelled: the cursor stays where it is and nothing more is posted.
 pub fn run_with(
     start: Option<(f64, f64)>,
     dest: (i32, i32),
@@ -78,11 +63,7 @@ impl Rng {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
-        let mut z = nanos ^ (std::process::id() as u64) << 32;
-        z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        Self((z ^ (z >> 31)) | 1)
+        Self(crate::scene_graph::mix(nanos ^ (std::process::id() as u64) << 32) | 1)
     }
 
     pub(crate) fn random(&mut self) -> f64 {
@@ -197,16 +178,13 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
         }
         (self.post)(x.round() as i32, y.round() as i32)?;
 
-        let ms = match sleep_ms {
-            Some(ms) => ms,
-            None => {
-                let mut ms = self.gap * self.rng.range(0.925, 1.075);
-                if self.rng.random() < 0.015 {
-                    ms *= self.rng.range(1.5, 2.5);
-                }
-                ms
+        let ms = sleep_ms.unwrap_or_else(|| {
+            let mut ms = self.gap * self.rng.range(0.925, 1.075);
+            if self.rng.random() < 0.015 {
+                ms *= self.rng.range(1.5, 2.5);
             }
-        };
+            ms
+        });
 
         let due = self.due + Duration::from_secs_f64(ms.max(0.0) / 1000.0);
         let now = Instant::now();
@@ -233,7 +211,6 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
             * self.rng.range(0.78, 1.22);
         let gap = self.rng.range(6.0, 9.0);
         let n = (move_time / gap).round().max(3.0);
-        // the same path, every step of it sooner
         self.gap = gap / self.pace;
         self.max_step = (self.total_dist / n / 0.80).min(self.total_dist * 0.5);
 
@@ -417,6 +394,18 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
 mod tests {
     use super::*;
 
+    fn run(
+        start: Option<(f64, f64)>,
+        dest: (i32, i32),
+        options: &Options,
+        post: impl FnMut(i32, i32) -> Result<(), String>,
+    ) -> Result<(), String> {
+        run_with(start, dest, options, post, |duration| {
+            std::thread::sleep(duration);
+            true
+        })
+    }
+
     const FAST: Options = Options {
         speed: 30.0,
         wind: 6.0,
@@ -505,7 +494,6 @@ mod tests {
 
     #[test]
     fn pace_divides_the_move_time() {
-        // nothing really sleeps, so each wait asked for runs from the start: the last is the move's length
         let slept_ms = |pace: f64| {
             let options = Options { pace, ..FAST };
             let mut total = 0.0;

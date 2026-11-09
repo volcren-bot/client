@@ -1,16 +1,17 @@
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher},
     ffi::c_void,
-    fs,
+    fmt, fs,
     hash::{Hash, Hasher},
     io,
     iter::once,
-    mem::{size_of, transmute},
+    mem::{self, size_of, transmute},
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
     ptr::{NonNull, copy_nonoverlapping, null, null_mut, write_bytes},
     sync::{
-        Arc, LazyLock, Mutex, OnceLock,
+        Arc, LazyLock, Mutex, MutexGuard, OnceLock,
         atomic::{Ordering, fence},
     },
     thread::sleep,
@@ -34,16 +35,17 @@ use windows_sys::{
             },
             LibraryLoader::{GetModuleHandleW, GetProcAddress},
             Memory::{
-                CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RELEASE,
-                MEM_RESERVE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW,
-                PAGE_READWRITE, UnmapViewOfFile, VirtualAllocEx, VirtualFreeEx,
+                CreateFileMappingW, FILE_MAP, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT,
+                MEM_RELEASE, MEM_RESERVE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+                OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile, VirtualAllocEx, VirtualFreeEx,
             },
             Threading::{
                 CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, IsWow64Process,
                 OpenEventW, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_NAME_WIN32,
                 PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
                 PROCESS_VM_READ, PROCESS_VM_WRITE, QueryFullProcessImageNameW, ReleaseMutex,
-                SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+                SYNCHRONIZATION_ACCESS_RIGHTS, SYNCHRONIZATION_SYNCHRONIZE, SetEvent,
+                WaitForMultipleObjects, WaitForSingleObject,
             },
         },
         UI::WindowsAndMessaging::{
@@ -69,10 +71,10 @@ use ipc::{
     state::{
         CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, CacheReply, CacheRequest,
         GameValRequest, ITEM_ICON_HEIGHT, ITEM_ICON_SHOW_COUNT, ITEM_ICON_WIDTH, ITEM_NAME_BATCH,
-        ItemNameRequest, LAYOUT_SIZE, Layout, LayoutMemory, LayoutView, LocsReply, ModelRequest,
-        NamesReply, PROJECT_BATCH, ProjectRequest, ReadError, Shared, TotalXpRequest,
-        WorkerRequest, cache_kind, cache_status, game_state::LOGGED_IN, item_name_status,
-        loc_status, menu_status, model_status, model_target, name_status, part, project_status,
+        ItemNameRequest, LAYOUT_SIZE, Layout, LayoutView, LocsReply, ModelRequest, NamesReply,
+        PROJECT_BATCH, ProjectRequest, ReadError, Shared, TotalXpRequest, WorkerRequest,
+        WorldLayout, cache_kind, cache_status, game_state::LOGGED_IN, item_name_status, loc_status,
+        menu_status, model_status, model_target, name_status, part, project_status,
         state_memory_name, total_xp_status, worker_kind, worker_status,
     },
     unload_event_name,
@@ -85,7 +87,7 @@ use crate::{
     LoadReport, MODULE_PREFIX, Overlay, Position, Rgba, TotalXp, UNLOAD_TIMEOUT, Widget,
     dll_version,
     memory::Memory,
-    projection::{self, Failure, Terrain, Via},
+    projection::{self, Terrain, Via},
     state,
     widgets::SubInterface,
     worker,
@@ -97,7 +99,6 @@ const LOAD_LIBRARY_TIMEOUT_MS: u32 = 10_000;
 
 struct Handle(HANDLE);
 
-// SAFETY: a kernel handle can be used and closed from any thread.
 unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
 
@@ -120,6 +121,84 @@ fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
 fn from_wide(buffer: &[u16]) -> String {
     let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
     String::from_utf16_lossy(&buffer[..len])
+}
+
+fn open_event(name: String, access: SYNCHRONIZATION_ACCESS_RIGHTS) -> Option<Handle> {
+    let name = wide(name);
+    Handle::new(unsafe { OpenEventW(access, 0, name.as_ptr()) })
+}
+
+fn new_event(name: String) -> Option<Handle> {
+    let name = wide(name);
+    let handle = unsafe { CreateEventW(null(), 0, 0, name.as_ptr()) };
+    let taken = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    Handle::new(handle).filter(|_| !taken)
+}
+
+fn create_mutex(name: String) -> Option<Handle> {
+    let name = wide(name);
+    Handle::new(unsafe { CreateMutexW(null(), 0, name.as_ptr()) })
+}
+
+struct SlotGuard<'a>(&'a Handle);
+
+impl<'a> SlotGuard<'a> {
+    fn lock(mutex: &'a Handle, timeout: Duration) -> Option<Self> {
+        matches!(
+            unsafe { WaitForSingleObject(mutex.0, timeout.as_millis() as u32) },
+            WAIT_OBJECT_0 | WAIT_ABANDONED
+        )
+        .then_some(Self(mutex))
+    }
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        unsafe { ReleaseMutex(self.0.0) };
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn wait_ms(timeout: Duration) -> u32 {
+    timeout.as_millis().min(u32::MAX as u128 - 1) as u32
+}
+
+fn open_mapping(name: String, access: FILE_MAP) -> Option<Handle> {
+    let name = wide(name);
+    Handle::new(unsafe { OpenFileMappingW(access, 0, name.as_ptr()) })
+}
+
+struct View {
+    address: NonNull<c_void>,
+    _mapping: Handle,
+}
+
+impl View {
+    fn new(mapping: Handle, access: FILE_MAP, size: usize) -> io::Result<Self> {
+        let view = unsafe { MapViewOfFile(mapping.0, access, 0, 0, size) };
+        let address = NonNull::new(view.Value).ok_or_else(io::Error::last_os_error)?;
+        Ok(Self {
+            address,
+            _mapping: mapping,
+        })
+    }
+
+    fn ptr<T>(&self) -> NonNull<T> {
+        self.address.cast()
+    }
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
+                Value: self.address.as_ptr(),
+            })
+        };
+    }
 }
 
 struct Module {
@@ -169,7 +248,6 @@ fn agent_module(modules: &[Module]) -> Option<&Module> {
         .find(|m| m.name.to_ascii_lowercase().starts_with(MODULE_PREFIX))
 }
 
-/// Clients another bot has already taken over (Detuks loads its own `dc_*.dll` and runs the client from a `.dc` folder).
 fn foreign_bot(modules: &[Module]) -> Option<&'static str> {
     let taken = modules.iter().any(|m| {
         let name = m.name.to_ascii_lowercase();
@@ -180,8 +258,7 @@ fn foreign_bot(modules: &[Module]) -> Option<&'static str> {
     taken.then_some("Detuks")
 }
 
-fn process_name(pid: u32) -> Option<String> {
-    let process = Handle::new(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })?;
+fn process_name(process: &Handle) -> Option<String> {
     let mut buffer = [0u16; 1024];
     let mut len = buffer.len() as u32;
     if unsafe {
@@ -239,7 +316,7 @@ pub fn list_clients() -> Vec<Client> {
             let modules = modules(pid).ok();
             Client {
                 pid,
-                exe: process_name(pid).unwrap_or_default(),
+                exe: process.as_ref().and_then(process_name).unwrap_or_default(),
                 title,
                 is_64bit: process.is_some_and(|p| is_64bit(p.0)),
                 loaded: modules
@@ -301,8 +378,7 @@ fn remove_old_copies(dll: &Path) {
     }
 }
 
-/// Leaves the cursor where the agent will find it while it builds its header; keep the handle alive until it connects.
-fn seed_cursor(pid: u32, cursor: &crate::Cursor) -> Option<Handle> {
+fn seed_cursor(pid: u32, cursor: &crate::Cursor) -> Option<View> {
     let name = wide(initial_cursor_name(pid));
     let mapping = Handle::new(unsafe {
         CreateFileMappingW(
@@ -314,17 +390,15 @@ fn seed_cursor(pid: u32, cursor: &crate::Cursor) -> Option<Handle> {
             name.as_ptr(),
         )
     })?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_WRITE, 0, 0, INITIAL_CURSOR_SIZE) };
-    if view.Value.is_null() {
-        return None;
-    }
+    let view = View::new(mapping, FILE_MAP_WRITE, INITIAL_CURSOR_SIZE).ok()?;
     let [r, g, b] = cursor.color;
     let bytes = [cursor.style.value(), r, g, b, cursor.size];
     unsafe {
-        (view.Value as *mut u8).copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
-        UnmapViewOfFile(view);
-    }
-    Some(mapping)
+        view.ptr::<u8>()
+            .as_ptr()
+            .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len())
+    };
+    Some(view)
 }
 
 pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<LoadReport, String> {
@@ -466,8 +540,7 @@ pub fn unload(pid: u32) -> Result<(), String> {
     if agent_module(&modules(pid)?).is_none() {
         return Ok(());
     }
-    let name = wide(unload_event_name(pid));
-    let event = Handle::new(unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) }).ok_or(
+    let event = open_event(unload_event_name(pid), EVENT_MODIFY_STATE).ok_or(
         "it's a build from before hot reload, which can't unload. Restart the client once.",
     )?;
     if unsafe { SetEvent(event.0) } == 0 {
@@ -504,18 +577,10 @@ fn wait_for_connection(pid: u32, version: &str, timeout: Duration) -> Option<Con
 }
 
 fn read_header(pid: u32) -> Option<Result<Header, Incompatible>> {
-    let name = wide(shared_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, HEADER_SIZE) };
-    if view.Value.is_null() {
-        return None;
-    }
-
+    let mapping = open_mapping(shared_memory_name(pid), FILE_MAP_READ)?;
+    let view = View::new(mapping, FILE_MAP_READ, HEADER_SIZE).ok()?;
     let mut header = [0u8; HEADER_SIZE];
-    unsafe {
-        copy_nonoverlapping(view.Value as *const u8, header.as_mut_ptr(), HEADER_SIZE);
-        UnmapViewOfFile(view);
-    }
+    unsafe { copy_nonoverlapping(view.ptr::<u8>().as_ptr(), header.as_mut_ptr(), HEADER_SIZE) };
     Some(Header::from_bytes(&header))
 }
 
@@ -590,25 +655,18 @@ pub fn varp_value(pid: u32, id: usize) -> Result<Option<i32>, String> {
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-// How often a request checks for the agent's answer; it answers within a frame, so a longer pause dominates the cost.
 const REQUEST_POLL: Duration = Duration::from_millis(1);
 
-/// A client's process and state block, kept per pid for `SESSION_TTL` so an agent reload is picked up soon.
 struct Session {
     process: Arc<Handle>,
     view: StateView,
     born: Instant,
-    // The agent's work event, opened on first use (`None` when the agent has none).
     work: OnceLock<Option<Handle>>,
-    // The mutex guarding the worker's request slot, opened on first use.
     slot: OnceLock<Option<Handle>>,
-    // The event the agent sets after answering the worker's request, opened on first use (`None` when it has none).
     reply: OnceLock<Option<Handle>>,
-    // The agent's frame event, opened on first use (`None` when it has none).
     frame: OnceLock<Option<Handle>>,
 }
 
-// SAFETY: the process handle works from any thread and the view is read through sequence-locked helpers, one request at a time per script.
 unsafe impl Send for Session {}
 unsafe impl Sync for Session {}
 
@@ -617,12 +675,12 @@ const SESSION_TTL: Duration = Duration::from_millis(500);
 static SESSIONS: Mutex<Vec<(u32, Arc<Session>)>> = Mutex::new(Vec::new());
 
 fn session(pid: u32) -> Result<Arc<Session>, String> {
-    let mut sessions = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sessions = lock(&SESSIONS);
     sessions.retain(|(_, s)| s.born.elapsed() < SESSION_TTL);
     if let Some((_, session)) = sessions.iter().find(|(p, _)| *p == pid) {
         return Ok(session.clone());
     }
-    let view = StateView::open(pid, true)?;
+    let view = StateView::open(pid)?;
     let process = Handle::new(unsafe { OpenProcess(PROCESS_VM_READ, 0, pid) })
         .ok_or_else(|| format!("Cannot open client {pid} to read it"))?;
     let session = Arc::new(Session {
@@ -638,62 +696,29 @@ fn session(pid: u32) -> Result<Arc<Session>, String> {
     Ok(session)
 }
 
-/// Drops `pid`'s session, for after something went wrong or the agent was loaded or unloaded.
 fn forget(pid: u32) {
-    SESSIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|(p, _)| *p != pid);
+    lock(&SESSIONS).retain(|(p, _)| *p != pid);
 }
 
-/// A client's shared state block mapped into this process, unmapped on drop; its handles borrow it.
-struct StateView {
-    view: MEMORY_MAPPED_VIEW_ADDRESS,
-    block: NonNull<LayoutMemory>,
-    writable: bool,
-    _mapping: Handle,
-}
+struct StateView(View);
 
 impl StateView {
-    fn open(pid: u32, writable: bool) -> Result<Self, String> {
-        let access = if writable {
-            FILE_MAP_READ | FILE_MAP_WRITE
-        } else {
-            FILE_MAP_READ
-        };
-        let name = wide(state_memory_name(pid));
-        let mapping = Handle::new(unsafe { OpenFileMappingW(access, 0, name.as_ptr()) })
-            .ok_or_else(|| {
-                format!("No game state in client {pid}: agent isn't loaded or is too old")
-            })?;
-        let view = unsafe { MapViewOfFile(mapping.0, access, 0, 0, LAYOUT_SIZE) };
-        let Some(block) = NonNull::new(view.Value.cast::<LayoutMemory>()) else {
-            return Err(format!("Cannot map the game state of client {pid}"));
-        };
-        Ok(Self {
-            view,
-            block,
-            writable,
-            _mapping: mapping,
-        })
+    fn open(pid: u32) -> Result<Self, String> {
+        let access = FILE_MAP_READ | FILE_MAP_WRITE;
+        let mapping = open_mapping(state_memory_name(pid), access).ok_or_else(|| {
+            format!("No game state in client {pid}: agent isn't loaded or is too old")
+        })?;
+        View::new(mapping, access, LAYOUT_SIZE)
+            .map(Self)
+            .map_err(|_| format!("Cannot map the game state of client {pid}"))
     }
 
-    /// For views opened writable.
     fn shared(&self) -> Shared<'_> {
-        assert!(self.writable, "the view was opened read-only");
-        // SAFETY: the agent set up the writable LAYOUT_SIZE block, mapped until `self` drops.
-        unsafe { Shared::attach(self.block) }
+        unsafe { Shared::attach(self.0.ptr()) }
     }
 
     fn layout(&self) -> LayoutView<'_> {
-        // SAFETY: as in `shared`, for reading.
-        unsafe { LayoutView::attach(self.block) }
-    }
-}
-
-impl Drop for StateView {
-    fn drop(&mut self) {
-        unsafe { UnmapViewOfFile(self.view) };
+        unsafe { LayoutView::attach(self.0.ptr()) }
     }
 }
 
@@ -701,21 +726,14 @@ fn ask<S>(
     pid: u32,
     message: u32,
     write: impl FnOnce(Shared<'_>) -> u32,
-    status: impl Fn(Shared<'_>) -> Option<(u32, S)>,
+    mut status: impl FnMut(Shared<'_>) -> Option<(u32, S)>,
 ) -> Result<S, String> {
     let session = session(pid)?;
-    // One asker per slot at a time, across threads and injector processes (a script, the loader's helper): the agent answers only the newest request, so a second one would leave the first waiting out its timeout.
-    let name = wide(request_mutex_name(pid, message));
-    let mutex = Handle::new(unsafe { CreateMutexW(null(), 0, name.as_ptr()) })
+    let mutex = create_mutex(request_mutex_name(pid, message))
         .ok_or("cannot take the agent's request slot")?;
-    // An abandoned mutex (its owner died with it) is ours all the same; the slot is rewritten below.
-    if !matches!(
-        unsafe { WaitForSingleObject(mutex.0, REQUEST_TIMEOUT.as_millis() as u32) },
-        WAIT_OBJECT_0 | WAIT_ABANDONED
-    ) {
+    let Some(_slot) = SlotGuard::lock(&mutex, REQUEST_TIMEOUT) else {
         return Err("the agent is busy with another request".to_owned());
-    }
-    let _slot = SlotGuard(mutex.0);
+    };
     let shared = session.view.shared();
     let sequence = write(shared);
     crate::input::post_request(pid, message).and_then(|()| {
@@ -733,6 +751,16 @@ fn ask<S>(
     })
 }
 
+const OTHER_THREAD: &str = "the client runs its game on another thread than its window's";
+
+fn game_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace('\u{a0}', " ")
+}
+
+fn first<T>(items: &[T], count: u32) -> &[T] {
+    &items[..(count as usize).min(items.len())]
+}
+
 pub fn set_display_name(pid: u32, name: &str) -> Result<DisplayName, String> {
     let (layout, memory) = reader(pid, 0, "")?;
     let request = state::name_request(&memory, &layout, name)?;
@@ -744,7 +772,7 @@ pub fn set_display_name(pid: u32, name: &str) -> Result<DisplayName, String> {
     )?;
     let real = short_string_text(&status.real)
         .filter(|real| !real.is_empty())
-        .map(|real| String::from_utf8_lossy(real).replace('\u{a0}', " "));
+        .map(game_text);
     match status.status {
         name_status::KEPT => Ok(DisplayName::Kept { real }),
         name_status::WAITING => Ok(DisplayName::Waiting),
@@ -836,7 +864,7 @@ fn names(
         )?;
         match status.status {
             item_name_status::OK => names.extend((0..status.count as usize).map(|i| {
-                status.name(i).filter(|name| !name.is_empty()).map(|name| String::from_utf8_lossy(name).replace('\u{a0}', " "))
+                status.name(i).filter(|name| !name.is_empty()).map(game_text)
             })),
             item_name_status::NOT_FOUND => return Err("agent didn't find what it needs in the client to look these up".into()),
             item_name_status::OTHER_THREAD => return Err("the client runs its game on another thread than its window's, so nothing can be looked up".into()),
@@ -854,16 +882,22 @@ fn project_locally(
     points: &[projection::Point],
     shift: Option<[i32; 3]>,
     clip: bool,
-) -> Result<Vec<[f32; 2]>, Failure> {
-    let (layout, memory) = reader(pid, 0, "").map_err(Failure::Unavailable)?;
-    let mut cache = TERRAIN.lock().unwrap_or_else(|e| e.into_inner());
+) -> Result<Vec<[f32; 2]>, String> {
+    let (layout, memory) = reader(pid, 0, "")?;
+    kept_terrain(pid, |terrain| {
+        projection::project(&memory, &layout, terrain, points, shift, clip, || {
+            decorations(pid)
+        })
+    })
+}
+
+fn kept_terrain<T>(pid: u32, use_terrain: impl FnOnce(&mut Option<Terrain>) -> T) -> T {
+    let mut cache = lock(&TERRAIN);
     let mut terrain = cache
         .take()
         .filter(|(p, _)| *p == pid)
         .map(|(_, terrain)| terrain);
-    let result = projection::project(&memory, &layout, &mut terrain, points, shift, clip, || {
-        decorations(pid)
-    });
+    let result = use_terrain(&mut terrain);
     *cache = terrain.map(|terrain| (pid, terrain));
     result
 }
@@ -872,41 +906,32 @@ pub fn project(pid: u32, points: &[projection::Point], via: Via) -> Result<Vec<[
     if via != Via::Client {
         match project_locally(pid, points, None, false) {
             Ok(screen) => return Ok(screen),
-            Err(Failure::Unavailable(why)) if via == Via::Local => {
-                return Err(format!("local projection: {why}"));
-            }
-            Err(Failure::Unavailable(_)) => {}
+            Err(why) if via == Via::Local => return Err(format!("local projection: {why}")),
+            Err(_) => {}
         }
     }
     let plain: Vec<[i32; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
     project_in_client(pid, &plain)
 }
 
-// `project` for drawing: a point nearer than the camera's near plane or behind it comes back as NaN, which is never on screen. Only the local projection clips; the client's own leaves such points where it puts them.
-pub fn project_clipped(pid: u32, points: &[projection::Point]) -> Result<Vec<[f32; 2]>, String> {
-    match project_locally(pid, points, None, true) {
-        Ok(screen) => Ok(screen),
-        Err(Failure::Unavailable(_)) => project(pid, points, Via::Client),
-    }
+fn project_clipped(pid: u32, points: &[projection::Point]) -> Result<Vec<[f32; 2]>, String> {
+    project_locally(pid, points, None, true).or_else(|_| project(pid, points, Via::Client))
 }
 
-// `project` with the camera moved by `shift` first (fine x, y and the plane it ends on, negative for this one); only the local projection can move the camera.
 pub fn project_moved(
     pid: u32,
     points: &[projection::Point],
     shift: [i32; 3],
 ) -> Result<Vec<[f32; 2]>, String> {
-    match project_locally(pid, points, Some(shift), false) {
-        Ok(screen) => Ok(screen),
-        Err(Failure::Unavailable(why)) => Err(format!("local projection: {why}")),
-    }
+    project_locally(pid, points, Some(shift), false)
+        .map_err(|why| format!("local projection: {why}"))
 }
 
 fn decorations(pid: u32) -> Vec<projection::Decoration> {
     let Ok(reply) = locs_reply(pid, ipc::state::locs_request::PLAYER_PLANE) else {
         return Vec::new();
     };
-    reply.locs[..(reply.count as usize).min(reply.locs.len())]
+    first(&reply.locs, reply.count)
         .iter()
         .filter(|l| l.kind == projection::GROUND_DECORATION && l.decoration_height != 0)
         .map(|l| {
@@ -934,13 +959,13 @@ fn project_in_client(pid: u32, points: &[[i32; 3]]) -> Result<Vec<[f32; 2]>, Str
             |shared| shared.read_project_reply(100).map(|r| (r.sequence, r)),
         )?;
         match reply.status {
-            project_status::OK => screen.extend_from_slice(&reply.points[..reply.count as usize]),
+            project_status::OK => screen.extend_from_slice(first(&reply.points, reply.count)),
             project_status::NOT_IN_GAME => return Err("not logged in".into()),
             project_status::NOT_FOUND => {
                 return Err("agent didn't find the client's projection".into());
             }
             project_status::OTHER_THREAD => {
-                return Err("the client runs its game on another thread than its window's".into());
+                return Err(OTHER_THREAD.into());
             }
             project_status::TOO_MANY => return Err("too many points in one request".into()),
             other => return Err(format!("unknown projection status {other}")),
@@ -962,11 +987,10 @@ fn model(pid: u32, request: ModelRequest) -> Result<Option<crate::EntityModel>, 
             bounding_box: reply.bounding_box != 0,
             orientation: reply.orientation,
             vertex_count: reply.vertex_count,
-            corners: reply.corners[..(reply.corner_count as usize).min(reply.corners.len())]
-                .to_vec(),
-            hull: reply.hull[..(reply.hull_count as usize).min(reply.hull.len())].to_vec(),
+            corners: first(&reply.corners, reply.corner_count).to_vec(),
+            hull: first(&reply.hull, reply.hull_count).to_vec(),
             face_count: reply.face_count,
-            faces: reply.faces[..(reply.face_count as usize).min(reply.faces.len())].to_vec(),
+            faces: first(&reply.faces, reply.face_count).to_vec(),
             frame_count: reply.frame_count,
         })),
         model_status::NO_NPC | model_status::NO_MODEL => Ok(None),
@@ -976,9 +1000,7 @@ fn model(pid: u32, request: ModelRequest) -> Result<Option<crate::EntityModel>, 
         )),
         model_status::NOT_IN_GAME => Err("not logged in".into()),
         model_status::NOT_FOUND => Err("agent didn't find the client's models".into()),
-        model_status::OTHER_THREAD => {
-            Err("the client runs its game on another thread than its window's".into())
-        }
+        model_status::OTHER_THREAD => Err(OTHER_THREAD.into()),
         other => Err(format!("unknown model status {other}")),
     }
 }
@@ -994,7 +1016,6 @@ pub fn npc_model(pid: u32, npc_index: i32) -> Result<Option<crate::EntityModel>,
     )
 }
 
-/// The client builds NPC type `id`'s model posed at `frame` of `animation` (-1 for none), placed at local fine x and y.
 pub fn npc_type_model(
     pid: u32,
     id: i32,
@@ -1049,18 +1070,17 @@ pub fn loc_model(
     )
 }
 
-// `request` is an `ipc::state::locs_request` value.
 fn locs_reply(pid: u32, request: i32) -> Result<Box<LocsReply>, String> {
     reader(pid, 0, "")?;
-    let reply = ask(
+    let mut reply: Box<LocsReply> = unsafe { Box::new_zeroed().assume_init() };
+    ask(
         pid,
         ipc::input::LOCS_MESSAGE,
         |shared| shared.write_locs_request(request),
         |shared| {
-            let mut reply: Box<LocsReply> = unsafe { Box::new_zeroed().assume_init() };
             shared
                 .read_locs_reply_into(&mut reply, 100)
-                .then_some((reply.sequence, reply))
+                .then_some((reply.sequence, ()))
         },
     )?;
     match reply.status {
@@ -1068,14 +1088,13 @@ fn locs_reply(pid: u32, request: i32) -> Result<Box<LocsReply>, String> {
         loc_status::NOT_IN_GAME => return Err("not logged in".into()),
         loc_status::NOT_FOUND => return Err("agent didn't find the client's scene".into()),
         loc_status::OTHER_THREAD => {
-            return Err("the client runs its game on another thread than its window's".into());
+            return Err(OTHER_THREAD.into());
         }
         other => return Err(format!("unknown locs status {other}")),
     }
     Ok(reply)
 }
 
-// How long `scene_tiles` reuses what it asked the agent for: locs and ground items change at most per tick.
 const TICK_CACHE_TTL: Duration = Duration::from_millis(600);
 
 type TickCache<T> = Mutex<Option<(u32, Instant, T)>>;
@@ -1088,7 +1107,7 @@ fn cached<T: Clone>(
     pid: u32,
     fetch: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = lock(cache);
     if let Some((cached, at, value)) = cache.as_ref()
         && *cached == pid
         && at.elapsed() < TICK_CACHE_TTL
@@ -1106,7 +1125,6 @@ fn cached_locs_reply(pid: u32) -> Result<Arc<LocsReply>, String> {
     })
 }
 
-/// The locs of the loaded scene on `plane` (the player's when `None`).
 pub fn locs(pid: u32, plane: Option<i32>) -> Result<Vec<crate::Loc>, String> {
     let request = match plane {
         Some(plane @ 0..=3) => plane,
@@ -1116,7 +1134,6 @@ pub fn locs(pid: u32, plane: Option<i32>) -> Result<Vec<crate::Loc>, String> {
     Ok(decode_locs_reply(&*locs_reply(pid, request)?))
 }
 
-/// The clickable locs of the loaded scene on every plane: what doors and ladders are.
 pub fn clickable_locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
     use ipc::state::locs_request::*;
     Ok(decode_locs_reply(&*locs_reply(
@@ -1127,12 +1144,12 @@ pub fn clickable_locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
 
 fn decode_locs_reply(reply: &LocsReply) -> Vec<crate::Loc> {
     use ipc::state::{LOC_CLICKABLE, LOC_PLANE_MASK, LOC_PLANE_SHIFT};
-    let names: Vec<String> = reply.names[..(reply.name_count as usize).min(reply.names.len())]
+    let names: Vec<String> = first(&reply.names, reply.name_count)
         .iter()
-        .map(|n| String::from_utf8_lossy(ipc::state::text(n)).replace('\u{a0}', " "))
+        .map(|n| game_text(ipc::state::text(n)))
         .collect();
     let known = |v: u8| (v != 0xff).then_some(v);
-    reply.locs[..(reply.count as usize).min(reply.locs.len())]
+    first(&reply.locs, reply.count)
         .iter()
         .map(|l| crate::Loc {
             id: l.id,
@@ -1172,9 +1189,7 @@ fn cache_request(pid: u32, request: &CacheRequest) -> Result<Box<CacheReply>, St
             "cache index {} has no archive {}",
             request.index, request.archive
         )),
-        cache_status::OTHER_THREAD => {
-            Err("the client runs its game on another thread than its window's".into())
-        }
+        cache_status::OTHER_THREAD => Err(OTHER_THREAD.into()),
         cache_status::TOO_MANY => Err("too many files in one request".into()),
         other => Err(format!("unknown cache status {other}")),
     }
@@ -1196,7 +1211,7 @@ fn cache_ids(
             ..Default::default()
         },
     )?;
-    let ids = reply.data[..reply.used as usize]
+    let ids = first(&reply.data, reply.used)
         .as_chunks::<4>()
         .0
         .iter()
@@ -1234,19 +1249,39 @@ fn cache_files_batched(
     files: &[[i32; 2]],
     batch: usize,
 ) -> Result<Vec<Option<Vec<u8>>>, String> {
+    cache_batches(
+        pid,
+        files,
+        batch.clamp(1, CACHE_BATCH),
+        |batch| {
+            let mut request = CacheRequest {
+                kind: cache_kind::FILES,
+                index,
+                count: batch.len() as u32,
+                ..Default::default()
+            };
+            request.files[..batch.len()].copy_from_slice(batch);
+            request
+        },
+        <[u8]>::to_vec,
+        |&[archive, file]| format!("cache file {index}/{archive}/{file} is too big to be sent"),
+    )
+}
+
+fn cache_batches<T, R>(
+    pid: u32,
+    items: &[T],
+    batch: usize,
+    request: impl Fn(&[T]) -> CacheRequest,
+    decode: impl Fn(&[u8]) -> R,
+    too_big: impl FnOnce(&T) -> String,
+) -> Result<Vec<Option<R>>, String> {
     reader(pid, 0, "")?;
-    let mut out: Vec<Option<Vec<u8>>> = vec![None; files.len()];
+    let mut out: Vec<Option<R>> = items.iter().map(|_| None).collect();
     let mut next = 0;
-    while next < files.len() {
-        let batch = &files[next..(next + batch.clamp(1, CACHE_BATCH)).min(files.len())];
-        let mut request = CacheRequest {
-            kind: cache_kind::FILES,
-            index,
-            count: batch.len() as u32,
-            ..Default::default()
-        };
-        request.files[..batch.len()].copy_from_slice(batch);
-        let reply = cache_request(pid, &request)?;
+    while next < items.len() {
+        let batch = &items[next..(next + batch).min(items.len())];
+        let reply = cache_request(pid, &request(batch))?;
         let mut done = 0;
         for (i, file) in reply.files[..batch.len()].iter().enumerate() {
             match file.length {
@@ -1254,23 +1289,27 @@ fn cache_files_batched(
                 CACHE_FILE_MISSING => {}
                 length => {
                     let start = file.offset as usize;
-                    out[next + i] = reply
-                        .data
-                        .get(start..start + length as usize)
-                        .map(<[u8]>::to_vec);
+                    out[next + i] = reply.data.get(start..start + length as usize).map(&decode);
                 }
             }
             done = i + 1;
         }
         if done == 0 {
-            let [archive, file] = batch[0];
-            return Err(format!(
-                "cache file {index}/{archive}/{file} is too big to be sent"
-            ));
+            return Err(too_big(&batch[0]));
         }
         next += done;
     }
     Ok(out)
+}
+
+fn config_ids(pid: u32, archive: i32) -> Result<Vec<i32>, String> {
+    Ok(
+        cache_archive_files(pid, crate::cache::CONFIG_INDEX, archive)?
+            .ids
+            .iter()
+            .map(|&id| id as i32)
+            .collect(),
+    )
 }
 
 fn config_files(pid: u32, archive: i32, ids: &[i32]) -> Result<Vec<Option<Vec<u8>>>, String> {
@@ -1290,67 +1329,56 @@ pub fn enum_def(pid: u32, id: i32) -> Result<Option<crate::config::EnumDef>, Str
         .ok_or_else(|| format!("enum {id} has an opcode this reader doesn't know"))
 }
 
-pub fn item_params(
+fn item_defs<T>(
     pid: u32,
     ids: &[i32],
-) -> Result<Vec<Option<std::collections::BTreeMap<u32, crate::config::Value>>>, String> {
+    decode: impl Fn(&[u8]) -> Option<T>,
+) -> Result<Vec<Option<T>>, String> {
     let files = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?;
     ids.iter()
         .zip(files)
         .map(|(id, data)| match data {
             None => Ok(None),
-            Some(data) => crate::config::decode_obj_params(&data)
+            Some(data) => decode(&data)
                 .map(Some)
                 .ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
         })
         .collect()
 }
 
-/// Each item's icon, drawn by the client itself on its game thread (`cache_kind::ITEM_ICONS`); none for an item the client can't draw.
-pub fn item_icons(pid: u32, icons: &[ItemIconRequest]) -> Result<Vec<Option<Image>>, String> {
-    reader(pid, 0, "")?;
-    let mut out: Vec<Option<Image>> = vec![None; icons.len()];
-    let mut next = 0;
-    while next < icons.len() {
-        let batch = &icons[next..(next + CACHE_BATCH).min(icons.len())];
-        let mut request = CacheRequest {
-            kind: cache_kind::ITEM_ICONS,
-            count: batch.len() as u32,
-            ..Default::default()
-        };
-        for (slot, icon) in request.files.iter_mut().zip(batch) {
-            let flags = if icon.show_count {
-                ITEM_ICON_SHOW_COUNT
-            } else {
-                0
-            };
-            *slot = [icon.id | flags, icon.quantity];
-        }
-        let reply = cache_request(pid, &request)?;
-        let mut done = 0;
-        for (i, file) in reply.files[..batch.len()].iter().enumerate() {
-            match file.length {
-                CACHE_FILE_NO_ROOM => break,
-                CACHE_FILE_MISSING => {}
-                length => {
-                    let start = file.offset as usize;
-                    out[next + i] = reply
-                        .data
-                        .get(start..start + length as usize)
-                        .map(icon_from_argb);
-                }
-            }
-            done = i + 1;
-        }
-        if done == 0 {
-            return Err("the agent had no room for an item icon".into());
-        }
-        next += done;
-    }
-    Ok(out)
+pub fn item_params(
+    pid: u32,
+    ids: &[i32],
+) -> Result<Vec<Option<BTreeMap<u32, crate::config::Value>>>, String> {
+    item_defs(pid, ids, crate::config::decode_obj_params)
 }
 
-/// The client's `0xAARRGGBB` words as an RGBA image; a word of 0 is a transparent pixel.
+pub fn item_icons(pid: u32, icons: &[ItemIconRequest]) -> Result<Vec<Option<Image>>, String> {
+    cache_batches(
+        pid,
+        icons,
+        CACHE_BATCH,
+        |batch| {
+            let mut request = CacheRequest {
+                kind: cache_kind::ITEM_ICONS,
+                count: batch.len() as u32,
+                ..Default::default()
+            };
+            for (slot, icon) in request.files.iter_mut().zip(batch) {
+                let flags = if icon.show_count {
+                    ITEM_ICON_SHOW_COUNT
+                } else {
+                    0
+                };
+                *slot = [icon.id | flags, icon.quantity];
+            }
+            request
+        },
+        icon_from_argb,
+        |_| "the agent had no room for an item icon".into(),
+    )
+}
+
 fn icon_from_argb(words: &[u8]) -> Image {
     let mut rgba = Vec::with_capacity(words.len());
     for word in words.as_chunks::<4>().0 {
@@ -1369,7 +1397,6 @@ fn icon_from_argb(words: &[u8]) -> Image {
     Image::from_rgba(ITEM_ICON_WIDTH, ITEM_ICON_HEIGHT, &rgba)
 }
 
-/// The first frame of each sprite of the cache (the interface icons: prayers, spells, ...); none for an id the cache doesn't have.
 pub fn sprites(pid: u32, ids: &[i32]) -> Result<Vec<Option<Image>>, String> {
     let files: Vec<[i32; 2]> = ids.iter().map(|&id| [id, 0]).collect();
     let archives = cache_files(pid, crate::font::SPRITES_INDEX, &files)?;
@@ -1387,23 +1414,12 @@ pub fn sprites(pid: u32, ids: &[i32]) -> Result<Vec<Option<Image>>, String> {
         .collect())
 }
 
-/// Whether each item stacks, from its definition.
 pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String> {
-    let files = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?;
-    ids.iter()
-        .zip(files)
-        .map(|(id, data)| match data {
-            None => Ok(None),
-            Some(data) => crate::config::decode_obj(&data)
-                .map(|def| Some(def.stackable))
-                .ok_or_else(|| format!("item {id} has an opcode this reader doesn't know")),
-        })
-        .collect()
+    item_defs(pid, ids, |data| {
+        crate::config::decode_obj(data).map(|def| def.stackable)
+    })
 }
 
-/// For each item, the doses or charges its family has, `(number, id)` by number, from every item's name in the cache: `None` for an
-/// item whose name ends in no number. Notes, placeholders and bought copies are left out; the cache is only scanned when one of the
-/// items has a number.
 pub fn item_doses(pid: u32, ids: &[i32]) -> Result<Vec<Option<crate::config::DoseFamily>>, String> {
     let decode = |data: Option<Vec<u8>>| {
         data.and_then(|data| crate::config::decode_obj(&data))
@@ -1422,12 +1438,7 @@ pub fn item_doses(pid: u32, ids: &[i32]) -> Result<Vec<Option<crate::config::Dos
     {
         return Ok(vec![None; ids.len()]);
     }
-    let all: Vec<i32> =
-        cache_archive_files(pid, crate::cache::CONFIG_INDEX, crate::config::OBJ_ARCHIVE)?
-            .ids
-            .iter()
-            .map(|&id| id as i32)
-            .collect();
+    let all = config_ids(pid, crate::config::OBJ_ARCHIVE)?;
     let every: Vec<(i32, String)> = all
         .iter()
         .zip(config_files(pid, crate::config::OBJ_ARCHIVE, &all)?)
@@ -1439,20 +1450,11 @@ pub fn item_doses(pid: u32, ids: &[i32]) -> Result<Vec<Option<crate::config::Dos
     ))
 }
 
-// Every varbit stored in `varp`: (id, definition, gameval name), by lowest bit.
 pub fn varbits_of(
     pid: u32,
     varp: u16,
 ) -> Result<Vec<(i32, crate::config::VarbitDef, Option<String>)>, String> {
-    let ids: Vec<i32> = cache_archive_files(
-        pid,
-        crate::cache::CONFIG_INDEX,
-        crate::config::VARBIT_ARCHIVE,
-    )?
-    .ids
-    .iter()
-    .map(|&id| id as i32)
-    .collect();
+    let ids = config_ids(pid, crate::config::VARBIT_ARCHIVE)?;
     let mut found = Vec::new();
     for (&id, data) in ids
         .iter()
@@ -1479,23 +1481,27 @@ pub fn varbits_of(
         .collect())
 }
 
-// Varbit definitions only change with game updates, so they're read from the cache once per process.
-type VarbitCache = (
-    u32,
-    std::collections::HashMap<i32, Option<crate::config::VarbitDef>>,
-);
-static VARBITS: Mutex<Option<VarbitCache>> = Mutex::new(None);
+type PerClient<K, V> = Option<(u32, HashMap<K, V>)>;
+
+fn of_client<K, V>(cache: &PerClient<K, V>, pid: u32) -> Option<&HashMap<K, V>> {
+    cache
+        .as_ref()
+        .filter(|(p, _)| *p == pid)
+        .map(|(_, map)| map)
+}
+
+fn of_client_mut<K, V>(cache: &mut PerClient<K, V>, pid: u32) -> &mut HashMap<K, V> {
+    if cache.as_ref().is_some_and(|(p, _)| *p != pid) {
+        *cache = None;
+    }
+    &mut cache.get_or_insert_with(|| (pid, HashMap::new())).1
+}
+
+static VARBITS: Mutex<PerClient<i32, Option<crate::config::VarbitDef>>> = Mutex::new(None);
 
 pub fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>, String> {
-    {
-        let cached = VARBITS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(def) = cached
-            .as_ref()
-            .filter(|(p, _)| *p == pid)
-            .and_then(|(_, defs)| defs.get(&id))
-        {
-            return Ok(*def);
-        }
+    if let Some(def) = of_client(&lock(&VARBITS), pid).and_then(|defs| defs.get(&id)) {
+        return Ok(*def);
     }
     let def = match config_files(pid, crate::config::VARBIT_ARCHIVE, &[id])?
         .pop()
@@ -1507,13 +1513,7 @@ pub fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>,
                 .ok_or_else(|| format!("varbit {id} has an opcode this reader doesn't know"))?,
         ),
     };
-    let mut cached = VARBITS.lock().unwrap_or_else(|e| e.into_inner());
-    if cached.as_ref().is_none_or(|(p, _)| *p != pid) {
-        *cached = Some((pid, std::collections::HashMap::new()));
-    }
-    if let Some((_, defs)) = cached.as_mut() {
-        defs.insert(id, def);
-    }
+    of_client_mut(&mut lock(&VARBITS), pid).insert(id, def);
     Ok(def)
 }
 
@@ -1524,27 +1524,20 @@ pub fn varbit(pid: u32, id: i32) -> Result<Option<i32>, String> {
     Ok(varp_value(pid, def.varp as usize)?.map(|varp| def.value(varp)))
 }
 
-type LocTexts = (
-    u32,
-    std::collections::HashMap<u32, Option<(crate::collision::LocDef, crate::collision::LocText)>>,
-);
-// Loc definitions only change with game updates, so each is read from the cache once per process.
-static LOC_TEXTS: Mutex<Option<LocTexts>> = Mutex::new(None);
+type ShownLoc = (crate::collision::LocDef, crate::collision::LocText);
+
+static LOC_TEXTS: Mutex<PerClient<u32, Option<ShownLoc>>> = Mutex::new(None);
 
 const CACHE_LOCS_MAX_SQUARES: i32 = 64;
 
-// Reads the definitions of `ids` the process hasn't read yet into `LOC_TEXTS`.
 fn read_loc_texts(pid: u32, ids: &[u32]) -> Result<(), String> {
     use crate::{cache::*, collision::*};
     let mut ids = ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
     let missing: Vec<u32> = {
-        let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-        let known = cached
-            .as_ref()
-            .filter(|(p, _)| *p == pid)
-            .map(|(_, defs)| defs);
+        let cached = lock(&LOC_TEXTS);
+        let known = of_client(&cached, pid);
         ids.iter()
             .copied()
             .filter(|id| !known.is_some_and(|defs| defs.contains_key(id)))
@@ -1555,35 +1548,25 @@ fn read_loc_texts(pid: u32, ids: &[u32]) -> Result<(), String> {
     }
     let files: Vec<[i32; 2]> = missing.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
     let defs = cache_files(pid, CONFIG_INDEX, &files)?;
-    let mut cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    if cached.as_ref().is_none_or(|(p, _)| *p != pid) {
-        *cached = Some((pid, std::collections::HashMap::new()));
-    }
-    if let Some((_, known)) = cached.as_mut() {
-        for (id, data) in missing.iter().zip(defs) {
-            known.insert(*id, data.as_deref().and_then(decode_loc_text));
-        }
+    let mut cached = lock(&LOC_TEXTS);
+    let known = of_client_mut(&mut cached, pid);
+    for (id, data) in missing.iter().zip(defs) {
+        known.insert(*id, data.as_deref().and_then(decode_loc_text));
     }
     Ok(())
 }
 
-type ShownLoc = (crate::collision::LocDef, crate::collision::LocText);
-
-/// The definitions of `ids` as the player sees them now (a transforming loc shows the one its varbit or varp picks).
-fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, ShownLoc>, String> {
+fn shown_locs(pid: u32, ids: &[u32]) -> Result<HashMap<u32, ShownLoc>, String> {
     let lookup = |ids: &[u32]| -> Result<Vec<Option<ShownLoc>>, String> {
         read_loc_texts(pid, ids)?;
-        let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-        let known = cached
-            .as_ref()
-            .filter(|(p, _)| *p == pid)
-            .map(|(_, defs)| defs);
+        let cached = lock(&LOC_TEXTS);
+        let known = of_client(&cached, pid);
         Ok(ids
             .iter()
             .map(|id| known.and_then(|defs| defs.get(id)).cloned().flatten())
             .collect())
     };
-    let mut shown = std::collections::HashMap::new();
+    let mut shown = HashMap::new();
     let mut transformed: Vec<(u32, u32)> = Vec::new();
     for (&id, def) in ids.iter().zip(lookup(ids)?) {
         let Some(def) = def else { continue };
@@ -1612,7 +1595,6 @@ fn shown_locs(pid: u32, ids: &[u32]) -> Result<std::collections::HashMap<u32, Sh
     Ok(shown)
 }
 
-/// The placements the cache has inside `area` (`[x1, y1, x2, y2]`, both corners included) on `plane_wanted` (all when `None`), with their world tile.
 fn cache_placements(
     pid: u32,
     area: [i32; 4],
@@ -1662,8 +1644,6 @@ fn cache_placements(
     Ok(found)
 }
 
-/// The locs the cache places on the map inside `area` (`[x1, y1, x2, y2]`, both corners included), loaded or not, with their names and options.
-/// How each of `ids` looks to the player now (see `crate::LocView`), in the order given.
 pub fn loc_shown(pid: u32, ids: &[u32]) -> Result<Vec<crate::LocView>, String> {
     let shown = shown_locs(pid, ids)?;
     Ok(ids
@@ -1673,16 +1653,19 @@ pub fn loc_shown(pid: u32, ids: &[u32]) -> Result<Vec<crate::LocView>, String> {
                 .get(id)
                 .map(|(_, text)| crate::LocView {
                     name: text.name.clone(),
-                    actions: text
-                        .actions
-                        .iter()
-                        .filter(|a| !a.is_empty())
-                        .cloned()
-                        .collect(),
+                    actions: shown_actions(text),
                 })
                 .unwrap_or_default()
         })
         .collect())
+}
+
+fn shown_actions(text: &crate::collision::LocText) -> Vec<String> {
+    text.actions
+        .iter()
+        .filter(|a| !a.is_empty())
+        .cloned()
+        .collect()
 }
 
 pub fn cache_locs(
@@ -1699,11 +1682,8 @@ pub fn cache_locs(
             .map(|l| l.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>())
     };
     let (names, actions) = (lower(&filter.names), lower(&filter.actions));
-    let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    let known = cached
-        .as_ref()
-        .filter(|(p, _)| *p == pid)
-        .map(|(_, defs)| defs);
+    let cached = lock(&LOC_TEXTS);
+    let known = of_client(&cached, pid);
     let mut out = Vec::new();
     for (p, x, y) in found {
         let Some((def, text)) = known
@@ -1727,11 +1707,7 @@ pub fn cache_locs(
         }) {
             continue;
         }
-        let (size_x, size_y) = if p.rotation & 1 == 1 {
-            (def.size_y, def.size_x)
-        } else {
-            (def.size_x, def.size_y)
-        };
+        let (size_x, size_y) = crate::collision::turned(def.size_x, def.size_y, p.rotation);
         out.push(crate::CacheLoc {
             id: p.id as i32,
             name: text.name.clone(),
@@ -1742,19 +1718,13 @@ pub fn cache_locs(
             size_y,
             shape: p.shape,
             rotation: p.rotation,
-            actions: text
-                .actions
-                .iter()
-                .filter(|a| !a.is_empty())
-                .cloned()
-                .collect(),
+            actions: shown_actions(text),
         });
     }
     out.sort_by_key(|l| (l.plane, l.x, l.y, l.id));
     Ok(out)
 }
 
-// The climbables the cache places inside `area` on every plane, but where `loaded` (the live scene has them, in their current state): ladders, caves and trapdoors that can be far from the scene (their transforms aren't resolved).
 fn cache_climbables(
     pid: u32,
     area: [i32; 4],
@@ -1768,11 +1738,8 @@ fn cache_climbables(
         .collect();
     let ids: Vec<u32> = found.iter().map(|(p, _, _)| p.id).collect();
     read_loc_texts(pid, &ids)?;
-    let cached = LOC_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
-    let known = cached
-        .as_ref()
-        .filter(|(p, _)| *p == pid)
-        .map(|(_, defs)| defs);
+    let cached = lock(&LOC_TEXTS);
+    let known = of_client(&cached, pid);
     let lookup = |id: i32| {
         known
             .and_then(|defs| defs.get(&(id as u32)))
@@ -1782,12 +1749,7 @@ fn cache_climbables(
         .iter()
         .filter_map(|&(p, x, y)| {
             let (def, _) = lookup(p.id as i32)?;
-            let (size_x, size_y) = if p.rotation & 1 == 1 {
-                (def.size_y, def.size_x)
-            } else {
-                (def.size_x, def.size_y)
-            };
-            // the tag's type: walls, wall decorations, game objects, ground decorations
+            let (size_x, size_y) = crate::collision::turned(def.size_x, def.size_y, p.rotation);
             let kind = match p.shape {
                 0..=3 => 0,
                 4..=8 => 1,
@@ -1814,10 +1776,7 @@ fn cache_climbables(
     Ok(crate::nav::scene_locs(flags, &locs, &lookup, request).1)
 }
 
-pub fn world_collision(
-    pid: u32,
-    regions: &[u32],
-) -> Result<crate::collision::WorldCollision, String> {
+fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::WorldCollision, String> {
     use crate::{cache::*, collision::*};
     let files: Vec<[i32; 2]> = regions
         .iter()
@@ -1842,7 +1801,7 @@ pub fn world_collision(
     ids.sort_unstable();
     ids.dedup();
     let files: Vec<[i32; 2]> = ids.iter().map(|&id| [LOC_ARCHIVE, id as i32]).collect();
-    let defs: std::collections::HashMap<u32, LocDef> = ids
+    let defs: HashMap<u32, LocDef> = ids
         .iter()
         .zip(cache_files(pid, CONFIG_INDEX, &files)?)
         .filter_map(|(&id, data)| Some((id, decode_loc(&data?)?)))
@@ -1858,45 +1817,38 @@ pub fn world_collision(
 }
 
 const WORLD_SQUARE_BATCH: usize = 16;
-// bump it when how the collision is worked out changes: the saved file is named after it
 const WORLD_FORMAT: u64 = 8;
 
-// The key it was built for, and the process whose cache that key was read from: the cache only changes with a game update, so later calls for that process skip reading its indexes.
 type WorldMovement = Arc<crate::collision::WorldCollision<crate::collision::Movement>>;
 static WORLD: Mutex<Option<(u64, u32, WorldMovement)>> = Mutex::new(None);
 
-fn world_cache_dir() -> std::path::PathBuf {
+fn world_cache_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join("injector")
 }
 
 pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
     use crate::{cache::*, collision::*};
-    if let Some((_, _, world)) = WORLD
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .filter(|(_, p, _)| *p == pid)
-    {
+    if let Some((_, _, world)) = lock(&WORLD).as_ref().filter(|(_, p, _)| *p == pid) {
         return Ok(world.clone());
     }
     let maps = cache_archives(pid, MAPS_INDEX)?;
     let loc_ids = cache_archive_files(pid, CONFIG_INDEX, LOC_ARCHIVE)?;
     let key = maps.fingerprint ^ loc_ids.fingerprint.rotate_left(17) ^ WORLD_FORMAT.rotate_left(42);
-    let mut cached = WORLD.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cached = lock(&WORLD);
     if let Some((_, _, world)) = cached.as_ref().filter(|(k, _, _)| *k == key) {
         let world = world.clone();
         *cached = Some((key, pid, world.clone()));
         return Ok(world);
     }
     let path = world_cache_dir().join(format!("collision-{key:016x}.bin"));
-    if let Some(world) = std::fs::read(&path)
+    if let Some(world) = fs::read(&path)
         .ok()
         .and_then(|bytes| WorldCollision::from_bytes(&bytes, key))
     {
-        let world = std::sync::Arc::new(world);
+        let world = Arc::new(world);
         *cached = Some((key, pid, world.clone()));
         return Ok(world);
     }
@@ -1946,7 +1898,6 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
         let data = cache_files_batched(pid, MAPS_INDEX, &files, files.len())?;
         for (pair, &region) in data.as_chunks::<2>().0.iter().zip(regions) {
             let Some(settings) = pair[0].as_deref().and_then(decode_terrain) else {
-                // Not a map square (the last archive holds 3 byte placeholders).
                 world.remove_square(region);
                 continue;
             };
@@ -1969,9 +1920,7 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
     }
     world.shrink();
     let bytes = world.to_bytes(key);
-    if let Err(e) =
-        std::fs::create_dir_all(world_cache_dir()).and_then(|()| std::fs::write(&path, &bytes))
-    {
+    if let Err(e) = fs::create_dir_all(world_cache_dir()).and_then(|()| fs::write(&path, &bytes)) {
         eprintln!(
             "couldn't keep the world collision in {}: {e}",
             path.display()
@@ -1982,19 +1931,16 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
         started.elapsed().as_secs_f32(),
         bytes.len() / 1024
     );
-    let world = std::sync::Arc::new(world);
+    let world = Arc::new(world);
     *cached = Some((key, pid, world.clone()));
     Ok(world)
 }
 
-// The surface's landmasses, built once from the world collision and kept for the process.
 static WORLD_MAP: Mutex<Option<KeptWorldMap>> = Mutex::new(None);
 type KeptWorldMap = ((usize, u64), Arc<crate::landmass::WorldMap>);
 
-/// How far (in tiles) from a point to look for a tile that has a landmass when the point itself has none (a loc stands on it).
 const LANDMASS_RADIUS: i32 = 3;
 
-/// The landmass number of each `[x, y, plane]` (0 for none or off the surface plane). Tiles with the same number can be walked between (doors open; no stairs or shortcuts).
 pub fn landmasses(pid: u32, points: &[[i32; 3]]) -> Result<Vec<u32>, String> {
     let map = world_map(pid)?;
     Ok(points
@@ -2003,11 +1949,10 @@ pub fn landmasses(pid: u32, points: &[[i32; 3]]) -> Result<Vec<u32>, String> {
         .collect())
 }
 
-// The world's landmasses and the climbs between them, kept until the world or the transport data changes.
 fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
     let world = world_movement(pid)?;
     let id = (Arc::as_ptr(&world) as usize, crate::transports::version());
-    let mut kept = WORLD_MAP.lock().unwrap_or_else(|e| e.into_inner());
+    let mut kept = lock(&WORLD_MAP);
     if let Some((_, map)) = kept.as_ref().filter(|(key, _)| *key == id) {
         return Ok(map.clone());
     }
@@ -2016,10 +1961,7 @@ fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
         crate::transports::with_climbs(|all| {
             all.iter()
                 .filter(|t| crate::transports::is_gated_door(t))
-                .filter_map(|t| {
-                    let (o, d) = (t.origin?, t.destination?);
-                    Some(((o.x, o.y, o.plane), (d.x, d.y, d.plane)))
-                })
+                .filter_map(transport_ends)
                 .collect()
         });
     let mut closed = crate::nav::Closed::default();
@@ -2036,14 +1978,9 @@ fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
     let rows: Vec<_> = crate::transports::with_climbs(|all| {
         all.iter()
             .filter_map(|t| {
-                let (o, d) = (t.origin?, t.destination?);
+                let (o, d) = transport_ends(t)?;
                 let key = crate::transports::gated(t).then(|| crate::transports::climb_key(t));
-                Some((
-                    (o.x, o.y, o.plane),
-                    (d.x, d.y, d.plane),
-                    key,
-                    crate::transports::touches_wilderness(t),
-                ))
+                Some((o, d, key, crate::transports::touches_wilderness(t)))
             })
             .collect()
     });
@@ -2062,7 +1999,17 @@ fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
     Ok(map)
 }
 
-/// The way from `from` to `to` by walking and climbing, with the climbs that ask for something only if `allow_climbs` names them, and the Wilderness's only for a walk that starts or ends there.
+fn transport_ends(
+    t: &crate::transports::Transport,
+) -> Option<(crate::nav::Point, crate::nav::Point)> {
+    let (o, d) = (t.origin?, t.destination?);
+    Some(((o.x, o.y, o.plane), (d.x, d.y, d.plane)))
+}
+
+fn walk_in_wilderness(from: crate::nav::Point, to: crate::nav::Point) -> bool {
+    crate::transports::in_wilderness(from.0, from.1) || crate::transports::in_wilderness(to.0, to.1)
+}
+
 pub fn world_route(
     pid: u32,
     from: crate::nav::Point,
@@ -2070,14 +2017,10 @@ pub fn world_route(
     allow_climbs: &[String],
 ) -> Result<crate::landmass::Route, String> {
     let map = world_map(pid)?;
-    let allowed: std::collections::HashSet<&str> =
-        allow_climbs.iter().map(String::as_str).collect();
-    let wilderness = crate::transports::in_wilderness(from.0, from.1)
-        || crate::transports::in_wilderness(to.0, to.1);
-    Ok(map.route(from, to, &allowed, wilderness))
+    let allowed: HashSet<&str> = allow_climbs.iter().map(String::as_str).collect();
+    Ok(map.route(from, to, &allowed, walk_in_wilderness(from, to)))
 }
 
-/// `max_tiles` caps how many tiles the search looks at (default `PATH_MAX_TILES`): a target that can't be reached would otherwise search every tile that can.
 pub fn find_path(
     pid: u32,
     plane: i32,
@@ -2108,13 +2051,39 @@ pub fn find_path(
 
 const PATH_MAX_TILES: usize = 4_000_000;
 
-// The cache's decoded collision of the map squares a route past the scene needs, plus the scenes seen lately (newest first) as a better guess than the cache.
 static SEEN_SCENES: Mutex<Vec<Arc<crate::scene_collision::SceneCollision>>> =
     Mutex::new(Vec::new());
 const SEEN_SCENES_KEPT: usize = 4;
 
 static REGION_FLAGS: Mutex<Vec<(u32, Arc<crate::collision::WorldCollision>)>> =
     Mutex::new(Vec::new());
+
+fn whole_squares((x1, y1, x2, y2): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
+    use crate::collision::REGION_SIZE;
+    let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
+    (
+        square(x1),
+        square(y1),
+        square(x2) + REGION_SIZE - 1,
+        square(y2) + REGION_SIZE - 1,
+    )
+}
+
+fn region_flags(
+    regions: &[(u32, Arc<crate::collision::WorldCollision>)],
+    plane: i32,
+    x: i32,
+    y: i32,
+) -> Option<u32> {
+    use crate::collision::{REGION_SIZE, region_id};
+    let region = region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
+    regions
+        .iter()
+        .find(|(r, _)| *r == region)
+        .and_then(|(_, world)| world.flags(plane, x, y))
+}
+
+const SCENE_EDGE: i32 = 4;
 
 fn cache_regions(
     pid: u32,
@@ -2127,7 +2096,7 @@ fn cache_regions(
                 .map(move |ry| region_id(rx, ry))
         })
         .collect();
-    let mut cached = REGION_FLAGS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cached = lock(&REGION_FLAGS);
     let missing: Vec<u32> = wanted
         .iter()
         .copied()
@@ -2144,21 +2113,14 @@ fn cache_regions(
         .collect())
 }
 
-// The route the game walks for a click on `to` over the client's collision map; with `options` it is randomized over a lattice (see `scene_graph`).
 pub fn scene_route(
     pid: u32,
     from: [i32; 2],
     to: [i32; 2],
     options: Option<crate::scene_graph::Options>,
 ) -> Result<crate::pathfinding::Route, String> {
-    use crate::collision::{REGION_SIZE, region_id};
-    // a tile of the scene's edge ring is all ones
-    const RING: u32 = 0xFF_FFFF;
-    // the largest box a lattice is built over
+    use crate::scene_collision::RING;
     const MAX_WINDOW: i32 = 400;
-    // a scene is this many tiles wide, and this many of its outermost tiles aren't trusted
-    const SCENE_SIZE: i32 = 104;
-    const SCENE_EDGE: i32 = 4;
     let (layout, memory) = reader(pid, part::COLLISION, "the scene's collision maps")?;
     if state::current(&memory, &layout) != Some(LOGGED_IN) {
         return Err("not logged in".into());
@@ -2173,7 +2135,7 @@ pub fn scene_route(
     }
     let (from, to) = ((from[0], from[1]), (to[0], to[1]));
     let seen: Vec<Arc<crate::scene_collision::SceneCollision>> = if options.is_some() {
-        let mut seen = SEEN_SCENES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen = lock(&SEEN_SCENES);
         seen.retain(|s| (s.base_x, s.base_y, s.plane) != (scene.base_x, scene.base_y, scene.plane));
         seen.insert(0, Arc::new(scene.clone()));
         seen.truncate(SEEN_SCENES_KEPT);
@@ -2188,24 +2150,16 @@ pub fn scene_route(
     let route = match options {
         None => crate::pathfinding::game_route(|x, y| scene.flags(x, y), from, to),
         Some(options) => {
-            // the lattice is over the scene when `to` is in it, else over the map squares around both ends, so it is stable for nearby targets
             let (x1, y1, x2, y2) = scene.bounds();
             let bounds = if scene.flags(to.0, to.1).is_some_and(|f| f != RING) {
                 (x1, y1, x2, y2)
             } else {
-                let (x1, y1, x2, y2) = (
+                whole_squares((
                     x1.min(to.0 - 12),
                     y1.min(to.1 - 12),
                     x2.max(to.0 + 12),
                     y2.max(to.1 + 12),
-                );
-                let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
-                (
-                    square(x1),
-                    square(y1),
-                    square(x2) + REGION_SIZE - 1,
-                    square(y2) + REGION_SIZE - 1,
-                )
+                ))
             };
             if bounds.2 - bounds.0 >= MAX_WINDOW || bounds.3 - bounds.1 >= MAX_WINDOW {
                 return Err(format!(
@@ -2215,10 +2169,9 @@ pub fn scene_route(
             }
             let regions = cache_regions(pid, bounds)?;
             let plane = scene.plane;
-            // The client's own tiles first (this scene's, then recent ones) where complete: a scene's outermost tiles miss the ground beyond.
             let live = |s: &crate::scene_collision::SceneCollision, x: i32, y: i32| {
                 let inner = |v: i32, base: i32| {
-                    (base + SCENE_EDGE..base + SCENE_SIZE - SCENE_EDGE).contains(&v)
+                    (base + SCENE_EDGE..base + SCENE_TILES - SCENE_EDGE).contains(&v)
                 };
                 (inner(x, s.base_x) && inner(y, s.base_y))
                     .then(|| s.flags(x, y))
@@ -2228,14 +2181,7 @@ pub fn scene_route(
             let flags = |x: i32, y: i32| {
                 live(&scene, x, y)
                     .or_else(|| seen.iter().find_map(|s| live(s, x, y)))
-                    .or_else(|| {
-                        let region =
-                            region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
-                        regions
-                            .iter()
-                            .find(|(r, _)| *r == region)
-                            .and_then(|(_, world)| world.flags(plane, x, y))
-                    })
+                    .or_else(|| region_flags(&regions, plane, x, y))
             };
             crate::scene_graph::route(&flags, bounds, from, to, &options)
         }
@@ -2248,26 +2194,22 @@ pub fn scene_route(
     })
 }
 
-/// The transport data's ways of changing plane as the planner's rows, and the menu options they start with (any case, each once). Empty when the request turns climbs off.
-/// A row that asks for something is used only if the script allowed it (`Request::allow_climbs`), and one in the Wilderness only if `wilderness` says the walk starts or ends there.
 fn climb_rows(
     request: &crate::nav::Request,
     wilderness: bool,
 ) -> (Vec<crate::nav::ClimbRow>, Vec<String>, crate::nav::Closed) {
     use crate::transports::{climb_key, gated, is_gated_door, touches_wilderness, with_climbs};
-    let allowed: std::collections::HashSet<&str> =
-        request.allow_climbs.iter().map(String::as_str).collect();
+    let allowed: HashSet<&str> = request.allow_climbs.iter().map(String::as_str).collect();
     let usable = |t: &crate::transports::Transport| {
         (!gated(t) || allowed.contains(climb_key(t).as_str()))
             && (wilderness || !touches_wilderness(t))
     };
-    // whatever the plan may climb, a door that asks for something stays shut unless the script found it has it
     let closed = with_climbs(|all| {
         all.iter()
             .filter(|t| is_gated_door(t) && !usable(t))
             .filter_map(|t| {
-                let (o, d) = (t.origin?, t.destination?);
-                Some(((o.x, o.y, o.plane), (d.x - o.x, d.y - o.y)))
+                let (o, d) = transport_ends(t)?;
+                Some((o, (d.0 - o.0, d.1 - o.1)))
             })
             .collect()
     });
@@ -2283,13 +2225,12 @@ fn climb_rows(
     let rows = with_climbs(|all| {
         let mut rows = Vec::new();
         for t in all {
-            let (Some(o), Some(d)) = (t.origin, t.destination) else {
+            let Some((origin, destination)) = transport_ends(t) else {
                 continue;
             };
             if !usable(t) {
                 continue;
             }
-            // "Climb-up Rope 51647": the option, the loc's name, its id
             let Some(option) = crate::transports::menu_option(&t.menu) else {
                 continue;
             };
@@ -2301,7 +2242,6 @@ fn climb_rows(
             if !options.iter().any(|o| o.eq_ignore_ascii_case(option)) {
                 options.push(option.to_owned());
             }
-            // the loc's name is what lies between the option and the id; a trapdoor or manhole is opened first
             let portal = !portal_names.is_empty() && {
                 let words: Vec<&str> = t.menu.split_whitespace().collect();
                 let name = words
@@ -2311,8 +2251,8 @@ fn climb_rows(
                 portal_names.iter().any(|p| name.contains(p))
             };
             rows.push(crate::nav::ClimbRow {
-                origin: (o.x, o.y, o.plane),
-                destination: (d.x, d.y, d.plane),
+                origin,
+                destination,
                 option: option.to_owned(),
                 id: id.unwrap_or(0),
                 shortcut_ticks: (t.kind == crate::transports::SHORTCUT_KIND)
@@ -2332,14 +2272,10 @@ pub fn nav_plan(
     request: &crate::nav::Request,
 ) -> Result<crate::nav::NavPlan, String> {
     use crate::{
-        collision::{REGION_SIZE, flag},
+        collision::flag,
         nav::{NavAction, NavPlan, NavTile, UNDERGROUND},
     };
-    // the largest box planned over in one go (at most 8 map squares wide: `cache_placements` reads 64 at most), a scene's size, and how many of its outermost tiles the cache knows better
     const MAX_WINDOW: i32 = 448;
-    const SCENE_SIZE: i32 = 104;
-    const SCENE_EDGE: i32 = 4;
-    // how far past the goal (or the world path's stop) the box reaches
     const MARGIN: i32 = 16;
     let (layout, memory) = reader(pid, part::COLLISION, "the scene's collision maps")?;
     if state::current(&memory, &layout) != Some(LOGGED_IN) {
@@ -2355,14 +2291,13 @@ pub fn nav_plan(
     let (base_x, base_y) = (scene.base_x, scene.base_y);
     let instance = in_instance(pid).unwrap_or(true);
     let in_scene = |x: i32, y: i32, edge: i32| {
-        (base_x + edge..base_x + SCENE_SIZE - edge).contains(&x)
-            && (base_y + edge..base_y + SCENE_SIZE - edge).contains(&y)
+        (base_x + edge..base_x + SCENE_TILES - edge).contains(&x)
+            && (base_y + edge..base_y + SCENE_TILES - edge).contains(&y)
     };
     if !in_scene(from.0, from.1, 0) {
         return Err(format!("{}, {} isn't in the loaded scene", from.0, from.1));
     }
 
-    // the surface and the underground are planned over one box of the surface's coordinates: the scene's, with the goal's tile folded onto it
     let shift = if base_y >= UNDERGROUND {
         UNDERGROUND
     } else {
@@ -2371,12 +2306,11 @@ pub fn nav_plan(
     let across_to = |tile: crate::nav::Point| !instance && (tile.1 >= UNDERGROUND) != (shift != 0);
     let goal_across = across_to(to);
     let folded = |y: i32| if y >= UNDERGROUND { y - UNDERGROUND } else { y };
-    // the box: the scene, grown to the goal when the cache can fill the rest, else to a stop along the world path
     let scene_box = (
         base_x,
         base_y - shift,
-        base_x + SCENE_SIZE - 1,
-        base_y - shift + SCENE_SIZE - 1,
+        base_x + SCENE_TILES - 1,
+        base_y - shift + SCENE_TILES - 1,
     );
     let grown = |(x1, y1, x2, y2): (i32, i32, i32, i32), (x, y): (i32, i32)| {
         (
@@ -2386,12 +2320,10 @@ pub fn nav_plan(
             y2.max(y.saturating_add(MARGIN)),
         )
     };
-    // in i64: a script may ask for a tile far outside the world, and a wrapped width would pass
     let fits = |(x1, y1, x2, y2): (i32, i32, i32, i32)| {
         let wide = i64::from(MAX_WINDOW);
         i64::from(x2) - i64::from(x1) < wide && i64::from(y2) - i64::from(y1) < wide
     };
-    // a box grown by `extra` tiles on every side, trimmed back (evenly) to the largest the cache can fill in one go
     const WIDEN: [i32; 3] = [48, 112, 224];
     let widen = |(x1, y1, x2, y2): (i32, i32, i32, i32), extra: i32| {
         let trim = |lo: i32, hi: i32| {
@@ -2406,11 +2338,7 @@ pub fn nav_plan(
         let (y1, y2) = trim((y1 - extra).max(0), y2 + extra);
         (x1, y1, x2, y2)
     };
-    let wilderness = crate::transports::in_wilderness(from.0, from.1)
-        || crate::transports::in_wilderness(to.0, to.1);
-    let climbs_of_request = climb_rows(request, wilderness);
-    let closed_doors = climbs_of_request.2.clone();
-    // a stop on the same plane and in the same world, as far along the world path to `target` as the box can reach
+    let (rows, climb_options, closed) = climb_rows(request, walk_in_wilderness(from, to));
     let stop_along = |target: crate::nav::Point| -> Result<Option<crate::nav::Point>, String> {
         let world = world_movement(pid)?;
         let path = crate::pathfinding::find_path_with(
@@ -2420,7 +2348,7 @@ pub fn nav_plan(
             (target.0, target.1),
             PATH_MAX_TILES,
             true,
-            &closed_doors,
+            &closed,
         )
         .unwrap_or_default();
         Ok(path
@@ -2429,7 +2357,6 @@ pub fn nav_plan(
             .find(|&&(x, y)| fits(grown(scene_box, (x, y - shift))))
             .map(|&(x, y)| (x, y, target.2)))
     };
-    // toward the first climb on the way: past it when the box can hold both its ends, else to it, else along the walk to it
     type Stop = (crate::nav::Point, (i32, i32, i32, i32));
     let through = |o: crate::nav::Point, d: crate::nav::Point| -> Result<Option<Stop>, String> {
         let at = |t: crate::nav::Point| (t.0, folded(t.1));
@@ -2468,8 +2395,6 @@ pub fn nav_plan(
         }
     }
     let requested_climbs = request.allow_climbs.clone();
-    // the transport data's ways of changing plane (the ones that ask for something only if the script found it can): their rows, and the menu options to look for on locs
-    let (rows, climb_options, closed) = climbs_of_request;
     let request = &crate::nav::Request {
         climb_options,
         ..request.clone()
@@ -2481,25 +2406,17 @@ pub fn nav_plan(
     let defs = shown_locs(pid, &ids)?;
     let lookup = |id: i32| defs.get(&(id as u32));
 
-    // one go at planning. `across` also loads the other world and the cache's ladders, caves and the like all over the box (the scene's own are the live ones), so a plan can leave the world and come back to it
     let attempt = |across: bool,
                    bounds: (i32, i32, i32, i32),
                    goal: crate::nav::Point|
      -> Result<Option<crate::nav::Plan>, String> {
-        // always the cache for what the scene doesn't hold: the client leaves its outer rows unfilled, which read as open ground
         let regions = if instance {
             Vec::new()
         } else {
-            let square = |v: i32| v.div_euclid(REGION_SIZE) * REGION_SIZE;
             let squares = |north: i32| {
                 cache_regions(
                     pid,
-                    (
-                        square(bounds.0),
-                        square(bounds.1 + north),
-                        square(bounds.2) + REGION_SIZE - 1,
-                        square(bounds.3 + north) + REGION_SIZE - 1,
-                    ),
+                    whole_squares((bounds.0, bounds.1 + north, bounds.2, bounds.3 + north)),
                 )
             };
             let mut regions = squares(shift)?;
@@ -2508,16 +2425,8 @@ pub fn nav_plan(
             }
             regions
         };
-        let region_of = |x: i32, y: i32| {
-            crate::collision::region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE))
-        };
-        // the cache's tiles where the scene's aren't trusted (or there are none), its closed doors open
         let cache = |x: i32, y: i32, plane: i32| {
-            let region = region_of(x, y);
-            let flags = regions
-                .iter()
-                .find(|(r, _)| *r == region)
-                .and_then(|(_, world)| world.flags(plane, x, y))?;
+            let flags = region_flags(&regions, plane, x, y)?;
             Some(flags & !flag::door_blocks(flags) & !flag::DOORS)
         };
         let edge = if regions.is_empty() { 0 } else { SCENE_EDGE };
@@ -2541,12 +2450,10 @@ pub fn nav_plan(
                     bounds.2,
                     bounds.3 + north,
                 ];
-                // the scene's outer tiles are the cache's, as for the collision: the client doesn't fill the last rows with objects, and a ladder there would be in neither list
                 let loaded = |x: i32, y: i32| north == shift && in_scene(x, y, edge);
                 climbables.extend(cache_climbables(pid, area, request, &flags, &loaded)?);
             }
         }
-        // the rows used from inside the box (the underground folded onto the surface's tiles, as the box is)
         let (x1, y1, x2, y2) = bounds;
         let in_box: Vec<crate::nav::ClimbRow> = rows
             .iter()
@@ -2565,7 +2472,6 @@ pub fn nav_plan(
             &closed,
         ))
     };
-    // plans in `bounds`, and again through the other world when it falls short (a dungeon's exit, then another's entrance); the one that reaches the goal wins
     let in_box = |bounds: (i32, i32, i32, i32),
                   goal: crate::nav::Point|
      -> Result<Option<crate::nav::Plan>, String> {
@@ -2580,7 +2486,6 @@ pub fn nav_plan(
         Ok(plan)
     };
     let mut plan = in_box(bounds, goal)?;
-    // short of the goal: the way may leave the box (a city's exit past its edge), so try wider boxes, up to the most the cache can fill in one go
     if !instance && plan.as_ref().is_none_or(|p| !p.reached) {
         let mut last = bounds;
         for extra in WIDEN {
@@ -2598,7 +2503,6 @@ pub fn nav_plan(
             }
         }
     }
-    // the goal fits a box but the way doesn't: toward the first climb on the way, wherever it is
     if goal == to
         && plan.as_ref().is_none_or(|p| !p.reached)
         && let crate::landmass::Route::Through(o, d) = route(&requested_climbs)
@@ -2628,7 +2532,6 @@ pub fn nav_plan(
                 to_plane: loc.plane,
                 loc,
             },
-            // opening a trapdoor leaves you where you are: like a door, the walk plans again after it
             crate::nav::Use::Climb(loc, _)
                 if request
                     .door_options
@@ -2658,7 +2561,6 @@ pub fn nav_plan(
     })
 }
 
-// The client's collision flags of the scene: `flags[x][y]` is world tile (x1 + x, y1 + y), edge ring included.
 pub type SceneCollision = (i32, i32, i32, Vec<Vec<u32>>);
 
 pub fn scene_collision(pid: u32) -> Result<SceneCollision, String> {
@@ -2684,7 +2586,6 @@ pub fn player_plane(pid: u32) -> Result<i32, String> {
         .ok_or_else(|| "not logged in".into())
 }
 
-/// The tile the server last put the local player on; `None` when not logged in.
 pub fn server_tile(pid: u32) -> Result<Option<crate::ServerTile>, String> {
     let (layout, memory) = reader(pid, part::PLAYER | part::PATH, "the player's path")?;
     Ok(state::server_tile(&memory, &layout))
@@ -2751,24 +2652,20 @@ fn menu_reply(pid: u32) -> Result<ipc::state::MenuReply, String> {
     match reply.status {
         menu_status::OK => Ok(reply),
         menu_status::NOT_FOUND => Err("agent didn't find the client's menu".into()),
-        menu_status::OTHER_THREAD => {
-            Err("the client runs its game on another thread than its window's".into())
-        }
+        menu_status::OTHER_THREAD => Err(OTHER_THREAD.into()),
         other => Err(format!("unknown menu status {other}")),
     }
 }
 
 pub fn menu(pid: u32) -> Result<Vec<crate::MenuEntry>, String> {
     let reply = menu_reply(pid)?;
-    Ok(reply.entries[..reply.count as usize]
+    Ok(first(&reply.entries, reply.count)
         .iter()
         .map(menu_entry)
         .collect())
 }
 
-/// Whether the client's choose-option menu is open (the agent reads the flag from the menu object).
-pub fn menu_open(pid: u32) -> Result<bool, String> {
-    let reply = menu_reply(pid)?;
+fn is_open(reply: &ipc::state::MenuReply) -> Result<bool, String> {
     match reply.open {
         ipc::state::menu_open::CLOSED => Ok(false),
         ipc::state::menu_open::OPEN => Ok(true),
@@ -2776,26 +2673,35 @@ pub fn menu_open(pid: u32) -> Result<bool, String> {
     }
 }
 
-/// The open menu as the client lays it out, or `None` while it is closed.
+fn menu_rows(g: &ipc::state::MenuGeometry) -> crate::MenuRect {
+    crate::MenuRect {
+        x: g.rows_x,
+        y: g.rows_y,
+        width: g.rows_width,
+        height: g.rows_height,
+    }
+}
+
+pub fn menu_open(pid: u32) -> Result<bool, String> {
+    is_open(&menu_reply(pid)?)
+}
+
 pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
     let reply = menu_reply(pid)?;
-    match reply.open {
-        ipc::state::menu_open::CLOSED => return Ok(None),
-        ipc::state::menu_open::OPEN => {}
-        _ => return Err("agent doesn't know where the client keeps the menu's open flag".into()),
+    if !is_open(&reply)? {
+        return Ok(None);
     }
     if reply.has_geometry == 0 {
         return Err("agent doesn't know how the client lays out the menu".into());
     }
     let g = reply.geometry;
-    let count = (reply.submenu_count as usize).min(reply.submenus.len());
-    let submenus = reply.submenus[..count]
+    let submenus = first(&reply.submenus, reply.submenu_count)
         .iter()
         .map(|sub| {
             let s = sub.geometry;
             crate::MenuSubmenu {
                 row: sub.row + 1,
-                entries: sub.entries[..(sub.count as usize).min(sub.entries.len())]
+                entries: first(&sub.entries, sub.count)
                     .iter()
                     .map(menu_entry)
                     .collect(),
@@ -2803,12 +2709,7 @@ pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
                 y: s.y,
                 width: s.width,
                 height: s.height,
-                rows: crate::MenuRect {
-                    x: s.rows_x,
-                    y: s.rows_y,
-                    width: s.rows_width,
-                    height: s.rows_height,
-                },
+                rows: menu_rows(&s),
                 header_height: s.header_height,
                 row_height: s.row_height,
                 scroll: s.scroll,
@@ -2821,12 +2722,7 @@ pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
         y: g.y,
         width: g.width,
         height: g.height,
-        rows: crate::MenuRect {
-            x: g.rows_x,
-            y: g.rows_y,
-            width: g.rows_width,
-            height: g.rows_height,
-        },
+        rows: menu_rows(&g),
         header_height: g.header_height,
         row_height: g.row_height,
         scroll: g.scroll,
@@ -2872,7 +2768,7 @@ pub fn sub_interfaces(pid: u32) -> Result<Option<Vec<SubInterface>>, String> {
     if let Some(interfaces) = ask_worker(pid, worker_kind::SUB_INTERFACES, [0; 4]) {
         return Ok(interfaces);
     }
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (layout, memory) = interfaces_reader(pid)?;
     Ok(worker::sub_interfaces(&memory, &layout))
 }
 
@@ -2880,18 +2776,17 @@ pub fn widget(pid: u32, group: u16, child: u16) -> Result<Option<Widget>, String
     if let Some(widget) = ask_worker(pid, worker_kind::WIDGET, [group as i32, child as i32, 0, 0]) {
         return Ok(widget);
     }
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (layout, memory) = interfaces_reader(pid)?;
     Ok(worker::widget(&memory, &layout, group, child))
 }
 
-/// The model a component draws, read straight from memory; `None` when there is no such component.
 pub fn widget_model(
     pid: u32,
     group: u16,
     child: u16,
 ) -> Result<Option<decode::widgets::WidgetModel>, String> {
     use decode::widgets::{MODEL_ID, MODEL_TYPE, WidgetModel};
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (layout, memory) = interfaces_reader(pid)?;
     let layout = &layout.interfaces;
     let Some(client) = memory.ptr(layout.module_base + layout.client as u64) else {
         return Ok(None);
@@ -2912,9 +2807,8 @@ pub fn widget_model(
     )
 }
 
-/// Every open interface with all of its components and their dynamic children, read straight from the client's memory.
 pub fn widget_tree(pid: u32) -> Result<decode::widgets::WidgetTree, String> {
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (layout, memory) = interfaces_reader(pid)?;
     worker::widget_tree(&memory, &layout)
         .ok_or_else(|| format!("Cannot read the interfaces of client {pid} (not logged in?)"))
 }
@@ -2927,12 +2821,16 @@ pub fn widget_children(pid: u32, group: u16, child: u16) -> Result<Option<Vec<Wi
     ) {
         return Ok(children);
     }
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (layout, memory) = interfaces_reader(pid)?;
     Ok(worker::widget_children(&memory, &layout, group, child))
 }
 
 fn world_reader(pid: u32) -> Result<(Layout, ProcessMemory), String> {
     reader(pid, part::WORLD, "where items, NPCs and players are")
+}
+
+fn interfaces_reader(pid: u32) -> Result<(Layout, ProcessMemory), String> {
+    reader(pid, part::INTERFACES, "the interfaces")
 }
 
 pub fn item_container(pid: u32, id: i32) -> Result<Option<Vec<Item>>, String> {
@@ -2943,7 +2841,6 @@ pub fn item_container(pid: u32, id: i32) -> Result<Option<Vec<Item>>, String> {
     Ok(worker::item_container(&memory, &layout, id))
 }
 
-/// Every item container the client holds, by id. Read from the client's memory directly: it is for the inspector, not for scripts.
 pub fn item_containers(pid: u32) -> Result<Vec<(i32, Vec<Item>)>, String> {
     let (layout, memory) = world_reader(pid)?;
     worker::item_containers(&memory, &layout)
@@ -2976,7 +2873,6 @@ pub fn chat_messages(pid: u32) -> Result<Vec<crate::ChatMessage>, String> {
     messages.ok_or_else(|| format!("Cannot read the chat history of client {pid}"))
 }
 
-// Item names don't change while the client runs, so each found name is looked up once and kept.
 static ITEM_NAMES: LazyLock<Mutex<HashMap<i32, String>>> = LazyLock::new(Default::default);
 
 pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
@@ -2991,7 +2887,7 @@ pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
     let mut ids: Vec<i32> = items.iter().map(|i| i.id).collect();
     ids.sort_unstable();
     ids.dedup();
-    let mut known = ITEM_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut known = lock(&ITEM_NAMES);
     let missing: Vec<i32> = ids
         .iter()
         .copied()
@@ -3000,7 +2896,7 @@ pub fn ground_items(pid: u32) -> Result<Vec<crate::GroundItem>, String> {
     if !missing.is_empty() {
         drop(known);
         let found = item_names(pid, &missing)?;
-        known = ITEM_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        known = lock(&ITEM_NAMES);
         known.extend(
             missing
                 .into_iter()
@@ -3022,25 +2918,13 @@ pub fn npcs(pid: u32) -> Result<Vec<Npc>, String> {
     Ok(worker::npcs(&memory, &layout))
 }
 
-// How long a request may take before the caller reads the memory itself.
 const WORKER_TIMEOUT: Duration = Duration::from_millis(50);
 
 thread_local! {
-    static WORKER_BYTES: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    static WORKER_BYTES: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
-// Holds a request slot (a mutex shared with every injector process on this client) until dropped.
-struct SlotGuard(HANDLE);
-
-impl Drop for SlotGuard {
-    fn drop(&mut self) {
-        unsafe { ReleaseMutex(self.0) };
-    }
-}
-
-// Asks the agent's worker to read inside the client in one request; `None` when it can't answer, and the caller reads the memory itself.
 fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4]) -> Option<T> {
-    // VOLCREN_NO_WORKER forces the injector's own reads, to compare the two paths.
     static NO_WORKER: LazyLock<bool> =
         LazyLock::new(|| std::env::var_os("VOLCREN_NO_WORKER").is_some());
     if *NO_WORKER {
@@ -3050,35 +2934,17 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
     let session = session(pid).ok()?;
     let event = session
         .work
-        .get_or_init(|| {
-            let name = wide(work_event_name(pid));
-            Handle::new(unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) })
-        })
+        .get_or_init(|| open_event(work_event_name(pid), EVENT_MODIFY_STATE))
         .as_ref()?;
     let mutex = session
         .slot
-        .get_or_init(|| {
-            let name = wide(worker_mutex_name(pid));
-            Handle::new(unsafe { CreateMutexW(null(), 0, name.as_ptr()) })
-        })
+        .get_or_init(|| create_mutex(worker_mutex_name(pid)))
         .as_ref()?;
     let reply = session
         .reply
-        .get_or_init(|| {
-            let name = wide(worker_reply_event_name(pid));
-            Handle::new(unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) })
-        })
+        .get_or_init(|| open_event(worker_reply_event_name(pid), SYNCHRONIZATION_SYNCHRONIZE))
         .as_ref()?;
-    let wait = WORKER_TIMEOUT.as_millis() as u32;
-    // An abandoned mutex (its owner died with it) is ours all the same; the slot is rewritten below.
-    if !matches!(
-        unsafe { WaitForSingleObject(mutex.0, wait) },
-        WAIT_OBJECT_0 | WAIT_ABANDONED
-    ) {
-        return None;
-    }
-    let _slot = SlotGuard(mutex.0);
-
+    let _slot = SlotGuard::lock(mutex, WORKER_TIMEOUT)?;
     let shared = session.view.shared();
     let sequence = shared.write_worker_request(&WorkerRequest {
         kind,
@@ -3100,7 +2966,6 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
             if left.is_zero() {
                 return None;
             }
-            // A wake left over from an answer its asker gave up on finds no answer here and waits again.
             unsafe { WaitForSingleObject(reply.0, left.as_millis().max(1) as u32) };
         };
         if status != worker_status::OK {
@@ -3110,43 +2975,36 @@ fn ask_worker<T: serde::de::DeserializeOwned>(pid: u32, kind: u32, args: [i32; 4
     })
 }
 
-// The sizes of the NPCs with `indices`, by index; the ones gone or unreadable are left out.
-pub fn npc_sizes(
+fn by_index<T>(
     pid: u32,
     indices: &[i32],
-) -> Result<std::collections::BTreeMap<i32, i32>, String> {
+    read: impl Fn(&ProcessMemory, &WorldLayout, i32) -> Option<T>,
+) -> Result<BTreeMap<i32, T>, String> {
     let (layout, memory) = world_reader(pid)?;
     Ok(indices
         .iter()
-        .filter_map(|&i| Some((i, world::npc_size(&memory, &layout.world, i)?)))
+        .filter_map(|&i| Some((i, read(&memory, &layout.world, i)?)))
         .collect())
 }
 
-// The hitsplats in use on the NPCs with `indices`, by index, read straight from the client's memory.
+pub fn npc_sizes(pid: u32, indices: &[i32]) -> Result<BTreeMap<i32, i32>, String> {
+    by_index(pid, indices, world::npc_size)
+}
+
 pub fn npc_hitsplats(
     pid: u32,
     indices: &[i32],
-) -> Result<std::collections::BTreeMap<i32, Vec<world::Hitsplat>>, String> {
-    let (layout, memory) = world_reader(pid)?;
-    Ok(indices
-        .iter()
-        .filter_map(|&i| Some((i, world::npc_hitsplats(&memory, &layout.world, i)?)))
-        .collect())
+) -> Result<BTreeMap<i32, Vec<world::Hitsplat>>, String> {
+    by_index(pid, indices, world::npc_hitsplats)
 }
 
-// The hitsplats in use on the players with `indices`, by index.
 pub fn player_hitsplats(
     pid: u32,
     indices: &[i32],
-) -> Result<std::collections::BTreeMap<i32, Vec<world::Hitsplat>>, String> {
-    let (layout, memory) = world_reader(pid)?;
-    Ok(indices
-        .iter()
-        .filter_map(|&i| Some((i, world::player_hitsplats(&memory, &layout.world, i)?)))
-        .collect())
+) -> Result<BTreeMap<i32, Vec<world::Hitsplat>>, String> {
+    by_index(pid, indices, world::player_hitsplats)
 }
 
-// The client cycle (50 a second) that hitsplat, projectile and spot animation cycles count in.
 pub fn client_cycle(pid: u32) -> Result<i32, String> {
     let (layout, memory) = reader(pid, part::PROJECTILES, "the client cycle")?;
     memory
@@ -3154,22 +3012,24 @@ pub fn client_cycle(pid: u32) -> Result<i32, String> {
         .ok_or_else(|| "can't read the client cycle".into())
 }
 
-// Debug: `count` 4-byte words of the client's memory at `address`, to follow pointers found with `npc_words`.
-pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, String> {
-    let (_, memory) = world_reader(pid)?;
+fn read_words(memory: &ProcessMemory, address: u64, count: usize) -> Option<Vec<i32>> {
     let mut bytes = vec![0u8; count * 4];
-    if !memory.read(address, &mut bytes) {
-        return Err(format!("can't read {count} words at {address:#x}"));
-    }
-    Ok(bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| i32::from_le_bytes(*c))
-        .collect())
+    memory.read(address, &mut bytes).then(|| {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c))
+            .collect()
+    })
 }
 
-// Debug: the words of an NPC's actor, to find fields (see `world::npc_words`).
+pub fn memory_words(pid: u32, address: u64, count: usize) -> Result<Vec<i32>, String> {
+    let (_, memory) = world_reader(pid)?;
+    read_words(&memory, address, count)
+        .ok_or_else(|| format!("can't read {count} words at {address:#x}"))
+}
+
 pub fn npc_words(
     pid: u32,
     index: i32,
@@ -3181,7 +3041,6 @@ pub fn npc_words(
         .ok_or_else(|| format!("no NPC {index} in the scene"))
 }
 
-// Debug: the first `count` 4-byte words of a component (or of its dynamic child `index`, when that is not -1), with its address.
 pub fn widget_words(
     pid: u32,
     group: u16,
@@ -3189,7 +3048,7 @@ pub fn widget_words(
     index: i32,
     count: usize,
 ) -> Result<(u64, Vec<i32>), String> {
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
+    let (layout, memory) = interfaces_reader(pid)?;
     let layout = &layout.interfaces;
     let client = memory
         .ptr(layout.module_base + layout.client as u64)
@@ -3206,51 +3065,27 @@ pub fn widget_words(
             .ptr(entries + index as u64 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
             .ok_or_else(|| format!("{group}.{child} has no dynamic child {index}"))?;
     }
-    let mut bytes = vec![0u8; count * 4];
-    if !memory.read(component, &mut bytes) {
-        return Err(format!("can't read the component at {component:#x}"));
-    }
-    Ok((
-        component,
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| i32::from_le_bytes(*c))
-            .collect(),
-    ))
+    let words = read_words(&memory, component, count)
+        .ok_or_else(|| format!("can't read the component at {component:#x}"))?;
+    Ok((component, words))
 }
 
-// Debug: the first `count` words of every component of the open interfaces and of their dynamic children, by component id and index.
 pub fn widget_dump(pid: u32, count: usize) -> Result<Vec<(i32, i32, Vec<i32>)>, String> {
-    let (layout, memory) = reader(pid, part::INTERFACES, "the interfaces")?;
-    let (root, _) =
+    let (layout, memory) = interfaces_reader(pid)?;
+    let root =
         decode::state::root_interface(&memory, &layout, decode::state::current(&memory, &layout))
-            .map(|root| (root, 1.0f32))
             .ok_or("no root interface")?;
-    let mut dump = Vec::new();
-    for (id, index, address) in
+    Ok(
         decode::widgets::component_addresses(&memory, &layout.interfaces, root)
             .ok_or("can't list the components")?
-    {
-        let mut bytes = vec![0u8; count * 4];
-        if memory.read(address, &mut bytes) {
-            dump.push((
-                id,
-                index,
-                bytes
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| i32::from_le_bytes(*c))
-                    .collect(),
-            ));
-        }
-    }
-    Ok(dump)
+            .into_iter()
+            .filter_map(|(id, index, address)| {
+                Some((id, index, read_words(&memory, address, count)?))
+            })
+            .collect(),
+    )
 }
 
-// Debug: watches `bytes` of the client object for `seconds` and reports each 4-byte word that changed, to find fields that only flicker.
 pub fn watch_client(pid: u32, seconds: u64, bytes: usize) -> Result<Vec<String>, String> {
     let (layout, memory) = world_reader(pid)?;
     let client = ipc::read::client(&memory, &layout).ok_or("no client")?;
@@ -3260,14 +3095,14 @@ pub fn watch_client(pid: u32, seconds: u64, bytes: usize) -> Result<Vec<String>,
         return Err("can't read the client object".into());
     }
     let mut now = last.clone();
-    let mut changes: std::collections::BTreeMap<usize, (i32, i32, u32)> = Default::default();
+    let mut changes: BTreeMap<usize, (i32, i32, u32)> = Default::default();
     let word = |b: &[u8], i: usize| i32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-    let end = std::time::Instant::now() + Duration::from_secs(seconds);
-    while std::time::Instant::now() < end {
+    let end = Instant::now() + Duration::from_secs(seconds);
+    while Instant::now() < end {
         if !read(&mut now) {
             continue;
         }
-        for i in (0..bytes).step_by(4) {
+        for i in (0..bytes.saturating_sub(3)).step_by(4) {
             let (old, new) = (word(&last, i), word(&now, i));
             if old != new {
                 let entry = changes.entry(i).or_insert((old, new, 0));
@@ -3275,7 +3110,7 @@ pub fn watch_client(pid: u32, seconds: u64, bytes: usize) -> Result<Vec<String>,
                 entry.2 += 1;
             }
         }
-        std::mem::swap(&mut last, &mut now);
+        mem::swap(&mut last, &mut now);
     }
     Ok(changes
         .into_iter()
@@ -3315,7 +3150,6 @@ pub fn projectiles(pid: u32) -> Result<Vec<crate::Projectile>, String> {
             worker::projectiles(&memory, &layout)
         }
     };
-    // The client's z counts from the heightmap's zero, so the height above the ground is the heightmap's height minus it.
     if projectiles.iter().any(|p| p.moving) {
         with_terrain(pid, |terrain| {
             for p in projectiles.iter_mut().filter(|p| p.moving) {
@@ -3334,26 +3168,90 @@ pub fn spot_anims(pid: u32) -> Result<Vec<crate::SpotAnim>, String> {
     Ok(worker::spot_anims(&memory, &layout))
 }
 
-// Maps the packet log read only for the length of `read`.
-fn with_packet_log<T>(pid: u32, read: impl FnOnce(*const Log) -> T) -> Result<T, String> {
-    let name = wide(packets_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No packet log in client {pid}: the agent isn't loaded, is too old, or didn't find the packet functions"))?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, LOG_SIZE) };
-    if view.Value.is_null() {
-        return Err(format!("Cannot map the packet log of client {pid}"));
-    }
-    let log = view.Value as *const Log;
-    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let value = unsafe { packet_log::is_compatible(log) }.then(|| read(log));
-    unsafe { UnmapViewOfFile(view) };
-    value.ok_or_else(|| format!("The packet log of client {pid} has another layout: restart the client and load a matching agent"))
+const RELOAD: &str = ": restart the client and load a matching agent";
+
+struct LogKind<L> {
+    what: &'static str,
+    finds: &'static str,
+    memory_name: fn(u32) -> String,
+    size: usize,
+    compatible: unsafe fn(*const L) -> bool,
 }
 
-/// The packets the client logged from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
+const PACKET_LOG: LogKind<Log> = LogKind {
+    what: "packet",
+    finds: "the packet functions",
+    memory_name: packets_memory_name,
+    size: LOG_SIZE,
+    compatible: packet_log::is_compatible,
+};
+
+const SCRIPT_LOG: LogKind<script_log::Log> = LogKind {
+    what: "script",
+    finds: "the script runner",
+    memory_name: script_runs_memory_name,
+    size: script_log::LOG_SIZE,
+    compatible: script_log::is_compatible,
+};
+
+const VARC_LOG: LogKind<varc_log::Log> = LogKind {
+    what: "varc",
+    finds: "the varc setters",
+    memory_name: varc_log_memory_name,
+    size: varc_log::LOG_SIZE,
+    compatible: varc_log::is_compatible,
+};
+
+const ITEM_LOG: LogKind<item_log::Log> = LogKind {
+    what: "item",
+    finds: "the item container writes",
+    memory_name: item_log_memory_name,
+    size: item_log::LOG_SIZE,
+    compatible: item_log::is_compatible,
+};
+
+impl<L> LogKind<L> {
+    fn open(&self, pid: u32, access: FILE_MAP, unmapped_hint: &str) -> Result<View, String> {
+        let what = self.what;
+        let mapping = open_mapping((self.memory_name)(pid), access).ok_or_else(|| {
+            format!(
+                "No {what} log in client {pid}: the agent isn't loaded, is too old, or didn't find {}",
+                self.finds
+            )
+        })?;
+        let view = View::new(mapping, access, self.size)
+            .map_err(|_| format!("Cannot map the {what} log of client {pid}{unmapped_hint}"))?;
+        if !unsafe { (self.compatible)(view.ptr::<L>().as_ptr()) } {
+            return Err(format!(
+                "The {what} log of client {pid} has another layout{RELOAD}"
+            ));
+        }
+        Ok(view)
+    }
+
+    fn read<T>(&self, pid: u32, read: impl FnOnce(*const L) -> T) -> Result<T, String> {
+        let view = self.open(pid, FILE_MAP_READ, "")?;
+        Ok(read(view.ptr::<L>().as_ptr()))
+    }
+}
+
+fn claim_slot(
+    subscribe: impl FnOnce(&mut dyn FnMut(u32) -> bool) -> Option<u32>,
+    event_name: impl Fn(u32) -> String,
+) -> Option<(u32, Handle)> {
+    let mut event = None;
+    let slot = subscribe(&mut |slot| match new_event(event_name(slot)) {
+        Some(handle) => {
+            event = Some(handle);
+            true
+        }
+        None => false,
+    });
+    slot.zip(event)
+}
+
 pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, String> {
-    // SAFETY: `with_packet_log` hands over a mapped, compatible log.
-    let page = with_packet_log(pid, |log| unsafe {
+    let page = PACKET_LOG.read(pid, |log| unsafe {
         packet_log::read_since(log, since, limit)
     })?;
     Ok(crate::PacketPage {
@@ -3374,10 +3272,8 @@ pub fn packets(pid: u32, since: u64, limit: usize) -> Result<crate::PacketPage, 
     })
 }
 
-/// The size and layout of every server packet as the agent read them from the client's code; `None` until the agent has published them (it didn't find the rule, or is an older one).
 pub fn packet_layouts(pid: u32) -> Result<Option<Vec<crate::PacketLayout>>, String> {
-    // SAFETY: as in `packets`.
-    let layouts = with_packet_log(pid, |log| unsafe { packet_log::read_layouts(log) })?;
+    let layouts = PACKET_LOG.read(pid, |log| unsafe { packet_log::read_layouts(log) })?;
     Ok(layouts.map(|layouts| {
         layouts
             .into_iter()
@@ -3392,10 +3288,8 @@ pub fn packet_layouts(pid: u32) -> Result<Option<Vec<crate::PacketLayout>>, Stri
     }))
 }
 
-/// The local player's server tile and whether it changed this tick, as the agent's receive hook last saw it; `None` when not logged in or before the hook saw the player.
 pub fn movement(pid: u32) -> Result<Option<crate::Movement>, String> {
-    // SAFETY: as in `packets`.
-    let Some(seen) = with_packet_log(pid, |log| unsafe { packet_log::movement(log) })? else {
+    let Some(seen) = PACKET_LOG.read(pid, |log| unsafe { packet_log::movement(log) })? else {
         return Ok(None);
     };
     let (layout, memory) = reader(
@@ -3403,7 +3297,6 @@ pub fn movement(pid: u32) -> Result<Option<crate::Movement>, String> {
         part::PLAYER | part::PATH | part::TICK_COUNT,
         "the player's path and the tick counter",
     )?;
-    // the hook keeps the last tile it saw after a logout
     if state::server_tile(&memory, &layout).is_none() {
         return Ok(None);
     }
@@ -3424,65 +3317,27 @@ pub fn movement(pid: u32) -> Result<Option<crate::Movement>, String> {
     }))
 }
 
-/// A reader of the packet log that waits on the agent's wake event for the packets in its filter; it claims a subscriber slot and gives it back on drop.
 pub struct PacketWatcher {
-    mapping: Handle,
-    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    view: View,
     event: Handle,
     slot: u32,
     filter: packet_log::Filter,
     next: u64,
 }
 
-// SAFETY: the view is a shared mapping used only through atomics and volatile accesses, and the handles may cross threads.
 unsafe impl Send for PacketWatcher {}
 
 impl PacketWatcher {
-    /// Starts with an empty filter: nothing wakes it until `set_filter`.
     pub fn new(pid: u32) -> Result<Self, String> {
-        let name = wide(packets_memory_name(pid));
-        let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) })
-            .ok_or_else(|| format!("No packet log in client {pid}: the agent isn't loaded, is too old, or didn't find the packet functions"))?;
-        let view =
-            unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, LOG_SIZE) };
-        if view.Value.is_null() {
-            return Err(format!(
-                "Cannot map the packet log of client {pid}: restart the client and load a matching agent"
-            ));
-        }
-        let log = view.Value as *const Log;
-        // SAFETY: the mapping is LOG_SIZE bytes, writable, and stays mapped until the watcher is dropped.
-        if !unsafe { packet_log::is_compatible(log) } {
-            unsafe { UnmapViewOfFile(view) };
-            return Err(format!(
-                "The packet log of client {pid} has another layout: restart the client and load a matching agent"
-            ));
-        }
-        // as in `ItemWatcher::new`: a slot is ours once its event is new and the mask bit is ours
-        let mut event = None;
-        let slot = unsafe {
-            packet_log::subscribe(log, |slot| {
-                let name = wide(packet_log::packet_wake_event_name(pid, slot));
-                let handle = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
-                let taken = GetLastError() == ERROR_ALREADY_EXISTS;
-                match Handle::new(handle) {
-                    Some(handle) if !taken => {
-                        event = Some(handle);
-                        true
-                    }
-                    _ => false,
-                }
-            })
-        };
-        let (Some(slot), Some(event)) = (slot, event) else {
-            unsafe { UnmapViewOfFile(view) };
-            return Err(format!(
-                "Too many readers are waiting for packets in client {pid}"
-            ));
-        };
+        let view = PACKET_LOG.open(pid, FILE_MAP_READ | FILE_MAP_WRITE, RELOAD)?;
+        let log = view.ptr::<Log>().as_ptr();
+        let (slot, event) = claim_slot(
+            |create| unsafe { packet_log::subscribe(log, create) },
+            |slot| packet_log::packet_wake_event_name(pid, slot),
+        )
+        .ok_or_else(|| format!("Too many readers are waiting for packets in client {pid}"))?;
         let next = unsafe { packet_log::written(log) };
         Ok(Self {
-            mapping,
             view,
             event,
             slot,
@@ -3492,31 +3347,23 @@ impl PacketWatcher {
     }
 
     fn log(&self) -> *const Log {
-        self.view.Value as *const Log
+        self.view.ptr::<Log>().as_ptr()
     }
 
-    /// Replaces the packets that wake the watcher and that `read` returns.
     pub fn set_filter(&mut self, filter: packet_log::Filter) {
         self.filter = filter;
-        // SAFETY: the view stays mapped while `self` lives and the slot is ours.
         unsafe { packet_log::set_filter(self.log(), self.slot, &filter) };
     }
 
-    /// The sequence number the next logged packet gets.
     pub fn written(&self) -> u64 {
-        // SAFETY: the view stays mapped while `self` lives.
         unsafe { packet_log::written(self.log()) }
     }
 
-    /// Whether packets were logged since the last read (not all of them need be in the filter).
     fn pending(&self) -> bool {
-        // SAFETY: the view stays mapped while `self` lives.
         unsafe { packet_log::written(self.log()) > self.next }
     }
 
-    /// The packets in the filter logged since the last read, from the next `limit` entries of the log.
     pub fn read(&mut self, limit: usize) -> packet_log::Page {
-        // SAFETY: as in `pending`, and the log was checked compatible when the watcher was made.
         let mut page = unsafe { packet_log::read_since(self.log(), self.next, limit) };
         self.next = page.next;
         page.entries
@@ -3527,16 +3374,10 @@ impl PacketWatcher {
 
 impl Drop for PacketWatcher {
     fn drop(&mut self) {
-        // SAFETY: the view is still mapped; the event handle closes after the slot is given back (when `event` drops).
-        unsafe {
-            packet_log::unsubscribe(self.log(), self.slot);
-            UnmapViewOfFile(self.view);
-        }
-        let _ = &self.mapping;
+        unsafe { packet_log::unsubscribe(self.log(), self.slot) };
     }
 }
 
-/// Waits up to `timeout` for either watcher's agent to log something for it; true when one did (or something is already waiting to be read).
 pub fn wait_watchers(
     items: Option<&ItemWatcher>,
     packets: Option<&PacketWatcher>,
@@ -3556,8 +3397,9 @@ pub fn wait_watchers(
         sleep(timeout);
         return false;
     }
-    let ms = timeout.as_millis().min(u32::MAX as u128 - 1) as u32;
-    let woke = unsafe { WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, ms) };
+    let woke = unsafe {
+        WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, wait_ms(timeout))
+    };
     woke < WAIT_OBJECT_0 + events.len() as u32
 }
 
@@ -3574,10 +3416,7 @@ fn read_layout(pid: u32, session: &Session) -> Result<Layout, String> {
         Ok(layout) => Ok(layout),
         Err(ReadError::Incompatible(protocol)) => {
             forget(pid);
-            Err(format!(
-                "Client {pid} runs agent protocol {protocol}, this is {}: restart the client and load a matching agent",
-                ipc::PROTOCOL_VERSION
-            ))
+            Err(protocol_mismatch(pid, protocol))
         }
         Err(ReadError::Busy) => Err(format!(
             "The game state layout of client {pid} kept changing while reading it"
@@ -3585,9 +3424,37 @@ fn read_layout(pid: u32, session: &Session) -> Result<Layout, String> {
     }
 }
 
+fn protocol_mismatch(pid: u32, protocol: impl fmt::Display) -> String {
+    format!(
+        "Client {pid} runs agent protocol {protocol}, this is {}{RELOAD}",
+        ipc::PROTOCOL_VERSION
+    )
+}
+
+fn no_shared_memory(pid: u32) -> String {
+    format!("No agent shared memory in client {pid}")
+}
+
+fn current_connection(pid: u32) -> Result<Connection, String> {
+    let connection = connection(pid).ok_or_else(|| no_shared_memory(pid))?;
+    if connection.protocol != ipc::PROTOCOL_VERSION {
+        return Err(protocol_mismatch(pid, connection.protocol));
+    }
+    Ok(connection)
+}
+
+fn shared_view(
+    pid: u32,
+    size: usize,
+    unmapped: impl FnOnce(io::Error) -> String,
+) -> Result<View, String> {
+    let mapping = open_mapping(shared_memory_name(pid), FILE_MAP_WRITE)
+        .ok_or_else(|| no_shared_memory(pid))?;
+    View::new(mapping, FILE_MAP_WRITE, size).map_err(unmapped)
+}
+
 pub fn screenshot(pid: u32, path: &Path) -> Result<(i32, i32), String> {
-    let connection =
-        connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
+    let connection = connection(pid).ok_or_else(|| no_shared_memory(pid))?;
     if connection.protocol != ipc::PROTOCOL_VERSION {
         return Err(format!(
             "Client {pid} runs agent protocol {}, this is {}: reload agent",
@@ -3601,28 +3468,21 @@ pub fn screenshot(pid: u32, path: &Path) -> Result<(i32, i32), String> {
         return Err(format!("Client {pid} hasn't captured a frame yet"));
     }
 
-    let name = wide(shared_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_WRITE, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_WRITE, 0, 0, HEADER_SIZE + size) };
-    if view.Value.is_null() {
-        return Err(format!("Cannot map the shared memory of client {pid}"));
-    }
-    let base = view.Value as *mut u8;
-    // The agent captures frames only while a reader asks; turn capture on long enough to get a few frames past the PBO's lag.
-    let capture = unsafe { base.add(core::mem::offset_of!(Header, capture_enabled)) };
+    let view = shared_view(pid, HEADER_SIZE + size, |_| {
+        format!("Cannot map the shared memory of client {pid}")
+    })?;
+    let base = view.ptr::<u8>().as_ptr();
+    let capture = unsafe { base.add(mem::offset_of!(Header, capture_enabled)) };
     let was_capturing = unsafe { *capture } != 0;
     if !was_capturing {
         unsafe { capture.write_volatile(1) };
         sleep(Duration::from_millis(200));
     }
     let pixels = unsafe { std::slice::from_raw_parts(base.add(HEADER_SIZE), size) }.to_vec();
-    unsafe {
-        if !was_capturing {
-            capture.write_volatile(0);
-        }
-        UnmapViewOfFile(view);
+    if !was_capturing {
+        unsafe { capture.write_volatile(0) };
     }
+    drop(view);
 
     let mut bmp = Vec::with_capacity(54 + size);
     bmp.extend_from_slice(b"BM");
@@ -3641,31 +3501,18 @@ pub fn screenshot(pid: u32, path: &Path) -> Result<(i32, i32), String> {
 }
 
 pub fn set_cursor(pid: u32, cursor: &crate::Cursor) -> Result<(), String> {
-    let connection =
-        connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
-    if connection.protocol != ipc::PROTOCOL_VERSION {
-        return Err(format!(
-            "Client {pid} runs agent protocol {}, this is {}: restart the client and load a matching agent",
-            connection.protocol,
-            ipc::PROTOCOL_VERSION
-        ));
-    }
-    let name = wide(shared_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_WRITE, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_WRITE, 0, 0, HEADER_SIZE) };
-    if view.Value.is_null() {
-        return Err(format!("Cannot map the shared memory of client {pid}"));
-    }
-    let base = view.Value as *mut u8;
+    current_connection(pid)?;
+    let view = shared_view(pid, HEADER_SIZE, |_| {
+        format!("Cannot map the shared memory of client {pid}")
+    })?;
+    let base = view.ptr::<u8>().as_ptr();
     unsafe {
-        base.add(core::mem::offset_of!(Header, cursor_color))
+        base.add(mem::offset_of!(Header, cursor_color))
             .copy_from_nonoverlapping(cursor.color.as_ptr(), 3);
-        base.add(core::mem::offset_of!(Header, cursor_size))
+        base.add(mem::offset_of!(Header, cursor_size))
             .write_volatile(cursor.size);
-        base.add(core::mem::offset_of!(Header, cursor_style))
+        base.add(mem::offset_of!(Header, cursor_style))
             .write_volatile(cursor.style.value());
-        UnmapViewOfFile(view);
     }
     Ok(())
 }
@@ -3674,7 +3521,6 @@ pub fn draw(pid: u32, overlay: &Overlay) -> Result<(), String> {
     draw_batch(pid, std::slice::from_ref(overlay))
 }
 
-// Paints every shape in order as one overlay update the agent never sees half drawn; an empty batch changes nothing.
 pub fn draw_batch(pid: u32, overlays: &[Overlay]) -> Result<(), String> {
     let Some(last) = overlays.last() else {
         return Ok(());
@@ -3716,7 +3562,6 @@ pub fn draw_batch(pid: u32, overlays: &[Overlay]) -> Result<(), String> {
     )
 }
 
-/// Paints through `put(x, y, color)` onto the overlay, over what is drawn on it already, as one update.
 pub(crate) fn paint_overlay(
     pid: u32,
     paint: impl FnOnce(&mut dyn FnMut(i32, i32, Rgba)),
@@ -3746,7 +3591,6 @@ pub fn draw_lines(pid: u32, lines: &[[i32; 4]], color: Rgba) -> Result<(), Strin
     )
 }
 
-// Scene tiles: devtools overlays on the ground. `scene_tiles` clears the overlay, then draws the layers named as the loader's checkboxes.
 const TILE_SIZE: i32 = 128;
 const TILE_HALF: i32 = TILE_SIZE / 2;
 const TILE_CORNERS: [[i32; 2]; 4] = [
@@ -3756,21 +3600,15 @@ const TILE_CORNERS: [[i32; 2]; 4] = [
     [-TILE_HALF, TILE_HALF],
 ];
 const SCENE_TILES: i32 = 104;
-// RuneLite's `Constants.CHUNK_SIZE` and the map square size.
 const CHUNK_TILES: i32 = 8;
 const MAP_SQUARE_TILES: i32 = 64;
-// How far from the player the map square lines, line of sight and hover reach; the hover covers the view, about 16 tiles each side.
 const MAP_SQUARE_RANGE: i32 = 16;
 const LOS_RANGE: i32 = 10;
 const HOVER_RANGE: i32 = 16;
-// The loading lines sit this many tiles in from the scene's edge.
 const LOADING_INSET: i32 = 16;
-// The grid (the Grid layer): every tile within `GRID_RADIUS` of the player.
 const GRID_RADIUS: i32 = 32;
 
-// How thick the outlines and lines of the scene layers are, in pixels.
 const STROKE_WIDTH: i32 = 2;
-// Corners further out than this are behind the camera or otherwise meaningless, so they're not drawn.
 const SCREEN_LIMIT: f32 = 100_000.0;
 const LABEL_SHADOW: Rgba = Rgba {
     r: 0,
@@ -3784,12 +3622,9 @@ const TEXT_COLOR: Rgba = Rgba {
     b: 255,
     a: 255,
 };
-// The p12 glyphs are drawn at twice their size.
 const LABEL_SCALE: i32 = 2;
-// Used for an actor whose model height can't be read; labels sit this far above, like the client's NPC overlay.
 const NPC_LABEL_DEFAULT_HEIGHT: i32 = 200;
 const NPC_LABEL_OFFSET: i32 = 40;
-// Text panels start this far in from the canvas's top left.
 const TEXT_LEFT: i32 = 8;
 const TEXT_TOP: i32 = 8;
 const LAYERS: [&str; 22] = [
@@ -3817,7 +3652,6 @@ const LAYERS: [&str; 22] = [
     "tile-location",
 ];
 
-// RuneLite's devtools colours.
 const PLAYER_TILE_COLOR: Rgba = Rgba {
     r: 41,
     g: 98,
@@ -3836,7 +3670,6 @@ const NPC_TILE_COLOR: Rgba = Rgba {
     b: 0,
     a: 255,
 };
-// RuneLite draws world entities in blue.
 const WORLD_ENTITY_COLOR: Rgba = Rgba {
     r: 0,
     g: 0,
@@ -3849,7 +3682,6 @@ const INTERACTING_COLOR: Rgba = Rgba {
     b: 255,
     a: 255,
 };
-// The interacting arrows are drawn this many pixels below the actors' middles, and their heads at twice RuneLite's size.
 const INTERACTING_SHIFT: f32 = 16.0;
 const ARROW_SCALE: f32 = 2.0;
 const OBJECT_TILE_COLOR: Rgba = Rgba {
@@ -3894,7 +3726,6 @@ const CHUNK_COLOR: Rgba = Rgba {
     b: 255,
     a: 255,
 };
-// RuneLite labels projectiles in red; the line to where each one lands is a dimmer red.
 const PROJECTILE_COLOR: Rgba = Rgba {
     r: 255,
     g: 0,
@@ -3907,7 +3738,6 @@ const PROJECTILE_PATH_COLOR: Rgba = Rgba {
     b: 0,
     a: 140,
 };
-// RuneLite outlines spot animations' tiles in magenta and labels them in white.
 const SPOT_ANIM_COLOR: Rgba = Rgba {
     r: 255,
     g: 0,
@@ -3945,11 +3775,10 @@ const GRID_COLOR: Rgba = Rgba {
     a: 90,
 };
 
-// The label font is decoded once and kept, since it doesn't change while the cache revision does not.
 static LABEL_FONT: Mutex<Option<Arc<crate::font::Font>>> = Mutex::new(None);
 
 fn label_font(pid: u32) -> Result<Arc<crate::font::Font>, String> {
-    let mut cached = LABEL_FONT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cached = lock(&LABEL_FONT);
     if let Some(font) = cached.as_ref() {
         return Ok(font.clone());
     }
@@ -3967,7 +3796,6 @@ fn label_font(pid: u32) -> Result<Arc<crate::font::Font>, String> {
     Ok(font)
 }
 
-// What one `scene_tiles` call draws: points are projected together, layers refer to them by index.
 #[derive(Default)]
 struct Plan {
     points: Vec<projection::Point>,
@@ -3978,7 +3806,6 @@ struct Plan {
     rects: Vec<Rect>,
 }
 
-// A box at canvas coordinates.
 struct Rect {
     x: i32,
     y: i32,
@@ -3987,7 +3814,6 @@ struct Rect {
     color: Rgba,
 }
 
-/// A layer that boxes a canvas area, `widget:x,y,width,height,rrggbb`: the area and the colour.
 fn widget_layer(layer: &str) -> Option<(i32, i32, i32, i32, Rgba)> {
     let mut parts = layer.strip_prefix("widget:")?.split(',');
     let mut number = || parts.next()?.parse::<i32>().ok();
@@ -4008,7 +3834,6 @@ fn widget_layer(layer: &str) -> Option<(i32, i32, i32, i32, Rgba)> {
     ))
 }
 
-// A line through the points, or around them when `closed`; a `marker` outline counts towards the `scene_tiles` result.
 struct Stroke {
     points: Vec<usize>,
     color: Rgba,
@@ -4016,21 +3841,18 @@ struct Stroke {
     marker: bool,
 }
 
-// A line from one point to another with a head at the second.
 struct Arrow {
     from: usize,
     to: usize,
     color: Rgba,
 }
 
-// A label drawn centred above its anchor point.
 struct Label {
     anchor: usize,
     text: String,
     color: Rgba,
 }
 
-// A line of text at a canvas position.
 struct Text {
     x: i32,
     y: i32,
@@ -4072,14 +3894,12 @@ impl Plan {
         self.texts.push(Text { x, y, text, color });
     }
 
-    // A tile's outline, with its label above the tile.
     fn tile(&mut self, tile: [i32; 2], label: String, color: Rgba) {
         self.path(&tile_corners(tile), color, true, true);
         self.label(tile_centre(tile), label, color);
     }
 }
 
-// The corners of a `size_x` by `size_y` footprint from tile `(tx, ty)` in scene coordinates; far corners lie on the tiles beyond, so they name it.
 fn footprint(tx: i32, ty: i32, size_x: i32, size_y: i32) -> [projection::Point; 4] {
     let (x, y, w, h) = (
         tx * TILE_SIZE,
@@ -4103,12 +3923,10 @@ fn tile_corners([tx, ty]: [i32; 2]) -> [projection::Point; 4] {
     footprint(tx, ty, 1, 1)
 }
 
-// The ground at the middle of a tile, where its labels go.
 fn tile_centre([tx, ty]: [i32; 2]) -> projection::Point {
     projection::Point::new(tx * TILE_SIZE + TILE_HALF, ty * TILE_SIZE + TILE_HALF, 0)
 }
 
-// A point on the scene's grid lines, which names no tile: the ground is the tile beyond it, as the client draws it.
 fn boundary(tx: i32, ty: i32) -> projection::Point {
     projection::Point {
         heightmap: true,
@@ -4120,25 +3938,27 @@ fn in_scene([tx, ty]: [i32; 2]) -> bool {
     (0..SCENE_TILES).contains(&tx) && (0..SCENE_TILES).contains(&ty)
 }
 
-// The world coordinates of the scene's tile (0, 0), from the player's position.
-fn scene_origin(position: &Position) -> (i32, i32) {
-    (
-        position.x - (position.local_x >> 7),
-        position.y - (position.local_y >> 7),
-    )
+fn scene_tile(position: &Position) -> [i32; 2] {
+    [position.local_x >> 7, position.local_y >> 7]
 }
 
-// An actor's outline on its tile with its label above the model; `height` is -1 when unknown.
-fn actor_marker(plan: &mut Plan, local: (i32, i32), height: i32, label: String, color: Rgba) {
-    let (local_x, local_y) = local;
-    let height = if height > 0 {
+fn scene_origin(position: &Position) -> (i32, i32) {
+    let [tx, ty] = scene_tile(position);
+    (position.x - tx, position.y - ty)
+}
+
+fn label_height(height: i32) -> i32 {
+    if height > 0 {
         height
     } else {
         NPC_LABEL_DEFAULT_HEIGHT
-    };
+    }
+}
+
+fn actor_marker(plan: &mut Plan, local: (i32, i32), height: i32, label: String, color: Rgba) {
+    let (local_x, local_y) = local;
     let tile = Some([local_x >> 7, local_y >> 7]);
-    // Heights point down in projection coordinates, so lifting a point is a negative offset.
-    let lift = height + NPC_LABEL_OFFSET;
+    let lift = label_height(height) + NPC_LABEL_OFFSET;
     let corners = TILE_CORNERS.map(|[dx, dy]| projection::Point {
         tile,
         ..projection::Point::new(local_x + dx, local_y + dy, 0)
@@ -4162,7 +3982,6 @@ fn npc_label(npc: &Npc) -> String {
     )
 }
 
-// Like RuneLite's projectile overlay, plus the cycles left until it lands (or until it leaves, while it waits).
 fn projectile_label(p: &crate::Projectile) -> String {
     if p.moving {
         format!("(ID: {}) ({})", p.id, p.end_cycle - p.cycle)
@@ -4171,7 +3990,6 @@ fn projectile_label(p: &crate::Projectile) -> String {
     }
 }
 
-// Like RuneLite's player overlay: the name, then the animation, pose and graphic.
 fn player_label(player: &Player) -> String {
     format!(
         "{} (A: {}) (P: {}) (G: {})",
@@ -4179,7 +3997,6 @@ fn player_label(player: &Player) -> String {
     )
 }
 
-// A game object's footprint, and its label at the ground (RuneLite draws game objects at zOffset 0).
 fn loc_marker(plan: &mut Plan, loc: &ipc::state::LocInfo, color: Rgba) {
     let (tx, ty) = (loc.x as i32, loc.y as i32);
     let (sx, sy) = (loc.size_x.max(1) as i32, loc.size_y.max(1) as i32);
@@ -4192,7 +4009,6 @@ fn loc_marker(plan: &mut Plan, loc: &ipc::state::LocInfo, color: Rgba) {
     plan.label(centre, format!("ID: {}", loc.id), color);
 }
 
-// The grid (the Grid layer): every tile within `GRID_RADIUS` of the centre, in the scene.
 fn grid_tiles([cx, cy]: [i32; 2]) -> Vec<[i32; 2]> {
     let mut tiles = Vec::new();
     for tx in (cx - GRID_RADIUS).max(0)..=(cx + GRID_RADIUS).min(SCENE_TILES - 1) {
@@ -4203,7 +4019,6 @@ fn grid_tiles([cx, cy]: [i32; 2]) -> Vec<[i32; 2]> {
     tiles
 }
 
-// Whether a point lies inside a convex quadrilateral (its corners in order).
 fn inside(corners: &[[f32; 2]], [px, py]: [f32; 2]) -> bool {
     let (mut positive, mut negative) = (false, false);
     for i in 0..corners.len() {
@@ -4215,7 +4030,6 @@ fn inside(corners: &[[f32; 2]], [px, py]: [f32; 2]) -> bool {
     !(positive && negative)
 }
 
-// The client window of a client process: its `JagWindow`.
 fn client_window(pid: u32) -> Option<HWND> {
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let (pid, found) = unsafe { &mut *(lparam as *mut (u32, Option<HWND>)) };
@@ -4236,7 +4050,6 @@ fn client_window(pid: u32) -> Option<HWND> {
     search.1
 }
 
-// The real mouse position on the client's canvas, not the cursor the injector moves for input.
 fn cursor_canvas(pid: u32) -> Option<[f32; 2]> {
     let hwnd = client_window(pid)?;
     let mut cursor = POINT { x: 0, y: 0 };
@@ -4249,7 +4062,6 @@ fn cursor_canvas(pid: u32) -> Option<[f32; 2]> {
     Some([(cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32])
 }
 
-// The scene tile under the mouse and its position, among tiles within `HOVER_RANGE` of the player.
 type HoveredTile = ([i32; 2], [f32; 2]);
 
 fn hovered_tile(pid: u32, centre: [i32; 2]) -> Result<Option<HoveredTile>, String> {
@@ -4274,49 +4086,36 @@ fn hovered_tile(pid: u32, centre: [i32; 2]) -> Result<Option<HoveredTile>, Strin
         .map(|(&tile, _)| (tile, cursor)))
 }
 
-// Runs `read` on the scene's terrain (its tile settings), reusing the terrain that projection keeps.
 fn with_terrain<T>(pid: u32, read: impl FnOnce(&Terrain) -> T) -> Result<T, String> {
     let (layout, memory) = reader(pid, 0, "")?;
-    let mut cache = TERRAIN.lock().unwrap_or_else(|e| e.into_inner());
-    let mut terrain = cache
-        .take()
-        .filter(|(p, _)| *p == pid)
-        .map(|(_, terrain)| terrain);
-    let result = projection::ensure_terrain(&memory, &layout, &mut terrain, || decorations(pid));
-    let value = match (result, terrain.as_ref()) {
-        (Ok(_), Some(terrain)) => Ok(read(terrain)),
-        (Ok(_), None) => Err("the scene's terrain isn't known".into()),
-        (Err(Failure::Unavailable(why)), _) => Err(why),
-    };
-    *cache = terrain.map(|terrain| (pid, terrain));
-    value
+    kept_terrain(pid, |terrain| {
+        match (
+            projection::ensure_terrain(&memory, &layout, terrain, || decorations(pid)),
+            terrain.as_ref(),
+        ) {
+            (Ok(()), Some(terrain)) => Ok(read(terrain)),
+            (Ok(()), None) => Err("the scene's terrain isn't known".into()),
+            (Err(why), _) => Err(why),
+        }
+    })
 }
 
-// How long `scene_tiles_next_frame` waits for a frame, so a caller looping on it can check whether to stop.
 const FRAME_WAIT: Duration = Duration::from_millis(100);
-// The longest single wait on the frame event: also notices a frame whose event another waiter took.
 const FRAME_SLICE: Duration = Duration::from_millis(20);
 
 fn frame_serial(pid: u32) -> Result<u32, String> {
     match read_header(pid) {
         Some(Ok(header)) => Ok(header.frame_serial),
-        Some(Err(Incompatible { protocol, .. })) => Err(format!(
-            "Client {pid} runs agent protocol {protocol}, this is {}: restart the client and load a matching agent",
-            ipc::PROTOCOL_VERSION
-        )),
-        None => Err(format!("No agent shared memory in client {pid}")),
+        Some(Err(Incompatible { protocol, .. })) => Err(protocol_mismatch(pid, protocol)),
+        None => Err(no_shared_memory(pid)),
     }
 }
 
-// Waits up to `timeout` for client `pid` to present a frame other than `after` (a `Header::frame_serial`); `None` if none came.
 fn next_frame(pid: u32, after: u32, timeout: Duration) -> Result<Option<u32>, String> {
     let session = session(pid)?;
     let event = session
         .frame
-        .get_or_init(|| {
-            let name = wide(frame_event_name(pid));
-            Handle::new(unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) })
-        })
+        .get_or_init(|| open_event(frame_event_name(pid), SYNCHRONIZATION_SYNCHRONIZE))
         .as_ref();
     let deadline = Instant::now() + timeout;
     loop {
@@ -4339,7 +4138,6 @@ fn next_frame(pid: u32, after: u32, timeout: Duration) -> Result<Option<u32>, St
     }
 }
 
-/// Draws `layers` once client `pid` has presented a frame after `after`; returns that frame, or `None` if none came within `FRAME_WAIT`.
 pub fn scene_tiles_next_frame(
     pid: u32,
     layers: &[&str],
@@ -4352,7 +4150,6 @@ pub fn scene_tiles_next_frame(
     Ok(Some(frame))
 }
 
-// Draws the layers named in `layers` (see `LAYERS`); returns how many tile outlines were drawn in full on the canvas.
 pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     if let Some(unknown) = layers
         .iter()
@@ -4377,7 +4174,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     let mut plan = Plan::default();
 
-    // boxes on the canvas, such as the widget inspector's selection
     for (x, y, width, height, color) in layers.iter().filter_map(|layer| widget_layer(layer)) {
         plan.rects.push(Rect {
             x,
@@ -4390,26 +4186,24 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("grid") {
         let here = here()?;
-        for tile in grid_tiles([here.local_x >> 7, here.local_y >> 7]) {
+        for tile in grid_tiles(scene_tile(&here)) {
             plan.path(&tile_corners(tile), GRID_COLOR, true, false);
         }
     }
 
     if on("npcs") {
         for npc in npcs(pid)? {
-            let color = NPC_TILE_COLOR;
             actor_marker(
                 &mut plan,
                 (npc.local_x, npc.local_y),
                 npc.height,
                 npc_label(&npc),
-                color,
+                NPC_TILE_COLOR,
             );
         }
     }
 
     if on("players") {
-        // The local player is the one standing where the game state says the player is.
         let me = state.position.map(|p| (p.local_x, p.local_y));
         for player in players(pid)? {
             let local = (player.local_x, player.local_y);
@@ -4429,7 +4223,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     }
 
     if on("world-entities") {
-        // Each moving sub-scene (a boat), labelled where it is in the top-level scene.
         for entity in world_entities(pid)? {
             let label = format!("ID: {} Type: {}", entity.view_id, entity.config_id);
             plan.label(
@@ -4441,18 +4234,9 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     }
 
     if on("interacting") {
-        // An arrow from each actor to the one it interacts with, from middle to middle.
         let (npcs, players) = (npcs(pid)?, players(pid)?);
         let middle = |local_x, local_y, height: i32| {
-            projection::Point::new(
-                local_x,
-                local_y,
-                -(if height > 0 {
-                    height
-                } else {
-                    NPC_LABEL_DEFAULT_HEIGHT
-                }) / 2,
-            )
+            projection::Point::new(local_x, local_y, -label_height(height) / 2)
         };
         let npc_at = |index: i32| {
             npcs.iter()
@@ -4490,7 +4274,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
         let projectiles = projectiles(pid)?;
-        // a projectile at an actor follows it, so its line ends where the actor stands now
         let npcs = if projectiles.iter().any(|p| p.target_npc >= 0) {
             npcs(pid)?
         } else {
@@ -4530,7 +4313,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("spot-anims") {
         let here = here()?;
-        // the points are projected in the main world, so the effects inside a boat (their own coordinates) are left out
         for object in spot_anims(pid)?
             .iter()
             .filter(|object| object.view_id == 0 && Some(object.plane) == here.plane)
@@ -4600,7 +4382,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     }
 
     if on("zone-borders") {
-        // The chunk grid across the whole scene, as RuneLite's zone borders.
         let lines: Vec<i32> = (CHUNK_TILES..=SCENE_TILES - CHUNK_TILES)
             .step_by(CHUNK_TILES as usize)
             .collect();
@@ -4618,7 +4399,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
         let (near_x, near_y) = (here.x, here.y);
-        // The map square edges within reach of the player, as RuneLite's map squares.
         for x in (near_x - MAP_SQUARE_RANGE..=near_x + MAP_SQUARE_RANGE)
             .filter(|x| x.rem_euclid(MAP_SQUARE_TILES) == 0)
         {
@@ -4651,14 +4431,8 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     if on("line-of-sight") {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
-        let (x1, y1, _, flags) = scene_collision(pid)?;
-        let flag_at = |x: i32, y: i32| {
-            flags
-                .get((x - x1) as usize)
-                .and_then(|column| column.get((y - y1) as usize))
-                .copied()
-                .unwrap_or(0)
-        };
+        let collision = scene_collision(pid)?;
+        let flag_at = |x: i32, y: i32| collision_at(&collision, x, y);
         let from = (here.x, here.y);
         for x in here.x - LOS_RANGE..=here.x + LOS_RANGE {
             for y in here.y - LOS_RANGE..=here.y + LOS_RANGE {
@@ -4692,7 +4466,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         }
     }
 
-    // The text panels at the top left, one under another.
     let mut panel_y = TEXT_TOP;
     let mut panel = |plan: &mut Plan, lines: Vec<String>| {
         for line in lines {
@@ -4702,12 +4475,13 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     };
     if on("location") {
         let here = here()?;
+        let [scene_x, scene_y] = scene_tile(&here);
         panel(
             &mut plan,
             vec![
                 format!("Local {}, {}", here.local_x, here.local_y),
                 format!("World {}, {}, {}", here.x, here.y, plane_text(&here)),
-                format!("Scene {}, {}", here.local_x >> 7, here.local_y >> 7),
+                format!("Scene {scene_x}, {scene_y}"),
             ],
         );
     }
@@ -4730,7 +4504,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     if on("movement-flags") || on("tile-location") {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
-        if let Some((tile, cursor)) = hovered_tile(pid, [here.local_x >> 7, here.local_y >> 7])? {
+        if let Some((tile, cursor)) = hovered_tile(pid, scene_tile(&here))? {
             plan.path(&tile_corners(tile), HOVER_COLOR, true, false);
             let (x, y) = (origin_x + tile[0], origin_y + tile[1]);
             let mut lines = Vec::new();
@@ -4753,13 +4527,11 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                 lines.push(format!("Flags: {settings}"));
             }
             if on("movement-flags") {
-                let (x1, y1, _, flags) = scene_collision(pid)?;
-                let data = flags
-                    .get((x - x1) as usize)
-                    .and_then(|column| column.get((y - y1) as usize))
-                    .copied()
-                    .unwrap_or(0);
-                let names = crate::devtools::movement_flag_names(data);
+                let names = crate::devtools::movement_flag_names(collision_at(
+                    &scene_collision(pid)?,
+                    x,
+                    y,
+                ));
                 if names.is_empty() {
                     lines.push("No movement flags".to_string());
                 }
@@ -4784,7 +4556,6 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         .filter(|path| path.marker && path.points.iter().all(|&i| on_screen(&screen[i])))
         .count();
 
-    // What ends up on the canvas, to skip repainting a frame identical to the last one.
     let mut hasher = DefaultHasher::new();
     for path in &plan.paths {
         (path.color, path.closed).hash(&mut hasher);
@@ -4819,38 +4590,27 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         Some(hasher.finish()),
         |buf, width, height| unsafe {
             for path in &plan.paths {
-                let points: Vec<[f32; 2]> = path.points.iter().map(|&i| screen[i]).collect();
+                let count = path.points.len();
                 let edges = if path.closed {
-                    points.len()
+                    count
                 } else {
-                    points.len().saturating_sub(1)
+                    count.saturating_sub(1)
                 };
                 for i in 0..edges {
-                    let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                    let (a, b) = (screen[path.points[i]], screen[path.points[(i + 1) % count]]);
                     if on_screen(&a) && on_screen(&b) {
-                        let [x1, y1, x2, y2] = [
-                            a[0].round() as i32,
-                            a[1].round() as i32,
-                            b[0].round() as i32,
-                            b[1].round() as i32,
-                        ];
-                        // two pixels thick: the line and its copy one pixel to the right and down
-                        for shift in 0..STROKE_WIDTH {
-                            draw_line(
-                                buf,
-                                width,
-                                height,
-                                [x1 + shift, y1, x2 + shift, y2],
-                                path.color,
-                            );
-                            draw_line(
-                                buf,
-                                width,
-                                height,
-                                [x1, y1 + shift, x2, y2 + shift],
-                                path.color,
-                            );
-                        }
+                        draw_stroke(
+                            buf,
+                            width,
+                            height,
+                            [
+                                a[0].round() as i32,
+                                a[1].round() as i32,
+                                b[0].round() as i32,
+                                b[1].round() as i32,
+                            ],
+                            path.color,
+                        );
                     }
                 }
             }
@@ -4874,54 +4634,84 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                 }
                 let left = ax.round() as i32 - font.width(&label.text, LABEL_SCALE) / 2;
                 let top = ay.round() as i32 - font.max_height * LABEL_SCALE;
-                font.plot(&label.text, left + 1, top + 1, LABEL_SCALE, |x, y| {
-                    put_pixel(buf, width, height, x, y, LABEL_SHADOW)
-                });
-                font.plot(&label.text, left, top, LABEL_SCALE, |x, y| {
-                    put_pixel(buf, width, height, x, y, label.color)
-                });
+                draw_text(
+                    buf,
+                    width,
+                    height,
+                    &font,
+                    &label.text,
+                    [left, top],
+                    label.color,
+                );
             }
             for rect in &plan.rects {
                 let (left, top, right, bottom) =
                     (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
-                for [x1, y1, x2, y2] in [
+                for line in [
                     [left, top, right, top],
                     [right, top, right, bottom],
                     [right, bottom, left, bottom],
                     [left, bottom, left, top],
                 ] {
-                    for shift in 0..STROKE_WIDTH {
-                        draw_line(
-                            buf,
-                            width,
-                            height,
-                            [x1 + shift, y1, x2 + shift, y2],
-                            rect.color,
-                        );
-                        draw_line(
-                            buf,
-                            width,
-                            height,
-                            [x1, y1 + shift, x2, y2 + shift],
-                            rect.color,
-                        );
-                    }
+                    draw_stroke(buf, width, height, line, rect.color);
                 }
             }
             for text in &plan.texts {
-                font.plot(&text.text, text.x + 1, text.y + 1, LABEL_SCALE, |x, y| {
-                    put_pixel(buf, width, height, x, y, LABEL_SHADOW)
-                });
-                font.plot(&text.text, text.x, text.y, LABEL_SCALE, |x, y| {
-                    put_pixel(buf, width, height, x, y, text.color)
-                });
+                draw_text(
+                    buf,
+                    width,
+                    height,
+                    &font,
+                    &text.text,
+                    [text.x, text.y],
+                    text.color,
+                );
             }
         },
     )?;
     Ok(drawn)
 }
 
-// Paints the overlay into the slot not shown and flips `overlay_serial`; `keep` starts from what is shown, `hash` and `mode` skip repeats.
+fn collision_at((x1, y1, _, flags): &SceneCollision, x: i32, y: i32) -> u32 {
+    flags
+        .get((x - x1) as usize)
+        .and_then(|column| column.get((y - y1) as usize))
+        .copied()
+        .unwrap_or(0)
+}
+
+unsafe fn draw_text(
+    buf: *mut u8,
+    width: i32,
+    height: i32,
+    font: &crate::font::Font,
+    text: &str,
+    [left, top]: [i32; 2],
+    color: Rgba,
+) {
+    font.plot(text, left + 1, top + 1, LABEL_SCALE, |x, y| unsafe {
+        put_pixel(buf, width, height, x, y, LABEL_SHADOW)
+    });
+    font.plot(text, left, top, LABEL_SCALE, |x, y| unsafe {
+        put_pixel(buf, width, height, x, y, color)
+    });
+}
+
+unsafe fn draw_stroke(
+    buf: *mut u8,
+    width: i32,
+    height: i32,
+    [x1, y1, x2, y2]: [i32; 4],
+    color: Rgba,
+) {
+    for shift in 0..STROKE_WIDTH {
+        unsafe {
+            draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], color);
+            draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], color);
+        }
+    }
+}
+
 fn with_overlay(
     pid: u32,
     mode: u8,
@@ -4929,44 +4719,25 @@ fn with_overlay(
     hash: Option<u64>,
     paint: impl FnOnce(*mut u8, i32, i32),
 ) -> Result<(), String> {
-    let connection =
-        connection(pid).ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
-    if connection.protocol != ipc::PROTOCOL_VERSION {
-        return Err(format!(
-            "Client {pid} runs agent protocol {}, this is {}: restart the client and load a matching agent",
-            connection.protocol,
-            ipc::PROTOCOL_VERSION
-        ));
-    }
+    let connection = current_connection(pid)?;
     let (width, height) = (connection.width, connection.height);
-    if width <= 0 || height <= 0 {
+    let bytes = width.max(0) as usize * height.max(0) as usize * 4;
+    if width <= 0 || height <= 0 || bytes > IMAGE_DATA_SIZE {
         return Err(format!("Client {pid} hasn't rendered a frame yet"));
     }
 
-    let name = wide(shared_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_WRITE, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No agent shared memory in client {pid}"))?;
-    let size = overlay_offset(ipc::OVERLAY_SLOTS);
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_WRITE, 0, 0, size) };
-    if view.Value.is_null() {
-        return Err(format!(
-            "Cannot map agent's shared memory in client {pid}: {}",
-            io::Error::last_os_error()
-        ));
-    }
-
-    let base = view.Value as *mut u8;
-    let bytes = width as usize * height as usize * 4;
+    let view = shared_view(pid, overlay_offset(ipc::OVERLAY_SLOTS), |e| {
+        format!("Cannot map agent's shared memory in client {pid}: {e}")
+    })?;
+    let base = view.ptr::<u8>().as_ptr();
     unsafe {
-        let serial_at = base.add(core::mem::offset_of!(Header, overlay_serial)) as *mut u32;
-        let hash_at = base.add(core::mem::offset_of!(Header, overlay_hash)) as *mut u64;
-        let mode_at = base.add(core::mem::offset_of!(Header, overlay_mode));
+        let serial_at = base.add(mem::offset_of!(Header, overlay_serial)) as *mut u32;
+        let hash_at = base.add(mem::offset_of!(Header, overlay_hash)) as *mut u64;
+        let mode_at = base.add(mem::offset_of!(Header, overlay_mode));
         let current = *mode_at;
 
-        // Never 0, which is what an unknown overlay holds.
         let hash = hash.map(|h| (h ^ (width as u64) << 32 ^ height as u64) | 1);
         if hash.is_some() && hash_at.read_unaligned() == hash.unwrap_or(0) && current == mode {
-            UnmapViewOfFile(view);
             return Ok(());
         }
 
@@ -4983,7 +4754,6 @@ fn with_overlay(
         hash_at.write_unaligned(hash.unwrap_or(0));
         serial_at.write_unaligned(serial.wrapping_add(1));
         *mode_at = mode;
-        UnmapViewOfFile(view);
     }
     Ok(())
 }
@@ -5011,7 +4781,6 @@ unsafe fn draw_rect(
     }
 }
 
-// A thick line from `from` to `to` with a filled head at `to`, like RuneLite's interacting arrows.
 unsafe fn draw_arrow(
     buf: *mut u8,
     width: i32,
@@ -5025,16 +4794,10 @@ unsafe fn draw_arrow(
     let round = |[x, y]: [f32; 2]| [x.round() as i32, y.round() as i32];
     let [x1, y1] = round(from);
     let [x2, y2] = round(to);
-    for shift in 0..STROKE_WIDTH {
-        unsafe {
-            draw_line(buf, width, height, [x1 + shift, y1, x2 + shift, y2], color);
-            draw_line(buf, width, height, [x1, y1 + shift, x2, y2 + shift], color);
-        }
-    }
+    unsafe { draw_stroke(buf, width, height, [x1, y1, x2, y2], color) };
     if length < 1.0 {
         return;
     }
-    // the head: its tip at `to`, 5 long and 6 wide, pointing along the line
     let (ux, uy) = (dx / length * ARROW_SCALE, dy / length * ARROW_SCALE);
     let base = [to[0] - 5.0 * ux, to[1] - 5.0 * uy];
     let corners = [
@@ -5121,22 +4884,10 @@ unsafe fn put_pixel(buf: *mut u8, width: i32, height: i32, x: i32, y: i32, color
     }
 }
 
-/// The scripts the client ran for events, from sequence number `since` on (0 for the oldest it still holds), at most `limit` of them.
 pub fn script_runs(pid: u32, since: u64, limit: usize) -> Result<crate::ScriptPage, String> {
-    let name = wide(script_runs_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No script log in client {pid}: the agent isn't loaded, is too old, or didn't find the script runner"))?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, script_log::LOG_SIZE) };
-    if view.Value.is_null() {
-        return Err(format!("Cannot map the script log of client {pid}"));
-    }
-    let log = view.Value as *const script_log::Log;
-    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let page = unsafe {
-        script_log::is_compatible(log).then(|| script_log::read_since(log, since, limit))
-    };
-    unsafe { UnmapViewOfFile(view) };
-    let page = page.ok_or_else(|| format!("The script log of client {pid} has another layout: restart the client and load a matching agent"))?;
+    let page = SCRIPT_LOG.read(pid, |log| unsafe {
+        script_log::read_since(log, since, limit)
+    })?;
     Ok(crate::ScriptPage {
         next: page.next,
         dropped: page.dropped,
@@ -5165,22 +4916,10 @@ pub fn script_runs(pid: u32, since: u64, limit: usize) -> Result<crate::ScriptPa
     })
 }
 
-/// The client variable changes the scripts made, from sequence number `since` on (0 for the oldest the log still holds), at most `limit` of them.
 pub fn varc_changes(pid: u32, since: u64, limit: usize) -> Result<crate::VarcPage, String> {
-    let name = wide(varc_log_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No varc log in client {pid}: the agent isn't loaded, is too old, or didn't find the varc setters"))?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, varc_log::LOG_SIZE) };
-    if view.Value.is_null() {
-        return Err(format!("Cannot map the varc log of client {pid}"));
-    }
-    let log = view.Value as *const varc_log::Log;
-    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let page =
-        unsafe { varc_log::is_compatible(log).then(|| varc_log::read_since(log, since, limit)) };
-    unsafe { UnmapViewOfFile(view) };
-    let page = page.ok_or_else(|| format!("The varc log of client {pid} has another layout: restart the client and load a matching agent"))?;
-    // the text a string keeps, with a mark when the log kept only the start of it
+    let page = VARC_LOG.read(pid, |log| unsafe {
+        varc_log::read_since(log, since, limit)
+    })?;
     let text = |bytes: &[u8], length: u32| {
         let mut text = String::from_utf8_lossy(bytes).into_owned();
         if (bytes.len() as u32) < length {
@@ -5219,98 +4958,40 @@ pub fn varc_changes(pid: u32, since: u64, limit: usize) -> Result<crate::VarcPag
     })
 }
 
-/// The item container changes from `since` on (0 for the oldest), at most `limit`; `ITEM_CHANGES_NOW` returns where the log is now.
 pub fn item_changes(pid: u32, since: u64, limit: usize) -> Result<crate::ItemPage, String> {
-    let name = wide(item_log_memory_name(pid));
-    let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr()) })
-        .ok_or_else(|| format!("No item log in client {pid}: the agent isn't loaded, is too old, or didn't find the item container writes"))?;
-    let view = unsafe { MapViewOfFile(mapping.0, FILE_MAP_READ, 0, 0, item_log::LOG_SIZE) };
-    if view.Value.is_null() {
-        return Err(format!("Cannot map the item log of client {pid}"));
-    }
-    let log = view.Value as *const item_log::Log;
-    // SAFETY: the mapping is LOG_SIZE bytes and stays mapped until the unmap below; the agent sets it up before it hooks anything.
-    let page = unsafe {
-        item_log::is_compatible(log).then(|| {
-            if since == crate::ITEM_CHANGES_NOW {
-                item_log::Page {
-                    next: item_log::written(log),
-                    ..Default::default()
-                }
-            } else {
-                item_log::read_since(log, since, limit)
+    let page = ITEM_LOG.read(pid, |log| unsafe {
+        if since == crate::ITEM_CHANGES_NOW {
+            item_log::Page {
+                next: item_log::written(log),
+                ..Default::default()
             }
-        })
-    };
-    unsafe { UnmapViewOfFile(view) };
-    let page = page.ok_or_else(|| format!("The item log of client {pid} has another layout: restart the client and load a matching agent"))?;
+        } else {
+            item_log::read_since(log, since, limit)
+        }
+    })?;
     Ok(item_page(page))
 }
 
-/// A reader of the item log that waits on the agent's wake event; it claims a subscriber slot and gives it back on drop.
 pub struct ItemWatcher {
-    pid: u32,
-    mapping: Handle,
-    view: MEMORY_MAPPED_VIEW_ADDRESS,
+    view: View,
     event: Handle,
     slot: u32,
     next: u64,
 }
 
-// SAFETY: the view is a shared mapping used only through atomics and volatile accesses, and the handles may cross threads.
 unsafe impl Send for ItemWatcher {}
 
 impl ItemWatcher {
     pub fn new(pid: u32) -> Result<Self, String> {
-        let name = wide(item_log_memory_name(pid));
-        let mapping = Handle::new(unsafe { OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, 0, name.as_ptr()) })
-            .ok_or_else(|| format!("No item log in client {pid}: the agent isn't loaded, is too old, or didn't find the item container writes"))?;
-        let view = unsafe {
-            MapViewOfFile(
-                mapping.0,
-                FILE_MAP_READ | FILE_MAP_WRITE,
-                0,
-                0,
-                item_log::LOG_SIZE,
-            )
-        };
-        if view.Value.is_null() {
-            return Err(format!("Cannot map the item log of client {pid}"));
-        }
-        let log = view.Value as *const item_log::Log;
-        // SAFETY: the mapping is LOG_SIZE bytes, writable, and stays mapped until the watcher is dropped.
-        if !unsafe { item_log::is_compatible(log) } {
-            unsafe { UnmapViewOfFile(view) };
-            return Err(format!(
-                "The item log of client {pid} has another layout: restart the client and load a matching agent"
-            ));
-        }
-        // A slot is ours once its event is new and the mask bit is ours; a stale bit is cleared by the agent later.
-        let mut event = None;
-        let slot = unsafe {
-            item_log::subscribe(log, |slot| {
-                let name = wide(item_wake_event_name(pid, slot));
-                let handle = CreateEventW(std::ptr::null(), 0, 0, name.as_ptr());
-                let taken = GetLastError() == ERROR_ALREADY_EXISTS;
-                match Handle::new(handle) {
-                    Some(handle) if !taken => {
-                        event = Some(handle);
-                        true
-                    }
-                    _ => false,
-                }
-            })
-        };
-        let (Some(slot), Some(event)) = (slot, event) else {
-            unsafe { UnmapViewOfFile(view) };
-            return Err(format!(
-                "Too many readers are waiting for item changes in client {pid}"
-            ));
-        };
+        let view = ITEM_LOG.open(pid, FILE_MAP_READ | FILE_MAP_WRITE, "")?;
+        let log = view.ptr::<item_log::Log>().as_ptr();
+        let (slot, event) = claim_slot(
+            |create| unsafe { item_log::subscribe(log, create) },
+            |slot| item_wake_event_name(pid, slot),
+        )
+        .ok_or_else(|| format!("Too many readers are waiting for item changes in client {pid}"))?;
         let next = unsafe { item_log::written(log) };
         Ok(Self {
-            pid,
-            mapping,
             view,
             event,
             slot,
@@ -5319,48 +5000,28 @@ impl ItemWatcher {
     }
 
     fn log(&self) -> *const item_log::Log {
-        self.view.Value as *const item_log::Log
+        self.view.ptr::<item_log::Log>().as_ptr()
     }
 
     fn pending(&self) -> bool {
-        // SAFETY: the view stays mapped while `self` lives.
         unsafe { item_log::written(self.log()) > self.next }
     }
 
-    /// Waits up to `timeout` for the agent to log a change; true when it did (or one is already waiting to be read).
-    pub fn wait(&self, timeout: Duration) -> bool {
-        if self.pending() {
-            return true;
-        }
-        unsafe {
-            WaitForSingleObject(
-                self.event.0,
-                timeout.as_millis().min(u32::MAX as u128 - 1) as u32,
-            ) == WAIT_OBJECT_0
-        }
+    fn wait(&self, timeout: Duration) -> bool {
+        self.pending()
+            || unsafe { WaitForSingleObject(self.event.0, wait_ms(timeout)) } == WAIT_OBJECT_0
     }
 
-    /// The changes logged since the last read, at most `limit`.
     pub fn read(&mut self, limit: usize) -> crate::ItemPage {
-        // SAFETY: as in `wait`, and the log was checked compatible when the watcher was made.
         let page = unsafe { item_log::read_since(self.log(), self.next, limit) };
         self.next = page.next;
         item_page(page)
-    }
-
-    pub fn pid(&self) -> u32 {
-        self.pid
     }
 }
 
 impl Drop for ItemWatcher {
     fn drop(&mut self) {
-        // SAFETY: the view is still mapped; the event handle closes after the slot is given back (when `event` drops).
-        unsafe {
-            item_log::unsubscribe(self.log(), self.slot);
-            UnmapViewOfFile(self.view);
-        }
-        let _ = &self.mapping;
+        unsafe { item_log::unsubscribe(self.log(), self.slot) };
     }
 }
 
@@ -5387,7 +5048,6 @@ fn item_page(page: item_log::Page) -> crate::ItemPage {
     }
 }
 
-/// Like `item_changes`, but blocks up to `wait` for the agent to log something when nothing is new.
 pub fn item_changes_wait(
     pid: u32,
     since: u64,
@@ -5403,7 +5063,6 @@ pub fn item_changes_wait(
     {
         return item_changes(pid, since, limit);
     }
-    // nothing yet: claim an event, then look once more so a change made meanwhile isn't waited for
     let watcher = ItemWatcher::new(pid)?;
     if item_changes(pid, since, 1)?.changes.is_empty() {
         watcher.wait(wait);

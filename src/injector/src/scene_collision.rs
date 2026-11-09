@@ -1,42 +1,35 @@
-// The collision map the client keeps for the loaded scene (Java's `CollisionMap`), with instances, opened doors and spawned locs; edge ring 0xFFFFFF.
-
 use ipc::{
     read::{Memory, local_player},
     state::{Layout, array, collision_map, part},
 };
 
+use crate::nav::PLANES;
+
+pub const RING: u32 = 0xFF_FFFF;
+const BORDER: i32 = collision_map::BORDER as i32;
 const MAX_SIZE: i32 = 256;
 const MAX_MAPS: u64 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneCollision {
-    // the world tile of the scene's (0, 0), which is the map's (1, 1)
     pub base_x: i32,
     pub base_y: i32,
     pub plane: i32,
     width: i32,
     height: i32,
-    // column major, edge ring included
     flags: Vec<u32>,
 }
 
 impl SceneCollision {
     pub fn flags(&self, x: i32, y: i32) -> Option<u32> {
-        let border = collision_map::BORDER as i32;
-        let (mx, my) = (x - self.base_x + border, y - self.base_y + border);
+        let (mx, my) = (x - self.base_x + BORDER, y - self.base_y + BORDER);
         ((0..self.width).contains(&mx) && (0..self.height).contains(&my))
             .then(|| self.flags[(mx * self.height + my) as usize])
     }
 
-    // The world tiles the map covers, edge ring included: (x1, y1, x2, y2).
     pub fn bounds(&self) -> (i32, i32, i32, i32) {
-        let border = collision_map::BORDER as i32;
-        (
-            self.base_x - border,
-            self.base_y - border,
-            self.base_x - border + self.width - 1,
-            self.base_y - border + self.height - 1,
-        )
+        let (x1, y1) = (self.base_x - BORDER, self.base_y - BORDER);
+        (x1, y1, x1 + self.width - 1, y1 + self.height - 1)
     }
 }
 
@@ -45,7 +38,6 @@ pub fn read(memory: &impl Memory, layout: &Layout) -> Option<SceneCollision> {
     maps.read(memory, plane)
 }
 
-/// Every plane's collision map (the loaded scene has four), with the player's plane first in the tuple.
 pub fn read_all(
     memory: &impl Memory,
     layout: &Layout,
@@ -58,8 +50,6 @@ pub fn read_all(
             .collect(),
     ))
 }
-
-const PLANES: i32 = 4;
 
 struct Maps {
     begin: u64,
@@ -133,10 +123,9 @@ impl Maps {
 
 #[cfg(test)]
 pub fn from_rows(base_x: i32, base_y: i32, rows: &[&str]) -> SceneCollision {
-    // `rows` top (north) first, '#' blocked; the edge ring is added around them
     let (inner_w, inner_h) = (rows[0].len() as i32, rows.len() as i32);
     let (width, height) = (inner_w + 2, inner_h + 2);
-    let mut flags = vec![0xFFFFFFu32; (width * height) as usize];
+    let mut flags = vec![RING; (width * height) as usize];
     for (row, line) in rows.iter().enumerate() {
         let y = inner_h - 1 - row as i32;
         for (x, ch) in line.chars().enumerate() {
@@ -200,18 +189,8 @@ mod tests {
         m.put_u64(0x100 + 0x10, CLIENT);
         m.put_i32(CLIENT + 0x70, 0);
         m.put_i32(CLIENT + 0x74, 0);
-        // one world view (id 0) and one player (index 0) in the hash tables `local_player` reads
-        for (table, value) in [(CLIENT + 0x20, VIEW), (VIEW + 0x40, 0x9000)] {
-            let buckets = table + 0x100;
-            m.put_u64(table + 0x8, buckets);
-            m.put_u64(table + 0x10, 1);
-            let node = buckets + 0x40;
-            m.put_u64(buckets, node);
-            m.put_u64(buckets + 8, 0xdead);
-            m.put(node, &[0; 0x20]);
-            m.put_u64(node + 0x10, value);
-            m.put_u64(node + 0x18, 0xdead);
-        }
+        m.put_table(CLIENT + 0x20, 0xb000, &[(0, VIEW)]);
+        m.put_table(VIEW + 0x40, 0xd000, &[(0, 0x9000)]);
         m.put_i32(VIEW + 0x60, 1);
         m.put_i32(VIEW + 0x80, 3200);
         m.put_i32(VIEW + 0x84, 3100);
@@ -232,7 +211,6 @@ mod tests {
         }
         let read = read(&m, &layout).expect("read");
         assert_eq!((read.base_x, read.base_y, read.plane), (3200, 3100, 1));
-        // the map's (1, 1) is the scene's (0, 0)
         assert_eq!(read.flags(3200, 3100), Some(11));
         assert_eq!(read.flags(3199, 3099), Some(0));
         assert_eq!(read.flags(3201, 3099), Some(20));
@@ -241,7 +219,6 @@ mod tests {
         let (plane, all) = read_all(&m, &layout).expect("read all");
         assert_eq!(plane, 1);
         assert_eq!(all.len(), 2);
-        // plane 0's map has no size
         assert_eq!(all[0], None);
         assert_eq!(all[1].as_ref(), Some(&read));
     }

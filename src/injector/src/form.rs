@@ -2,44 +2,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 pub const SCRIPT_PREFIX: &str = "\u{1e}SCRIPT ";
-/// Optional, before the script: a JSON object of the script's other files by name, which the injector keeps in memory.
 pub const MODULES_PREFIX: &str = "\u{1e}MODULES ";
-/// Optional, the first line: the loader answers `PIN_REQUEST_PREFIX` requests, so `bank_pin_enter()` may ask it.
 pub const PINS_PREFIX: &str = "\u{1e}PINS";
-/// A line the injector writes for `bank_pin_enter()` with the account name hash; the loader answers on stdin with `pin_reply_line`.
 pub const PIN_REQUEST_PREFIX: &str = "\u{1e}PINREQ ";
-/// A line the injector writes for `lamp_skill()` with the account name hash; the loader answers on stdin with `lamp_reply_line`. Goes with `PINS_PREFIX`.
 pub const LAMP_REQUEST_PREFIX: &str = "\u{1e}LAMPREQ ";
 pub const FORM_PREFIX: &str = "\u{1e}FORM ";
-/// A line the loader writes to stdin when the user presses Update on the settings, with the form's values as JSON.
 pub const UPDATE_PREFIX: &str = "\u{1e}UPDATE ";
-/// A line a script writes with `report_stats`: the loader sums these between heartbeats and sends them to the API.
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";
 
-/// A line a script writes with `report_breaks`: the breaks and sleeps it has scheduled, for the loader's Breaks tab.
 pub const BREAKS_PREFIX: &str = "\u{1e}BREAKS ";
 
-/// A scheduled break or sleep. Times are milliseconds, counted from when the line was written.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PlannedBreak {
-    /// How long until it is taken.
     pub remaining: f64,
-    /// About how long it lasts.
     pub length: f64,
-    /// For a sleep, the time of day it is scheduled to, in seconds since local midnight.
     #[serde(default)]
     pub at: Option<f64>,
-    /// Its position in the config, which "Skip next" names it by.
     #[serde(default)]
     pub index: u32,
 }
 
-/// The break or sleep being taken right now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActiveBreak {
-    /// `"break"` or `"sleep"`.
     pub kind: String,
-    /// How long until it is over.
     pub remaining: f64,
 }
 
@@ -60,35 +45,27 @@ pub fn breaks_line(plan: &BreakPlan) -> String {
     )
 }
 
-/// The plan of a `BREAKS_PREFIX` line, without the prefix.
 pub fn parse_breaks(payload: &str) -> Option<BreakPlan> {
     serde_json::from_str(payload).ok()
 }
 
-/// A line a script writes with `report_warning`: text the loader shows in its log in the warning color.
 pub const WARN_PREFIX: &str = "\u{1e}WARN ";
 
-/// A line a script writes with `report_counters`: what it counts, for the loader's XP Tracker tab.
 pub const COUNTERS_PREFIX: &str = "\u{1e}COUNTERS ";
 
 fn yes() -> bool {
     true
 }
 
-/// Something a script counts, with its total since the script started. The loader works out the rest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Counter {
-    /// What other counters refer to it by.
     pub id: String,
     pub label: String,
     pub value: f64,
-    /// Whether to show it per hour of the run (on unless set to false).
     #[serde(default = "yes")]
     pub hourly: bool,
-    /// The `id` of a counter to divide by, shown as "per" it, such as points per game.
     #[serde(default)]
     pub per: Option<String>,
-    /// The `id` of a counter this is a share of, shown as a percent, such as wins of games.
     #[serde(default)]
     pub percent_of: Option<String>,
 }
@@ -100,21 +77,18 @@ pub fn counters_line(counters: &[Counter]) -> String {
     )
 }
 
-/// The counters of a `COUNTERS_PREFIX` line, without the prefix.
 pub fn parse_counters(payload: &str) -> Option<Vec<Counter>> {
     serde_json::from_str(payload).ok()
 }
 
 static UPDATE: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
 
-/// Keeps `values` for the script to pick up, replacing an update it hasn't picked up yet.
 pub fn push_update(values: Value) {
     *UPDATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values);
 }
 
-/// The latest values the user updated the settings to since the last call, if any.
 pub fn take_update() -> Option<Value> {
     UPDATE
         .lock()
@@ -122,12 +96,10 @@ pub fn take_update() -> Option<Value> {
         .take()
 }
 
-/// The line that tells a running script its settings changed.
 pub fn update_line(values: &Value) -> String {
     format!("{UPDATE_PREFIX}{values}")
 }
 
-/// The values of an `UPDATE_PREFIX` line, without the prefix.
 pub fn parse_update(payload: &str) -> Option<Value> {
     serde_json::from_str::<Value>(payload.trim())
         .ok()
@@ -147,16 +119,11 @@ pub const KINDS: [&str; 9] = [
     "inventory",
     "prayer",
 ];
-/// The kinds whose value is a layout the loader keeps per script: the script gets the chosen one, or nil.
 pub const LAYOUT_KINDS: [&str; 3] = ["equipment", "inventory", "prayer"];
 
-/// The worn items slots an `equipment` field's `required` items may name: the container's, then the secondary ammo (14).
 pub const EQUIPMENT_SLOTS: [usize; 12] = [0, 1, 2, 3, 4, 5, 7, 9, 10, 12, 13, 14];
 pub const INVENTORY_SLOTS: usize = 28;
 
-/// An item a layout field's `required` list puts in every layout of that kind, which the user can move but not remove or change:
-/// the ids that count as it (the first is shown and taken first), its slot (an equipment field's must have one; an inventory's is
-/// where it starts), the amount range of a stack (both 0: any amount) and the doses or charges that count, in the order to take them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Required {
     pub ids: Vec<i32>,
@@ -267,7 +234,6 @@ fn check_required(kind: &str, field: &Value) -> Result<Vec<Required>, String> {
     Ok(items)
 }
 
-/// The items a layout field puts in every layout (`required`); a list that doesn't check out (see `validate`) is none.
 pub fn required(field: &Value) -> Vec<Required> {
     check_required(kind(field), field).unwrap_or_default()
 }
@@ -287,7 +253,6 @@ fn check_locked(field: &Value) -> Result<Vec<String>, String> {
     }
 }
 
-/// The prayers a `prayer` field's script controls itself (`locked`, by key), which its layouts leave out.
 pub fn locked(field: &Value) -> Vec<String> {
     check_locked(field).unwrap_or_default()
 }
@@ -319,7 +284,6 @@ pub fn options(field: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A list's rows: `(id, label, ticked by default)`. A row is a table `{ id, label, default }`.
 pub fn items(field: &Value) -> Vec<(String, String, bool)> {
     field
         .get("items")
@@ -340,27 +304,22 @@ pub fn items(field: &Value) -> Vec<(String, String, bool)> {
         .unwrap_or_default()
 }
 
-/// The id of the check that has to be ticked for the field to be usable, when it names one.
 pub fn enabled_by(field: &Value) -> Option<&str> {
     field.get("enabled_by").and_then(Value::as_str)
 }
 
-/// The gap, in points, the form puts between the fields of a row, when it sets one.
 pub fn row_gap(spec: &Value) -> Option<f64> {
     spec.get("row_gap").and_then(Value::as_f64)
 }
 
-/// A label's heading level: 1 for a title, 2 for a section, none for plain text.
 pub fn heading(field: &Value) -> Option<u64> {
     field.get("heading").and_then(Value::as_u64)
 }
 
-/// The name of the row the field shares with the fields next to it that name the same one, drawn side by side.
 pub fn row(field: &Value) -> Option<&str> {
     field.get("row").and_then(Value::as_str)
 }
 
-/// The conditions that all have to hold for the field to be shown: `visible_when` is one `{ id, equals }` or a list of them, where `equals` is a value or a list of values.
 pub fn visible_rules(field: &Value) -> Vec<(&str, &Value)> {
     fn rule(r: &Value) -> Option<(&str, &Value)> {
         Some((r.get("id")?.as_str()?, r.get("equals")?))
@@ -372,7 +331,6 @@ pub fn visible_rules(field: &Value) -> Vec<(&str, &Value)> {
     }
 }
 
-/// Whether `value` is the `equals` of a `visible_when`, or one of them when it is a list.
 pub fn matches(value: &Value, equals: &Value) -> bool {
     match equals {
         Value::Array(any) => any.iter().any(|e| e == value),
@@ -491,7 +449,6 @@ pub fn stats_line(experience: i64, gold: i64, custom: &[i64]) -> String {
     )
 }
 
-/// The values of a `STATS_PREFIX` line, without the prefix.
 pub fn parse_stats(payload: &str) -> Option<(i64, i64, Vec<i64>)> {
     let value: Value = serde_json::from_str(payload).ok()?;
     let custom = value
@@ -507,7 +464,6 @@ pub fn parse_stats(payload: &str) -> Option<(i64, i64, Vec<i64>)> {
     ))
 }
 
-/// Ends every entry the script writes to stdout, so an entry can hold newlines.
 pub const ENTRY_END: char = '\0';
 
 pub fn request_line(spec: &Value) -> String {
@@ -518,49 +474,42 @@ pub fn pin_request_line(hash: &str) -> String {
     format!("{PIN_REQUEST_PREFIX}{hash}")
 }
 
-/// The loader's answer to a PIN request: the PIN, `None` when no saved account has that hash, or why it can't tell.
 pub fn pin_reply_line(answer: &Result<Option<String>, String>) -> String {
-    match answer {
-        Ok(Some(pin)) => json!({ "pin": pin }),
-        Ok(None) => json!({ "none": true }),
-        Err(error) => json!({ "error": error }),
-    }
-    .to_string()
+    answer_line("pin", answer)
 }
 
 pub fn lamp_request_line(hash: &str) -> String {
     format!("{LAMP_REQUEST_PREFIX}{hash}")
 }
 
-/// The loader's answer to a lamp request: the skill, `None` when the account has none set, or why it can't tell.
 pub fn lamp_reply_line(answer: &Result<Option<String>, String>) -> String {
+    answer_line("skill", answer)
+}
+
+pub fn parse_lamp_reply(line: &str) -> Result<Option<String>, String> {
+    parse_answer(line, "lamp", "skill")
+}
+
+pub fn parse_pin_reply(line: &str) -> Result<Option<String>, String> {
+    parse_answer(line, "PIN", "pin")
+}
+
+fn answer_line(key: &str, answer: &Result<Option<String>, String>) -> String {
     match answer {
-        Ok(Some(skill)) => json!({ "skill": skill }),
+        Ok(Some(value)) => Value::Object(Map::from_iter([(key.to_owned(), json!(value))])),
         Ok(None) => json!({ "none": true }),
         Err(error) => json!({ "error": error }),
     }
     .to_string()
 }
 
-pub fn parse_lamp_reply(line: &str) -> Result<Option<String>, String> {
+fn parse_answer(line: &str, what: &str, key: &str) -> Result<Option<String>, String> {
     let reply: Value = serde_json::from_str(line.trim())
-        .map_err(|e| format!("bad lamp reply from the loader: {e}"))?;
+        .map_err(|e| format!("bad {what} reply from the loader: {e}"))?;
     if let Some(error) = reply.get("error").and_then(Value::as_str) {
         return Err(error.to_owned());
     }
-    Ok(reply
-        .get("skill")
-        .and_then(Value::as_str)
-        .map(str::to_owned))
-}
-
-pub fn parse_pin_reply(line: &str) -> Result<Option<String>, String> {
-    let reply: Value = serde_json::from_str(line.trim())
-        .map_err(|e| format!("bad PIN reply from the loader: {e}"))?;
-    if let Some(error) = reply.get("error").and_then(Value::as_str) {
-        return Err(error.to_owned());
-    }
-    Ok(reply.get("pin").and_then(Value::as_str).map(str::to_owned))
+    Ok(reply.get(key).and_then(Value::as_str).map(str::to_owned))
 }
 
 pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {

@@ -1,5 +1,3 @@
-// Randomized walking routes: a jittered sparse lattice over the scene's walkable tiles, routed with per-edge noise and cached per scene.
-
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, VecDeque},
@@ -10,19 +8,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::pathfinding::{Route, Tile, game_route, step_open};
+use crate::pathfinding::{DIRECTIONS, Route, Tile, game_route, step_open};
 
-const DIRECTIONS: [(i32, i32); 8] = [
-    (-1, 0),
-    (1, 0),
-    (0, -1),
-    (0, 1),
-    (-1, -1),
-    (1, -1),
-    (-1, 1),
-    (1, 1),
-];
-// the lattice edges: each node to the next cell east, north, north-east and south-east
 const FORWARD: [(i32, i32); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
 const ATTACH_CANDIDATES: usize = 8;
 const ATTACH_KEPT: usize = 4;
@@ -30,17 +17,11 @@ const RETRIES: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
-    // the walk's noise; the same seed gives the same route
     pub seed: u64,
-    // edge costs are scaled by 1 +- rnd / 2
     pub rnd: f64,
-    // the cells' size in tiles
     pub spacing: i32,
-    // how far from its cell's centre a node can be
     pub jitter: i32,
-    // routes longer than this times the game's own route are dropped for the game's
     pub max_detour: f64,
-    // each call moves the route's nodes by up to this many tiles on each axis, whatever the seed
     pub offset: i32,
 }
 
@@ -72,7 +53,6 @@ fn unit(seed: u64, a: u64, b: u64) -> f64 {
     (mix(seed ^ mix(a ^ mix(b))) >> 11) as f64 / (1u64 << 53) as f64
 }
 
-// Picked once per process, so a run keeps its lattice while every run has its own.
 fn run_seed() -> u64 {
     static SEED: OnceLock<u64> = OnceLock::new();
     *SEED.get_or_init(|| {
@@ -83,7 +63,6 @@ fn run_seed() -> u64 {
     })
 }
 
-// A new value on every call: the offsets of a route are not the walk's seed, they are re-rolled each time.
 fn call_nonce() -> u64 {
     static CALLS: AtomicU64 = AtomicU64::new(0);
     mix(run_seed() ^ mix(CALLS.fetch_add(1, Ordering::Relaxed)))
@@ -91,7 +70,6 @@ fn call_nonce() -> u64 {
 
 type Flags<'a> = &'a dyn Fn(i32, i32) -> Option<u32>;
 
-// Shortest walk between two tiles inside their bounding box grown by `pad`, as the game steps, `a` first.
 fn bfs(flags: Flags, a: Tile, b: Tile, pad: i32, max_len: usize) -> Option<Vec<Tile>> {
     let (x1, y1) = (a.0.min(b.0) - pad, a.1.min(b.1) - pad);
     let (w, h) = (a.0.max(b.0) + pad - x1 + 1, a.1.max(b.1) + pad - y1 + 1);
@@ -134,7 +112,7 @@ fn bfs(flags: Flags, a: Tile, b: Tile, pad: i32, max_len: usize) -> Option<Vec<T
     None
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq)]
 struct Key {
     bounds: (i32, i32, i32, i32),
     flags_hash: u64,
@@ -144,12 +122,9 @@ struct Key {
 
 struct Lattice {
     key: Key,
-    // the tiles reachable from where it was built, over the bounds
     inside: Vec<bool>,
     nodes: Vec<Tile>,
-    // per node: (neighbour, edge)
     adj: Vec<Vec<(usize, usize)>>,
-    // (a, b, the walk from a to b)
     edges: Vec<(usize, usize, Vec<Tile>)>,
 }
 
@@ -161,13 +136,22 @@ impl Lattice {
             && self.inside[((x - x1) * (y2 - y1 + 1) + (y - y1)) as usize]
     }
 
-    fn walk(&self, edge: usize, from: usize) -> Vec<Tile> {
+    fn walk(&self, edge: usize, from: usize) -> impl Iterator<Item = Tile> + '_ {
         let (a, _, path) = &self.edges[edge];
-        if *a == from {
-            path.clone()
-        } else {
-            path.iter().rev().copied().collect()
-        }
+        let last = path.len() - 1;
+        let forward = *a == from;
+        (0..path.len()).map(move |i| path[if forward { i } else { last - i }])
+    }
+
+    fn leg_len(&self) -> usize {
+        self.key.spacing as usize * 4
+    }
+}
+
+fn reached(tiles: Vec<Tile>) -> Route {
+    Route {
+        tiles,
+        reached: true,
     }
 }
 
@@ -182,7 +166,6 @@ fn flags_hash(flags: Flags, (x1, y1, x2, y2): (i32, i32, i32, i32)) -> u64 {
     hash
 }
 
-// A tile something can stand on, by the game's masks for an object, a full block and a blocked floor.
 fn standable(flags: Flags, x: i32, y: i32) -> bool {
     flags(x, y).is_some_and(|f| f & 0x0024_0100 == 0)
 }
@@ -191,7 +174,6 @@ fn build(flags: Flags, key: Key) -> Lattice {
     let (x1, y1, x2, y2) = key.bounds;
     let h = y2 - y1 + 1;
     let index = |(x, y): Tile| ((x - x1) * h + (y - y1)) as usize;
-    // Nodes go on any standable tile, not only reachable ones, so the same ground gives the same lattice.
     let mut inside = vec![false; ((x2 - x1 + 1) * h) as usize];
     for x in x1..=x2 {
         for y in y1..=y2 {
@@ -201,7 +183,6 @@ fn build(flags: Flags, key: Key) -> Lattice {
 
     let seed = run_seed();
     let (spacing, jitter) = (key.spacing, key.jitter);
-    // cells are laid out on the world's tiles, so two windows over the same ground get the same nodes
     let (first_x, first_y) = (x1.div_euclid(spacing), y1.div_euclid(spacing));
     let cells_x = x2.div_euclid(spacing) - first_x + 1;
     let cells_y = y2.div_euclid(spacing) - first_y + 1;
@@ -267,7 +248,6 @@ fn build(flags: Flags, key: Key) -> Lattice {
     }
 }
 
-// the lattices of the last few queries: a walk's own and the scene's don't push each other out
 static CACHE: Mutex<Vec<Arc<Lattice>>> = Mutex::new(Vec::new());
 const CACHED: usize = 3;
 
@@ -290,7 +270,6 @@ fn lattice(flags: Flags, bounds: (i32, i32, i32, i32), options: &Options) -> Arc
     built
 }
 
-// The nearest few nodes to `tile` by walking distance, each with the walk from `tile`.
 fn attach(flags: Flags, lattice: &Lattice, tile: Tile) -> Vec<(usize, Vec<Tile>)> {
     let mut near: Vec<usize> = (0..lattice.nodes.len()).collect();
     let distance = |n: usize| {
@@ -299,7 +278,7 @@ fn attach(flags: Flags, lattice: &Lattice, tile: Tile) -> Vec<(usize, Vec<Tile>)
             .max((lattice.nodes[n].1 - tile.1).abs())
     };
     near.sort_by_key(|&n| distance(n));
-    let max_len = lattice.key.spacing as usize * 4;
+    let max_len = lattice.leg_len();
     let mut found: Vec<(usize, Vec<Tile>)> = near
         .into_iter()
         .take(ATTACH_CANDIDATES)
@@ -310,7 +289,6 @@ fn attach(flags: Flags, lattice: &Lattice, tile: Tile) -> Vec<(usize, Vec<Tile>)
     found
 }
 
-// A walk can't turn back on itself: cut every loop out of it.
 fn without_loops(tiles: Vec<Tile>) -> Vec<Tile> {
     let mut out: Vec<Tile> = Vec::with_capacity(tiles.len());
     for tile in tiles {
@@ -323,11 +301,9 @@ fn without_loops(tiles: Vec<Tile>) -> Vec<Tile> {
     out
 }
 
-// How far a target can be for `route` to look past the game's 128 x 128 route finder: the search box and longest walk.
 const FAR_PAD: i32 = 64;
 const FAR_MAX_LEN: usize = 1000;
 
-// The game's route from `from` to `to`, or one over the lattice when the target is beyond ~60 tiles, searched inside `bounds`.
 pub fn route(
     flags: Flags,
     bounds: (i32, i32, i32, i32),
@@ -335,27 +311,19 @@ pub fn route(
     to: Tile,
     options: &Options,
 ) -> Option<Route> {
+    let short = |len: usize| options.spacing < 4 || len < options.spacing as usize * 2;
     let plain = game_route(flags, from, to);
     let (to, baseline) = match &plain {
         Some(plain) if plain.reached => (*plain.tiles.last()?, plain.tiles.len()),
-        // out of the game's sight: the shortest walk there is the baseline, or it can't be reached
         _ => match bfs(flags, from, to, FAR_PAD, FAR_MAX_LEN) {
-            Some(walk) => {
-                if options.spacing < 4 || walk.len() < options.spacing as usize * 2 {
-                    return Some(Route {
-                        tiles: walk,
-                        reached: true,
-                    });
-                }
-                (to, walk.len())
-            }
+            Some(walk) if short(walk.len()) => return Some(reached(walk)),
+            Some(walk) => (to, walk.len()),
             None => return plain,
         },
     };
-    if options.spacing < 4 || baseline < options.spacing as usize * 2 {
+    if short(baseline) {
         return plain;
     }
-    // a route over the cap is tried again with other noise before giving up on the lattice
     let routed = (0..RETRIES).find_map(|attempt| {
         let options = Options {
             seed: mix(options.seed.wrapping_add(attempt)),
@@ -364,20 +332,13 @@ pub fn route(
         over_lattice(flags, bounds, from, to, &options, baseline)
     });
     match routed {
-        Some(tiles) => Some(Route {
-            tiles,
-            reached: true,
-        }),
-        None => plain.filter(|p| p.reached).or_else(|| {
-            bfs(flags, from, to, FAR_PAD, FAR_MAX_LEN).map(|tiles| Route {
-                tiles,
-                reached: true,
-            })
-        }),
+        Some(tiles) => Some(reached(tiles)),
+        None => plain
+            .filter(|p| p.reached)
+            .or_else(|| bfs(flags, from, to, FAR_PAD, FAR_MAX_LEN).map(reached)),
     }
 }
 
-// The route through `nodes` with each node moved to a random standable tile within `options.offset`; None when the last leg can't be found.
 fn offset_route(
     flags: Flags,
     lattice: &Lattice,
@@ -393,7 +354,7 @@ fn offset_route(
         state
     };
     let span = (options.offset * 2 + 1) as u64;
-    let max_len = lattice.key.spacing as usize * 4;
+    let max_len = lattice.leg_len();
     let mut tiles = vec![from];
     let mut at = from;
     for &node in nodes {
@@ -416,7 +377,6 @@ fn offset_route(
                 break;
             }
         }
-        // the node itself is what the lattice already walks to, so it's the safe draw
         let walk = moved.or_else(|| bfs(flags, at, node, pad, max_len))?;
         at = *walk.last()?;
         tiles.extend(walk.into_iter().skip(1));
@@ -442,7 +402,6 @@ fn over_lattice(
     if starts.is_empty() || ends.is_empty() {
         return None;
     }
-    // per walk and per pair of places, so the same walk sees the same noise from another window
     let noise = |a: Tile, b: Tile| {
         (1.0 + (unit(options.seed, key_of(a.min(b)), key_of(a.max(b))) - 0.5) * options.rnd)
             .max(0.2)
@@ -495,16 +454,19 @@ fn over_lattice(
     walked.reverse();
     let (_, head) = starts.iter().find(|(node, _)| *node == chain[0])?;
 
-    let mut tiles = head.clone();
-    for (node, edge) in walked {
-        tiles.extend(lattice.walk(edge, node).into_iter().skip(1));
-    }
-    tiles.extend(tail.iter().rev().copied().skip(1));
+    let over_edges = || {
+        let mut tiles = head.clone();
+        for &(node, edge) in &walked {
+            tiles.extend(lattice.walk(edge, node).skip(1));
+        }
+        tiles.extend(tail.iter().rev().copied().skip(1));
+        tiles
+    };
     let tiles = if options.offset > 0 {
         let nodes: Vec<Tile> = chain.iter().map(|&n| lattice.nodes[n]).collect();
-        offset_route(flags, &lattice, from, to, &nodes, options).unwrap_or(tiles)
+        offset_route(flags, &lattice, from, to, &nodes, options).unwrap_or_else(over_edges)
     } else {
-        tiles
+        over_edges()
     };
     let tiles = without_loops(tiles);
     debug_assert_eq!((tiles.first(), tiles.last()), (Some(&from), Some(&to)));
@@ -517,7 +479,6 @@ mod tests {
     use crate::scene_collision::{SceneCollision, from_rows};
 
     fn open(size: usize, walls: &[(usize, usize)]) -> SceneCollision {
-        // `walls` as (x, y) inner tiles, y up
         let mut rows = vec![vec!['.'; size]; size];
         for &(x, y) in walls {
             rows[size - 1 - y][x] = '#';
@@ -528,7 +489,6 @@ mod tests {
 
     fn walk(scene: &SceneCollision, from: Tile, to: Tile, seed: u64) -> Route {
         let flags = |x, y| scene.flags(x, y);
-        // no offsets: those are new on every call, and these tests compare calls
         let options = Options {
             seed,
             offset: 0,
@@ -558,13 +518,11 @@ mod tests {
         let mut distinct = routes.clone();
         distinct.sort();
         distinct.dedup();
-        // the same seed, and still every call has its own route
         assert!(
             distinct.len() >= 7,
             "only {} different routes",
             distinct.len()
         );
-        // without offsets the seed is the route
         let still = Options {
             offset: 0,
             ..options
@@ -635,14 +593,13 @@ mod tests {
             "only {} different routes",
             distinct.len()
         );
-        // the same seed is the same route
         assert_eq!(walk(&scene, from, to, 3).tiles, routes[3]);
     }
 
     #[test]
     fn unreachable_targets_use_the_games_route() {
         let rows = [
-            "..........", //
+            "..........",
             ".########.",
             ".#......#.",
             ".#......#.",
@@ -701,7 +658,6 @@ mod tests {
 
     #[test]
     fn routes_cross_the_seam_of_two_sources() {
-        // a loaded scene on the left with an open door, "cache" ground on the right with it closed: the first source answers west of x 60
         let live = open(
             60,
             &(0..60)

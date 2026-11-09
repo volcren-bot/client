@@ -1,8 +1,3 @@
-//! The keys that type letters, digits and space: the client turns key codes into characters itself, and for these the
-//! code is the same on every common layout, while the layout Wine reports can name another key for them (a digit asked
-//! for with Shift, or on the keypad). Punctuation is left to the layout, which the client also reads it through.
-
-/// The virtual key code of `c` and whether Shift is held, for a letter, a digit or a space; `None` for anything else.
 pub fn us_key(c: char) -> Option<(u8, bool)> {
     match c {
         'a'..='z' => Some((c.to_ascii_uppercase() as u8, false)),
