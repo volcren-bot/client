@@ -1,4 +1,4 @@
-//! The item log: the container slots the client changed, in a ring in shared memory (`AGENT_ITEMS_<pid>`), using the packet log's scheme.
+//! The item log (`AGENT_ITEMS_<pid>`): container slot changes in a `ring`; `log` must be an initialised `Log` unless noted.
 
 use crate::ring;
 use alloc::{format, string::String};
@@ -48,11 +48,8 @@ impl ring::Slot for Slot {
 
 #[repr(C)]
 pub struct Log {
-    slots: u32,
-    slot_size: u32,
-    /// Sequence numbers handed out so far: the next entry is number `written`.
-    written: AtomicU64,
-    /// Bit `n` is set while a reader waits on `item_wake_event_name(pid, n)`; the agent sets that event for every change it logs.
+    header: ring::Header,
+    /// Bit `n` is set while a reader waits on `item_wake_event_name(pid, n)` for every change.
     subscribers: AtomicU32,
     reserved: [u8; 44],
     entries: [Slot; SLOT_COUNT],
@@ -86,40 +83,30 @@ pub type Page = ring::Page<Entry>;
 
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
-    write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(
-        addr_of_mut!((*log).slot_size),
-        core::mem::size_of::<Slot>() as u32,
-    );
+    ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
-        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
 
-/// Appends a change; `log` must point to an initialised `Log`.
+/// Appends a change.
 pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
-    ring::push(
-        &(*log).written,
-        addr_of!((*log).entries) as *const Slot,
-        SLOT_COUNT,
-        |slot| {
-            write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
-            write_volatile(addr_of_mut!((*slot).tick), change.tick);
-            write_volatile(addr_of_mut!((*slot).container), change.container);
-            write_volatile(addr_of_mut!((*slot).slot), change.slot);
-            write_volatile(addr_of_mut!((*slot).old_item), change.old_item);
-            write_volatile(addr_of_mut!((*slot).old_quantity), change.old_quantity);
-            write_volatile(addr_of_mut!((*slot).new_item), change.new_item);
-            write_volatile(addr_of_mut!((*slot).new_quantity), change.new_quantity);
-            write_volatile(addr_of_mut!((*slot).old_known), change.old_known as u8);
-        },
-    );
+    ring::push(&(*log).header, addr_of!((*log).entries), |slot| {
+        write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
+        write_volatile(addr_of_mut!((*slot).tick), change.tick);
+        write_volatile(addr_of_mut!((*slot).container), change.container);
+        write_volatile(addr_of_mut!((*slot).slot), change.slot);
+        write_volatile(addr_of_mut!((*slot).old_item), change.old_item);
+        write_volatile(addr_of_mut!((*slot).old_quantity), change.old_quantity);
+        write_volatile(addr_of_mut!((*slot).new_item), change.new_item);
+        write_volatile(addr_of_mut!((*slot).new_quantity), change.new_quantity);
+        write_volatile(addr_of_mut!((*slot).old_known), change.old_known as u8);
+    });
 }
 
-/// The readers waiting for changes, as a bit mask of their slots; `log` must point to an initialised `Log`.
+/// The readers waiting for changes, as a bit mask of their slots.
 pub unsafe fn subscribers(log: *const Log) -> u32 {
     (*log).subscribers.load(Ordering::Acquire)
 }
@@ -134,17 +121,16 @@ pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
     ring::unsubscribe(&(*log).subscribers, slot);
 }
 
-/// The sequence number the next entry will get; `log` must point to an initialised `Log`.
+/// The sequence number the next entry will get.
 pub unsafe fn written(log: *const Log) -> u64 {
-    (*log).written.load(Ordering::Acquire)
+    (*log).header.written()
 }
 
-/// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
+/// Copies out up to `limit` entries from `since` on (from the oldest if `since` is ahead).
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     ring::read_since(
-        &(*log).written,
-        addr_of!((*log).entries) as *const Slot,
-        SLOT_COUNT,
+        &(*log).header,
+        addr_of!((*log).entries),
         since,
         limit,
         |at, slot| Entry {
@@ -167,23 +153,12 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+    use crate::ring::Zeroed;
 
-    struct Memory(*mut Log);
-
-    impl Memory {
-        fn new() -> Self {
-            let layout = Layout::new::<Log>();
-            let log = unsafe { alloc_zeroed(layout) } as *mut Log;
-            unsafe { init(log) };
-            Self(log)
-        }
-    }
-
-    impl Drop for Memory {
-        fn drop(&mut self) {
-            unsafe { dealloc(self.0.cast(), Layout::new::<Log>()) };
-        }
+    fn memory() -> Zeroed<Log> {
+        let memory = Zeroed::new();
+        unsafe { init(memory.0) };
+        memory
     }
 
     fn change(slot: i32, new_item: i32) -> Change {
@@ -208,7 +183,7 @@ mod tests {
 
     #[test]
     fn reads_what_was_pushed_in_order() {
-        let memory = Memory::new();
+        let memory = memory();
         unsafe {
             assert!(is_compatible(memory.0));
             push(memory.0, 10, &change(0, 995));

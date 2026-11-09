@@ -1,12 +1,42 @@
-//! The ring the shared-memory logs (packets, items, varcs, script runs) are built on: writers claim a sequence number and
-//! fill the slot it lands on, readers copy slots out and drop any that were overwritten or torn while they read.
+//! The lock-free ring under the shared-memory logs: writers claim a sequence number, readers drop torn or overwritten slots.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use core::{
+    mem::size_of,
+    ptr::{addr_of, addr_of_mut, read_volatile, write_volatile},
+    sync::atomic::{fence, AtomicU32, AtomicU64, Ordering},
+};
 
 /// A slot of a log: `commit` is 0 while a writer fills it, then the sequence number plus one.
 pub trait Slot {
     fn commit(&self) -> &AtomicU64;
+}
+
+/// The start of every log: the layout it was made with, then the sequence numbers handed out so far.
+#[repr(C)]
+pub(crate) struct Header {
+    slots: u32,
+    slot_size: u32,
+    written: AtomicU64,
+}
+
+impl Header {
+    /// Stamps the layout of a freshly created (zeroed) log of `N` slots of `S`.
+    pub(crate) unsafe fn init<S, const N: usize>(this: *mut Self) {
+        write_volatile(addr_of_mut!((*this).slots), N as u32);
+        write_volatile(addr_of_mut!((*this).slot_size), size_of::<S>() as u32);
+    }
+
+    /// Whether the log was made with `N` slots of `S`.
+    pub(crate) unsafe fn is_compatible<S, const N: usize>(this: *const Self) -> bool {
+        read_volatile(addr_of!((*this).slots)) == N as u32
+            && read_volatile(addr_of!((*this).slot_size)) == size_of::<S>() as u32
+    }
+
+    /// The sequence number the next entry will get.
+    pub(crate) fn written(&self) -> u64 {
+        self.written.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,15 +58,23 @@ impl<E> Default for Page<E> {
     }
 }
 
-/// Claims the next sequence number and runs `write` on its slot, one of `count` at `entries`; `written` is the log's counter.
-pub unsafe fn push<S: Slot>(
-    written: &AtomicU64,
-    entries: *const S,
-    count: usize,
+/// The first `N` bytes of `data`, zero padded, and how many of them came from `data`.
+pub(crate) fn prefix<const N: usize>(data: &[u8]) -> ([u8; N], u8) {
+    const { assert!(N <= u8::MAX as usize) };
+    let stored = data.len().min(N);
+    let mut bytes = [0; N];
+    bytes[..stored].copy_from_slice(&data[..stored]);
+    (bytes, stored as u8)
+}
+
+/// Claims the next sequence number and runs `write` on the slot of `entries` it lands on.
+pub(crate) unsafe fn push<S: Slot, const N: usize>(
+    header: &Header,
+    entries: *const [S; N],
     write: impl FnOnce(*mut S),
 ) {
-    let sequence = written.fetch_add(1, Ordering::AcqRel);
-    let slot = entries.add(sequence as usize % count) as *mut S;
+    let sequence = header.written.fetch_add(1, Ordering::AcqRel);
+    let slot = entries.cast::<S>().add(sequence as usize % N) as *mut S;
 
     (*slot).commit().store(0, Ordering::Release);
     fence(Ordering::Release);
@@ -44,22 +82,20 @@ pub unsafe fn push<S: Slot>(
     (*slot).commit().store(sequence + 1, Ordering::Release);
 }
 
-/// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead), each made by `read`
-/// from its sequence number and slot.
-pub unsafe fn read_since<S: Slot, E>(
-    written: &AtomicU64,
-    entries: *const S,
-    count: usize,
+/// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead), each made by `read`.
+pub(crate) unsafe fn read_since<S: Slot, E, const N: usize>(
+    header: &Header,
+    entries: *const [S; N],
     since: u64,
     limit: usize,
     read: impl Fn(u64, *const S) -> E,
 ) -> Page<E> {
-    let written = written.load(Ordering::Acquire);
+    let written = header.written();
     let mut at = if since > written { 0 } else { since };
     let mut page = Page::default();
 
     // anything older than the ring holds is gone
-    let oldest = written.saturating_sub(count as u64);
+    let oldest = written.saturating_sub(N as u64);
     if at < oldest {
         page.dropped += oldest - at;
         at = oldest;
@@ -68,10 +104,10 @@ pub unsafe fn read_since<S: Slot, E>(
         .reserve_exact(limit.min((written - at) as usize));
 
     while at < written && page.entries.len() < limit {
-        let slot = entries.add(at as usize % count);
+        let slot = entries.cast::<S>().add(at as usize % N);
         let before = (*slot).commit().load(Ordering::Acquire);
         if before < at + 1 {
-            // claimed but not published yet: stop here, the next read picks it up
+            // claimed but not published yet: the next read picks it up
             break;
         }
         let entry = (before == at + 1).then(|| read(at, slot));
@@ -89,7 +125,7 @@ pub unsafe fn read_since<S: Slot, E>(
 }
 
 /// Claims a free subscriber slot of `slots` (None when full), skipping slots whose event already exists.
-pub fn subscribe(
+pub(crate) fn subscribe(
     subscribers: &AtomicU32,
     slots: u32,
     mut create_event: impl FnMut(u32) -> bool,
@@ -107,17 +143,32 @@ pub fn subscribe(
 }
 
 /// Gives a subscriber slot back.
-pub fn unsubscribe(subscribers: &AtomicU32, slot: u32) {
+pub(crate) fn unsubscribe(subscribers: &AtomicU32, slot: u32) {
     subscribers.fetch_and(!(1u32 << slot), Ordering::AcqRel);
+}
+
+/// A zeroed heap block for tests, like a freshly created mapping.
+#[cfg(test)]
+pub(crate) struct Zeroed<T>(pub *mut T);
+
+#[cfg(test)]
+impl<T> Zeroed<T> {
+    pub fn new() -> Self {
+        Self(unsafe { alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<T>()) }.cast())
+    }
+}
+
+#[cfg(test)]
+impl<T> Drop for Zeroed<T> {
+    fn drop(&mut self) {
+        unsafe { alloc::alloc::dealloc(self.0.cast(), alloc::alloc::Layout::new::<T>()) };
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{
-        alloc::{alloc_zeroed, dealloc, Layout},
-        vec,
-    };
+    use alloc::vec;
 
     const COUNT: usize = 8;
 
@@ -134,40 +185,32 @@ mod tests {
     }
 
     struct Ring {
-        written: AtomicU64,
-        slots: *mut TestSlot,
+        header: Header,
+        slots: Zeroed<[TestSlot; COUNT]>,
     }
 
     impl Ring {
         fn new() -> Self {
-            let slots = unsafe { alloc_zeroed(Layout::array::<TestSlot>(COUNT).unwrap()) };
             Self {
-                written: AtomicU64::new(0),
-                slots: slots.cast(),
+                header: Header {
+                    slots: 0,
+                    slot_size: 0,
+                    written: AtomicU64::new(0),
+                },
+                slots: Zeroed::new(),
             }
         }
 
         unsafe fn push(&self, value: u64) {
-            push(&self.written, self.slots, COUNT, |slot| {
+            push(&self.header, self.slots.0, |slot| {
                 (*slot).value = value;
             });
         }
 
         unsafe fn read(&self, since: u64, limit: usize) -> Page<(u64, u64)> {
-            read_since(
-                &self.written,
-                self.slots,
-                COUNT,
-                since,
-                limit,
-                |at, slot| (at, (*slot).value),
-            )
-        }
-    }
-
-    impl Drop for Ring {
-        fn drop(&mut self) {
-            unsafe { dealloc(self.slots.cast(), Layout::array::<TestSlot>(COUNT).unwrap()) };
+            read_since(&self.header, self.slots.0, since, limit, |at, slot| {
+                (at, (*slot).value)
+            })
         }
     }
 
@@ -227,10 +270,28 @@ mod tests {
         let ring = Ring::new();
         unsafe {
             ring.push(1);
-            ring.written.store(2, Ordering::Release);
+            ring.header.written.store(2, Ordering::Release);
             let page = ring.read(0, 10);
             assert_eq!((page.entries.len(), page.next), (1, 1));
         }
+    }
+
+    #[test]
+    fn layout_is_stamped_and_checked() {
+        let header = Zeroed::<Header>::new();
+        unsafe {
+            assert!(!Header::is_compatible::<TestSlot, COUNT>(header.0));
+            Header::init::<TestSlot, COUNT>(header.0);
+            assert!(Header::is_compatible::<TestSlot, COUNT>(header.0));
+            assert!(!Header::is_compatible::<TestSlot, 16>(header.0));
+            assert!(!Header::is_compatible::<u8, COUNT>(header.0));
+        }
+    }
+
+    #[test]
+    fn prefix_keeps_the_first_bytes_and_says_how_many() {
+        assert_eq!(prefix::<4>(b"ab"), (*b"ab\0\0", 2));
+        assert_eq!(prefix::<4>(b"abcdef"), (*b"abcd", 4));
     }
 
     #[test]

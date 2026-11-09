@@ -1,4 +1,4 @@
-//! The packet log: the last packets received and sent, in a lock-free ring in shared memory (`AGENT_PACKETS_<pid>`).
+//! The packet log (`AGENT_PACKETS_<pid>`): recent packets in a `ring`; `log` must be an initialised `Log` unless noted.
 
 use crate::ring;
 use alloc::{format, string::String, vec::Vec};
@@ -75,13 +75,10 @@ impl ring::Slot for Slot {
 
 #[repr(C)]
 pub struct Log {
-    slots: u32,
-    slot_size: u32,
-    /// Sequence numbers handed out so far: the next packet is number `written`.
-    written: AtomicU64,
-    /// Bit `n` is set while a reader waits on `packet_wake_event_name(pid, n)`; the agent sets that event for the packets in `filters[n]`.
+    header: ring::Header,
+    /// Bit `n` is set while a reader waits on `packet_wake_event_name(pid, n)` for the packets in `filters[n]`.
     subscribers: AtomicU32,
-    /// The local player's movement as the receive hook saw it (`set_movement`): sequence-locked, odd while written, 0 until first written.
+    /// Sequence-locks `movement`: odd while written, 0 until first written.
     movement_sequence: AtomicU32,
     movement: [AtomicI32; MOVEMENT_FIELDS],
     /// 1 once `publish_layouts` has filled `layouts`.
@@ -117,14 +114,14 @@ const MOVEMENT_FIELDS: usize = 7;
 /// A tick the hook could not read, or the tile not having changed since the hook first saw it.
 pub const NO_TICK: i32 = -1;
 
-/// The local player's server tile (world coordinates) and when it last changed, written by the receive hook before each packet is taken, so after the previous packet was handled.
+/// The local player's server tile and when it last changed, written by the receive hook before each packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Movement {
     pub x: i32,
     pub y: i32,
     /// -1 when the plane offset wasn't found
     pub plane: i32,
-    /// the client's tick counter when the tile last changed (`NO_TICK` if it hasn't since the hook first saw it); Player Info is handled one tick count before the tick ends
+    /// the tick counter when the tile last changed (`NO_TICK` if it hasn't since the hook first saw it)
     pub moved_tick: i32,
     /// the tile before that change
     pub from_x: i32,
@@ -145,7 +142,7 @@ impl Movement {
         ]
     }
 
-    /// Whether the tile changed in the last tick that ended, or in the one being received; `tick` is the client's tick counter now (one behind `moved_tick` means the counter was reset, so not moving).
+    /// Whether the tile changed in the last tick that ended or the one being received; `tick` is the counter now.
     pub fn moving(&self, tick: i32) -> bool {
         self.moved_tick != NO_TICK && (0..=1).contains(&tick.wrapping_sub(self.moved_tick))
     }
@@ -165,7 +162,7 @@ pub struct Entry {
 
 pub type Page = ring::Page<Entry>;
 
-/// How a field is stored on the wire, as the agent finds it in a read function: `width` bytes, each at a `shifts` position (in bytes) of the value, with `transform` applied to the one at position 0.
+/// How a field is stored on the wire: each byte's position in the value (`shifts`), with `transform` on position 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub signed: bool,
@@ -265,24 +262,25 @@ pub struct Layout {
     pub fields: Option<Vec<Field>>,
 }
 
-/// Publishes what the agent found in the client's code, once; `layouts[id]` is for server packet `id`. `log` must point to an initialised `Log`.
+/// Publishes, once, what the agent found in the client's code; `layouts[id]` is for server packet `id`.
 pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field>>)]) {
     for (id, (size, fields)) in layouts.iter().enumerate().take(LAYOUT_IDS) {
         let slot = addr_of!((*log).layouts[id]) as *mut LayoutSlot;
         write_volatile(addr_of_mut!((*slot).size), *size);
-        let codes: Option<Vec<[u8; 2]>> = fields
+        let codes = fields
             .as_ref()
-            .and_then(|fields| fields.iter().map(encode_field).collect())
-            .filter(|codes: &Vec<[u8; 2]>| codes.len() < LAYOUT_FIELDS);
-        match codes {
+            .and_then(|fields| fields.iter().map(encode_field).collect::<Option<Vec<_>>>())
+            .filter(|codes| codes.len() < LAYOUT_FIELDS);
+        let count = match codes {
             Some(codes) => {
-                for (i, code) in codes.iter().enumerate() {
-                    write_volatile(addr_of_mut!((*slot).fields[i]), *code);
+                for (i, &code) in codes.iter().enumerate() {
+                    write_volatile(addr_of_mut!((*slot).fields[i]), code);
                 }
-                write_volatile(addr_of_mut!((*slot).fields_count), codes.len() as u8);
+                codes.len() as u8
             }
-            None => write_volatile(addr_of_mut!((*slot).fields_count), NO_LAYOUT),
-        }
+            None => NO_LAYOUT,
+        };
+        write_volatile(addr_of_mut!((*slot).fields_count), count);
     }
     (*log)
         .layouts_ready
@@ -317,20 +315,15 @@ pub unsafe fn read_layouts(log: *const Log) -> Option<Vec<Layout>> {
 
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
-    write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(
-        addr_of_mut!((*log).slot_size),
-        core::mem::size_of::<Slot>() as u32,
-    );
+    ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
-        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
 
-/// Appends a packet, keeping the first `PAYLOAD_SIZE` bytes of `data`; `log` must point to an initialised `Log`.
+/// Appends a packet, keeping the first `PAYLOAD_SIZE` bytes of `data`.
 pub unsafe fn push(
     log: *const Log,
     time_ms: u64,
@@ -339,25 +332,18 @@ pub unsafe fn push(
     length: u32,
     data: &[u8],
 ) {
-    let stored = data.len().min(PAYLOAD_SIZE);
-    ring::push(
-        &(*log).written,
-        addr_of!((*log).entries) as *const Slot,
-        SLOT_COUNT,
-        |slot| {
-            write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
-            write_volatile(addr_of_mut!((*slot).length), length);
-            write_volatile(addr_of_mut!((*slot).opcode), opcode);
-            write_volatile(addr_of_mut!((*slot).direction), direction);
-            write_volatile(addr_of_mut!((*slot).stored), stored as u8);
-            for (i, &byte) in data[..stored].iter().enumerate() {
-                write_volatile(addr_of_mut!((*slot).payload[i]), byte);
-            }
-        },
-    );
+    let (payload, stored) = ring::prefix::<PAYLOAD_SIZE>(data);
+    ring::push(&(*log).header, addr_of!((*log).entries), |slot| {
+        write_volatile(addr_of_mut!((*slot).time_ms), time_ms);
+        write_volatile(addr_of_mut!((*slot).length), length);
+        write_volatile(addr_of_mut!((*slot).opcode), opcode);
+        write_volatile(addr_of_mut!((*slot).direction), direction);
+        write_volatile(addr_of_mut!((*slot).stored), stored);
+        write_volatile(addr_of_mut!((*slot).payload), payload);
+    });
 }
 
-/// Publishes the player's movement; one writer only (the game thread); `log` must point to an initialised `Log`.
+/// Publishes the player's movement; one writer only (the game thread).
 pub unsafe fn set_movement(log: *const Log, movement: &Movement) {
     let sequence = (*log).movement_sequence.load(Ordering::Relaxed);
     (*log)
@@ -373,7 +359,7 @@ pub unsafe fn set_movement(log: *const Log, movement: &Movement) {
         .store((sequence | 1).wrapping_add(1).max(2), Ordering::Release);
 }
 
-/// The player's movement as last published (None before the hook first saw the player, or when the writer kept tearing it); `log` must point to an initialised `Log`.
+/// The player's movement as last published; `None` before the first write or while the writer keeps tearing it.
 pub unsafe fn movement(log: *const Log) -> Option<Movement> {
     for _ in 0..100 {
         let before = (*log).movement_sequence.load(Ordering::Acquire);
@@ -384,25 +370,25 @@ pub unsafe fn movement(log: *const Log) -> Option<Movement> {
             core::hint::spin_loop();
             continue;
         }
-        let f: [i32; MOVEMENT_FIELDS] =
+        let [x, y, plane, moved_tick, from_x, from_y, from_plane] =
             core::array::from_fn(|i| (*log).movement[i].load(Ordering::Relaxed));
         fence(Ordering::Acquire);
         if (*log).movement_sequence.load(Ordering::Relaxed) == before {
             return Some(Movement {
-                x: f[0],
-                y: f[1],
-                plane: f[2],
-                moved_tick: f[3],
-                from_x: f[4],
-                from_y: f[5],
-                from_plane: f[6],
+                x,
+                y,
+                plane,
+                moved_tick,
+                from_x,
+                from_y,
+                from_plane,
             });
         }
     }
     None
 }
 
-/// The readers whose filter has this packet, as a bit mask of their slots; `log` must point to an initialised `Log`.
+/// The readers whose filter has this packet, as a bit mask of their slots.
 pub unsafe fn subscribers_for(log: *const Log, direction: u8, opcode: u16) -> u32 {
     let mask = (*log).subscribers.load(Ordering::Acquire);
     let Some(bit) = filter_bit(direction, opcode).filter(|_| mask != 0) else {
@@ -421,7 +407,7 @@ pub unsafe fn subscribers_for(log: *const Log, direction: u8, opcode: u16) -> u3
     wanted
 }
 
-/// Claims a free subscriber slot with an empty filter (None when full), skipping slots whose event already exists; `log` must be writable.
+/// Claims a free subscriber slot with an empty filter (None when full); `log` must be writable.
 pub unsafe fn subscribe(log: *const Log, mut create_event: impl FnMut(u32) -> bool) -> Option<u32> {
     ring::subscribe(&(*log).subscribers, SUBSCRIBER_SLOTS, |slot| {
         // the event is ours alone, so nobody else writes this filter
@@ -445,17 +431,16 @@ pub unsafe fn unsubscribe(log: *const Log, slot: u32) {
     ring::unsubscribe(&(*log).subscribers, slot);
 }
 
-/// The sequence number the next packet will get; `log` must point to an initialised `Log`.
+/// The sequence number the next packet will get.
 pub unsafe fn written(log: *const Log) -> u64 {
-    (*log).written.load(Ordering::Acquire)
+    (*log).header.written()
 }
 
-/// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
+/// Copies out up to `limit` entries from `since` on (from the oldest if `since` is ahead).
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     ring::read_since(
-        &(*log).written,
-        addr_of!((*log).entries) as *const Slot,
-        SLOT_COUNT,
+        &(*log).header,
+        addr_of!((*log).entries),
         since,
         limit,
         |at, slot| {
@@ -476,26 +461,13 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::{
-        alloc::{alloc_zeroed, dealloc, Layout as AllocLayout},
-        vec,
-    };
+    use crate::ring::Zeroed;
+    use alloc::vec;
 
-    struct Memory(*mut Log);
-
-    impl Memory {
-        fn new() -> Self {
-            let layout = AllocLayout::new::<Log>();
-            let log = unsafe { alloc_zeroed(layout) } as *mut Log;
-            unsafe { init(log) };
-            Self(log)
-        }
-    }
-
-    impl Drop for Memory {
-        fn drop(&mut self) {
-            unsafe { dealloc(self.0.cast(), AllocLayout::new::<Log>()) };
-        }
+    fn memory() -> Zeroed<Log> {
+        let memory = Zeroed::new();
+        unsafe { init(memory.0) };
+        memory
     }
 
     #[test]
@@ -567,7 +539,7 @@ mod tests {
 
     #[test]
     fn layouts_are_unpublished_until_the_agent_publishes_them() {
-        let memory = Memory::new();
+        let memory = memory();
         let u16le = Field {
             signed: false,
             shifts: vec![0, 1],
@@ -614,7 +586,7 @@ mod tests {
 
     #[test]
     fn movement_is_published_whole_and_says_when_it_changed() {
-        let memory = Memory::new();
+        let memory = memory();
         unsafe {
             assert_eq!(movement(memory.0), None);
             let standing = Movement {
@@ -630,7 +602,7 @@ mod tests {
             assert_eq!(movement(memory.0), Some(standing));
             assert!(!standing.moving(500));
 
-            // Player Info of the tick that ends at counter 101 moved the player: moving while it is received, and through the next tick
+            // moved at counter 100: moving while it is received and through the next tick
             let walked = Movement {
                 x: 3201,
                 moved_tick: 100,
@@ -663,7 +635,7 @@ mod tests {
 
     #[test]
     fn subscribers_are_woken_only_for_their_packets() {
-        let memory = Memory::new();
+        let memory = memory();
         unsafe {
             assert_eq!(subscribe(memory.0, |_| true), Some(0));
             // slot 1 has a live event that isn't in the mask (another process's), so it is skipped
@@ -693,7 +665,7 @@ mod tests {
 
     #[test]
     fn reads_what_was_pushed_in_order() {
-        let memory = Memory::new();
+        let memory = memory();
         unsafe {
             assert!(is_compatible(memory.0));
             push(
@@ -734,7 +706,7 @@ mod tests {
 
     #[test]
     fn keeps_only_the_start_of_a_long_payload_but_the_whole_length() {
-        let memory = Memory::new();
+        let memory = memory();
         let data: Vec<u8> = (0..200u32).map(|i| i as u8).collect();
         unsafe {
             push(memory.0, 0, direction::RECEIVED, 7, 200, &data);

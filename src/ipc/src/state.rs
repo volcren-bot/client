@@ -1,4 +1,4 @@
-use alloc::{format, string::String};
+use alloc::{format, string::String, vec::Vec};
 use core::{
     marker::PhantomData,
     ptr::{addr_of, addr_of_mut, NonNull},
@@ -7,10 +7,8 @@ use core::{
 
 use crate::PROTOCOL_VERSION;
 
-pub const STATE_MEMORY_PREFIX: &str = "AGENT_STATE_";
-
 pub fn state_memory_name(pid: u32) -> String {
-    format!("{STATE_MEMORY_PREFIX}{pid}")
+    format!("AGENT_STATE_{pid}")
 }
 
 pub mod part {
@@ -157,8 +155,8 @@ pub struct InterfaceLayout {
 
 pub mod interfaces {
     pub const GROUP_SIZE: usize = 0x18;
-    pub const ARRAY_COUNT: usize = 0x8;
-    pub const ARRAY_DATA: usize = 0x10;
+    pub const ARRAY_COUNT: usize = super::array::COUNT;
+    pub const ARRAY_DATA: usize = super::array::DATA;
     pub const ENTRY_SIZE: usize = 0x10;
     pub const ENTRY_COMPONENT: usize = 0x8;
     pub const CHILDREN_DATA: usize = 0x8;
@@ -202,10 +200,9 @@ pub struct WorldLayout {
     pub varc_kind: u32,
     pub run_energy: u32,
     pub weight: u32,
-    // the NPC actor's animation id (-1 when none), `Npc::animation`
+    // the NPC's animation id (-1 when none)
     pub npc_animation: u32,
-    // the NPC's pointer to the head icons the server set (0 when the rule failed), and where the sprite vector starts in
-    // that object (the archive vector is at 0): `Npc::head_icons`
+    // the NPC's head icons object (0 when the rule failed) and where its sprite vector starts
     pub npc_head_icons: u32,
     pub head_icon_sprites: u32,
     pub reserved: u32,
@@ -256,7 +253,7 @@ pub struct GroundItemsLayout {
     pub id: u32,
 }
 
-// The chat history: `messages` and `cycle` are module RVAs (uid hash table, client cycle at 50 per second), the rest message fields.
+// The chat history: `messages` and `cycle` are module RVAs, the rest message fields.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChatLayout {
@@ -301,7 +298,7 @@ pub struct ProjectionLayout {
     pub decoration_height: u32,
 }
 
-// The scene's collision maps (Java's `CollisionMap[]`): a vector at `scene + maps`, `stride` apart, tile (x, y) at `[x + 1][y + 1]`.
+// The scene's collision maps: a vector at `scene + maps`, `stride` apart, tile (x, y) at `[x + 1][y + 1]`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CollisionLayout {
@@ -309,14 +306,14 @@ pub struct CollisionLayout {
     pub stride: u32,
 }
 
-// The scene loader the client's packet handler keeps: the byte at `loader + instance_flag` is the client's instance flag, 1 or 0.
+// The scene loader: the byte at `loader + instance_flag` is 1 in an instance.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SceneLoaderLayout {
     pub instance_flag: u32,
 }
 
-// The projectiles in flight: a circular list at `client + list` of nodes holding projectile pointers, plus the projectile field offsets.
+// The projectiles in flight: a circular list at `client + list`, plus the projectile field offsets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectileLayout {
@@ -346,7 +343,7 @@ pub struct ProjectileLayout {
     pub reserved: u32,
 }
 
-// The spot animations on tiles: a circular list at `world view + list` of nodes holding object pointers, plus the object field offsets.
+// The spot animations on tiles: a circular list at `world view + list`, plus the object field offsets.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpotAnimLayout {
@@ -360,7 +357,7 @@ pub struct SpotAnimLayout {
     pub id: u32,
 }
 
-// An actor's path, scene tiles newest first: entry 0 of `x` and `y` (each `[i32; 10]`) is the tile the server last put it on; `length` the steps it still has to walk.
+// An actor's path, newest scene tile first in `x` and `y` (`[i32; 10]` each); `length` is the steps left.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PathLayout {
@@ -383,7 +380,6 @@ pub mod world {
     pub const INVENTORY: i32 = 93;
     pub const EQUIPMENT: i32 = 94;
     pub const BANK: i32 = 95;
-    pub const VARC_GAME_TAB: i32 = 171;
 }
 
 pub mod array {
@@ -563,7 +559,7 @@ impl NamesReply {
             .names
             .get(index)
             .filter(|_| index < self.count as usize)?;
-        Some(&name[..name.iter().position(|&b| b == 0).unwrap_or(ITEM_NAME_SIZE)])
+        Some(text(name))
     }
 
     pub fn set_name(&mut self, index: usize, name: &[u8]) {
@@ -700,7 +696,7 @@ pub struct MenuReply {
     pub click_y: i32,
     pub click_age: i32,
     pub has_click: u32,
-    /// The component waiting for a target: verb `option`, name `target`, component `id`, child `index`, item id `action` and mask `kind`; valid when `selected` is 1.
+    /// The component waiting for a target (`action` is the item id, `kind` the mask); valid when `selected` is 1.
     pub selection: MenuEntryInfo,
     /// 1 when agent knows where the client keeps the selected component.
     pub has_selection: u32,
@@ -782,7 +778,7 @@ pub mod model_status {
     pub const NOT_IN_GAME: i32 = -4;
     pub const NO_NPC: i32 = -5;
     pub const NO_MODEL: i32 = -6;
-    /// an `NPC_TYPE` request's animation doesn't exist, is skeletal (not supported yet) or has no such frame
+    /// an `NPC_TYPE` request's animation is missing, skeletal (unsupported) or lacks the frame
     pub const BAD_ANIMATION: i32 = -7;
 }
 
@@ -806,7 +802,7 @@ pub struct ModelRequest {
     pub loc_x: i32,
     pub loc_y: i32,
     pub loc_id: i32,
-    /// `NPC_TYPE`: the NPC id, the animation (-1 for none) and its frame, and where: local fine x and y and the orientation
+    /// `NPC_TYPE`: the NPC id, animation (-1 for none), frame, local fine x and y, and orientation
     pub type_id: i32,
     pub animation: i32,
     pub frame: i32,
@@ -855,7 +851,7 @@ pub struct LocInfo {
     pub decoration_height: i16,
 }
 
-/// One request slot and one reply buffer for read-only requests the worker answers; the injector holds `worker_mutex_name` while waiting.
+/// Read-only requests the worker answers; the asker holds `worker_mutex_name` while waiting.
 pub mod worker_kind {
     pub const NPCS: u32 = 1;
     pub const PLAYERS: u32 = 2;
@@ -956,14 +952,14 @@ pub mod cache_kind {
     pub const FILES: u32 = 0;
     pub const ARCHIVES: u32 = 1;
     pub const ARCHIVE_FILES: u32 = 2;
-    /// Item icons drawn by the client's own icon builder: each `files` entry is `[id | flags, quantity]`, each reply file the icon's `ITEM_ICON_WIDTH * ITEM_ICON_HEIGHT` pixels as `0xAARRGGBB` little endian words.
+    /// Item icons from the client's icon builder: `files` are `[id | flags, quantity]`, replies `0xAARRGGBB` pixels.
     pub const ITEM_ICONS: u32 = 3;
 }
 
 /// The size of an item icon, the one the client draws in its inventory.
 pub const ITEM_ICON_WIDTH: u32 = 36;
 pub const ITEM_ICON_HEIGHT: u32 = 32;
-/// Set in the id word of an `ITEM_ICONS` request to draw the quantity on the icon, as the inventory does for a stackable item.
+/// Set in the id word of an `ITEM_ICONS` request to draw the quantity on the icon.
 pub const ITEM_ICON_SHOW_COUNT: i32 = 1 << 24;
 pub const ITEM_ICON_ID_MASK: i32 = ITEM_ICON_SHOW_COUNT - 1;
 
@@ -1100,25 +1096,94 @@ pub enum ReadError {
     Busy,
 }
 
-/// A handle to the shared memory block, valid for `'a`; the one place that vouches the pointer is a live mapping.
+/// A handle to the shared memory block, valid for `'a`: the one place that vouches the pointer is a live mapping.
 #[derive(Clone, Copy)]
 pub struct Shared<'a> {
     ptr: NonNull<LayoutMemory>,
     view: PhantomData<&'a LayoutMemory>,
 }
 
+/// Accessors for a `field` sequence-locked by `sequence`: a request, a reply copied in, or a reply filled in place.
+macro_rules! seqlocked {
+    ($sequence:ident, $field:ident: $ty:ty; request $write:ident, $read:ident($attempts:expr)) => {
+        pub fn $write(self, value: &$ty) -> u32 {
+            let this = self.this();
+            // SAFETY: the mapping is live (see `Shared`).
+            unsafe {
+                seqlock_write(
+                    addr_of_mut!((*this).$sequence),
+                    addr_of_mut!((*this).$field),
+                    value,
+                )
+            }
+        }
+
+        pub fn $read(self) -> Option<(u32, $ty)> {
+            let this = self.this();
+            // SAFETY: the mapping is live (see `Shared`).
+            unsafe {
+                seqlock_read(
+                    addr_of!((*this).$sequence),
+                    addr_of!((*this).$field),
+                    $attempts,
+                )
+            }
+        }
+    };
+    ($sequence:ident, $field:ident: $ty:ty; reply $write:ident, $read:ident) => {
+        pub fn $write(self, value: &$ty) {
+            let this = self.this();
+            // SAFETY: the mapping is live (see `Shared`).
+            unsafe {
+                seqlock_write(
+                    addr_of_mut!((*this).$sequence),
+                    addr_of_mut!((*this).$field),
+                    value,
+                );
+            }
+        }
+
+        seqlocked!($sequence, $field: $ty; read $read);
+    };
+    ($sequence:ident, $field:ident: $ty:ty; fill $write:ident) => {
+        /// Fills the reply in place, as it is too big for the caller's stack; `fill` must set every field.
+        pub fn $write(self, fill: impl FnOnce(&mut $ty)) {
+            let this = self.this();
+            // SAFETY: the mapping is live (see `Shared`).
+            unsafe {
+                seqlock_write_with(
+                    addr_of_mut!((*this).$sequence),
+                    addr_of_mut!((*this).$field),
+                    |data| fill(&mut *data),
+                );
+            }
+        }
+    };
+    ($sequence:ident, $field:ident: $ty:ty; read $read:ident) => {
+        pub fn $read(self, attempts: usize) -> Option<$ty> {
+            let this = self.this();
+            // SAFETY: the mapping is live (see `Shared`).
+            unsafe {
+                seqlock_read(
+                    addr_of!((*this).$sequence),
+                    addr_of!((*this).$field),
+                    attempts,
+                )
+                .map(|(_, value)| value)
+            }
+        }
+    };
+}
+
 impl<'a> Shared<'a> {
-    /// Zeroes the block and stamps the protocol version; `ptr` must be a writable, aligned mapping of `LAYOUT_SIZE` bytes nobody else uses yet.
+    /// Zeroes and stamps the block; `ptr` must be a writable, aligned, unshared mapping of `LAYOUT_SIZE` bytes.
     pub unsafe fn create(ptr: NonNull<LayoutMemory>) -> Self {
         let this = ptr.as_ptr();
         unsafe {
             core::ptr::write_bytes(this, 0, 1);
             addr_of_mut!((*this).protocol).write(PROTOCOL_VERSION as u32);
         }
-        Self {
-            ptr,
-            view: PhantomData,
-        }
+        Self::attach(ptr)
     }
 
     /// `ptr` must be a writable, aligned mapping of `LAYOUT_SIZE` bytes set up by `create`.
@@ -1135,265 +1200,40 @@ impl<'a> Shared<'a> {
 
     pub fn write(self, layout: &Layout) {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of_mut!((*this).sequence));
-            let start = sequence.load(Ordering::Relaxed);
-            sequence.store(start.wrapping_add(1), Ordering::Relaxed);
-            fence(Ordering::Release);
-            addr_of_mut!((*this).layout).write_volatile(*layout);
-            sequence.store(start.wrapping_add(2), Ordering::Release);
-        }
-    }
-
-    pub fn write_name_request(self, request: &NameRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_write(
-                addr_of_mut!((*this).request_sequence),
-                addr_of_mut!((*this).name_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_name_request(self) -> Option<(u32, NameRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).request_sequence),
-                addr_of!((*this).name_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_name_status(self, status: &NameStatus) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).status_sequence),
-                addr_of_mut!((*this).name_status),
-                status,
+                addr_of_mut!((*this).sequence),
+                addr_of_mut!((*this).layout),
+                layout,
             );
         }
     }
 
-    pub fn read_name_status(self, attempts: usize) -> Option<NameStatus> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).status_sequence),
-                addr_of!((*this).name_status),
-                attempts,
-            )
-            .map(|(_, s)| s)
-        }
-    }
-
-    pub fn write_total_xp_request(self, request: &TotalXpRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).xp_request_sequence),
-                addr_of_mut!((*this).total_xp_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_total_xp_request(self) -> Option<(u32, TotalXpRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).xp_request_sequence),
-                addr_of!((*this).total_xp_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_total_xp_status(self, status: &TotalXpStatus) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).xp_status_sequence),
-                addr_of_mut!((*this).total_xp_status),
-                status,
-            );
-        }
-    }
-
-    pub fn read_total_xp_status(self, attempts: usize) -> Option<TotalXpStatus> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).xp_status_sequence),
-                addr_of!((*this).total_xp_status),
-                attempts,
-            )
-            .map(|(_, s)| s)
-        }
-    }
-
-    pub fn write_item_name_request(self, request: &ItemNameRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).item_request_sequence),
-                addr_of_mut!((*this).item_name_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_item_name_request(self) -> Option<(u32, ItemNameRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).item_request_sequence),
-                addr_of!((*this).item_name_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_item_name_status(self, status: &NamesReply) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).item_status_sequence),
-                addr_of_mut!((*this).item_name_status),
-                status,
-            );
-        }
-    }
-
-    pub fn read_item_name_status(self, attempts: usize) -> Option<NamesReply> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).item_status_sequence),
-                addr_of!((*this).item_name_status),
-                attempts,
-            )
-            .map(|(_, s)| s)
-        }
-    }
-
-    pub fn write_game_val_request(self, request: &GameValRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).game_val_request_sequence),
-                addr_of_mut!((*this).game_val_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_game_val_request(self) -> Option<(u32, GameValRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).game_val_request_sequence),
-                addr_of!((*this).game_val_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_game_val_status(self, status: &NamesReply) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).game_val_status_sequence),
-                addr_of_mut!((*this).game_val_status),
-                status,
-            );
-        }
-    }
-
-    pub fn read_game_val_status(self, attempts: usize) -> Option<NamesReply> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).game_val_status_sequence),
-                addr_of!((*this).game_val_status),
-                attempts,
-            )
-            .map(|(_, s)| s)
-        }
-    }
-
-    pub fn write_project_request(self, request: &ProjectRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).project_request_sequence),
-                addr_of_mut!((*this).project_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_project_request(self) -> Option<(u32, ProjectRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).project_request_sequence),
-                addr_of!((*this).project_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_project_reply(self, reply: &ProjectReply) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).project_reply_sequence),
-                addr_of_mut!((*this).project_reply),
-                reply,
-            );
-        }
-    }
-
-    pub fn read_project_reply(self, attempts: usize) -> Option<ProjectReply> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).project_reply_sequence),
-                addr_of!((*this).project_reply),
-                attempts,
-            )
-            .map(|(_, r)| r)
-        }
-    }
+    seqlocked!(request_sequence, name_request: NameRequest; request write_name_request, read_name_request(1));
+    seqlocked!(status_sequence, name_status: NameStatus; reply write_name_status, read_name_status);
+    seqlocked!(xp_request_sequence, total_xp_request: TotalXpRequest; request write_total_xp_request, read_total_xp_request(1));
+    seqlocked!(xp_status_sequence, total_xp_status: TotalXpStatus; reply write_total_xp_status, read_total_xp_status);
+    seqlocked!(item_request_sequence, item_name_request: ItemNameRequest; request write_item_name_request, read_item_name_request(1));
+    seqlocked!(item_status_sequence, item_name_status: NamesReply; reply write_item_name_status, read_item_name_status);
+    seqlocked!(game_val_request_sequence, game_val_request: GameValRequest; request write_game_val_request, read_game_val_request(1));
+    seqlocked!(game_val_status_sequence, game_val_status: NamesReply; reply write_game_val_status, read_game_val_status);
+    seqlocked!(project_request_sequence, project_request: ProjectRequest; request write_project_request, read_project_request(1));
+    seqlocked!(project_reply_sequence, project_reply: ProjectReply; reply write_project_reply, read_project_reply);
+    seqlocked!(menu_reply_sequence, menu_reply: MenuReply; fill write_menu_reply_with);
+    seqlocked!(menu_reply_sequence, menu_reply: MenuReply; read read_menu_reply);
+    seqlocked!(model_request_sequence, model_request: ModelRequest; request write_model_request, read_model_request(1));
+    seqlocked!(model_reply_sequence, model_reply: ModelReply; fill write_model_reply_with);
+    seqlocked!(model_reply_sequence, model_reply: ModelReply; read read_model_reply);
+    seqlocked!(locs_reply_sequence, locs_reply: LocsReply; fill write_locs_reply_with);
+    seqlocked!(cache_request_sequence, cache_request: CacheRequest; request write_cache_request, read_cache_request(1));
+    seqlocked!(cache_reply_sequence, cache_reply: CacheReply; fill write_cache_reply_with);
+    seqlocked!(worker_request_sequence, worker_request: WorkerRequest; request write_worker_request, read_worker_request(100));
+    seqlocked!(worker_reply_sequence, worker_reply: WorkerReply; fill write_worker_reply_with);
 
     pub fn write_menu_request(self) -> u32 {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_write(
                 addr_of_mut!((*this).menu_request_sequence),
@@ -1405,7 +1245,7 @@ impl<'a> Shared<'a> {
 
     pub fn read_menu_request(self) -> Option<u32> {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_read(
                 addr_of!((*this).menu_request_sequence),
@@ -1416,87 +1256,10 @@ impl<'a> Shared<'a> {
         }
     }
 
-    /// Fills the menu reply in place, as it is too big for the window procedure's stack; `fill` must set every field.
-    pub fn write_menu_reply_with(self, fill: impl FnOnce(&mut MenuReply)) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of_mut!((*this).menu_reply_sequence));
-            let start = sequence.load(Ordering::Relaxed) & !1;
-            sequence.store(start.wrapping_add(1), Ordering::Relaxed);
-            fence(Ordering::Release);
-            fill(&mut *addr_of_mut!((*this).menu_reply));
-            sequence.store(start.wrapping_add(2), Ordering::Release);
-        }
-    }
-
-    pub fn read_menu_reply(self, attempts: usize) -> Option<MenuReply> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).menu_reply_sequence),
-                addr_of!((*this).menu_reply),
-                attempts,
-            )
-            .map(|(_, r)| r)
-        }
-    }
-
-    pub fn write_model_request(self, request: &ModelRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).model_request_sequence),
-                addr_of_mut!((*this).model_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_model_request(self) -> Option<(u32, ModelRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).model_request_sequence),
-                addr_of!((*this).model_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_model_reply_with(self, fill: impl FnOnce(&mut ModelReply)) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of_mut!((*this).model_reply_sequence));
-            let start = sequence.load(Ordering::Relaxed) & !1;
-            sequence.store(start.wrapping_add(1), Ordering::Relaxed);
-            fence(Ordering::Release);
-            fill(&mut *addr_of_mut!((*this).model_reply));
-            sequence.store(start.wrapping_add(2), Ordering::Release);
-        }
-    }
-
-    pub fn read_model_reply(self, attempts: usize) -> Option<ModelReply> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).model_reply_sequence),
-                addr_of!((*this).model_reply),
-                attempts,
-            )
-            .map(|(_, r)| r)
-        }
-    }
-
     /// `request` is a `locs_request` value.
     pub fn write_locs_request(self, request: i32) -> u32 {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_write(
                 addr_of_mut!((*this).locs_request_sequence),
@@ -1508,7 +1271,7 @@ impl<'a> Shared<'a> {
 
     pub fn read_locs_request(self) -> Option<(u32, i32)> {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
             seqlock_read(
                 addr_of!((*this).locs_request_sequence),
@@ -1518,179 +1281,68 @@ impl<'a> Shared<'a> {
         }
     }
 
-    pub fn write_locs_reply_with(self, fill: impl FnOnce(&mut LocsReply)) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of_mut!((*this).locs_reply_sequence));
-            let start = sequence.load(Ordering::Relaxed) & !1;
-            sequence.store(start.wrapping_add(1), Ordering::Relaxed);
-            fence(Ordering::Release);
-            fill(&mut *addr_of_mut!((*this).locs_reply));
-            sequence.store(start.wrapping_add(2), Ordering::Release);
-        }
-    }
-
     pub fn read_locs_reply_into(self, out: &mut LocsReply, attempts: usize) -> bool {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`); `out` is a separate, writable `LocsReply`.
         unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of!((*this).locs_reply_sequence) as *mut u32);
-            for _ in 0..attempts {
-                let before = sequence.load(Ordering::Acquire);
-                if before % 2 == 1 {
-                    core::hint::spin_loop();
-                    continue;
-                }
-                core::ptr::copy_nonoverlapping(addr_of!((*this).locs_reply), out, 1);
-                fence(Ordering::Acquire);
-                if sequence.load(Ordering::Relaxed) == before {
-                    return true;
-                }
-            }
-            false
-        }
-    }
-
-    pub fn write_worker_request(self, request: &WorkerRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).worker_request_sequence),
-                addr_of_mut!((*this).worker_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_worker_request(self) -> Option<(u32, WorkerRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).worker_request_sequence),
-                addr_of!((*this).worker_request),
-                100,
-            )
-        }
-    }
-
-    pub fn write_worker_reply_with(self, fill: impl FnOnce(&mut WorkerReply)) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of_mut!((*this).worker_reply_sequence));
-            let start = sequence.load(Ordering::Relaxed) & !1;
-            sequence.store(start.wrapping_add(1), Ordering::Relaxed);
-            fence(Ordering::Release);
-            fill(&mut *addr_of_mut!((*this).worker_reply));
-            sequence.store(start.wrapping_add(2), Ordering::Release);
+            seqlock_read_with(addr_of!((*this).locs_reply_sequence), attempts, || {
+                core::ptr::copy_nonoverlapping(addr_of!((*this).locs_reply), out, 1)
+            })
+            .is_some()
         }
     }
 
     /// The request sequence the reply answers, or `None` while the agent is writing it.
     pub fn worker_reply_answers(self) -> Option<u32> {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`).
         unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of!((*this).worker_reply_sequence) as *mut u32);
-            let before = sequence.load(Ordering::Acquire);
-            if before % 2 == 1 {
-                return None;
-            }
-            let answers = addr_of!((*this).worker_reply.sequence).read_volatile();
-            fence(Ordering::Acquire);
-            (sequence.load(Ordering::Relaxed) == before).then_some(answers)
+            seqlock_read_with(addr_of!((*this).worker_reply_sequence), 1, || {
+                addr_of!((*this).worker_reply.sequence).read_volatile()
+            })
+            .map(|(_, answers)| answers)
         }
     }
 
-    /// Copies the answer to request `sequence` into `data` and returns its status; `None` if another request's or changed.
-    pub fn read_worker_reply(self, sequence: u32, data: &mut alloc::vec::Vec<u8>) -> Option<i32> {
+    /// Copies the answer to request `sequence` into `data` and returns its status; `None` if not that answer.
+    pub fn read_worker_reply(self, sequence: u32, data: &mut Vec<u8>) -> Option<i32> {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`); at most `WORKER_DATA_SIZE` bytes are copied into the reserved `data`.
         unsafe {
-            let counter = AtomicU32::from_ptr(addr_of!((*this).worker_reply_sequence) as *mut u32);
-            let before = counter.load(Ordering::Acquire);
-            if before % 2 == 1 {
-                return None;
-            }
-            let reply = addr_of!((*this).worker_reply);
-            let (answers, status, length) = (
-                addr_of!((*reply).sequence).read_volatile(),
-                addr_of!((*reply).status).read_volatile(),
-                (addr_of!((*reply).length).read_volatile() as usize).min(WORKER_DATA_SIZE),
-            );
-            if answers != sequence {
-                return None;
-            }
-            data.clear();
-            data.reserve(length);
-            core::ptr::copy_nonoverlapping(
-                addr_of!((*reply).data) as *const u8,
-                data.as_mut_ptr(),
-                length,
-            );
-            data.set_len(length);
-            fence(Ordering::Acquire);
-            (counter.load(Ordering::Relaxed) == before).then_some(status)
-        }
-    }
-
-    pub fn write_cache_request(self, request: &CacheRequest) -> u32 {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).cache_request_sequence),
-                addr_of_mut!((*this).cache_request),
-                request,
-            )
-        }
-    }
-
-    pub fn read_cache_request(self) -> Option<(u32, CacheRequest)> {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).cache_request_sequence),
-                addr_of!((*this).cache_request),
-                1,
-            )
-        }
-    }
-
-    pub fn write_cache_reply_with(self, fill: impl FnOnce(&mut CacheReply)) {
-        let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
-        unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of_mut!((*this).cache_reply_sequence));
-            let start = sequence.load(Ordering::Relaxed) & !1;
-            sequence.store(start.wrapping_add(1), Ordering::Relaxed);
-            fence(Ordering::Release);
-            fill(&mut *addr_of_mut!((*this).cache_reply));
-            sequence.store(start.wrapping_add(2), Ordering::Release);
+            seqlock_read_with(addr_of!((*this).worker_reply_sequence), 1, || {
+                let reply = addr_of!((*this).worker_reply);
+                let (answers, status, length) = (
+                    addr_of!((*reply).sequence).read_volatile(),
+                    addr_of!((*reply).status).read_volatile(),
+                    (addr_of!((*reply).length).read_volatile() as usize).min(WORKER_DATA_SIZE),
+                );
+                if answers != sequence {
+                    return None;
+                }
+                data.clear();
+                data.reserve(length);
+                core::ptr::copy_nonoverlapping(
+                    addr_of!((*reply).data) as *const u8,
+                    data.as_mut_ptr(),
+                    length,
+                );
+                data.set_len(length);
+                Some(status)
+            })
+            .and_then(|(_, status)| status)
         }
     }
 
     pub fn read_cache_reply_into(self, out: &mut CacheReply, attempts: usize) -> bool {
         let this = self.this();
-        // SAFETY: `Shared` only holds pointers that `create`/`attach` promised are live mappings.
+        // SAFETY: the mapping is live (see `Shared`); `out` is a separate, writable `CacheReply` and `used` is capped to its data.
         unsafe {
-            let sequence = AtomicU32::from_ptr(addr_of!((*this).cache_reply_sequence) as *mut u32);
             let reply = addr_of!((*this).cache_reply);
-            for _ in 0..attempts {
-                let before = sequence.load(Ordering::Acquire);
-                if before % 2 == 1 {
-                    core::hint::spin_loop();
-                    continue;
-                }
-                let header = core::mem::offset_of!(CacheReply, data);
+            seqlock_read_with(addr_of!((*this).cache_reply_sequence), attempts, || {
                 core::ptr::copy_nonoverlapping(
                     reply as *const u8,
                     out as *mut CacheReply as *mut u8,
-                    header,
+                    core::mem::offset_of!(CacheReply, data),
                 );
                 let used = (out.used as usize).min(CACHE_DATA_SIZE);
                 core::ptr::copy_nonoverlapping(
@@ -1698,12 +1350,8 @@ impl<'a> Shared<'a> {
                     out.data.as_mut_ptr(),
                     used,
                 );
-                fence(Ordering::Acquire);
-                if sequence.load(Ordering::Relaxed) == before {
-                    return true;
-                }
-            }
-            false
+            })
+            .is_some()
         }
     }
 }
@@ -1732,40 +1380,42 @@ impl<'a> LayoutView<'a> {
             if protocol != PROTOCOL_VERSION as u32 {
                 return Err(ReadError::Incompatible(protocol));
             }
-
-            let sequence = AtomicU32::from_ptr(addr_of!((*this).sequence) as *mut u32);
-            for _ in 0..attempts {
-                let before = sequence.load(Ordering::Acquire);
-                if before % 2 == 1 {
-                    core::hint::spin_loop();
-                    continue;
-                }
-                let layout = addr_of!((*this).layout).read_volatile();
-                fence(Ordering::Acquire);
-                if sequence.load(Ordering::Relaxed) == before {
-                    return Ok(layout);
-                }
-            }
-            Err(ReadError::Busy)
+            seqlock_read(
+                addr_of!((*this).sequence),
+                addr_of!((*this).layout),
+                attempts,
+            )
+            .map(|(_, layout)| layout)
+            .ok_or(ReadError::Busy)
         }
     }
 }
 
-unsafe fn seqlock_write<T: Copy>(sequence: *mut u32, data: *mut T, value: &T) -> u32 {
+/// Runs `fill` on `data` with `sequence` odd, then publishes the next even sequence and returns it.
+unsafe fn seqlock_write_with<T>(
+    sequence: *mut u32,
+    data: *mut T,
+    fill: impl FnOnce(*mut T),
+) -> u32 {
     let sequence = AtomicU32::from_ptr(sequence);
     let start = sequence.load(Ordering::Relaxed) & !1;
     sequence.store(start.wrapping_add(1), Ordering::Relaxed);
     fence(Ordering::Release);
-    data.write_volatile(*value);
+    fill(data);
     sequence.store(start.wrapping_add(2), Ordering::Release);
     start.wrapping_add(2)
 }
 
-unsafe fn seqlock_read<T: Copy>(
+unsafe fn seqlock_write<T: Copy>(sequence: *mut u32, data: *mut T, value: &T) -> u32 {
+    seqlock_write_with(sequence, data, |data| data.write_volatile(*value))
+}
+
+/// Runs `read` until `sequence` stays even across it, up to `attempts` times.
+unsafe fn seqlock_read_with<R>(
     sequence: *const u32,
-    data: *const T,
     attempts: usize,
-) -> Option<(u32, T)> {
+    mut read: impl FnMut() -> R,
+) -> Option<(u32, R)> {
     let sequence = AtomicU32::from_ptr(sequence as *mut u32);
     for _ in 0..attempts {
         let before = sequence.load(Ordering::Acquire);
@@ -1773,7 +1423,7 @@ unsafe fn seqlock_read<T: Copy>(
             core::hint::spin_loop();
             continue;
         }
-        let value = data.read_volatile();
+        let value = read();
         fence(Ordering::Acquire);
         if sequence.load(Ordering::Relaxed) == before {
             return Some((before, value));
@@ -1782,10 +1432,24 @@ unsafe fn seqlock_read<T: Copy>(
     None
 }
 
+unsafe fn seqlock_read<T: Copy>(
+    sequence: *const u32,
+    data: *const T,
+    attempts: usize,
+) -> Option<(u32, T)> {
+    seqlock_read_with(sequence, attempts, || data.read_volatile())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::mem::{offset_of, size_of};
+    use alloc::boxed::Box;
+    use core::mem::{offset_of, size_of, MaybeUninit};
+
+    // On the heap: the layout is megabytes, more than a test thread's stack.
+    fn memory() -> Box<MaybeUninit<LayoutMemory>> {
+        Box::new_uninit()
+    }
 
     #[test]
     fn layout() {
@@ -1849,11 +1513,9 @@ mod tests {
 
     #[test]
     fn write_then_read() {
-        // On the heap: the layout is megabytes, more than a test thread's stack.
-        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
-        let shared = (*memory).as_mut_ptr();
+        let mut memory = memory();
+        let ptr = memory.as_mut_ptr();
         unsafe {
-            let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
             let view = LayoutView::attach(NonNull::new(ptr).unwrap());
             assert_eq!(view.read(1), Ok(Layout::default()));
@@ -1882,11 +1544,9 @@ mod tests {
 
     #[test]
     fn total_xp_requests_and_status_round_trip() {
-        // On the heap: the layout is megabytes, more than a test thread's stack.
-        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
-        let shared = (*memory).as_mut_ptr();
+        let mut memory = memory();
+        let ptr = memory.as_mut_ptr();
         unsafe {
-            let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
             assert_eq!(
                 shared.read_total_xp_request(),
@@ -1914,11 +1574,9 @@ mod tests {
 
     #[test]
     fn item_name_requests_and_status_round_trip() {
-        // On the heap: the layout is megabytes, more than a test thread's stack.
-        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
-        let shared = (*memory).as_mut_ptr();
+        let mut memory = memory();
+        let ptr = memory.as_mut_ptr();
         unsafe {
-            let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
             let mut request = ItemNameRequest {
                 count: 2,
@@ -1946,11 +1604,9 @@ mod tests {
 
     #[test]
     fn name_requests_and_status_round_trip() {
-        // On the heap: the layout is megabytes, more than a test thread's stack.
-        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
-        let shared = (*memory).as_mut_ptr();
+        let mut memory = memory();
+        let ptr = memory.as_mut_ptr();
         unsafe {
-            let ptr = shared;
             let shared = Shared::create(NonNull::new(ptr).unwrap());
             let view = LayoutView::attach(NonNull::new(ptr).unwrap());
             assert_eq!(
@@ -1981,11 +1637,9 @@ mod tests {
 
     #[test]
     fn rejects_busy_and_incompatible() {
-        // On the heap: the layout is megabytes, more than a test thread's stack.
-        let mut memory = alloc::boxed::Box::<LayoutMemory>::new_uninit();
-        let shared = (*memory).as_mut_ptr();
+        let mut memory = memory();
+        let ptr = memory.as_mut_ptr();
         unsafe {
-            let ptr = shared;
             Shared::create(NonNull::new(ptr).unwrap());
             let view = LayoutView::attach(NonNull::new(ptr).unwrap());
             (*ptr).sequence = 1;

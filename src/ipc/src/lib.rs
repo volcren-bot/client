@@ -15,10 +15,8 @@ pub mod varc_log;
 
 pub const PROTOCOL_VERSION: u8 = 58;
 
-pub const SHARED_MEMORY_PREFIX: &str = "AGENT_DATA_";
-
 pub fn shared_memory_name(pid: u32) -> String {
-    format!("{SHARED_MEMORY_PREFIX}{pid}")
+    format!("AGENT_DATA_{pid}")
 }
 
 pub const IMAGE_DATA_SIZE: usize = 33177602;
@@ -46,7 +44,7 @@ pub fn build_id(dll: &[u8]) -> [u8; VERSION_LEN] {
     id
 }
 
-// Created by the injector before the agent loads so the first frame draws the user's cursor: [style, r, g, b, size]; optional.
+/// The optional cursor mapping the injector creates before loading the agent: [style, r, g, b, size].
 pub const INITIAL_CURSOR_SIZE: usize = 5;
 
 pub fn initial_cursor_name(pid: u32) -> String {
@@ -57,7 +55,7 @@ pub fn unload_event_name(pid: u32) -> String {
     format!("AGENT_UNLOAD_{pid}")
 }
 
-/// The event that wakes the agent's worker thread to answer read-only requests without waiting for a frame.
+/// Wakes the agent's worker thread to answer read-only requests without waiting for a frame.
 pub fn work_event_name(pid: u32) -> String {
     format!("AGENT_WORK_{pid}")
 }
@@ -77,7 +75,7 @@ pub fn worker_mutex_name(pid: u32) -> String {
     format!("AGENT_WORKER_{pid}")
 }
 
-/// Held by whoever has a request in the slot of a window message (`input::*_MESSAGE`), from writing it to reading the answer. The agent only answers a slot's newest request, so askers take turns.
+/// Held by whoever has a request in a window message's slot (`input::*_MESSAGE`) until it reads the answer.
 pub fn request_mutex_name(pid: u32, message: u32) -> String {
     format!("AGENT_REQUEST_{pid}_{message}")
 }
@@ -109,7 +107,7 @@ pub mod offsets_state {
     pub const NOT_FOUND: u8 = 2;
 }
 
-// How the agent treats the overlay: Simba's slot 0 is uploaded every frame, otherwise slot `overlay_serial & 1` when the serial changes.
+// How the agent uploads the overlay: Simba's slot 0 every frame, or slot `overlay_serial & 1` when the serial changes.
 pub mod overlay_mode {
     pub const OFF: u8 = 0;
     pub const EVERY_FRAME: u8 = 1;
@@ -124,6 +122,7 @@ pub mod cursor_style {
     pub const X: u8 = 3;
 }
 
+/// Flag, version and protocol: the bytes every protocol keeps, so a stale side can still be named.
 pub const PREAMBLE_SIZE: usize = 9;
 
 #[repr(C, packed)]
@@ -143,7 +142,7 @@ pub struct Header {
     pub offsets_state: u8,
     pub capture_enabled: u8,
     pub overlay_serial: u32,
-    // What the injector last painted (0: unknown), read only by it to skip repainting an identical frame.
+    // What the injector last painted (0: unknown), so it can skip an identical frame.
     pub overlay_hash: u64,
     pub cursor_style: u8,
     pub cursor_color: [u8; 3],
@@ -162,10 +161,10 @@ pub struct Incompatible {
 
 impl Header {
     pub fn from_bytes(bytes: &[u8; HEADER_SIZE]) -> Result<Self, Incompatible> {
-        let protocol = bytes[8];
+        let protocol = bytes[PREAMBLE_SIZE - 1];
         if protocol != PROTOCOL_VERSION {
             return Err(Incompatible {
-                version: version_text(&bytes[1..8]),
+                version: version_text(&bytes[1..PREAMBLE_SIZE - 1]),
                 protocol,
             });
         }

@@ -1,4 +1,4 @@
-//! The script log: the last scripts the client ran for an event, in a ring in shared memory (`AGENT_SCRIPTS_<pid>`), using the packet log's scheme.
+//! The script log (`AGENT_SCRIPTS_<pid>`): event scripts run, in a `ring`; `log` must be an initialised `Log` unless noted.
 
 use crate::ring;
 use alloc::{format, string::String, vec::Vec};
@@ -54,10 +54,7 @@ impl ring::Slot for Slot {
 
 #[repr(C)]
 pub struct Log {
-    slots: u32,
-    slot_size: u32,
-    /// Sequence numbers handed out so far: the next entry is number `written`.
-    written: AtomicU64,
+    header: ring::Header,
     reserved: [u8; 48],
     entries: [Slot; SLOT_COUNT],
 }
@@ -86,17 +83,12 @@ pub type Page = ring::Page<Entry>;
 
 /// Sets up a freshly created (zeroed) mapping of `LOG_SIZE` writable bytes.
 pub unsafe fn init(log: *mut Log) {
-    write_volatile(addr_of_mut!((*log).slots), SLOT_COUNT as u32);
-    write_volatile(
-        addr_of_mut!((*log).slot_size),
-        core::mem::size_of::<Slot>() as u32,
-    );
+    ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));
 }
 
 /// Whether the mapping was set up by an agent with this layout; `log` must point to `LOG_SIZE` readable bytes.
 pub unsafe fn is_compatible(log: *const Log) -> bool {
-    read_volatile(addr_of!((*log).slots)) == SLOT_COUNT as u32
-        && read_volatile(addr_of!((*log).slot_size)) == core::mem::size_of::<Slot>() as u32
+    ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
 
 /// What to log about a script: the event it runs for and where it is.
@@ -110,7 +102,7 @@ pub struct Run<'a> {
     pub args: &'a [(u8, i32)],
 }
 
-/// Appends an entry; `log` must point to an initialised `Log`.
+/// Appends an entry.
 pub unsafe fn push(log: *const Log, time_us: u64, run: &Run) {
     let Run {
         phase,
@@ -121,32 +113,26 @@ pub unsafe fn push(log: *const Log, time_us: u64, run: &Run) {
         args,
     } = *run;
     let stored = args.len().min(ARG_COUNT);
-    ring::push(
-        &(*log).written,
-        addr_of!((*log).entries) as *const Slot,
-        SLOT_COUNT,
-        |slot| {
-            write_volatile(addr_of_mut!((*slot).time_us), time_us);
-            write_volatile(addr_of_mut!((*slot).event_type), event_type);
-            write_volatile(addr_of_mut!((*slot).tick), tick.unwrap_or(-1));
-            write_volatile(addr_of_mut!((*slot).phase), phase);
-            write_volatile(addr_of_mut!((*slot).arg_count), arg_count);
-            write_volatile(addr_of_mut!((*slot).depth), depth);
-            write_volatile(addr_of_mut!((*slot).stored), stored as u8);
-            for (i, &(kind, value)) in args[..stored].iter().enumerate() {
-                write_volatile(addr_of_mut!((*slot).kinds[i]), kind);
-                write_volatile(addr_of_mut!((*slot).values[i]), value);
-            }
-        },
-    );
+    ring::push(&(*log).header, addr_of!((*log).entries), |slot| {
+        write_volatile(addr_of_mut!((*slot).time_us), time_us);
+        write_volatile(addr_of_mut!((*slot).event_type), event_type);
+        write_volatile(addr_of_mut!((*slot).tick), tick.unwrap_or(-1));
+        write_volatile(addr_of_mut!((*slot).phase), phase);
+        write_volatile(addr_of_mut!((*slot).arg_count), arg_count);
+        write_volatile(addr_of_mut!((*slot).depth), depth);
+        write_volatile(addr_of_mut!((*slot).stored), stored as u8);
+        for (i, &(kind, value)) in args[..stored].iter().enumerate() {
+            write_volatile(addr_of_mut!((*slot).kinds[i]), kind);
+            write_volatile(addr_of_mut!((*slot).values[i]), value);
+        }
+    });
 }
 
-/// Copies out up to `limit` entries from `since` on (restarting at the oldest if `since` is ahead); `log` must point to an initialised `Log`.
+/// Copies out up to `limit` entries from `since` on (from the oldest if `since` is ahead).
 pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
     ring::read_since(
-        &(*log).written,
-        addr_of!((*log).entries) as *const Slot,
-        SLOT_COUNT,
+        &(*log).header,
+        addr_of!((*log).entries),
         since,
         limit,
         |at, slot| {
@@ -176,23 +162,12 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+    use crate::ring::Zeroed;
 
-    struct Memory(*mut Log);
-
-    impl Memory {
-        fn new() -> Self {
-            let layout = Layout::new::<Log>();
-            let log = unsafe { alloc_zeroed(layout) } as *mut Log;
-            unsafe { init(log) };
-            Self(log)
-        }
-    }
-
-    impl Drop for Memory {
-        fn drop(&mut self) {
-            unsafe { dealloc(self.0.cast(), Layout::new::<Log>()) };
-        }
+    fn memory() -> Zeroed<Log> {
+        let memory = Zeroed::new();
+        unsafe { init(memory.0) };
+        memory
     }
 
     fn run<'a>(
@@ -221,7 +196,7 @@ mod tests {
 
     #[test]
     fn reads_what_was_pushed_in_order() {
-        let memory = Memory::new();
+        let memory = memory();
         unsafe {
             assert!(is_compatible(memory.0));
             push(
@@ -293,7 +268,7 @@ mod tests {
 
     #[test]
     fn keeps_only_the_first_arguments_but_the_whole_count() {
-        let memory = Memory::new();
+        let memory = memory();
         let args: Vec<(u8, i32)> = (0..20).map(|i| (arg_kind::INT, i)).collect();
         unsafe {
             push(memory.0, 0, &run(phase::START, 76, 0, 20, &args));

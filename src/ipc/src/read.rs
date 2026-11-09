@@ -1,6 +1,6 @@
 use alloc::{string::String, vec, vec::Vec};
 
-use crate::state::{game_state, interfaces, part, InterfaceLayout, Layout};
+use crate::state::{array, game_state, interfaces, part, InterfaceLayout, Layout};
 
 const MAX_CHAIN: usize = 64;
 const TABLE_BUCKETS: u64 = 0x8;
@@ -17,18 +17,15 @@ pub trait Memory {
     }
 
     fn u64(&self, address: u64) -> Option<u64> {
-        let mut b = [0; 8];
-        self.read(address, &mut b).then(|| u64::from_le_bytes(b))
+        read_array(self, address).map(u64::from_le_bytes)
     }
 
     fn i32(&self, address: u64) -> Option<i32> {
-        let mut b = [0; 4];
-        self.read(address, &mut b).then(|| i32::from_le_bytes(b))
+        read_array(self, address).map(i32::from_le_bytes)
     }
 
     fn f32(&self, address: u64) -> Option<f32> {
-        let mut b = [0; 4];
-        self.read(address, &mut b).then(|| f32::from_le_bytes(b))
+        read_array(self, address).map(f32::from_le_bytes)
     }
 
     fn ptr(&self, address: u64) -> Option<u64> {
@@ -45,20 +42,30 @@ pub trait Memory {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .map(|&c| i32::from_le_bytes(c))
                 .collect(),
         )
     }
 }
 
+fn read_array<const N: usize>(memory: &(impl Memory + ?Sized), address: u64) -> Option<[u8; N]> {
+    let mut bytes = [0; N];
+    memory.read(address, &mut bytes).then_some(bytes)
+}
+
+fn le_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+fn le_i32(bytes: &[u8], at: usize) -> i32 {
+    i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
 pub fn read_string(memory: &impl Memory, address: u64) -> Option<String> {
-    let mut b = [0u8; 24];
-    if !memory.read(address, &mut b) {
-        return None;
-    }
+    let b: [u8; 24] = read_array(memory, address)?;
     if b[23] & 0x80 != 0 {
-        let ptr = u64::from_le_bytes(b[0..8].try_into().ok()?);
-        let len = u64::from_le_bytes(b[8..16].try_into().ok()?);
+        let ptr = le_u64(&b, 0);
+        let len = le_u64(&b, 8);
         if len > 4096 {
             return None;
         }
@@ -140,52 +147,44 @@ impl Table {
             if node == 0 || node == self.end {
                 return None;
             }
-            // one read covers the node's key, value and next pointer
-            let mut fields = [0u8; NODE_SIZE];
-            if !memory.read(node, &mut fields) {
-                return None;
-            }
-            if i32::from_le_bytes(fields[..4].try_into().ok()?) == key {
-                let value = u64::from_le_bytes(fields[NODE_VALUE as usize..][..8].try_into().ok()?);
+            let (node_key, value, next) = read_node(memory, node)?;
+            if node_key == key {
                 return (value != 0).then_some(value);
             }
-            node = u64::from_le_bytes(fields[NODE_NEXT as usize..].try_into().ok()?);
+            node = next;
         }
         None
     }
 }
 
+/// A node's key, value and next pointer, in one read.
+fn read_node(memory: &impl Memory, node: u64) -> Option<(i32, u64, u64)> {
+    let fields: [u8; NODE_SIZE] = read_array(memory, node)?;
+    Some((
+        le_i32(&fields, 0),
+        le_u64(&fields, NODE_VALUE as usize),
+        le_u64(&fields, NODE_NEXT as usize),
+    ))
+}
+
 /// Every (key, value) in a table `table_get` reads, in no order.
 pub fn table_entries(memory: &impl Memory, table: u64) -> Vec<(i32, u64)> {
-    let (Some(buckets), Some(count)) = (
-        memory.ptr(table + TABLE_BUCKETS),
-        memory.i32(table + TABLE_COUNT),
-    ) else {
-        return Vec::new();
-    };
-    let count = count as u32 as u64;
-    if count == 0 || count > 1 << 16 {
-        return Vec::new();
-    }
-    let Some(end) = memory.u64(buckets + count * 8) else {
+    let Some(table) = Table::open(memory, table).filter(|t| t.count <= 1 << 16) else {
         return Vec::new();
     };
     let mut seen = alloc::collections::BTreeSet::new();
     let mut entries = Vec::new();
-    for bucket in 0..count {
-        let mut node = memory.u64(buckets + bucket * 8).unwrap_or(0);
+    for bucket in 0..table.count {
+        let mut node = memory.u64(table.buckets + bucket * 8).unwrap_or(0);
         for _ in 0..MAX_CHAIN {
-            if node == 0 || node == end || !seen.insert(node) {
+            if node == 0 || node == table.end || !seen.insert(node) {
                 break;
             }
-            let mut fields = [0u8; NODE_SIZE];
-            if !memory.read(node, &mut fields) {
+            let Some((key, value, next)) = read_node(memory, node) else {
                 break;
-            }
-            let key = i32::from_le_bytes(fields[..4].try_into().unwrap());
-            let value = u64::from_le_bytes(fields[NODE_VALUE as usize..][..8].try_into().unwrap());
+            };
             entries.push((key, value));
-            node = u64::from_le_bytes(fields[NODE_NEXT as usize..].try_into().unwrap());
+            node = next;
         }
     }
     entries
@@ -204,7 +203,7 @@ pub fn local_player(memory: &impl Memory, layout: &Layout) -> Option<(u64, u64)>
     Some((view, player))
 }
 
-// The map squares the scene was built from (the source squares in an instance), found through the scene loader's builder vector without offsets.
+// The scene's map squares (an instance's source squares), found by shape through the scene loader's builder.
 const LOADER_SCAN: [usize; 3] = [0x8000, 0x4000, 0x2000];
 const LOADER_VIEW: u64 = 0x10;
 const LOADER_FIELDS: usize = 0x50;
@@ -219,17 +218,14 @@ pub fn map_regions(memory: &impl Memory, layout: &Layout) -> Option<Vec<[i32; 2]
     scene_loader(memory, client(memory, layout)?, view).map(|(_, regions)| regions)
 }
 
-// The client's own flag for "this scene is an instance", read from the scene loader.
+/// The client's own flag for "this scene is an instance", read from the scene loader.
 pub fn in_instance(memory: &impl Memory, layout: &Layout) -> Option<bool> {
     if !layout.has(part::SCENE_LOADER) {
         return None;
     }
     let (view, _) = local_player(memory, layout)?;
     let (loader, _) = scene_loader(memory, client(memory, layout)?, view)?;
-    let mut flag = [0u8; 1];
-    memory
-        .read(loader + layout.scene_loader.instance_flag as u64, &mut flag)
-        .then(|| flag[0] != 0)
+    read_array(memory, loader + layout.scene_loader.instance_flag as u64).map(|[flag]| flag != 0)
 }
 
 fn plausible(pointer: u64) -> bool {
@@ -244,16 +240,15 @@ fn scene_loader(memory: &impl Memory, client: u64, view: u64) -> Option<(u64, Ve
     // (loader, builder, regions)
     let mut found: Vec<(u64, u64, Vec<[i32; 2]>)> = Vec::new();
     for at in (0..scan).step_by(8) {
-        let loader = u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
+        let loader = le_u64(&window, at);
         if !plausible(loader) || memory.u64(loader + LOADER_VIEW) != Some(view) {
             continue;
         }
-        let mut fields = [0u8; LOADER_FIELDS];
-        if !memory.read(loader, &mut fields) {
+        let Some(fields) = read_array::<LOADER_FIELDS>(memory, loader) else {
             continue;
-        }
+        };
         for field in (8..LOADER_FIELDS).step_by(8) {
-            let builder = u64::from_le_bytes(fields[field..field + 8].try_into().unwrap());
+            let builder = le_u64(&fields, field);
             if plausible(builder) && !found.iter().any(|(_, b, _)| *b == builder) {
                 if let Some(regions) = find_map_regions(memory, builder, BUILDER_WINDOW) {
                     found.push((loader, builder, regions));
@@ -274,7 +269,7 @@ fn find_map_regions(memory: &impl Memory, start: u64, length: usize) -> Option<V
     if !memory.read(first, &mut window[..length - skipped]) {
         return None;
     }
-    let word = |at: usize| u64::from_le_bytes(window[at..at + 8].try_into().unwrap());
+    let word = |at: usize| le_u64(&window, at);
     let mut found = Vec::new();
     for at in (0..=(length - skipped).saturating_sub(24)).step_by(8) {
         if let Some(regions) = region_vector(memory, word(at), word(at + 8), word(at + 16)) {
@@ -302,7 +297,7 @@ fn region_vector(
     if !memory.read(begin, &mut data) {
         return None;
     }
-    let int = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+    let int = |at: usize| le_i32(&data, at);
     (REGION_MIN_STRIDE..=REGION_MAX_STRIDE.min(bytes))
         .step_by(8)
         .filter(|stride| bytes % stride == 0 && (capacity - begin).is_multiple_of(*stride))
@@ -312,9 +307,10 @@ fn region_vector(
             let square = |i: usize| (int(i * stride), int(i * stride + 4));
             // zeroed memory would pass as square (0, 0), which is never loaded
             if (0..count).any(|i| {
-                !(0..REGION_LIMIT).contains(&square(i).0)
-                    || !(0..REGION_LIMIT).contains(&square(i).1)
-                    || square(i) == (0, 0)
+                let (x, y) = square(i);
+                !(0..REGION_LIMIT).contains(&x)
+                    || !(0..REGION_LIMIT).contains(&y)
+                    || (x, y) == (0, 0)
             }) {
                 return None;
             }
@@ -328,7 +324,7 @@ fn region_vector(
         })
 }
 
-const _: () = assert!(interfaces::ARRAY_DATA == interfaces::ARRAY_COUNT + 8);
+const _: () = assert!(array::DATA == array::COUNT + 8);
 
 pub fn component(
     memory: &impl Memory,
@@ -339,17 +335,14 @@ pub fn component(
     let (group, child) = ((id as u32 >> 16) as u64, (id as u32 & 0xffff) as u64);
     let manager = memory.ptr(client + layout.manager as u64)?;
     let groups = memory.ptr(manager + layout.groups as u64)?;
-    let array = groups + group * interfaces::GROUP_SIZE as u64;
+    let children = groups + group * interfaces::GROUP_SIZE as u64;
     // the count and the data pointer are adjacent, so one read fetches both
-    let mut header = [0u8; 16];
-    if !memory.read(array + interfaces::ARRAY_COUNT as u64, &mut header) {
-        return None;
-    }
-    let count = u64::from_le_bytes(header[..8].try_into().ok()?);
+    let header: [u8; 16] = read_array(memory, children + array::COUNT as u64)?;
+    let count = le_u64(&header, 0);
     if child >= count {
         return None;
     }
-    let elements = u64::from_le_bytes(header[8..].try_into().ok()?);
+    let elements = le_u64(&header, 8);
     if elements == 0 {
         return None;
     }
@@ -374,7 +367,7 @@ pub fn local_name_object(memory: &impl Memory, layout: &Layout) -> Option<u64> {
 mod tests {
     use super::*;
 
-    // A sparse-ish fake process: one flat window starting at `base`.
+    // A fake process: one flat window starting at `base`.
     struct Fake {
         base: u64,
         bytes: Vec<u8>,
@@ -620,8 +613,8 @@ mod tests {
         // group 2 holds two children
         let group = groups + 2 * interfaces::GROUP_SIZE as u64;
         let elements = 0x1400;
-        m.put_u64(group + interfaces::ARRAY_COUNT as u64, 2);
-        m.put_u64(group + interfaces::ARRAY_DATA as u64, elements);
+        m.put_u64(group + array::COUNT as u64, 2);
+        m.put_u64(group + array::DATA as u64, elements);
         let node_at = |index: u64| 0x1500 + index * 0x40;
         for index in 0..2u64 {
             let entry = elements + index * interfaces::ENTRY_SIZE as u64;
