@@ -17,50 +17,43 @@ use crate::{
     world_select::{self, WorldSelect},
 };
 
-fn logged_in(memory: &impl Memory, layout: &Layout) -> bool {
-    state::current(memory, layout) == Some(LOGGED_IN)
+/// What `read` finds while logged in, and nothing otherwise.
+fn in_game<M: Memory, T>(
+    memory: &M,
+    layout: &Layout,
+    read: impl FnOnce(&M, &Layout) -> Option<Vec<T>>,
+) -> Vec<T> {
+    if state::current(memory, layout) != Some(LOGGED_IN) {
+        return Vec::new();
+    }
+    read(memory, layout).unwrap_or_default()
 }
 
 pub fn npcs(memory: &impl Memory, layout: &Layout) -> Vec<Npc> {
-    if !logged_in(memory, layout) {
-        return Vec::new();
-    }
-    world::npcs(memory, &layout.world).unwrap_or_default()
+    in_game(memory, layout, |m, l| world::npcs(m, &l.world))
 }
 
 pub fn players(memory: &impl Memory, layout: &Layout) -> Vec<Player> {
-    if !logged_in(memory, layout) {
-        return Vec::new();
-    }
-    world::players(memory, &layout.world).unwrap_or_default()
+    in_game(memory, layout, |m, l| world::players(m, &l.world))
 }
 
 pub const PROJECTILE_PARTS: u64 = part::PROJECTILES | part::WORLD;
 
 pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Vec<Projectile> {
-    if !logged_in(memory, layout) {
-        return Vec::new();
-    }
-    world::projectiles(memory, layout).unwrap_or_default()
+    in_game(memory, layout, world::projectiles)
 }
 
 pub const SPOT_ANIM_PARTS: u64 = part::SPOT_ANIMS | part::PLAYER;
 
 pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Vec<SpotAnim> {
-    if !logged_in(memory, layout) {
-        return Vec::new();
-    }
-    world::spot_anims(memory, layout).unwrap_or_default()
+    in_game(memory, layout, world::spot_anims)
 }
 
 pub const GROUND_ITEM_PARTS: u64 = part::GROUND_ITEMS | part::PROJECTION | part::PLAYER;
 
 /// Ground items without their names, which the client's item definitions give.
 pub fn ground_items(memory: &impl Memory, layout: &Layout) -> Vec<GroundItem> {
-    if !logged_in(memory, layout) {
-        return Vec::new();
-    }
-    world::ground_items(memory, layout).unwrap_or_default()
+    in_game(memory, layout, world::ground_items)
 }
 
 /// The interface root and the scale its widgets are drawn at; `None` while no interface is up.

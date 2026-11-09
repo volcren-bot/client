@@ -1,17 +1,13 @@
 use ipc::state::{ChatLayout, Layout};
 use serde::{Deserialize, Serialize};
 
-use crate::memory::{Memory, read_string};
+use crate::memory::{Memory, NODE_NEXT, NODE_VALUE, TABLE_BUCKETS, TABLE_COUNT, read_string};
 
-const TABLE_BUCKETS: u64 = 0x8;
-const TABLE_COUNT: u64 = 0x10;
-const NODE_VALUE: u64 = 0x10;
-const NODE_NEXT: u64 = 0x18;
 const MAX_BUCKETS: u64 = 1 << 16;
 const MAX_NODES: usize = 1 << 14;
 const CYCLE_MS: i64 = 20;
 
-// A chat history message: `kind` is the client's type, `name` and `sender` who and where, `age`/`time` in ms, `time_utc`/`time_local` the client's "HH:MM" stamps.
+/// A chat history message: `age` and `time` in ms, `time_utc` and `time_local` the client's "HH:MM" stamps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub uid: i32,
@@ -58,7 +54,7 @@ fn message(
     })
 }
 
-// Every message the client keeps, oldest first; one freed while read is left out.
+/// Every message the client keeps, oldest first; one freed while read is left out.
 pub fn messages(memory: &impl Memory, layout: &Layout, now: i64) -> Option<Vec<ChatMessage>> {
     let c = &layout.chat;
     let table = layout.module_base + c.messages as u64;

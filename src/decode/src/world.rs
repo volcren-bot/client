@@ -1,21 +1,14 @@
+use ipc::read::{Table, local_player, table_get};
 use ipc::state::{Layout, WorldLayout};
 use serde::{Deserialize, Serialize};
 
-use ipc::read::{Table, local_player, table_get};
-
-use crate::memory::{Memory, Snapshot, read_string};
+use crate::memory::{Memory, Snapshot, TABLE_BUCKETS, TABLE_COUNT, byte, i32_pair, read_string};
+use crate::state::view_base;
 
 const MAX_CHAIN: usize = 64;
 const MAX_ITEMS: u64 = 4096;
 const MAX_ACTORS: i32 = 4096;
 const MAX_VARCS: u64 = 1 << 16;
-
-#[cfg(test)]
-const NODE_VALUE: u64 = 0x10;
-#[cfg(test)]
-const NODE_NEXT: u64 = 0x18;
-const TABLE_BUCKETS: u64 = 0x8;
-const TABLE_COUNT: u64 = 0x10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
@@ -49,8 +42,7 @@ fn ground_items_in(memory: &impl Memory, layout: &Layout, view: u64) -> Option<V
     let g = &layout.ground_items;
     let p = &layout.projection;
     let plane = memory.i32(view + p.plane as u64)?;
-    let base = view + layout.player.base_x as u64;
-    let (base_x, base_y) = (memory.i32(base)?, memory.i32(base + 4)?);
+    let (base_x, base_y) = view_base(memory, layout, view)?;
     let scene = memory.ptr(view + p.scene as u64);
     let size = |offset: u32| {
         scene
@@ -85,10 +77,7 @@ fn ground_items_in(memory: &impl Memory, layout: &Layout, view: u64) -> Option<V
                 let Some(item) = memory.ptr(node + g.node_item as u64) else {
                     break;
                 };
-                let (Some(id), Some(quantity)) = (
-                    memory.i32(item + g.id as u64),
-                    memory.i32(item + g.id as u64 + 4),
-                ) else {
+                let Some((id, quantity)) = i32_pair(memory, item + g.id as u64) else {
                     break;
                 };
                 items.push(GroundItem {
@@ -126,10 +115,10 @@ pub struct Npc {
     pub pose: i32,
     // the spot animation (graphic) on the NPC, -1 when it has none
     pub graphic: i32,
-    // the actor it is interacting with (fighting, facing after a talk): an NPC index or a player index, -1 for the other kind or for none
+    // the NPC or player index it interacts with (fighting, facing after a talk), -1 for the other kind or none
     pub interacting_npc: i32,
     pub interacting_player: i32,
-    // the head icons the server set on it (an overhead prayer, ...), at most 8; empty for none
+    // the head icons the server set on it (an overhead prayer, ...), at most 8
     pub head_icons: Vec<HeadIcon>,
 }
 
@@ -142,20 +131,12 @@ pub struct HeadIcon {
 
 const MAX_HEAD_ICONS: u64 = 8;
 
-// The pairs of the head icon object's two `std::vector<int>`s, archives at 0 and sprites further on, leaving out unset
-// slots (-1); nothing when a vector doesn't look like one.
+// The set (archive, sprite) pairs of the head icon object's two `std::vector<int>`s; none when one doesn't read as a vector.
 fn head_icons(memory: &impl Memory, layout: &WorldLayout, object: u64) -> Vec<HeadIcon> {
-    let vector = |at: u64| -> Option<Vec<i32>> {
-        let (begin, end) = (memory.ptr(at)?, memory.ptr(at + 8)?);
-        let count = end.checked_sub(begin)? / 4;
-        if begin == 0 || count > MAX_HEAD_ICONS {
-            return None;
-        }
-        memory.i32s(begin, count as usize)
-    };
+    let sprites = object + layout.head_icon_sprites as u64;
     let (Some(archives), Some(sprites)) = (
-        vector(object),
-        vector(object + layout.head_icon_sprites as u64),
+        ints(memory, object, MAX_HEAD_ICONS),
+        ints(memory, sprites, MAX_HEAD_ICONS),
     ) else {
         return Vec::new();
     };
@@ -188,12 +169,12 @@ pub struct Player {
     pub animation: i32,
     pub pose: i32,
     pub graphic: i32,
-    // What the player is interacting with: state (0 NPC, 1 loc, 2 gone, 3 done, -1 unknown), NPC index, loc world tile (-1 if none).
+    // The interaction's state (0 NPC, 1 loc, 2 gone, 3 done, -1 unknown), NPC index and loc tile (-1 if none).
     pub target_state: i32,
     pub target_npc: i32,
     pub target_x: i32,
     pub target_y: i32,
-    // The actor it is interacting with (NPC or player index), -1 for none; unlike `target_npc` it covers following players.
+    // The NPC or player index it interacts with, -1 for none; unlike `target_npc` it covers following players.
     pub interacting_npc: i32,
     pub interacting_player: i32,
 }
@@ -253,7 +234,7 @@ fn span(fields: &[(u64, u64)]) -> usize {
     }
 }
 
-// The fields `actor_fields`, `interacting` and `position` read from any actor.
+// The span of an actor: the fields `read_actor` reads plus `own`.
 fn actor_span(layout: &WorldLayout, own: &[(u64, u64)]) -> usize {
     let shared = [
         (ACTOR_HEIGHT, 4),
@@ -267,25 +248,31 @@ fn actor_span(layout: &WorldLayout, own: &[(u64, u64)]) -> usize {
     span(&[&shared[..], own].concat())
 }
 
-fn read_ints(memory: &impl Memory, address: u64) -> Option<Vec<i32>> {
-    let begin = memory.u64(address)?;
-    let end = memory.u64(address + 8)?;
-    let count = end.checked_sub(begin)? / 4;
-    if count > MAX_ITEMS {
+// The fields `npcs` and `players` read from an actor besides the shared ones.
+fn npc_fields(layout: &WorldLayout) -> [(u64, u64); 3] {
+    [
+        (layout.npc_definition as u64, 8),
+        (layout.npc_name_override as u64, 24),
+        (layout.npc_head_icons as u64, 8),
+    ]
+}
+
+fn player_fields(layout: &WorldLayout) -> [(u64, u64); 2] {
+    [(layout.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)]
+}
+
+// A `std::vector<int>` at `at`: where its data starts and how many it holds.
+fn int_vector(memory: &impl Memory, at: u64) -> Option<(u64, u64)> {
+    let (begin, end) = (memory.u64(at)?, memory.u64(at + 8)?);
+    Some((begin, end.checked_sub(begin)? / 4))
+}
+
+fn ints(memory: &impl Memory, at: u64, max: u64) -> Option<Vec<i32>> {
+    let (begin, count) = int_vector(memory, at)?;
+    if count > max {
         return None;
     }
-    let mut bytes = vec![0u8; count as usize * 4];
-    if count > 0 && !memory.read(begin, &mut bytes) {
-        return None;
-    }
-    Some(
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| i32::from_le_bytes(*c))
-            .collect(),
-    )
+    memory.i32s(begin, count as usize)
 }
 
 fn client(memory: &impl Memory, layout: &WorldLayout) -> Option<u64> {
@@ -293,8 +280,8 @@ fn client(memory: &impl Memory, layout: &WorldLayout) -> Option<u64> {
 }
 
 fn container_items(memory: &impl Memory, layout: &WorldLayout, node: u64) -> Option<Vec<Item>> {
-    let ids = read_ints(memory, node + layout.container_ids as u64)?;
-    let quantities = read_ints(memory, node + layout.container_quantities as u64)?;
+    let ids = ints(memory, node + layout.container_ids as u64, MAX_ITEMS)?;
+    let quantities = ints(memory, node + layout.container_quantities as u64, MAX_ITEMS)?;
     Some(
         ids.iter()
             .enumerate()
@@ -307,14 +294,22 @@ fn container_items(memory: &impl Memory, layout: &WorldLayout, node: u64) -> Opt
     )
 }
 
-fn container_node(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<u64> {
+// The container table's buckets, how many there are and the end sentinel.
+fn containers(memory: &impl Memory, layout: &WorldLayout) -> Option<(u64, u64, u64)> {
     let table = layout.module_base + layout.containers as u64;
     let buckets = memory.ptr(table + TABLE_BUCKETS)?;
     let count = memory.u64(table + TABLE_COUNT)?;
-    if count == 0 || count > MAX_ITEMS || id < 0 {
+    if count == 0 || count > MAX_ITEMS {
         return None;
     }
-    let end = memory.u64(buckets + count * 8)?;
+    Some((buckets, count, memory.u64(buckets + count * 8)?))
+}
+
+fn container_node(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<u64> {
+    if id < 0 {
+        return None;
+    }
+    let (buckets, count, end) = containers(memory, layout)?;
     let mut node = memory.u64(buckets + (id as u64 % count) * 8)?;
     for _ in 0..MAX_CHAIN {
         if node == 0 || node == end {
@@ -336,9 +331,7 @@ pub fn item_container(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Op
 pub fn item_slot(memory: &impl Memory, layout: &WorldLayout, id: i32, slot: i32) -> Option<Item> {
     let node = container_node(memory, layout, id)?;
     let read = |vector: u32| -> Option<i32> {
-        let begin = memory.u64(node + vector as u64)?;
-        let end = memory.u64(node + vector as u64 + 8)?;
-        let length = end.checked_sub(begin)? / 4;
+        let (begin, length) = int_vector(memory, node + vector as u64)?;
         let index = u64::try_from(slot)
             .ok()
             .filter(|&index| index < length && index < MAX_ITEMS)?;
@@ -356,13 +349,7 @@ pub fn item_containers(
     memory: &impl Memory,
     layout: &WorldLayout,
 ) -> Option<Vec<(i32, Vec<Item>)>> {
-    let table = layout.module_base + layout.containers as u64;
-    let buckets = memory.ptr(table + TABLE_BUCKETS)?;
-    let count = memory.u64(table + TABLE_COUNT)?;
-    if count == 0 || count > MAX_ITEMS {
-        return None;
-    }
-    let end = memory.u64(buckets + count * 8)?;
+    let (buckets, count, end) = containers(memory, layout)?;
     let mut seen = Vec::new();
     let mut found = Vec::new();
     for bucket in 0..count {
@@ -405,12 +392,7 @@ pub fn varc(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<i32> 
         } else if key > id {
             high = mid;
         } else {
-            let kind = {
-                let mut b = [0u8];
-                memory
-                    .read(entry + layout.varc_kind as u64, &mut b)
-                    .then_some(b[0])?
-            };
+            let kind = byte(memory, entry + layout.varc_kind as u64)?;
             return (kind == 1)
                 .then(|| memory.i32(entry + layout.varc_value as u64))
                 .flatten();
@@ -419,118 +401,144 @@ pub fn varc(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<i32> 
     None
 }
 
-fn world_view(memory: &impl Memory, layout: &WorldLayout, client: u64) -> Option<(u64, i32, i32)> {
+// The client's own world view and the world tile its scene starts at.
+fn world_view(
+    memory: &impl Memory,
+    layout: &WorldLayout,
+    client: u64,
+) -> Option<(u64, (i32, i32))> {
     let id = memory.i32(client + layout.world_view_id as u64)?;
     let view = table_get(memory, client + layout.world_views as u64, id)?;
-    let base_x = memory.i32(view + layout.base_x as u64)?;
-    let base_y = memory.i32(view + layout.base_x as u64 + 4)?;
-    Some((view, base_x, base_y))
+    Some((view, i32_pair(memory, view + layout.base_x as u64)?))
 }
 
-fn position(
+// What NPCs and players share, all read from the actor itself.
+struct Actor {
+    index: i32,
+    x: i32,
+    y: i32,
+    local_x: i32,
+    local_y: i32,
+    animation: i32,
+    height: i32,
+    pose: i32,
+    graphic: i32,
+    interacting_npc: i32,
+    interacting_player: i32,
+}
+
+fn read_actor(
     memory: &impl Memory,
     layout: &WorldLayout,
     actor: u64,
-    base: (i32, i32),
-) -> Option<(i32, i32, i32, i32)> {
-    let local_x = memory.i32(actor + layout.local_x as u64)?;
-    let local_y = memory.i32(actor + layout.local_x as u64 + 4)?;
-    Some((
-        base.0 + (local_x >> 7),
-        base.1 + (local_y >> 7),
-        local_x,
-        local_y,
-    ))
-}
-
-// The fields NPCs and players share, all read from the actor itself.
-fn actor_fields(memory: &impl Memory, layout: &WorldLayout, actor: u64) -> (i32, i32, i32, i32) {
-    let animation = memory
-        .i32(actor + layout.npc_animation as u64)
-        .unwrap_or(-1);
-    let height = memory
-        .i32(actor + ACTOR_HEIGHT)
-        .filter(|h| (1..=1000).contains(h))
-        .unwrap_or(-1);
-    let pose = memory.i32(actor + ACTOR_POSE).unwrap_or(-1);
+    index: i32,
+    (base_x, base_y): (i32, i32),
+) -> Option<Actor> {
+    let (local_x, local_y) = i32_pair(memory, actor + layout.local_x as u64)?;
     let graphic = memory
         .ptr(actor + ACTOR_SPOT_ANIM)
         .filter(|&spot| memory.i32(spot + SPOT_ANIM_KIND) == Some(SPOT_ANIM_KIND_VALUE))
         .and_then(|spot| memory.i32(spot + SPOT_ANIM_ID))
         .unwrap_or(-1);
-    (animation, height, pose, graphic)
+    let (interacting_npc, interacting_player) = interacting(memory, actor);
+    Some(Actor {
+        index,
+        x: base_x + (local_x >> 7),
+        y: base_y + (local_y >> 7),
+        local_x,
+        local_y,
+        animation: memory
+            .i32(actor + layout.npc_animation as u64)
+            .unwrap_or(-1),
+        height: memory
+            .i32(actor + ACTOR_HEIGHT)
+            .filter(|h| (1..=1000).contains(h))
+            .unwrap_or(-1),
+        pose: memory.i32(actor + ACTOR_POSE).unwrap_or(-1),
+        graphic,
+        interacting_npc,
+        interacting_player,
+    })
 }
 
-pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
-    let client = client(memory, layout)?;
-    let (view, base_x, base_y) = world_view(memory, layout, client)?;
-    let indices = memory.ptr(view + layout.npc_indices as u64)?;
-    let count = memory.i32(view + layout.npc_indices as u64 + 8)?;
+// The `count` actors whose indices are at `indices`, each copied in one read with its `own` fields and decoded by `decode`.
+fn actors<M: Memory, T>(
+    memory: &M,
+    layout: &WorldLayout,
+    (table, indices, count): (u64, u64, i32),
+    base: (i32, i32),
+    own: &[(u64, u64)],
+    mut decode: impl FnMut(&Snapshot<'_, M>, u64, Actor) -> T,
+) -> Option<Vec<T>> {
     if !(0..=MAX_ACTORS).contains(&count) {
         return None;
     }
-    // a table that can't be opened finds no NPC, as each lookup would
-    let table = Table::open(memory, view + layout.npc_table as u64);
+    // a table that can't be opened finds no actor, as each lookup would
+    let table = Table::open(memory, table);
     let mut list = Snapshot::new(memory, count as usize * 4);
     list.load(indices);
-    let mut actor = Snapshot::new(
-        memory,
-        actor_span(
-            layout,
-            &[
-                (layout.npc_definition as u64, 8),
-                (layout.npc_name_override as u64, 24),
-                (layout.npc_head_icons as u64, 8),
-            ],
-        ),
-    );
-    let mut npcs = Vec::with_capacity(count as usize);
+    let mut snapshot = Snapshot::new(memory, actor_span(layout, own));
+    let mut found = Vec::with_capacity(count as usize);
     for i in 0..count as u64 {
         let Some(index) = list.i32(indices + i * 4) else {
             continue;
         };
-        let Some(npc) = table.and_then(|t| t.get(memory, index)) else {
+        let Some(address) = table.and_then(|t| t.get(memory, index)) else {
             continue;
         };
-        actor.load(npc);
-        let m = &actor;
-        let Some((x, y, local_x, local_y)) = position(m, layout, npc, (base_x, base_y)) else {
-            continue;
-        };
-        let definition = m.ptr(npc + layout.npc_definition as u64);
-        let id = definition
-            .and_then(|d| m.i32(d + layout.definition_id as u64))
-            .unwrap_or(-1);
-        let name = read_string(m, npc + layout.npc_name_override as u64)
-            .filter(|n| !n.is_empty())
-            .or_else(|| definition.and_then(|d| read_string(m, d + layout.definition_name as u64)))
-            .unwrap_or_default();
-        let (animation, height, pose, graphic) = actor_fields(m, layout, npc);
-        let (interacting_npc, interacting_player) = interacting(m, npc);
-        let head_icons = (layout.npc_head_icons != 0)
-            .then(|| m.ptr(npc + layout.npc_head_icons as u64))
-            .flatten()
-            .filter(|&object| object != 0)
-            .map(|object| head_icons(memory, layout, object))
-            .unwrap_or_default();
-        npcs.push(Npc {
-            index,
-            id,
-            name,
-            x,
-            y,
-            local_x,
-            local_y,
-            animation,
-            height,
-            pose,
-            graphic,
-            interacting_npc,
-            interacting_player,
-            head_icons,
-        });
+        snapshot.load(address);
+        if let Some(actor) = read_actor(&snapshot, layout, address, index, base) {
+            found.push(decode(&snapshot, address, actor));
+        }
     }
-    Some(npcs)
+    Some(found)
+}
+
+pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
+    let (view, base) = world_view(memory, layout, client(memory, layout)?)?;
+    let indices = memory.ptr(view + layout.npc_indices as u64)?;
+    let count = memory.i32(view + layout.npc_indices as u64 + 8)?;
+    let list = (view + layout.npc_table as u64, indices, count);
+    actors(
+        memory,
+        layout,
+        list,
+        base,
+        &npc_fields(layout),
+        |m, npc, a| {
+            let definition = m.ptr(npc + layout.npc_definition as u64);
+            let id = definition
+                .and_then(|d| m.i32(d + layout.definition_id as u64))
+                .unwrap_or(-1);
+            let name = read_string(m, npc + layout.npc_name_override as u64)
+                .filter(|n| !n.is_empty())
+                .or_else(|| {
+                    definition.and_then(|d| read_string(m, d + layout.definition_name as u64))
+                })
+                .unwrap_or_default();
+            let head_icons = (layout.npc_head_icons != 0)
+                .then(|| m.ptr(npc + layout.npc_head_icons as u64))
+                .flatten()
+                .map(|object| head_icons(memory, layout, object))
+                .unwrap_or_default();
+            Npc {
+                index: a.index,
+                id,
+                name,
+                x: a.x,
+                y: a.y,
+                local_x: a.local_x,
+                local_y: a.local_y,
+                animation: a.animation,
+                height: a.height,
+                pose: a.pose,
+                graphic: a.graphic,
+                interacting_npc: a.interacting_npc,
+                interacting_player: a.interacting_player,
+                head_icons,
+            }
+        },
+    )
 }
 
 // The NPC definition's size in tiles (its side), checked against NPCs of size 1, 2 and 3.
@@ -552,18 +560,19 @@ const ACTOR_HITSPLATS: u64 = 0x358;
 const HITSPLAT_SIZE: u64 = 12;
 const HITSPLAT_SLOTS: u64 = 4;
 
+// The actor with `index` in the table at offset `table` of the client's own world view.
+fn actor_at(memory: &impl Memory, layout: &WorldLayout, table: u32, index: i32) -> Option<u64> {
+    let (view, _) = world_view(memory, layout, client(memory, layout)?)?;
+    table_get(memory, view + table as u64, index)
+}
+
 /// The hitsplats in use on the NPC with `index` (None when gone); read every tick to see every hit.
 pub fn npc_hitsplats(
     memory: &impl Memory,
     layout: &WorldLayout,
     index: i32,
 ) -> Option<Vec<Hitsplat>> {
-    let client = client(memory, layout)?;
-    let (view, _, _) = world_view(memory, layout, client)?;
-    actor_hitsplats(
-        memory,
-        table_get(memory, view + layout.npc_table as u64, index)?,
-    )
+    actor_hitsplats(memory, actor_at(memory, layout, layout.npc_table, index)?)
 }
 
 /// The hitsplats in use on the player with `index` (None when gone).
@@ -572,12 +581,7 @@ pub fn player_hitsplats(
     layout: &WorldLayout,
     index: i32,
 ) -> Option<Vec<Hitsplat>> {
-    let client = client(memory, layout)?;
-    let (view, _, _) = world_view(memory, layout, client)?;
-    actor_hitsplats(
-        memory,
-        table_get(memory, view + layout.players as u64, index)?,
-    )
+    actor_hitsplats(memory, actor_at(memory, layout, layout.players, index)?)
 }
 
 fn actor_hitsplats(memory: &impl Memory, actor: u64) -> Option<Vec<Hitsplat>> {
@@ -599,9 +603,7 @@ fn actor_hitsplats(memory: &impl Memory, actor: u64) -> Option<Vec<Hitsplat>> {
 
 /// The size in tiles of the NPC with `index`, from its definition; None when it's gone or the value is off.
 pub fn npc_size(memory: &impl Memory, layout: &WorldLayout, index: i32) -> Option<i32> {
-    let client = client(memory, layout)?;
-    let (view, _, _) = world_view(memory, layout, client)?;
-    let npc = table_get(memory, view + layout.npc_table as u64, index)?;
+    let npc = actor_at(memory, layout, layout.npc_table, index)?;
     let definition = memory.ptr(npc + layout.npc_definition as u64)?;
     memory
         .i32(definition + DEFINITION_SIZE)
@@ -616,27 +618,13 @@ pub fn npc_words(
     count: usize,
     definition: bool,
 ) -> Option<(u64, Vec<i32>)> {
-    let client = client(memory, layout)?;
-    let (view, _, _) = world_view(memory, layout, client)?;
-    let npc = table_get(memory, view + layout.npc_table as u64, index)?;
+    let npc = actor_at(memory, layout, layout.npc_table, index)?;
     let at = if definition {
         memory.ptr(npc + layout.npc_definition as u64)?
     } else {
         npc
     };
-    let mut bytes = vec![0u8; count * 4];
-    if !memory.read(at, &mut bytes) {
-        return None;
-    }
-    Some((
-        at,
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| i32::from_le_bytes(*c))
-            .collect(),
-    ))
+    Some((at, memory.i32s(at, count)?))
 }
 
 // Debug: the player actor with `index` (its address and first `count` 4-byte words), to find fields.
@@ -646,22 +634,8 @@ pub fn player_words(
     index: i32,
     count: usize,
 ) -> Option<(u64, Vec<i32>)> {
-    let client = client(memory, layout)?;
-    let (view, _, _) = world_view(memory, layout, client)?;
-    let player = table_get(memory, view + layout.players as u64, index)?;
-    let mut bytes = vec![0u8; count * 4];
-    if !memory.read(player, &mut bytes) {
-        return None;
-    }
-    Some((
-        player,
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| i32::from_le_bytes(*c))
-            .collect(),
-    ))
+    let player = actor_at(memory, layout, layout.players, index)?;
+    Some((player, memory.i32s(player, count)?))
 }
 
 // A world entity (RuneLite's `WorldEntity`): a moving sub-scene such as a boat, with a world view of its own.
@@ -678,8 +652,8 @@ pub struct WorldEntity {
 
 // The top-level world view's id; the world views table is keyed by it.
 const TOP_LEVEL_VIEW: i32 = 0;
-// Where the top-level world view keeps its world entities and their fields; found by comparing a ship with land, redo on updates.
-const SCENE_LIMIT: i32 = 104 << 7;
+const SCENE_LIMIT: i32 = SCENE_TILES << 7;
+// Where the top-level world view keeps its world entities and their fields; found by comparing a ship with land.
 const VIEW_WORLD_ENTITIES: u64 = 0xe0;
 const ENTITY_VIEW_ID: u64 = 0x2c;
 const ENTITY_CONFIG: u64 = 0x38;
@@ -690,7 +664,6 @@ pub fn world_entities(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<
     let client = client(memory, layout)?;
     let views = client + layout.world_views as u64;
     let top = table_get(memory, views, TOP_LEVEL_VIEW)?;
-    let scene = SCENE_LIMIT;
     Some(
         ipc::read::table_entries(memory, top + VIEW_WORLD_ENTITIES)
             .into_iter()
@@ -701,9 +674,8 @@ pub fn world_entities(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<
                 {
                     return None;
                 }
-                let local_x = memory.i32(entity + ENTITY_LOCAL_X)?;
-                let local_y = memory.i32(entity + ENTITY_LOCAL_X + 4)?;
-                if !(0..scene).contains(&local_x) || !(0..scene).contains(&local_y) {
+                let (local_x, local_y) = i32_pair(memory, entity + ENTITY_LOCAL_X)?;
+                if !(0..SCENE_LIMIT).contains(&local_x) || !(0..SCENE_LIMIT).contains(&local_y) {
                     return None;
                 }
                 let config_id = memory
@@ -734,7 +706,7 @@ pub fn world_debug(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Str
         );
         lines.push(format!("view id {id} at {view:#x} base {bx:?} {by:?}"));
     }
-    let view = table_get(memory, client + layout.world_views as u64, 0)?;
+    let view = table_get(memory, client + layout.world_views as u64, TOP_LEVEL_VIEW)?;
     for offset in (0..0x4000u64).step_by(8) {
         let entries = ipc::read::table_entries(memory, view + offset);
         if !entries.is_empty() {
@@ -754,63 +726,46 @@ pub fn world_debug(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Str
 
 pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>> {
     let client = client(memory, layout)?;
-    let (view, base_x, base_y) = world_view(memory, layout, client)?;
+    let (view, base) = world_view(memory, layout, client)?;
     let count = memory.i32(client + layout.player_count as u64)?;
-    if !(0..=MAX_ACTORS).contains(&count) {
-        return None;
-    }
-    let table = Table::open(memory, view + layout.players as u64);
-    let indices = client + layout.player_count as u64 + 4;
-    let mut list = Snapshot::new(memory, count as usize * 4);
-    list.load(indices);
-    let mut actor = Snapshot::new(
-        memory,
-        actor_span(
-            layout,
-            &[(layout.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)],
-        ),
+    let list = (
+        view + layout.players as u64,
+        client + layout.player_count as u64 + 4,
+        count,
     );
-    let mut players = Vec::with_capacity(count as usize);
-    for i in 0..count as u64 {
-        let Some(index) = list.i32(indices + i * 4) else {
-            continue;
-        };
-        let Some(player) = table.and_then(|t| t.get(memory, index)) else {
-            continue;
-        };
-        actor.load(player);
-        let m = &actor;
-        let Some((x, y, local_x, local_y)) = position(m, layout, player, (base_x, base_y)) else {
-            continue;
-        };
-        let name = m
-            .ptr(player + layout.player_name as u64)
-            .and_then(|n| read_string(m, n))
-            .unwrap_or_default()
-            .replace('\u{a0}', " ");
-        let (animation, height, pose, graphic) = actor_fields(m, layout, player);
-        let (target_state, target_npc, target_x, target_y) = player_target(m, player);
-        let (interacting_npc, interacting_player) = interacting(m, player);
-        players.push(Player {
-            index,
-            name,
-            x,
-            y,
-            local_x,
-            local_y,
-            height,
-            animation,
-            pose,
-            graphic,
-            target_state,
-            target_npc,
-            target_x,
-            target_y,
-            interacting_npc,
-            interacting_player,
-        });
-    }
-    Some(players)
+    actors(
+        memory,
+        layout,
+        list,
+        base,
+        &player_fields(layout),
+        |m, player, a| {
+            let name = m
+                .ptr(player + layout.player_name as u64)
+                .and_then(|n| read_string(m, n))
+                .unwrap_or_default()
+                .replace('\u{a0}', " ");
+            let (target_state, target_npc, target_x, target_y) = player_target(m, player);
+            Player {
+                index: a.index,
+                name,
+                x: a.x,
+                y: a.y,
+                local_x: a.local_x,
+                local_y: a.local_y,
+                height: a.height,
+                animation: a.animation,
+                pose: a.pose,
+                graphic: a.graphic,
+                target_state,
+                target_npc,
+                target_x,
+                target_y,
+                interacting_npc: a.interacting_npc,
+                interacting_player: a.interacting_player,
+            }
+        },
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -854,7 +809,7 @@ pub struct Projectile {
 const MAX_PROJECTILES: u64 = 512;
 
 // An actor reference as the client stores it: NPC index + 1, -(player index + 1), 0 for none.
-fn actor(value: i32) -> (i32, i32) {
+fn actor_ref(value: i32) -> (i32, i32) {
     match value {
         v if v > 0 => (v - 1, -1),
         v if v < 0 => (-1, -v - 1),
@@ -862,16 +817,40 @@ fn actor(value: i32) -> (i32, i32) {
     }
 }
 
+// Where a client list's sentinel keeps its length.
+const LIST_COUNT: u64 = 0x10;
+
+// Visits each object of the client list at `head` (its sentinel), whose nodes hold the object pointer `object` bytes in.
+fn list_objects(
+    memory: &impl Memory,
+    head: u64,
+    object: u64,
+    max: u64,
+    mut visit: impl FnMut(u64),
+) -> Option<()> {
+    if memory.u64(head + LIST_COUNT)? > max {
+        return None;
+    }
+    let mut node = memory.u64(head)?;
+    for _ in 0..max {
+        if node == 0 || node == head {
+            break;
+        }
+        let next = memory.u64(node)?;
+        if let Some(at) = memory.ptr(node + object) {
+            visit(at);
+        }
+        node = next;
+    }
+    Some(())
+}
+
 pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projectile>> {
     let w = &layout.world;
     let p = &layout.projectiles;
     let client = client(memory, w)?;
-    let (_, base_x, base_y) = world_view(memory, w, client)?;
+    let (_, (base_x, base_y)) = world_view(memory, w, client)?;
     let cycle = memory.i32(layout.module_base + p.cycle as u64)?;
-    let head = client + p.list as u64;
-    if memory.u64(head + 0x10)? > MAX_PROJECTILES {
-        return None;
-    }
     let fields = [
         p.id,
         p.source_x,
@@ -896,77 +875,71 @@ pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projecti
     ];
     let mut object = Snapshot::new(memory, span(&fields.map(|offset| (offset as u64, 8))));
     let mut projectiles = Vec::new();
-    let mut node = memory.u64(head)?;
-    for _ in 0..MAX_PROJECTILES {
-        if node == 0 || node == head {
-            break;
-        }
-        let next = memory.u64(node)?;
-        let Some(at) = memory.ptr(node + p.node as u64) else {
-            node = next;
-            continue;
-        };
-        object.load(at);
-        let m = &object;
-        let int = |offset: u32| m.i32(at + offset as u64);
-        let double = |offset: u32| {
-            m.u64(at + offset as u64)
-                .map(f64::from_bits)
-                .filter(|v| v.is_finite())
-                .map(|v| v as i32)
-        };
-        let (Some(id), Some(source_x), Some(source_y), Some(target_x), Some(target_y)) = (
-            int(p.id),
-            int(p.source_x),
-            int(p.source_y),
-            int(p.target_x),
-            int(p.target_y),
-        ) else {
-            node = next;
-            continue;
-        };
-        let (source_npc, source_player) = actor(int(p.source_actor).unwrap_or(0));
-        let (target_npc, target_player) = actor(int(p.target_actor).unwrap_or(0));
-        let mut moving = [0u8];
-        let moving = m.read(at + p.moving as u64, &mut moving) && moving[0] != 0;
-        let (local_x, local_y, z) = match (moving, double(p.x), double(p.y), double(p.z)) {
-            (true, Some(x), Some(y), Some(z)) => (x, y, z),
-            _ => (
-                ((source_x - base_x) << 7) + 64,
-                ((source_y - base_y) << 7) + 64,
-                0,
-            ),
-        };
-        projectiles.push(Projectile {
-            id,
-            source_x,
-            source_y,
-            source_plane: int(p.source_level).unwrap_or(0),
-            target_x,
-            target_y,
-            target_plane: int(p.target_level).unwrap_or(0),
-            source_npc,
-            source_player,
-            target_npc,
-            target_player,
-            start_height: int(p.start_height).unwrap_or(0),
-            end_height: int(p.end_height).unwrap_or(0),
-            slope: int(p.slope).unwrap_or(0),
-            start_pos: int(p.start_pos).unwrap_or(0),
-            start_cycle: int(p.start_cycle).unwrap_or(0),
-            end_cycle: int(p.end_cycle).unwrap_or(0),
-            cycle,
-            moving,
-            x: base_x + (local_x >> 7),
-            y: base_y + (local_y >> 7),
-            local_x,
-            local_y,
-            z,
-            orientation: int(p.orientation).unwrap_or(0),
-            height: int(p.start_height).unwrap_or(0),
-        });
-        node = next;
-    }
+    list_objects(
+        memory,
+        client + p.list as u64,
+        p.node as u64,
+        MAX_PROJECTILES,
+        |at| {
+            object.load(at);
+            let m = &object;
+            let int = |offset: u32| m.i32(at + offset as u64);
+            let double = |offset: u32| {
+                m.u64(at + offset as u64)
+                    .map(f64::from_bits)
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as i32)
+            };
+            let (Some(id), Some(source_x), Some(source_y), Some(target_x), Some(target_y)) = (
+                int(p.id),
+                int(p.source_x),
+                int(p.source_y),
+                int(p.target_x),
+                int(p.target_y),
+            ) else {
+                return;
+            };
+            let (source_npc, source_player) = actor_ref(int(p.source_actor).unwrap_or(0));
+            let (target_npc, target_player) = actor_ref(int(p.target_actor).unwrap_or(0));
+            let moving = byte(m, at + p.moving as u64).is_some_and(|b| b != 0);
+            let (local_x, local_y, z) = match (moving, double(p.x), double(p.y), double(p.z)) {
+                (true, Some(x), Some(y), Some(z)) => (x, y, z),
+                _ => (
+                    ((source_x - base_x) << 7) + 64,
+                    ((source_y - base_y) << 7) + 64,
+                    0,
+                ),
+            };
+            projectiles.push(Projectile {
+                id,
+                source_x,
+                source_y,
+                source_plane: int(p.source_level).unwrap_or(0),
+                target_x,
+                target_y,
+                target_plane: int(p.target_level).unwrap_or(0),
+                source_npc,
+                source_player,
+                target_npc,
+                target_player,
+                start_height: int(p.start_height).unwrap_or(0),
+                end_height: int(p.end_height).unwrap_or(0),
+                slope: int(p.slope).unwrap_or(0),
+                start_pos: int(p.start_pos).unwrap_or(0),
+                start_cycle: int(p.start_cycle).unwrap_or(0),
+                end_cycle: int(p.end_cycle).unwrap_or(0),
+                cycle,
+                moving,
+                x: base_x + (local_x >> 7),
+                y: base_y + (local_y >> 7),
+                local_x,
+                local_y,
+                z,
+                orientation: int(p.orientation).unwrap_or(0),
+                height: int(p.start_height).unwrap_or(0),
+            });
+        },
+    )?;
     Some(projectiles)
 }
 
@@ -978,7 +951,7 @@ pub struct SpotAnim {
     pub x: i32,
     pub y: i32,
     pub plane: i32,
-    // the local fine coordinates (128 per tile) and the client's z, the height at the tile minus the height the server asked for
+    // the local fine coordinates (128 per tile) and the client's z: the tile's height minus the one the server asked for
     pub local_x: i32,
     pub local_y: i32,
     pub z: i32,
@@ -1020,43 +993,33 @@ fn spot_anims_in(
     view_id: i32,
 ) -> Option<Vec<SpotAnim>> {
     let g = &layout.spot_anims;
-    let base = view + layout.player.base_x as u64;
-    let (base_x, base_y) = (memory.i32(base)?, memory.i32(base + 4)?);
+    let (base_x, base_y) = view_base(memory, layout, view)?;
     let cycle = memory.i32(layout.module_base + g.cycle as u64)?;
-    let head = view + g.list as u64;
-    if memory.u64(head + 0x10)? > MAX_SPOT_ANIMS {
-        return None;
-    }
     let mut objects = Vec::new();
-    let mut node = memory.u64(head)?;
-    for _ in 0..MAX_SPOT_ANIMS {
-        if node == 0 || node == head {
-            break;
-        }
-        let next = memory.u64(node)?;
-        let Some(at) = memory.ptr(node + SPOT_ANIM_NODE) else {
-            node = next;
-            continue;
-        };
-        let int = |offset: u32| memory.i32(at + offset as u64);
-        let (Some(id), Some(local_x), Some(local_y)) = (int(g.id), int(g.x), int(g.y)) else {
-            node = next;
-            continue;
-        };
-        objects.push(SpotAnim {
-            id,
-            x: base_x + (local_x >> 7),
-            y: base_y + (local_y >> 7),
-            plane: int(g.level).unwrap_or(0),
-            local_x,
-            local_y,
-            z: int(g.z).unwrap_or(0),
-            start_cycle: int(g.start_cycle).unwrap_or(0),
-            cycle,
-            view_id,
-        });
-        node = next;
-    }
+    list_objects(
+        memory,
+        view + g.list as u64,
+        SPOT_ANIM_NODE,
+        MAX_SPOT_ANIMS,
+        |at| {
+            let int = |offset: u32| memory.i32(at + offset as u64);
+            let (Some(id), Some(local_x), Some(local_y)) = (int(g.id), int(g.x), int(g.y)) else {
+                return;
+            };
+            objects.push(SpotAnim {
+                id,
+                x: base_x + (local_x >> 7),
+                y: base_y + (local_y >> 7),
+                plane: int(g.level).unwrap_or(0),
+                local_x,
+                local_y,
+                z: int(g.z).unwrap_or(0),
+                start_cycle: int(g.start_cycle).unwrap_or(0),
+                cycle,
+                view_id,
+            });
+        },
+    )?;
     Some(objects)
 }
 
@@ -1098,23 +1061,6 @@ mod tests {
         reserved: 0,
     };
     const CLIENT: u64 = 0x10_0000;
-
-    fn table(m: &mut Fake, table: u64, nodes: u64, entries: &[(i32, u64)]) {
-        let buckets = nodes + 0x10000;
-        m.put_u64(table + TABLE_BUCKETS, buckets);
-        m.put_i32(table + TABLE_COUNT, 1);
-        m.put_u64(buckets + 8, 0xdead);
-        let mut next = 0;
-        for (i, &(key, value)) in entries.iter().enumerate().rev() {
-            let node = nodes + i as u64 * 0x20;
-            m.put(node, &[0; 0x20]);
-            m.put_i32(node, key);
-            m.put_u64(node + NODE_VALUE, value);
-            m.put_u64(node + NODE_NEXT, next);
-            next = node;
-        }
-        m.put_u64(buckets, next);
-    }
 
     fn grand_exchange() -> Fake {
         let mut m = Fake::default();
@@ -1160,18 +1106,12 @@ mod tests {
 
         let view = 0x40_0000;
         m.put_i32(CLIENT + LAYOUT.world_view_id as u64, 0);
-        table(
-            &mut m,
-            CLIENT + LAYOUT.world_views as u64,
-            0x41_0000,
-            &[(0, view)],
-        );
+        m.put_table(CLIENT + LAYOUT.world_views as u64, 0x41_0000, &[(0, view)]);
         m.put_i32(view + 0x24, 3112);
         m.put_i32(view + 0x28, 3440);
 
         let (clerk, banker) = (0x50_0000u64, 0x51_0000u64);
-        table(
-            &mut m,
+        m.put_table(
             view + LAYOUT.npc_table as u64,
             0x52_0000,
             &[(25400, clerk), (25399, banker)],
@@ -1204,12 +1144,7 @@ mod tests {
         m.put_u64(clerk + 0x8000 + 0x18, 0x8000_0000_0000_0020);
 
         let player = 0x60_0000;
-        table(
-            &mut m,
-            view + LAYOUT.players as u64,
-            0x61_0000,
-            &[(780, player)],
-        );
+        m.put_table(view + LAYOUT.players as u64, 0x61_0000, &[(780, player)]);
         m.put_i32(CLIENT + LAYOUT.player_count as u64, 1);
         m.put_i32(CLIENT + LAYOUT.player_count as u64 + 4, 780);
         m.put_i32(player + LAYOUT.local_x as u64, 6464);
@@ -1353,19 +1288,9 @@ mod tests {
         let mut m = grand_exchange();
         // the fixture only holds the fields it sets: fill the rest of each actor, so its span reads at once
         let client = m.ptr(LAYOUT.module_base + LAYOUT.client as u64).unwrap();
-        let (view, _, _) = world_view(&m, &LAYOUT, client).unwrap();
-        let npc_span = actor_span(
-            &LAYOUT,
-            &[
-                (LAYOUT.npc_definition as u64, 8),
-                (LAYOUT.npc_name_override as u64, 24),
-                (LAYOUT.npc_head_icons as u64, 8),
-            ],
-        );
-        let player_span = actor_span(
-            &LAYOUT,
-            &[(LAYOUT.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)],
-        );
+        let (view, _) = world_view(&m, &LAYOUT, client).unwrap();
+        let npc_span = actor_span(&LAYOUT, &npc_fields(&LAYOUT));
+        let player_span = actor_span(&LAYOUT, &player_fields(&LAYOUT));
         let npcs_in = ipc::read::table_entries(&m, view + LAYOUT.npc_table as u64)
             .into_iter()
             .map(|(_, npc)| (npc, npc_span));
@@ -1613,6 +1538,7 @@ mod tests {
             ]
         );
     }
+
     #[test]
     fn reads_spot_anims() {
         use ipc::state::{PlayerLayout, SpotAnimLayout};
@@ -1705,10 +1631,10 @@ mod tests {
         m.put_u64(LAYOUT.module_base + LAYOUT.client as u64, client);
         m.put_i32(LAYOUT.module_base + 0xe98c14, 500);
         // two views, the main world (0) and the boat the player is in (5): a table with one view each
-        table(&mut m, client + 0x300, 0x40_0000, &[(0, top), (5, boat)]);
+        m.put_table(client + 0x300, 0x40_0000, &[(0, top), (5, boat)]);
         m.put_i32(client + 0x320, 5);
         m.put_i32(client + 0x324, 7);
-        table(&mut m, boat + 0x60, 0x42_0000, &[(7, player)]);
+        m.put_table(boat + 0x60, 0x42_0000, &[(7, player)]);
         for (view, base) in [(top, 3136), (boat, 0)] {
             m.put_i32(view + 0x24, base);
             m.put_i32(view + 0x28, base);

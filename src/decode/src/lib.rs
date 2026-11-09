@@ -23,6 +23,15 @@ pub struct Position {
     pub plane: Option<i32>,
 }
 
+impl Position {
+    pub fn chunk(&self) -> Chunk {
+        Chunk {
+            x: self.x >> 6,
+            y: self.y >> 6,
+        }
+    }
+}
+
 /// The tile the server last put the local player on, which the client's `Position` only reaches once the walk animation gets there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerTile {
@@ -32,15 +41,6 @@ pub struct ServerTile {
     pub plane: Option<i32>,
     /// steps the server sent that the client hasn't finished walking yet (0 once the player model stands on `x`, `y`)
     pub steps: i32,
-}
-
-impl Position {
-    pub fn chunk(&self) -> Chunk {
-        Chunk {
-            x: self.x >> 6,
-            y: self.y >> 6,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

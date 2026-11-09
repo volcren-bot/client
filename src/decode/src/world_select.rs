@@ -1,7 +1,7 @@
 use ipc::state::Layout;
 use serde::{Deserialize, Serialize};
 
-use crate::memory::{Memory, read_string};
+use crate::memory::{Memory, byte, read_string};
 
 const MAX_WORLDS: i32 = 2048;
 
@@ -27,13 +27,9 @@ pub struct WorldSelect {
 
 fn world(memory: &impl Memory, layout: &Layout, address: u64) -> Option<World> {
     let w = &layout.world_select;
-    let mut types = [0u8; 4];
-    memory
-        .read(address + w.types as u64, &mut types)
-        .then_some(())?;
     Some(World {
         id: memory.i32(address + w.id as u64)?,
-        types: u32::from_le_bytes(types),
+        types: memory.i32(address + w.types as u64)? as u32,
         players: memory.i32(address + w.players as u64)?,
         location: memory.i32(address + w.location as u64)?,
         activity: read_string(memory, address + w.activity as u64).unwrap_or_default(),
@@ -57,15 +53,12 @@ fn worlds(memory: &impl Memory, layout: &Layout) -> Option<Vec<World>> {
 pub fn world_select(memory: &impl Memory, layout: &Layout, client: u64) -> Option<WorldSelect> {
     let w = &layout.world_select;
     let global = |rva: u32| memory.i32(layout.module_base + rva as u64);
-    let mut open = [0u8];
-    memory
-        .read(layout.module_base + w.open as u64, &mut open)
-        .then_some(())?;
+    let open = byte(memory, layout.module_base + w.open as u64)?;
     let background_height = memory
         .ptr(layout.module_base + w.background as u64)
         .and_then(|background| memory.i32(background + w.background_height as u64));
     Some(WorldSelect {
-        open: open[0] != 0,
+        open: open != 0,
         current: memory.i32(client + w.current_world as u64)?,
         offset: global(w.offset)?,
         max_offset: global(w.max_offset)?,

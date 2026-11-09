@@ -7,28 +7,34 @@ pub use ipc::read::current_game_state as current;
 
 use crate::{
     Camera, GameState, Login, Minimap, Position, ServerTile, Skill, Tile,
-    memory::{Memory, read_string},
+    memory::{Memory, i32_pair, read_string},
 };
 
 pub const MAX_VARPS: usize = 8192;
 const MAX_SKILLS: u32 = 64;
-fn position(memory: &impl Memory, layout: &Layout, view: u64, player: u64) -> Option<Position> {
-    let p = &layout.player;
-    let local_x = memory.i32(player + p.local_x as u64)?;
-    let local_y = memory.i32(player + p.local_x as u64 + 4)?;
-    let base_x = memory.i32(view + p.base_x as u64)?;
-    let base_y = memory.i32(view + p.base_x as u64 + 4)?;
-    // the player's own world view, not the top one: they differ on a boat
-    let plane = layout
+
+/// The world tile a world view's scene starts at.
+pub(crate) fn view_base(memory: &impl Memory, layout: &Layout, view: u64) -> Option<(i32, i32)> {
+    i32_pair(memory, view + layout.player.base_x as u64)
+}
+
+/// The player's own world view's plane, not the top one's: they differ on a boat.
+fn view_plane(memory: &impl Memory, layout: &Layout, view: u64) -> Option<i32> {
+    layout
         .has(part::PROJECTION)
         .then(|| memory.i32(view + layout.projection.plane as u64))
-        .flatten();
+        .flatten()
+}
+
+fn position(memory: &impl Memory, layout: &Layout, view: u64, player: u64) -> Option<Position> {
+    let (local_x, local_y) = i32_pair(memory, player + layout.player.local_x as u64)?;
+    let (base_x, base_y) = view_base(memory, layout, view)?;
     Some(Position {
         local_x,
         local_y,
         x: base_x + (local_x >> 7),
         y: base_y + (local_y >> 7),
-        plane,
+        plane: view_plane(memory, layout, view),
     })
 }
 
@@ -42,16 +48,11 @@ pub fn server_tile(memory: &impl Memory, layout: &Layout) -> Option<ServerTile> 
     let scene_x = memory.i32(player + path.x as u64)?;
     let scene_y = memory.i32(player + path.y as u64)?;
     let steps = memory.i32(player + path.length as u64)?;
-    let base_x = memory.i32(view + layout.player.base_x as u64)?;
-    let base_y = memory.i32(view + layout.player.base_x as u64 + 4)?;
-    let plane = layout
-        .has(part::PROJECTION)
-        .then(|| memory.i32(view + layout.projection.plane as u64))
-        .flatten();
+    let (base_x, base_y) = view_base(memory, layout, view)?;
     Some(ServerTile {
         x: base_x + scene_x,
         y: base_y + scene_y,
-        plane,
+        plane: view_plane(memory, layout, view),
         steps,
     })
 }
@@ -81,19 +82,12 @@ fn skills(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Vec<Skil
 }
 
 pub fn total_xp(memory: &impl Memory, layout: &Layout) -> Option<i64> {
-    let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let skills = skills(memory, layout, client)?;
+    let skills = skills(memory, layout, client(memory, layout)?)?;
     Some(skills.iter().map(|s| s.xp.max(0) as i64).sum())
 }
 
-fn player_name(memory: &impl Memory, name: u64) -> Option<String> {
-    Some(read_string(memory, name)?.replace('\u{a0}', " ")).filter(|name| !name.is_empty())
-}
-
-/// The logged in account's normalized name (lowercase, spaces as `_`), which the display name override never touches.
-fn account_name(memory: &impl Memory, object: u64) -> Option<String> {
-    Some(read_string(memory, object + NAME_CLEAN)?.replace('\u{a0}', " "))
-        .filter(|name| !name.is_empty())
+fn name(memory: &impl Memory, address: u64) -> Option<String> {
+    Some(read_string(memory, address)?.replace('\u{a0}', " ")).filter(|name| !name.is_empty())
 }
 
 pub const MAX_NAME_BYTES: usize = SHORT_STRING_MAX;
@@ -126,20 +120,19 @@ pub fn name_request(
     })
 }
 
-fn ui(memory: &impl Memory, layout: &Layout, client: u64) -> Option<(i32, i32, f32)> {
+fn scale(memory: &impl Memory, layout: &Layout, client: u64) -> Option<f32> {
     let i = &layout.interfaces;
     let canvas = memory.ptr(client + i.canvas as u64)?;
-    let width = memory.i32(canvas + i.ui_width as u64)?;
-    let height = memory.i32(canvas + i.ui_width as u64 + 4)?;
-    let scale = memory.f32(canvas + i.ui_scale as u64)?;
-    (scale.is_finite() && scale > 0.0).then_some((width, height, scale))
+    memory
+        .f32(canvas + i.ui_scale as u64)
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
 }
 
 pub fn ui_scale(memory: &impl Memory, layout: &Layout) -> Option<f32> {
     if !layout.has(part::INTERFACES) {
         return None;
     }
-    ui(memory, layout, client(memory, layout)?).map(|(_, _, scale)| scale)
+    scale(memory, layout, client(memory, layout)?)
 }
 
 pub fn root_interface(memory: &impl Memory, layout: &Layout, state: Option<i32>) -> Option<i32> {
@@ -163,30 +156,25 @@ fn login(memory: &impl Memory, layout: &Layout, scale: f32) -> Option<Login> {
     })
 }
 
-fn minimap(memory: &impl Memory, layout: &Layout, client: u64) -> Option<Minimap> {
-    let m = &layout.minimap;
-    let object = memory.ptr(client + m.object as u64)?;
-    let zoom = memory.i32(object + m.zoom as u64)?;
+fn minimap(memory: &impl Memory, layout: &Layout, object: u64) -> Option<Minimap> {
+    let zoom = memory.i32(object + layout.minimap.zoom as u64)?;
     (2..=8).contains(&zoom).then_some(Minimap { zoom })
 }
 
 fn destination(
     memory: &impl Memory,
     layout: &Layout,
-    client: u64,
+    object: u64,
     player: Option<(u64, u64)>,
 ) -> Option<Tile> {
-    let object = memory.ptr(client + layout.minimap.object as u64)?;
-    let at = object + layout.minimap.destination as u64;
-    let (x, y) = (memory.i32(at)?, memory.i32(at + 4)?);
+    let (x, y) = i32_pair(memory, object + layout.minimap.destination as u64)?;
     if x == 0 && y == 0 {
         return None;
     }
-    let (view, _) = player?;
-    let base = view + layout.player.base_x as u64;
+    let (base_x, base_y) = view_base(memory, layout, player?.0)?;
     Some(Tile {
-        x: memory.i32(base)? + x,
-        y: memory.i32(base + 4)? + y,
+        x: base_x + x,
+        y: base_y + y,
     })
 }
 
@@ -227,9 +215,9 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
         state,
         Some(states::LOGIN_SCREEN | states::LOGIN_SCREEN_AUTHENTICATOR)
     );
-    let ui = layout
+    let scale = layout
         .has(part::INTERFACES)
-        .then(|| ui(memory, layout, client))
+        .then(|| scale(memory, layout, client))
         .flatten();
     let run_energy = (logged_in && layout.has(part::WORLD))
         .then(|| {
@@ -245,11 +233,14 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
         .then(|| memory.ptr(player?.1 + layout.world.player_name as u64))
         .flatten();
     let root = root_interface(memory, layout, state);
+    let minimap_object = (logged_in && layout.has(part::MINIMAP))
+        .then(|| memory.ptr(client + layout.minimap.object as u64))
+        .flatten();
 
     GameState {
         position: player.and_then(|(view, player)| position(memory, layout, view, player)),
-        player_name: name_object.and_then(|name| player_name(memory, name)),
-        account_name: name_object.and_then(|object| account_name(memory, object)),
+        player_name: name_object.and_then(|object| name(memory, object)),
+        account_name: name_object.and_then(|object| name(memory, object + NAME_CLEAN)),
         game_state: state,
         skills: (logged_in && layout.has(part::SKILLS))
             .then(|| skills(memory, layout, client))
@@ -259,21 +250,19 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
             .then(|| memory.i32(client + layout.tick_count as u64))
             .flatten(),
         login: (on_login_screen && layout.has(part::LOGIN))
-            .then(|| login(memory, layout, ui.map_or(1.0, |(_, _, scale)| scale)))
+            .then(|| login(memory, layout, scale.unwrap_or(1.0)))
             .flatten(),
         root_interface: root,
-        ui_scale: ui.map(|(_, _, scale)| scale),
+        ui_scale: scale,
         run_energy: run_energy.map(|(energy, _)| energy),
         weight: run_energy.map(|(_, weight)| weight),
         camera: (logged_in && layout.has(part::CAMERA))
             .then(|| camera(memory, layout, client, root))
             .flatten(),
-        minimap: (logged_in && layout.has(part::MINIMAP))
-            .then(|| minimap(memory, layout, client))
-            .flatten(),
-        destination: (logged_in && layout.has(part::MINIMAP | part::DESTINATION))
-            .then(|| destination(memory, layout, client, player))
-            .flatten(),
+        minimap: minimap_object.and_then(|object| minimap(memory, layout, object)),
+        destination: minimap_object
+            .filter(|_| layout.has(part::DESTINATION))
+            .and_then(|object| destination(memory, layout, object, player)),
     }
 }
 
@@ -308,10 +297,6 @@ mod tests {
         ProjectionLayout, SkillsLayout, WorldLayout,
     };
 
-    const TABLE_BUCKETS: u64 = 0x8;
-    const TABLE_COUNT: u64 = 0x10;
-    const NODE_VALUE: u64 = 0x10;
-    const NODE_NEXT: u64 = 0x18;
     const BASE: u64 = 0x1_4000_0000;
     const CLIENT: u64 = 0x10_0000;
 
@@ -387,18 +372,6 @@ mod tests {
         }
     }
 
-    fn table(m: &mut Fake, table: u64, node: u64, key: i32, value: u64) {
-        let buckets = node + 0x100;
-        m.put_u64(table + TABLE_BUCKETS, buckets);
-        m.put_i32(table + TABLE_COUNT, 1);
-        m.put_u64(buckets, node);
-        m.put_u64(buckets + 8, 0xdead);
-        m.put(node, &[0; 0x20]);
-        m.put_i32(node, key);
-        m.put_u64(node + NODE_VALUE, value);
-        m.put_u64(node + NODE_NEXT, 0);
-    }
-
     fn logged_in() -> Fake {
         let l = layout();
         let mut m = Fake::default();
@@ -409,20 +382,12 @@ mod tests {
         let (view, player) = (0x20_0000, 0x21_0000);
         m.put_i32(CLIENT + l.player.world_view_id as u64, 0);
         m.put_i32(CLIENT + l.player.player_index as u64, 780);
-        table(
-            &mut m,
+        m.put_table(
             CLIENT + l.player.world_views as u64,
             0x22_0000,
-            0,
-            view,
+            &[(0, view)],
         );
-        table(
-            &mut m,
-            view + l.player.players as u64,
-            0x23_0000,
-            780,
-            player,
-        );
+        m.put_table(view + l.player.players as u64, 0x23_0000, &[(780, player)]);
         m.put_i32(view + 0x24, 3112);
         m.put_i32(view + 0x28, 3335);
         m.put_i32(view + 0x18, 1);

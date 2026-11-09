@@ -1,7 +1,9 @@
+use std::cell::OnceCell;
+
 use ipc::state::{InterfaceLayout, interfaces::*};
 use serde::{Deserialize, Serialize};
 
-pub use crate::memory::Memory;
+use crate::memory::{Memory, byte, i32_pair, read_string};
 
 const MAX_DEPTH: usize = 64;
 const MAX_BUCKETS: u32 = 1 << 16;
@@ -34,11 +36,10 @@ pub struct Widget {
     pub scroll_width: i32,
     #[serde(default)]
     pub scroll_height: i32,
-    /// the widget's first menu option ("Close", or the port's name on a map marker), read at fixed offsets (build a2636a01); nil when it has none
+    /// The first menu option ("Close", or a map marker's port), read at fixed offsets (build a2636a01).
     #[serde(default)]
     pub action: Option<String>,
-    /// the item it shows (an inventory or bank cell; -1 for none) and how many, read at the fixed `DETAIL_ITEM_ID` offsets: a
-    /// bank placeholder shows quantity 0 while its container slot reads 1
+    /// The item shown (-1 for none) and its quantity; a bank placeholder shows 0 while its slot reads 1.
     #[serde(default = "minus_one")]
     pub item_id: i32,
     #[serde(default)]
@@ -79,25 +80,60 @@ struct Tree<'a, M: Memory> {
     memory: &'a M,
     layout: &'a InterfaceLayout,
     client: u64,
+    opened: OnceCell<Option<Vec<(i32, i32)>>>,
 }
 
-impl<M: Memory> Tree<'_, M> {
+impl<'a, M: Memory> Tree<'a, M> {
+    fn open(memory: &'a M, layout: &'a InterfaceLayout) -> Option<Self> {
+        Some(Self {
+            memory,
+            layout,
+            client: memory.ptr(layout.module_base + layout.client as u64)?,
+            opened: OnceCell::new(),
+        })
+    }
+
     fn field(&self, component: u64, offset: u32) -> Option<i32> {
         self.memory.i32(component + offset as u64)
+    }
+
+    fn pair(&self, component: u64, offset: u32) -> Option<(i32, i32)> {
+        i32_pair(self.memory, component + offset as u64)
+    }
+
+    /// The component's own hidden flag, false when the layout has none.
+    fn hidden(&self, component: u64) -> Option<bool> {
+        if self.layout.hidden == 0 {
+            return Some(false);
+        }
+        byte(self.memory, component + self.layout.hidden as u64).map(|b| b != 0)
     }
 
     fn component(&self, id: i32) -> Option<u64> {
         ipc::read::component(self.memory, self.layout, self.client, id)
     }
 
-    fn opened_in(&self, group: i32) -> Option<i32> {
-        self.sub_interfaces()?
-            .into_iter()
-            .find(|&(_, g)| g == group)
-            .map(|(parent, _)| parent)
+    /// The component `group`:`child` and where it stands under `root`.
+    fn placed(&self, root: i32, group: u16, child: u16) -> Option<(u64, (i32, i32, bool))> {
+        let component = self.component((group as i32) << 16 | child as i32)?;
+        Some((component, place(self, component, root)?))
     }
 
-    fn sub_interfaces(&self) -> Option<Vec<(i32, i32)>> {
+    fn opened_in(&self, group: i32) -> Option<i32> {
+        self.sub_interfaces()?
+            .iter()
+            .find(|&&(_, g)| g == group)
+            .map(|&(parent, _)| parent)
+    }
+
+    /// Each open sub-interface as (parent, group), read once per tree.
+    fn sub_interfaces(&self) -> Option<&[(i32, i32)]> {
+        self.opened
+            .get_or_init(|| self.read_sub_interfaces())
+            .as_deref()
+    }
+
+    fn read_sub_interfaces(&self) -> Option<Vec<(i32, i32)>> {
         let table = self.client + self.layout.sub_interfaces as u64;
         let buckets = self.memory.ptr(table + TABLE_BUCKETS as u64)?;
         let count = self.memory.i32(table + TABLE_BUCKET_COUNT as u64)? as u32;
@@ -121,19 +157,32 @@ impl<M: Memory> Tree<'_, M> {
         }
         Some(found)
     }
+
+    /// The index and component of each dynamic child of `parent`.
+    fn children(&self, parent: u64) -> Option<Vec<(u64, u64)>> {
+        let at = parent + self.layout.children as u64;
+        let count = self.memory.u64(at)?;
+        if count == 0 {
+            return Some(Vec::new());
+        }
+        if count > MAX_CHILDREN {
+            return None;
+        }
+        let entries = self.memory.ptr(at + CHILDREN_DATA as u64)?;
+        let entry = |i: u64| entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64;
+        Some(
+            (0..count)
+                .filter_map(|i| Some((i, self.memory.ptr(entry(i))?)))
+                .collect(),
+        )
+    }
 }
 
-pub fn sub_interfaces(memory: &impl Memory, layout: &InterfaceLayout) -> Option<Vec<SubInterface>> {
-    let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree {
-        memory,
-        layout,
-        client,
-    };
+fn listed_sub_interfaces<M: Memory>(tree: &Tree<M>) -> Option<Vec<SubInterface>> {
     let mut list: Vec<SubInterface> = tree
         .sub_interfaces()?
-        .into_iter()
-        .map(|(parent, group)| SubInterface {
+        .iter()
+        .map(|&(parent, group)| SubInterface {
             group,
             parent,
             parent_group: parent >> 16,
@@ -144,34 +193,41 @@ pub fn sub_interfaces(memory: &impl Memory, layout: &InterfaceLayout) -> Option<
     Some(list)
 }
 
+pub fn sub_interfaces(memory: &impl Memory, layout: &InterfaceLayout) -> Option<Vec<SubInterface>> {
+    listed_sub_interfaces(&Tree::open(memory, layout)?)
+}
+
+/// `root` and the group of each sub-interface, once each.
+fn open_groups(root: i32, sub_interfaces: &[SubInterface]) -> Vec<i32> {
+    let mut groups = vec![root];
+    for sub in sub_interfaces {
+        if !groups.contains(&sub.group) {
+            groups.push(sub.group);
+        }
+    }
+    groups
+}
+
 fn place<M: Memory>(tree: &Tree<M>, component: u64, root: i32) -> Option<(i32, i32, bool)> {
     let layout = tree.layout;
-    let field = |c: u64, offset: u32| tree.field(c, offset);
-    let hidden = |c: u64| -> Option<bool> {
-        if layout.hidden == 0 {
-            return Some(false);
-        }
-        let mut b = [0u8];
-        tree.memory
-            .read(c + layout.hidden as u64, &mut b)
-            .then_some(b[0] != 0)
-    };
-    let (mut x, mut y) = (field(component, layout.x)?, field(component, layout.x + 4)?);
-    let mut is_hidden = hidden(component)?;
+    let (mut x, mut y) = tree.pair(component, layout.x)?;
+    let mut hidden = tree.hidden(component)?;
     let mut current = component;
     for _ in 0..MAX_DEPTH {
-        let mut parent = field(current, layout.parent)?;
+        let mut parent = tree.field(current, layout.parent)?;
         if parent == -1 {
-            let current_group = field(current, layout.id)? >> 16;
-            if current_group == root {
-                return Some((x, y, is_hidden));
+            let group = tree.field(current, layout.id)? >> 16;
+            if group == root {
+                return Some((x, y, hidden));
             }
-            parent = tree.opened_in(current_group)?;
+            parent = tree.opened_in(group)?;
         }
         current = tree.component(parent)?;
-        x += field(current, layout.x)? - field(current, layout.scroll_x)?;
-        y += field(current, layout.x + 4)? - field(current, layout.scroll_x + 4)?;
-        is_hidden |= hidden(current)?;
+        let (parent_x, parent_y) = tree.pair(current, layout.x)?;
+        let (scroll_x, scroll_y) = tree.pair(current, layout.scroll_x)?;
+        x += parent_x - scroll_x;
+        y += parent_y - scroll_y;
+        hidden |= tree.hidden(current)?;
     }
     None
 }
@@ -181,21 +237,21 @@ fn widget_at<M: Memory>(
     component: u64,
     (x, y, hidden): (i32, i32, bool),
 ) -> Option<Widget> {
-    let layout = tree.layout;
+    let (memory, layout) = (tree.memory, tree.layout);
     let field = |offset: u32| tree.field(component, offset);
     let optional = |offset: u32| if offset == 0 { Some(-1) } else { field(offset) };
     let id = field(layout.id)?;
     let kind = field(layout.kind)?;
     let text = (layout.text != 0)
-        .then(|| crate::memory::read_string(tree.memory, component + layout.text as u64))
+        .then(|| read_string(memory, component + layout.text as u64))
         .flatten()
         .filter(|text| !text.is_empty() || kind == TEXT);
-    let scroll = |offset: u32, extra: u32| {
-        if offset == 0 {
-            Some(0)
-        } else {
-            field(offset + extra)
-        }
+    let (width, height) = tree.pair(component, layout.width)?;
+    let (scroll_x, scroll_y) = tree.pair(component, layout.scroll_x)?;
+    let (scroll_width, scroll_height) = if layout.scroll_width == 0 {
+        (0, 0)
+    } else {
+        tree.pair(component, layout.scroll_width)?
     };
     Some(Widget {
         id,
@@ -204,25 +260,21 @@ fn widget_at<M: Memory>(
         kind,
         x,
         y,
-        width: field(layout.width)?,
-        height: field(layout.width + 4)?,
+        width,
+        height,
         parent: field(layout.parent)?,
         sprite: optional(layout.sprite)?,
-        index: if layout.index == 0 {
-            -1
-        } else {
-            field(layout.index)?
-        },
+        index: optional(layout.index)?,
         hidden,
         text,
         text_color: optional(layout.text_color)?,
-        scroll_x: field(layout.scroll_x)?,
-        scroll_y: field(layout.scroll_x + 4)?,
-        scroll_width: scroll(layout.scroll_width, 0)?,
-        scroll_height: scroll(layout.scroll_width, 4)?,
-        action: action_at(tree.memory, component),
-        item_id: tree.memory.i32(component + DETAIL_ITEM_ID).unwrap_or(-1),
-        item_quantity: tree.memory.i32(component + DETAIL_ITEM_ID + 4).unwrap_or(0),
+        scroll_x,
+        scroll_y,
+        scroll_width,
+        scroll_height,
+        action: action_at(memory, component),
+        item_id: memory.i32(component + DETAIL_ITEM_ID).unwrap_or(-1),
+        item_quantity: memory.i32(component + DETAIL_ITEM_ID + 4).unwrap_or(0),
     })
 }
 
@@ -238,13 +290,13 @@ fn action_at(memory: &impl Memory, component: u64) -> Option<String> {
     }
     let text = memory.ptr(component + ACTION_TEXT)?;
     let mut bytes = [0u8; MAX_ACTION];
-    // a string near the end of a mapping may not fill the buffer: read what can be read, in halves
+    // a string near the end of a mapping may not fill the buffer, so halve the read until it fits
     let mut len = MAX_ACTION;
     while len > 0 && !memory.read(text, &mut bytes[..len]) {
         len /= 2;
     }
     let end = bytes[..len].iter().position(|&b| b == 0)?;
-    // an option is plain text: anything else means the pointer isn't to one (some options are stored another way)
+    // anything but plain text means the pointer isn't to an option
     let text = &bytes[..end];
     (end > 0 && text.iter().all(|&b| (0x20..0x7f).contains(&b)))
         .then(|| String::from_utf8_lossy(text).into_owned())
@@ -263,14 +315,9 @@ pub fn find_widget(
     if root < 0 {
         return None;
     }
-    let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree {
-        memory,
-        layout,
-        client,
-    };
-    let component = tree.component((group as i32) << 16 | child as i32)?;
-    widget_at(&tree, component, place(&tree, component, root)?)
+    let tree = Tree::open(memory, layout)?;
+    let (component, placed) = tree.placed(root, group, child)?;
+    widget_at(&tree, component, placed)
 }
 
 pub fn find_children(
@@ -283,66 +330,25 @@ pub fn find_children(
     if root < 0 || layout.children == 0 {
         return None;
     }
-    let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree {
-        memory,
-        layout,
-        client,
-    };
-    let parent = tree.component((group as i32) << 16 | child as i32)?;
-    let placed = place(&tree, parent, root)?;
-    dynamic_children(&tree, parent, placed)
+    let tree = Tree::open(memory, layout)?;
+    let (parent, placed) = tree.placed(root, group, child)?;
+    let children = dynamic_children(&tree, parent, placed)?;
+    Some(children.into_iter().map(|(widget, _)| widget).collect())
 }
 
-// The dynamic children of `parent`, which stands at `placed` (see `place`).
+/// The dynamic children of `parent`, which stands at `placed` (see `place`), with their components.
 fn dynamic_children<M: Memory>(
-    tree: &Tree<M>,
-    parent: u64,
-    placed: (i32, i32, bool),
-) -> Option<Vec<Widget>> {
-    Some(
-        dynamic_children_with_components(tree, parent, placed)?
-            .into_iter()
-            .map(|(widget, _)| widget)
-            .collect(),
-    )
-}
-
-// The same with the address of each child's component.
-fn dynamic_children_with_components<M: Memory>(
     tree: &Tree<M>,
     parent: u64,
     (x, y, hidden): (i32, i32, bool),
 ) -> Option<Vec<(Widget, u64)>> {
-    let (memory, layout) = (tree.memory, tree.layout);
-    let (x, y) = (
-        x - tree.field(parent, layout.scroll_x)?,
-        y - tree.field(parent, layout.scroll_x + 4)?,
-    );
-    let count = memory.u64(parent + layout.children as u64)?;
-    if count == 0 {
-        return Some(Vec::new());
-    }
-    if count > MAX_CHILDREN {
-        return None;
-    }
-    let entries = memory.ptr(parent + layout.children as u64 + CHILDREN_DATA as u64)?;
+    let (scroll_x, scroll_y) = tree.pair(parent, tree.layout.scroll_x)?;
+    let (x, y) = (x - scroll_x, y - scroll_y);
     let mut children = Vec::new();
-    for i in 0..count {
-        let Some(component) = memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
-        else {
-            continue;
-        };
-        let at = (
-            x + tree.field(component, layout.x)?,
-            y + tree.field(component, layout.x + 4)?,
-            hidden,
-        );
-        let mut widget = widget_at(tree, component, at)?;
-        if layout.hidden != 0 {
-            let mut b = [0u8];
-            widget.hidden |= memory.read(component + layout.hidden as u64, &mut b) && b[0] != 0;
-        }
+    for (_, component) in tree.children(parent)? {
+        let (child_x, child_y) = tree.pair(component, tree.layout.x)?;
+        let mut widget = widget_at(tree, component, (x + child_x, y + child_y, hidden))?;
+        widget.hidden |= tree.hidden(component).unwrap_or(false);
         children.push((widget, component));
     }
     Some(children)
@@ -394,23 +400,19 @@ const DETAIL_LINE_HEIGHT: u64 = 0x188;
 const DETAIL_X_ALIGNMENT: u64 = 0x18c;
 const DETAIL_TEXT_SHADOWED: u64 = 0x194;
 const DETAIL_ITEM_ID: u64 = 0xb38;
+const DETAIL_NO_CLICK_THROUGH: u64 = 0xb98;
 /// A component's model: its type (1 is a model id) and its id. Fixed offsets, like the `DETAIL_` ones.
 pub const MODEL_TYPE: u64 = 0xfc;
 pub const MODEL_ID: u64 = 0x100;
-const DETAIL_NO_CLICK_THROUGH: u64 = 0xb98;
 
 fn detail_at<M: Memory>(tree: &Tree<M>, component: u64) -> WidgetDetail {
     let memory = tree.memory;
     let int = |offset: u64| memory.i32(component + offset).unwrap_or(0);
-    let byte = |offset: u64| {
-        let mut b = [0u8];
-        memory.read(component + offset, &mut b) && b[0] != 0
-    };
-    let mut opacity = [0u8];
-    memory.read(component + DETAIL_OPACITY, &mut opacity);
+    let u8_at = |offset: u64| byte(memory, component + offset).unwrap_or(0);
+    let flag = |offset: u64| u8_at(offset) != 0;
     WidgetDetail {
         content_type: int(DETAIL_CONTENT_TYPE),
-        self_hidden: tree.layout.hidden != 0 && byte(tree.layout.hidden as u64),
+        self_hidden: tree.hidden(component).unwrap_or(false),
         original_x: int(DETAIL_ORIGINAL),
         original_y: int(DETAIL_ORIGINAL + 4),
         original_width: int(DETAIL_ORIGINAL + 8),
@@ -423,15 +425,15 @@ fn detail_at<M: Memory>(tree: &Tree<M>, component: u64) -> WidgetDetail {
         relative_y: int(DETAIL_RELATIVE + 4),
         relative_width: int(DETAIL_RELATIVE + 8),
         relative_height: int(DETAIL_RELATIVE + 12),
-        opacity: opacity[0] as i32,
+        opacity: u8_at(DETAIL_OPACITY) as i32,
         font_id: int(DETAIL_FONT),
         line_height: int(DETAIL_LINE_HEIGHT),
         x_text_alignment: int(DETAIL_X_ALIGNMENT),
         y_text_alignment: int(DETAIL_X_ALIGNMENT + 4),
-        text_shadowed: byte(DETAIL_TEXT_SHADOWED),
-        filled: byte(DETAIL_FILLED),
-        sprite_tiling: byte(DETAIL_SPRITE_TILING),
-        no_click_through: byte(DETAIL_NO_CLICK_THROUGH),
+        text_shadowed: flag(DETAIL_TEXT_SHADOWED),
+        filled: flag(DETAIL_FILLED),
+        sprite_tiling: flag(DETAIL_SPRITE_TILING),
+        no_click_through: flag(DETAIL_NO_CLICK_THROUGH),
         item_id: int(DETAIL_ITEM_ID),
         item_quantity: int(DETAIL_ITEM_ID + 4),
     }
@@ -466,7 +468,6 @@ pub struct WidgetTree {
 /// The most components one group is taken to hold.
 const MAX_GROUP: u64 = 1 << 14;
 
-// How many components `group` has.
 fn group_size<M: Memory>(tree: &Tree<M>, group: i32) -> Option<u64> {
     let manager = tree.memory.ptr(tree.client + tree.layout.manager as u64)?;
     let groups = tree.memory.ptr(manager + tree.layout.groups as u64)?;
@@ -482,40 +483,17 @@ pub fn component_addresses(
     layout: &InterfaceLayout,
     root: i32,
 ) -> Option<Vec<(i32, i32, u64)>> {
-    let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree {
-        memory,
-        layout,
-        client,
-    };
-    let mut groups = vec![root];
-    for sub in sub_interfaces(memory, layout)? {
-        if !groups.contains(&sub.group) {
-            groups.push(sub.group);
-        }
-    }
+    let tree = Tree::open(memory, layout)?;
     let mut found = Vec::new();
-    for group in groups {
+    for group in open_groups(root, &listed_sub_interfaces(&tree)?) {
         for child in 0..group_size(&tree, group).unwrap_or(0) {
             let id = group << 16 | child as i32;
-            if let Some(component) = tree.component(id) {
-                found.push((id, -1, component));
-                let count = memory
-                    .u64(component + layout.children as u64)
-                    .filter(|&count| count <= MAX_CHILDREN)
-                    .unwrap_or(0);
-                let entries = if count == 0 {
-                    None
-                } else {
-                    memory.ptr(component + layout.children as u64 + CHILDREN_DATA as u64)
-                };
-                for i in 0..count {
-                    if let Some(child) = entries.and_then(|entries| {
-                        memory.ptr(entries + i * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
-                    }) {
-                        found.push((id, i as i32, child));
-                    }
-                }
+            let Some(component) = tree.component(id) else {
+                continue;
+            };
+            found.push((id, -1, component));
+            for (index, child) in tree.children(component).unwrap_or_default() {
+                found.push((id, index as i32, child));
             }
         }
     }
@@ -531,21 +509,10 @@ pub fn find_tree(
     if root < 0 {
         return None;
     }
-    let client = memory.ptr(layout.module_base + layout.client as u64)?;
-    let tree = Tree {
-        memory,
-        layout,
-        client,
-    };
-    let sub_interfaces = sub_interfaces(memory, layout)?;
-    let mut groups = vec![root];
-    for sub in &sub_interfaces {
-        if !groups.contains(&sub.group) {
-            groups.push(sub.group);
-        }
-    }
+    let tree = Tree::open(memory, layout)?;
+    let sub_interfaces = listed_sub_interfaces(&tree)?;
     let mut widgets = Vec::new();
-    for group in groups {
+    for group in open_groups(root, &sub_interfaces) {
         for child in 0..group_size(&tree, group).unwrap_or(0) {
             let id = group << 16 | child as i32;
             let Some(component) = tree.component(id) else {
@@ -563,9 +530,7 @@ pub fn find_tree(
                 dynamic: false,
                 owner: -1,
             });
-            for (child, address) in
-                dynamic_children_with_components(&tree, component, placed).unwrap_or_default()
-            {
+            for (child, address) in dynamic_children(&tree, component, placed).unwrap_or_default() {
                 widgets.push(TreeWidget {
                     widget: child.scaled(scale),
                     detail: detail_at(&tree, address),
@@ -626,6 +591,7 @@ mod tests {
             memory: &m,
             layout: &LAYOUT,
             client: 0,
+            opened: OnceCell::new(),
         };
         let d = detail_at(&tree, c);
         assert_eq!(
