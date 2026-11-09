@@ -54,6 +54,7 @@ const QUIVER_AMOUNT_VARP: usize = 4141;
 pub const INVENTORY_SIZE: usize = 28;
 pub const INVENTORY_COLUMNS: usize = 4;
 pub const POUCH_SIZE: usize = 4;
+pub const POUCH_MAX_AMOUNT: i32 = 16000;
 pub const POUCH_RUNE_VARBITS: [i32; POUCH_SIZE] = [29, 1622, 1623, 14285];
 pub const POUCH_AMOUNT_VARBITS: [i32; POUCH_SIZE] = [1624, 1625, 1626, 14286];
 pub const POUCH_RUNES_ENUM: i32 = 982;
@@ -439,7 +440,6 @@ impl Doses {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "StoredItem")]
 pub struct Item {
     pub id: i32,
     pub name: String,
@@ -449,41 +449,6 @@ pub struct Item {
     pub doses: Option<Doses>,
     pub locked: bool,
     pub ids: Vec<i32>,
-}
-
-#[derive(Deserialize)]
-struct StoredItem {
-    id: i32,
-    name: String,
-    stackable: bool,
-    #[serde(default)]
-    min: Option<i32>,
-    #[serde(default)]
-    max: Option<i32>,
-    #[serde(default)]
-    quantity: Option<i32>,
-    #[serde(default)]
-    doses: Option<Doses>,
-    #[serde(default)]
-    locked: bool,
-    #[serde(default)]
-    ids: Vec<i32>,
-}
-
-impl From<StoredItem> for Item {
-    fn from(s: StoredItem) -> Self {
-        let quantity = s.quantity.unwrap_or(1);
-        Item {
-            id: s.id,
-            name: s.name,
-            stackable: s.stackable,
-            min: s.min.unwrap_or(quantity),
-            max: s.max.unwrap_or(quantity),
-            doses: s.doses,
-            locked: s.locked,
-            ids: s.ids,
-        }
-    }
 }
 
 impl Item {
@@ -1463,7 +1428,7 @@ fn paint_padlock(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool) -> Option<Doses> {
+fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool, cap: i32) -> Option<Doses> {
     ui.label(item_title(item));
     if item.locked {
         ui.colored_label(
@@ -1490,14 +1455,16 @@ fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool) -> Option<Dose
             ui.label("Min");
             let min = ui.add(
                 egui::DragValue::new(&mut item.min)
-                    .range(0..=i32::MAX)
-                    .speed(1.0),
+                    .range(0..=cap)
+                    .speed(1.0)
+                    .update_while_editing(false),
             );
             ui.label("Max");
             let max = ui.add(
                 egui::DragValue::new(&mut item.max)
-                    .range(0..=i32::MAX)
-                    .speed(1.0),
+                    .range(0..=cap)
+                    .speed(1.0)
+                    .update_while_editing(false),
             );
             if min.changed() && item.min > item.max {
                 item.max = item.min;
@@ -1649,7 +1616,7 @@ pub fn equipment_ui(
                 }
                 match editor.draft.slot_mut(slot) {
                     EquipmentSlot::Item(item) => {
-                        item_ui(ui, item, false);
+                        item_ui(ui, item, false, i32::MAX);
                     }
                     state => {
                         const EMPTY: &str = "Must be empty";
@@ -1921,7 +1888,7 @@ pub fn inventory_ui(
                     .filter(|_| editor.selected_in_pouch)
                     .and_then(|i| runes.get_mut(i))
                 {
-                    item_ui(ui, rune, false);
+                    item_ui(ui, rune, false, POUCH_MAX_AMOUNT);
                 }
                 ui.weak("Read from client fills it from the pouch's contents.");
                 ui.add_space(10.0);
@@ -1937,7 +1904,7 @@ pub fn inventory_ui(
                     .is_some_and(|item| !item.locked && editor.draft.script_doses(item).is_some());
                 match editor.draft.slot_mut(slot) {
                     Some(item) => {
-                        if let Some(doses) = item_ui(ui, item, fixed) {
+                        if let Some(doses) = item_ui(ui, item, fixed, i32::MAX) {
                             shared = item.dose_base().map(|base| (base.to_owned(), doses));
                         }
                     }
@@ -2251,14 +2218,28 @@ mod tests {
         assert!(none.is_empty() && message.is_none());
 
         let mut saved = AllLayouts::default();
-        saved
-            .entry("Zulrah".into())
-            .or_default()
-            .prayer
-            .push(Prayer {
-                name: "Boost".into(),
-                prayers: vec!["rigour".into()],
-            });
+        let zulrah = saved.entry("Zulrah".into()).or_default();
+        zulrah.prayer.push(Prayer {
+            name: "Boost".into(),
+            prayers: vec!["rigour".into()],
+        });
+        let mut potion = item(2434, 1, false);
+        potion.doses = Some(Doses {
+            all: vec![1, 2, 3, 4],
+            accepted: vec![4],
+            highest_first: true,
+        });
+        zulrah.inventory.push(Inventory {
+            name: "Trip".into(),
+            slots: vec![Some(item(995, 1000, true)), None, Some(potion)],
+            pouch: Some(vec![item(565, 100, true)]),
+        });
+        zulrah.equipment.push(Equipment {
+            name: "Ranged".into(),
+            slots: vec![EquipmentSlot::Item(item(23971, 1, false)), EquipmentSlot::Any],
+            spell: None,
+            autocast: false,
+        });
         eframe::set_value(&mut storage, "layouts", &saved);
         let (read, message) = load(Some(&storage), "layouts", Some(&dir));
         assert_eq!(read, saved);
@@ -2291,14 +2272,10 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_saved_with_one_quantity_wants_exactly_it() {
-        let old: Item =
-            serde_json::from_str(r#"{"id":995,"quantity":1000,"name":"Coins","stackable":true}"#)
-                .unwrap();
+    fn a_read_stack_wants_exactly_its_amount() {
+        let old = item(995, 1000, true);
         assert_eq!((old.min, old.max), (1000, 1000));
         assert!(!old.locked && old.doses.is_none());
-        let again: Item = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
-        assert_eq!(again, old);
         let value = old.to_value();
         assert_eq!(value["min"], 1000);
         assert_eq!(value["ids"], json!([995]));
