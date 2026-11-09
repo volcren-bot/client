@@ -80,21 +80,16 @@ fn animation_slot(
         module_base + animation_height as u64,
     );
     let rdata = section(image, b".rdata")?;
-    let qwords: Vec<u64> = image
-        .get(rdata)?
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|c| u64::from_le_bytes(*c))
-        .collect();
+    let qwords = image.get(rdata)?.as_chunks::<8>().0;
+    let is = |qword: &[u8; 8], value: u64| u64::from_le_bytes(*qword) == value;
     qwords
         .iter()
         .enumerate()
-        .filter(|&(_, &q)| q == get_model)
+        .filter(|&(_, qword)| is(qword, get_model))
         .find_map(|(at, _)| {
             qwords[at..(at + 64).min(qwords.len())]
                 .iter()
-                .position(|&q| q == height)
+                .position(|qword| is(qword, height))
                 .map(|slot| slot as u32 * 8)
         })
 }
@@ -465,8 +460,8 @@ unsafe fn checked_frames(types: &TypeModels, rules: &Rules, seq: &Pair, frame: i
         return None;
     }
     let count = memory.i32(seq.object() + types.seq_frame_count as u64)?;
-    let frames = memory.ptr(seq.object() + types.seq_frames as u64)?;
-    (count > 0 && frames != 0 && frame >= 0 && frame < count).then_some(count as u32)
+    let has_frames = memory.ptr(seq.object() + types.seq_frames as u64).is_some();
+    (has_frames && (0..count).contains(&frame)).then_some(count as u32)
 }
 
 fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {

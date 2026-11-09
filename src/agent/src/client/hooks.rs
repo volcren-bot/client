@@ -59,23 +59,24 @@ use super::unload::HookCall;
 use crate::shared::{
     memory::{memory_manager, try_memory_manager, MemoryManager, MEMORY_MANAGER},
     sync::event_listener,
-    windows::{
-        WI_CACHE, WI_CONSOLE, WI_GAME_VALS, WI_ITEM_NAMES, WI_LOCS, WI_MENU, WI_MODEL,
-        WI_MODIFIERS, WI_NAME, WI_PROJECT, WI_TOTAL_XP,
-    },
+};
+use ipc::input::{
+    CACHE_MESSAGE, GAME_VALS_MESSAGE, ITEM_NAMES_MESSAGE, LOCS_MESSAGE, MENU_MESSAGE,
+    MODEL_MESSAGE, MODIFIERS_MESSAGE, NAME_MESSAGE, OPEN_CONSOLE_MESSAGE, PROJECT_MESSAGE,
+    TOTAL_XP_MESSAGE,
 };
 use ipc::state::{
     part, CameraLayout, ChatLayout, CollisionLayout, GroundItemsLayout, InterfaceLayout, Layout,
     LoginLayout, MinimapLayout, PathLayout, PlayerLayout, ProjectileLayout, ProjectionLayout,
     SceneLoaderLayout, SkillsLayout, SpotAnimLayout, WorldLayout, WorldSelectLayout,
 };
-use ipc::{cursor_style, overlay_mode};
+use ipc::{cursor_style, overlay_mode, IMAGE_DATA_SIZE};
 
 const MODIFIER_KEYS: [u8; 3] = [0x10, 0x11, 0x12];
 static KEYBOARD_MODIFIERS: Mutex<[bool; 3]> = Mutex::new([false; 3]);
 static LAST_CHAR: AtomicU8 = AtomicU8::new(0);
 
-pub unsafe fn open_client_console() {
+unsafe fn open_client_console() {
     let hwnd = GetConsoleWindow();
     if !hwnd.0.is_null() {
         if IsWindowVisible(hwnd).as_bool() {
@@ -152,7 +153,7 @@ unsafe extern "system" fn hooked_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     let _call = HookCall::enter();
-    wndproc(hwnd, msg, wparam, lparam)
+    catch_unwind(AssertUnwindSafe(|| wndproc(hwnd, msg, wparam, lparam))).unwrap_or(LRESULT(0))
 }
 
 static LAST_SYNTHETIC_MOUSE: AtomicU64 = AtomicU64::new(0);
@@ -181,17 +182,17 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
         return LRESULT(0);
     };
     match msg {
-        WI_CONSOLE => open_client_console(),
-        WI_MODIFIERS => toggle_modifiers(hwnd, wparam),
-        WI_NAME => super::name::on_request(),
-        WI_TOTAL_XP => super::total_xp::on_request(),
-        WI_ITEM_NAMES => super::items::on_request(),
-        WI_GAME_VALS => super::items::on_game_val_request(),
-        WI_PROJECT => super::projection::on_request(),
-        WI_MENU => super::menu::on_request(),
-        WI_MODEL => super::model::on_request(),
-        WI_LOCS => super::scene::on_locs_request(),
-        WI_CACHE => super::cache::on_request(),
+        OPEN_CONSOLE_MESSAGE => open_client_console(),
+        MODIFIERS_MESSAGE => toggle_modifiers(hwnd, wparam),
+        NAME_MESSAGE => super::name::on_request(),
+        TOTAL_XP_MESSAGE => super::total_xp::on_request(),
+        ITEM_NAMES_MESSAGE => super::items::on_request(),
+        GAME_VALS_MESSAGE => super::items::on_game_val_request(),
+        PROJECT_MESSAGE => super::projection::on_request(),
+        MENU_MESSAGE => super::menu::on_request(),
+        MODEL_MESSAGE => super::model::on_request(),
+        LOCS_MESSAGE => super::scene::on_locs_request(),
+        CACHE_MESSAGE => super::cache::on_request(),
         WM_KILLFOCUS | WM_IME_SETCONTEXT | WM_IME_NOTIFY => {}
         WM_KEYDOWN => {
             if KEYBOARD_MODIFIERS.lock().unwrap().contains(&true) {
@@ -266,8 +267,21 @@ unsafe fn unhook_wndproc() {
 static ORIGINAL_WGL_SWAPBUFFERS: OnceLock<GenericDetour<unsafe extern "system" fn(HDC) -> BOOL>> =
     OnceLock::new();
 
+fn frame_fits(width: i32, height: i32) -> bool {
+    width > 0 && height > 0 && width as usize * height as usize * 4 <= IMAGE_DATA_SIZE
+}
+
 unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
     let _call = HookCall::enter();
+    let _ = catch_unwind(|| draw_frame());
+    let presented = ORIGINAL_WGL_SWAPBUFFERS.get().unwrap().call(hdc);
+    if let Some(memory) = try_memory_manager() {
+        memory.frame_presented();
+    }
+    presented
+}
+
+unsafe fn draw_frame() {
     let mut viewport = [0; 4];
     glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
     let mut prev_program: i32 = 0;
@@ -282,16 +296,15 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
     let window_height = client_rect.bottom - client_rect.top;
     let offset_y_top_down = window_height - offset_y - height;
 
+    let fits = frame_fits(width, height);
     let (mouse, dest, overlay, (cursor, cursor_color, cursor_size)) = {
         let mem_manager = memory_manager();
         mem_manager.set_viewport(offset_x, offset_y, width, height, window_height);
-        let overlay = (mem_manager.overlay_mode() != overlay_mode::OFF).then(|| {
+        let overlay = (fits && mem_manager.overlay_mode() != overlay_mode::OFF).then(|| {
             let serial = mem_manager.overlay_serial();
             (mem_manager.overlay_ptr(serial as usize & 1), serial)
         });
-        let dest = mem_manager
-            .capture_enabled()
-            .then(|| mem_manager.image_ptr());
+        let dest = (fits && mem_manager.capture_enabled()).then(|| mem_manager.image_ptr());
         (
             mem_manager.get_mouse_position(),
             dest,
@@ -300,7 +313,10 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
         )
     };
 
-    if load_opengl_extensions() {
+    if !load_opengl_extensions() {
+        return;
+    }
+    let _ = catch_unwind(|| {
         match dest {
             Some(dest) => read_frame(offset_x, offset_y, width, height, dest),
             None => release_frame_buffers(),
@@ -324,15 +340,8 @@ unsafe extern "system" fn hooked_wgl_swap_buffers(hdc: HDC) -> BOOL {
                 );
             }
         }
-        restore_state(prev_program, prev_vao);
-    }
-
-    let original = ORIGINAL_WGL_SWAPBUFFERS.get().unwrap();
-    let presented = original.call(hdc);
-    if let Some(memory) = try_memory_manager() {
-        memory.frame_presented();
-    }
-    presented
+    });
+    restore_state(prev_program, prev_vao);
 }
 
 unsafe fn hook_wgl_swap_buffers() {
@@ -343,16 +352,11 @@ unsafe fn hook_wgl_swap_buffers() {
         .expect("[Agent]: wglSwapBuffers function not found.\r\n");
 
     let original_fn: unsafe extern "system" fn(HDC) -> BOOL = std::mem::transmute(addr);
-    let detour = GenericDetour::new(original_fn, hooked_wgl_swap_buffers)
-        .expect("[Agent]: Failed to create wglSwapBuffers hook.\r\n");
-
     ORIGINAL_WGL_SWAPBUFFERS
-        .set(detour)
-        .expect("[Agent]: Failed to save original wglSwapBuffers function.\r\n");
-
-    ORIGINAL_WGL_SWAPBUFFERS
-        .get()
-        .unwrap()
+        .get_or_init(|| {
+            GenericDetour::new(original_fn, hooked_wgl_swap_buffers)
+                .expect("[Agent]: Failed to create wglSwapBuffers hook.\r\n")
+        })
         .enable()
         .expect("[Agent]: Failed to enable wglSwapBuffers hook.\r\n");
 
@@ -604,10 +608,7 @@ unsafe fn find_offsets() {
             reserved: 0,
         };
     }
-    if let (Some(c), Some(m)) = (
-        camera,
-        minimap.filter(|m| camera.is_some_and(|c| c.yaw == m.angle)),
-    ) {
+    if let Some((c, m)) = camera.zip(minimap).filter(|(c, m)| c.yaw == m.angle) {
         layout.found |= part::CAMERA;
         layout.camera = CameraLayout {
             position: c.position,
@@ -858,17 +859,15 @@ unsafe fn find_offsets() {
             super::menu::set_selection(selection);
         }
     }
-    if let Some(rule) =
-        world.and_then(|w| found("NPC model", find_npc_model(pe, w.names.npc_definition)))
-    {
+    if let Some((w, rule)) = world.and_then(|w| {
+        found("NPC model", find_npc_model(pe, w.names.npc_definition)).map(|rule| (w, rule))
+    }) {
         let vertices = found("Model vertices", find_model_vertices(pe, &rule));
         let orientation = found("Actor orientation", find_actor_orientation(pe));
-        let height = world.and_then(|w| {
-            found(
-                "Animation height",
-                find_animation_height(pe, w.names.npc_definition),
-            )
-        });
+        let height = found(
+            "Animation height",
+            find_animation_height(pe, w.names.npc_definition),
+        );
         let faces = vertices.and_then(|v| found("Model faces", find_model_faces(pe, &v)));
         if let (Some(vertices), Some(faces), Some(orientation), Some(height)) =
             (vertices, faces, orientation, height)
@@ -883,7 +882,7 @@ unsafe fn find_offsets() {
                 height,
             );
         }
-        if let (Some(lookup), Some(w)) = (item_lookup, world) {
+        if let Some(lookup) = item_lookup {
             if let Some(types) = found(
                 "Type models",
                 find_type_models(pe, lookup.function, rule.get_model, w.names.npc_definition),
@@ -901,8 +900,9 @@ pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {
     let hwnd = lparam as u64;
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let _ = MEMORY_MANAGER.set(Mutex::new(MemoryManager::create_map(GetCurrentProcessId())));
-        match LayoutMap::create(GetCurrentProcessId()) {
+        let pid = GetCurrentProcessId();
+        let _ = MEMORY_MANAGER.set(Mutex::new(MemoryManager::create_map(pid)));
+        match LayoutMap::create(pid) {
             Some(layout) => drop(LAYOUT_MAP.set(layout)),
             None => println!("[Agent]: Cannot create the game state layout shared memory.\r\n"),
         }
@@ -912,7 +912,7 @@ pub unsafe extern "system" fn start(lparam: *mut c_void) -> u32 {
         hook_wgl_swap_buffers();
         find_offsets();
 
-        event_listener(GetCurrentProcessId());
+        event_listener(pid);
     }));
 
     if result.is_err() {

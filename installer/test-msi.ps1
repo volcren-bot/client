@@ -1,4 +1,3 @@
-# Installs, updates and uninstalls the MSI in both modes on a real Windows runner, updating the way the loader does.
 param(
     [Parameter(Mandatory)] [string] $OldMsi,
     [Parameter(Mandatory)] [string] $NewMsi,
@@ -28,7 +27,6 @@ function Msi([string] $arguments) {
     }
 }
 
-# The same questions the loader asks Windows Installer. AssignmentType is 0 per-user, 1 per-machine.
 function Products {
     foreach ($product in $installer.RelatedProducts($upgradeCode)) {
         [pscustomobject]@{
@@ -64,7 +62,6 @@ function Check([string] $name, [string] $assignment, [string] $folder, [string] 
     }
 }
 
-# What update::apply starts: a copy of the installed loader, outside the install, for a process that has already exited.
 function Update-Like-The-Loader([string] $folder, [string] $scope) {
     $helper = Join-Path $work "finish-update.exe"
     Copy-Item (Join-Path $folder "loader.exe") $helper -Force
@@ -77,7 +74,6 @@ function Update-Like-The-Loader([string] $folder, [string] $scope) {
         $script:failed++
         Stop-Process $process -Force
     }
-    # The update starts the installed loader, which can't do much on a runner.
     Start-Sleep -Seconds 3
     $started = @(Get-Process loader -ErrorAction SilentlyContinue)
     Write-Host "Loaders running after the update: $($started.Count)"
@@ -94,7 +90,6 @@ function Update-Like-The-Loader([string] $folder, [string] $scope) {
 $perUserFolder = Join-Path $env:LOCALAPPDATA "Programs\VOLCREN"
 $perMachineFolder = Join-Path $env:ProgramFiles "VOLCREN"
 
-# With no choice made the default is per-user, even for an administrator.
 Msi "/i `"$OldMsi`" /qn"
 Check "default install is per-user" "0" $perUserFolder $OldVersion
 Update-Like-The-Loader $perUserFolder "user"

@@ -7,10 +7,10 @@ use injector::{Item, ItemChange, ItemPage};
 
 use crate::log_view::Poller;
 
-pub const KEEP: usize = 25;
+const KEEP: usize = 25;
 pub const INV_GAME_VAL: u32 = 2;
 pub const WAIT_FOR_CHANGE: Duration = Duration::from_secs(1);
-pub const RETRY_AFTER_ERROR: Duration = Duration::from_secs(1);
+const RETRY_AFTER_ERROR: Duration = Duration::from_secs(1);
 
 pub struct Poll {
     pub page: ItemPage,
@@ -204,8 +204,8 @@ impl Inspector {
         let mut run: Option<(i32, Option<i32>)> = None;
         for change in changes {
             let key = (change.container, change.tick);
-            if run.is_some_and(|run| run != key) {
-                self.snapshot(run.take().unwrap());
+            if let Some(previous) = run.filter(|&run| run != key) {
+                self.snapshot(previous);
             }
             run = Some(key);
             let items = self.copy.entry(change.container).or_default();

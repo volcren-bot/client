@@ -465,19 +465,15 @@ pub fn find_packet_layouts(pe: &Pe, packets: &Packets) -> Result<PacketLayouts, 
     let sizes = int_table(pe, size_at as usize, count);
 
     let (data_at, cursor_at) = (packets.buffer_data, packets.buffer_cursor);
+    if data_at.max(cursor_at) as usize + 8 > OBJECT_SIZE {
+        return Err(ScanError::NotFound);
+    }
     let mut reads: HashMap<u32, Option<Read>> = HashMap::new();
     let mut layouts = Vec::new();
     for (opcode, &case) in cases.iter().enumerate() {
         let end = (case as usize + 0x300).min(pe.image.len());
         let mut found = Vec::new();
-        let mut instrs = Decoder::with_ip(
-            64,
-            &pe.image[case as usize..end],
-            case as u64,
-            DecoderOptions::NONE,
-        )
-        .into_iter()
-        .peekable();
+        let mut instrs = instructions(pe.bytes(case, end as u32), case).peekable();
         while let Some(i) = instrs.next() {
             match i.mnemonic() {
                 Mnemonic::Call if i.near_branch_target() != 0 => {

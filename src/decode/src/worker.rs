@@ -53,7 +53,7 @@ pub fn ground_items(memory: &impl Memory, layout: &Layout) -> Vec<GroundItem> {
 }
 
 fn interface_root(memory: &impl Memory, layout: &Layout) -> Option<(i32, f32)> {
-    let root = state::root_interface(memory, layout, state::current(memory, layout))?;
+    let root = state::root_interface(memory, layout)?;
     Some((root, state::ui_scale(memory, layout).unwrap_or(1.0)))
 }
 
@@ -79,7 +79,7 @@ pub fn widget_tree(memory: &impl Memory, layout: &Layout) -> Option<WidgetTree> 
 }
 
 pub fn sub_interfaces(memory: &impl Memory, layout: &Layout) -> Option<Vec<SubInterface>> {
-    state::root_interface(memory, layout, state::current(memory, layout))?;
+    state::root_interface(memory, layout)?;
     widgets::sub_interfaces(memory, &layout.interfaces)
 }
 
@@ -104,13 +104,13 @@ pub fn chat(memory: &impl Memory, layout: &Layout, now: i64) -> Option<Vec<ChatM
 }
 
 pub fn world_select(memory: &impl Memory, layout: &Layout) -> Option<WorldSelect> {
+    let client = ipc::read::client(memory, layout)?;
     if !matches!(
-        state::current(memory, layout),
+        ipc::read::game_state_in(memory, layout, client),
         Some(LOGIN_SCREEN | LOGIN_SCREEN_AUTHENTICATOR | LOGGED_IN)
     ) {
         return None;
     }
-    let client = ipc::read::client(memory, layout)?;
     world_select::world_select(memory, layout, client)
 }
 

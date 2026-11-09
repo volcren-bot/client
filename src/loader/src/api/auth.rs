@@ -67,10 +67,13 @@ impl fmt::Debug for Session {
 
 impl Session {
     pub fn from_tokens(tokens: Tokens) -> Self {
+        let now = Instant::now();
         Self {
             access_token: tokens.access_token,
             refresh_token: tokens.refresh_token,
-            expires_at: Instant::now() + Duration::from_secs(tokens.expires_in),
+            expires_at: now
+                .checked_add(Duration::from_secs(tokens.expires_in))
+                .unwrap_or(now),
         }
     }
 
@@ -344,6 +347,17 @@ mod tests {
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
         );
+    }
+
+    #[test]
+    fn an_absurd_lifetime_counts_as_expired_instead_of_panicking() {
+        let tokens = |expires_in| Tokens {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in,
+        };
+        assert!(Session::from_tokens(tokens(u64::MAX)).needs_refresh());
+        assert!(!Session::from_tokens(tokens(3600)).needs_refresh());
     }
 
     #[test]

@@ -28,6 +28,7 @@ const TAG_NOT_CLICKABLE: u64 = 1 << 19;
 const ENTRY_SIZE: u64 = 0x10;
 const ENTRY_OBJECT: u64 = 8;
 const MAX_GAME_OBJECTS: i32 = 64;
+const MAX_SCENE_SIZE: i32 = 1024;
 const SHAPE_MASK: i32 = 0x3f;
 const ROTATION_SHIFT: i32 = 6;
 const UNKNOWN: u8 = 0xff;
@@ -68,9 +69,7 @@ fn view(memory: &OwnMemory, rules: &Rules) -> Option<View> {
     let (world_view, _) = read::local_player(memory, layout)?;
     let base = layout.player.base_x as u64;
     Some(View {
-        scene: memory
-            .ptr(world_view + rules.scene.scene as u64)
-            .filter(|&s| s != 0)?,
+        scene: memory.ptr(world_view + rules.scene.scene as u64)?,
         plane: memory.i32(world_view + rules.plane as u64)?,
         base_x: memory.i32(world_view + base)?,
         base_y: memory.i32(world_view + base + 4)?,
@@ -108,9 +107,90 @@ impl Tiles {
             return None;
         }
         let index = ((self.plane * self.size_x + x) * self.size_y + y) as u64;
-        memory
-            .ptr(self.base + index * ENTRY_SIZE + ENTRY_OBJECT)
-            .filter(|&t| t != 0)
+        memory.ptr(self.base + index * ENTRY_SIZE + ENTRY_OBJECT)
+    }
+
+    fn objects(&self, memory: &OwnMemory) -> Option<Vec<u64>> {
+        if !(0..4).contains(&self.plane)
+            || !(0..=MAX_SCENE_SIZE).contains(&self.size_x)
+            || !(0..=MAX_SCENE_SIZE).contains(&self.size_y)
+        {
+            return None;
+        }
+        let count = (self.size_x * self.size_y) as usize;
+        let mut entries = vec![0u8; count * ENTRY_SIZE as usize];
+        let first = self.base + self.plane as u64 * count as u64 * ENTRY_SIZE;
+        if count > 0 && !memory.read(first, &mut entries) {
+            return None;
+        }
+        Some(
+            entries
+                .as_chunks::<{ ENTRY_SIZE as usize }>()
+                .0
+                .iter()
+                .map(|entry| Fields(entry).u64(ENTRY_OBJECT as u32).unwrap_or(0))
+                .collect(),
+        )
+    }
+}
+
+struct Fields<'a>(&'a [u8]);
+
+impl Fields<'_> {
+    fn bytes<const N: usize>(&self, at: u32) -> Option<[u8; N]> {
+        self.0.get(at as usize..at as usize + N)?.try_into().ok()
+    }
+
+    fn u64(&self, at: u32) -> Option<u64> {
+        self.bytes(at).map(u64::from_le_bytes)
+    }
+
+    fn ptr(&self, at: u32) -> Option<u64> {
+        self.u64(at).filter(|&p| p != 0)
+    }
+
+    fn i32(&self, at: u32) -> Option<i32> {
+        self.bytes(at).map(i32::from_le_bytes)
+    }
+
+    fn u8(&self, at: u32) -> Option<u8> {
+        self.bytes(at).map(|[b]| b)
+    }
+}
+
+fn read_fields<'a>(memory: &OwnMemory, at: u64, block: &'a mut [u8]) -> Option<Fields<'a>> {
+    memory.read(at, block).then_some(Fields(block))
+}
+
+struct Blocks {
+    tile: Vec<u8>,
+    slot: Vec<u8>,
+    game: Vec<u8>,
+}
+
+impl Blocks {
+    fn new(rules: &Rules) -> Self {
+        let s = &rules.scene;
+        let span = |ends: &[Option<u32>]| {
+            vec![0u8; ends.iter().flatten().max().copied().unwrap_or(0) as usize]
+        };
+        Self {
+            tile: span(&[
+                Some(s.wall + 8),
+                Some(s.wall_decoration + 8),
+                Some(s.ground_decoration + 8),
+                Some(s.game_count + 4),
+                Some(s.game_array + 8),
+                rules.item_pile.map(|pile| pile + 8),
+            ]),
+            slot: span(&single_slots(rules).map(|(_, _, config)| Some(slot_span(s, config)))),
+            game: span(&[
+                Some(s.game_tag + 8),
+                Some(s.game_origin_x + 8),
+                Some(s.game_origin_y + 8),
+                Some(rules.game.config + 4),
+            ]),
+        }
     }
 }
 
@@ -123,6 +203,10 @@ fn shape_rotation(config: i32) -> (u8, u8) {
 
 fn loc_id(rules: &Rules, tag: u64) -> i32 {
     ((tag >> rules.scene.id_shift) & 0xffff) as i32
+}
+
+fn slot_span(scene: &Scene, config: Option<u32>) -> u32 {
+    (scene.tag + 8).max(config.map_or(0, |c| c + 1))
 }
 
 fn single_slots(rules: &Rules) -> [(u32, u8, Option<u32>); 3] {
@@ -143,29 +227,61 @@ fn single_slots(rules: &Rules) -> [(u32, u8, Option<u32>); 3] {
     ]
 }
 
-fn game_objects(memory: &OwnMemory, rules: &Rules, tile: u64) -> Vec<(u64, u64)> {
+struct GameObject {
+    object: u64,
+    tag: u64,
+    x1: i32,
+    x2: i32,
+    y1: i32,
+    y2: i32,
+    config: i32,
+}
+
+fn game_objects(
+    memory: &OwnMemory,
+    rules: &Rules,
+    tile: &Fields,
+    block: &mut [u8],
+) -> Vec<GameObject> {
     let s = &rules.scene;
-    let count = memory
-        .i32(tile + s.game_count as u64)
+    let count = tile
+        .i32(s.game_count)
         .unwrap_or(0)
-        .clamp(0, MAX_GAME_OBJECTS);
-    let Some(array) = memory.ptr(tile + s.game_array as u64).filter(|&a| a != 0) else {
+        .clamp(0, MAX_GAME_OBJECTS) as usize;
+    let Some(array) = tile.ptr(s.game_array) else {
         return Vec::new();
     };
-    (0..count as u64)
-        .filter_map(|i| {
-            memory
-                .ptr(array + i * ENTRY_SIZE + ENTRY_OBJECT)
-                .filter(|&o| o != 0)
+    let mut entries = vec![0u8; count * ENTRY_SIZE as usize];
+    if count > 0 && !memory.read(array, &mut entries) {
+        return Vec::new();
+    }
+    entries
+        .as_chunks::<{ ENTRY_SIZE as usize }>()
+        .0
+        .iter()
+        .filter_map(|entry| Fields(entry).ptr(ENTRY_OBJECT as u32))
+        .filter_map(|object| {
+            let fields = read_fields(memory, object, block)?;
+            let tag = fields.u64(s.game_tag)?;
+            if (tag >> TAG_TYPE_SHIFT) & 7 != TAG_LOC {
+                return None;
+            }
+            Some(GameObject {
+                object,
+                tag,
+                x1: fields.i32(s.game_origin_x)?,
+                x2: fields.i32(s.game_origin_x + 4)?,
+                y1: fields.i32(s.game_origin_y)?,
+                y2: fields.i32(s.game_origin_y + 4)?,
+                config: fields.i32(rules.game.config).unwrap_or(0),
+            })
         })
-        .filter_map(|o| Some((o, memory.u64(o + s.game_tag as u64)?)))
-        .filter(|&(_, tag)| (tag >> TAG_TYPE_SHIFT) & 7 == TAG_LOC)
         .collect()
 }
 
 unsafe fn definition(memory: &OwnMemory, rules: &Rules, id: i32) -> Option<u64> {
     let lookup: Lookup = function(rules.module_base + rules.names.lookup as u64);
-    memory.ptr(lookup(id) as u64 + 8).filter(|&d| d != 0)
+    memory.ptr(lookup(id) as u64 + 8)
 }
 
 unsafe fn decoration_height(memory: &OwnMemory, rules: &Rules, id: i32) -> i16 {
@@ -184,7 +300,7 @@ unsafe fn name(memory: &OwnMemory, rules: &Rules, id: i32) -> Option<String> {
         .is_some_and(|t| t != 0)
     {
         let pair = transform(definition);
-        definition = memory.ptr(pair as u64 + 8).filter(|&d| d != 0)?;
+        definition = memory.ptr(pair as u64 + 8)?;
     }
     read::read_string(memory, definition + n.name as u64)
         .filter(|name| !name.is_empty() && name != NULL_NAME)
@@ -247,13 +363,21 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
         reply.locs[count] = info;
         count += 1;
     };
+    let mut blocks = Blocks::new(rules);
     for plane in planes {
         let Some(tiles) = Tiles::new(&memory, rules, view.scene, plane) else {
             continue;
         };
+        let Some(objects) = tiles.objects(&memory) else {
+            continue;
+        };
         for x in 0..tiles.size_x {
             for y in 0..tiles.size_y {
-                let Some(tile) = tiles.at(&memory, x, y) else {
+                let tile = objects[(x * tiles.size_y + y) as usize];
+                let Some(tile) = (tile != 0)
+                    .then(|| read_fields(&memory, tile, &mut blocks.tile))
+                    .flatten()
+                else {
                     continue;
                 };
                 let base = LocInfo {
@@ -266,10 +390,14 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
                     ..LocInfo::default()
                 };
                 for (slot, kind, config) in single_slots(rules) {
-                    let Some(object) = memory.ptr(tile + slot as u64).filter(|&o| o != 0) else {
+                    let Some(object) = tile.ptr(slot) else {
                         continue;
                     };
-                    let Some(tag) = memory.u64(object + s.tag as u64) else {
+                    let block = &mut blocks.slot[..slot_span(s, config) as usize];
+                    let Some(fields) = read_fields(&memory, object, block) else {
+                        continue;
+                    };
+                    let Some(tag) = fields.u64(s.tag) else {
                         continue;
                     };
                     let id = loc_id(rules, tag);
@@ -279,10 +407,7 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
                             .or_insert_with(|| unsafe { decoration_height(&memory, rules, id) }),
                         _ => 0,
                     };
-                    let config = config.and_then(|c| {
-                        let mut byte = [0u8];
-                        memory.read(object + c as u64, &mut byte).then_some(byte[0])
-                    });
+                    let config = config.and_then(|c| fields.u8(c));
                     let (shape, rotation) =
                         config.map_or((UNKNOWN, UNKNOWN), |c| shape_rotation(c as i32));
                     push(
@@ -298,32 +423,22 @@ fn fill_locs(reply: &mut LocsReply, request: i32) -> i32 {
                         plane,
                     );
                 }
-                for (object, tag) in game_objects(&memory, rules, tile) {
-                    let origin = |offset: u32| memory.i32(object + offset as u64);
-                    let (Some(x1), Some(x2), Some(y1), Some(y2)) = (
-                        origin(s.game_origin_x),
-                        origin(s.game_origin_x + 4),
-                        origin(s.game_origin_y),
-                        origin(s.game_origin_y + 4),
-                    ) else {
-                        continue;
-                    };
-                    if x1 != x || y1 != y {
+                for object in game_objects(&memory, rules, &tile, &mut blocks.game) {
+                    if object.x1 != x || object.y1 != y {
                         continue;
                     }
-                    let (shape, rotation) =
-                        shape_rotation(memory.i32(object + rules.game.config as u64).unwrap_or(0));
+                    let (shape, rotation) = shape_rotation(object.config);
                     push(
                         reply,
                         LocInfo {
                             kind: loc_kind::GAME,
-                            size_x: (x2 - x1 + 1).clamp(1, 255) as u8,
-                            size_y: (y2 - y1 + 1).clamp(1, 255) as u8,
+                            size_x: (object.x2 - object.x1 + 1).clamp(1, 255) as u8,
+                            size_y: (object.y2 - object.y1 + 1).clamp(1, 255) as u8,
                             shape,
                             rotation,
                             ..base
                         },
-                        tag,
+                        object.tag,
                         plane,
                     );
                 }
@@ -350,7 +465,7 @@ pub fn on_locs_request() {
 }
 
 fn slots(memory: &OwnMemory, rules: &Rules, object: u64) -> Vec<u32> {
-    let Some(vtable) = memory.ptr(object).filter(|&v| v != 0) else {
+    let Some(vtable) = memory.ptr(object) else {
         return Vec::new();
     };
     let mut cache = SLOTS.lock().unwrap();
@@ -374,12 +489,15 @@ pub fn loc_renderables(kind: u8, x: i32, y: i32, id: i32) -> Option<Vec<(u64, Pl
     let rules = RULES.get()?;
     let view = view(&memory, rules)?;
     let tile = Tiles::new(&memory, rules, view.scene, view.plane)?.at(&memory, x, y)?;
+    let mut blocks = Blocks::new(rules);
+    let tile = read_fields(&memory, tile, &mut blocks.tile)?;
     let s = &rules.scene;
     if kind == loc_kind::GAME {
         let g = &rules.game;
-        let (object, _) = game_objects(&memory, rules, tile)
+        let object = game_objects(&memory, rules, &tile, &mut blocks.game)
             .into_iter()
-            .find(|&(_, tag)| loc_id(rules, tag) == id)?;
+            .find(|object| loc_id(rules, object.tag) == id)?
+            .object;
         let field = |offset: u32| memory.i32(object + offset as u64);
         let at = Placement {
             x: field(g.x)?,
@@ -387,20 +505,16 @@ pub fn loc_renderables(kind: u8, x: i32, y: i32, id: i32) -> Option<Vec<(u64, Pl
             height: field(g.height)?,
             orientation: field(g.orientation)?,
         };
-        let renderable = memory
-            .ptr(object + g.renderable as u64)
-            .filter(|&r| r != 0)?;
+        let renderable = memory.ptr(object + g.renderable as u64)?;
         return Some(vec![(renderable, at)]);
     }
     let object = if kind == loc_kind::ITEM_PILE {
-        memory
-            .ptr(tile + rules.item_pile? as u64)
-            .filter(|&o| o != 0)?
+        tile.ptr(rules.item_pile?)?
     } else {
         let (slot, _, _) = single_slots(rules)
             .into_iter()
             .find(|&(_, k, _)| k == kind)?;
-        let object = memory.ptr(tile + slot as u64).filter(|&o| o != 0)?;
+        let object = tile.ptr(slot)?;
         if memory
             .u64(object + s.tag as u64)
             .map(|tag| loc_id(rules, tag))
@@ -422,7 +536,7 @@ pub fn loc_renderables(kind: u8, x: i32, y: i32, id: i32) -> Option<Vec<(u64, Pl
         .into_iter()
         .enumerate()
         .filter_map(|(i, offset)| {
-            let renderable = memory.ptr(object + offset as u64).filter(|&r| r != 0)?;
+            let renderable = memory.ptr(object + offset as u64)?;
             let at = if kind == loc_kind::WALL_DECORATION {
                 let shift = i as u32 * 8;
                 Placement {

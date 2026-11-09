@@ -59,12 +59,9 @@ impl Kind {
             b'i' => true,
             _ => return None,
         };
-        let digits = token[1..]
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        let bytes = digits.parse::<usize>().ok()? / 8;
-        let rest = &token[1 + digits.len()..];
+        let digits = token[1..].bytes().take_while(u8::is_ascii_digit).count();
+        let bytes = token[1..1 + digits].parse::<usize>().ok()? / 8;
+        let rest = &token[1 + digits..];
         if bytes == 1 {
             let transform = match rest {
                 "" => Transform::None,
@@ -78,6 +75,9 @@ impl Kind {
                 shifts: vec![0],
                 transform,
             });
+        }
+        if !(2..=4).contains(&bytes) {
+            return None;
         }
         let (order, transform) = match rest.strip_suffix("add") {
             Some(order) => (order, Transform::Add),
@@ -97,7 +97,7 @@ impl Kind {
                 })
                 .collect::<Option<_>>()?,
         };
-        (shifts.len() == bytes && (2..=4).contains(&bytes)).then_some(Kind::Int {
+        (shifts.len() == bytes).then_some(Kind::Int {
             signed,
             shifts,
             transform,
@@ -206,12 +206,9 @@ impl Table {
                     .iter()
                     .any(|d| d.opcode == l.opcode && d.size == l.size)
             });
-        let signature = |size: i32, fields: &Option<Vec<Kind>>| {
-            fields
-                .as_ref()
-                .filter(|f| !f.is_empty())
-                .map(|f| (size, f.clone()))
-        };
+        fn signature(size: i32, fields: &Option<Vec<Kind>>) -> Option<(i32, &Vec<Kind>)> {
+            fields.as_ref().filter(|f| !f.is_empty()).map(|f| (size, f))
+        }
         let parsed: Vec<Option<Vec<Kind>>> = layouts
             .iter()
             .map(|l| {
@@ -238,29 +235,17 @@ impl Table {
                     .filter(|d| same_protocol && d.size == layout.size && fits(d));
                 let by_shape = || {
                     let sig = signature(layout.size, fields)?;
-                    let named = || {
-                        shipped.defs.iter().filter(|d| {
-                            !d.sent
-                                && !d.name.is_empty()
-                                && signature(d.size, &d.fields).as_ref() == Some(&sig)
-                        })
-                    };
                     let here = layouts
                         .iter()
                         .zip(&parsed)
-                        .filter(|(l, f)| signature(l.size, f).as_ref() == Some(&sig))
+                        .filter(|(l, f)| signature(l.size, f) == Some(sig))
                         .count();
-                    let mut matches = named();
-                    let only = matches
-                        .next()
-                        .filter(|_| matches.next().is_none() && here == 1)?;
-                    (shipped
+                    let mut same = shipped
                         .defs
                         .iter()
-                        .filter(|d| !d.sent && signature(d.size, &d.fields).as_ref() == Some(&sig))
-                        .count()
-                        == 1)
-                        .then_some(only)
+                        .filter(|d| !d.sent && signature(d.size, &d.fields) == Some(sig));
+                    let only = same.next().filter(|_| same.next().is_none())?;
+                    (here == 1 && !only.name.is_empty()).then_some(only)
                 };
                 let named = by_opcode.filter(|d| !d.name.is_empty()).or_else(by_shape);
                 Def {
@@ -364,13 +349,15 @@ fn label(kind: &Kind) -> String {
             shifts,
             transform,
         } => {
-            let order = if shifts.windows(2).all(|w| w[0] > w[1]) {
-                "be".to_string()
+            let order = if shifts.len() == 1 {
+                String::new()
+            } else if shifts.windows(2).all(|w| w[0] > w[1]) {
+                " be".to_string()
             } else if shifts.windows(2).all(|w| w[0] < w[1]) {
-                "le".to_string()
+                " le".to_string()
             } else {
                 format!(
-                    "mixed order {}",
+                    " mixed order {}",
                     shifts
                         .iter()
                         .map(|s| (s / 8).to_string())
@@ -386,11 +373,6 @@ fn label(kind: &Kind) -> String {
             };
             let sign = if *signed { "i" } else { "u" };
             let width = shifts.len() * 8;
-            let order = if shifts.len() == 1 {
-                String::new()
-            } else {
-                format!(" {order}")
-            };
             format!("{sign}{width}{order}{transform}")
         }
         Kind::Bool => "bool".into(),

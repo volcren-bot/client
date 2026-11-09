@@ -5,10 +5,9 @@ import gen
 
 class Classify(unittest.TestCase):
     def kind(self, body):
-        return gen.classify("", body)
+        return gen.classify(body)
 
     def test_the_clients_own_read_methods(self):
-        # xw.eg, xw.jo and xw.ed as decompiled
         self.assertEqual(self.kind("return ((this.ah[-1851950461 * this.ab - 1] & 0xFF) << 8) + (this.ah[-1851950461 * this.ab - 2] - 128 & 0xFF);"), "u16leadd")
         self.assertEqual(
             self.kind("return (var0.ah[var0.ab * -1851950461 - 2] & 0xFF) + ((var0.ah[-1851950461 * var0.ab - 4] & 0xFF) << 16) + ((var0.ah[var0.ab * -1851950461 - 3] & 0xFF) << 24) + ((var0.ah[-1851950461 * var0.ab - 1] & 0xFF) << 8);"),

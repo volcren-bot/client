@@ -43,6 +43,18 @@ fn scan(pid: u32, mut visit: impl FnMut(u64, &[u8])) {
     }
 }
 
+const NEAR: [i64; 8] = [-16, -12, -8, -4, 4, 8, 12, 16];
+
+fn aligned<const N: usize>(base: u64, data: &[u8]) -> impl Iterator<Item = (usize, [u8; N])> + '_ {
+    let start = (N - base as usize % N) % N;
+    data.get(start..).unwrap_or_default().as_chunks::<N>().0.iter().enumerate().map(move |(k, &w)| (start + k * N, w))
+}
+
+fn near(data: &[u8], i: usize, d: i64) -> Option<[u8; 4]> {
+    let j = usize::try_from(i as i64 + d).ok()?;
+    data.get(j..j + 4)?.try_into().ok()
+}
+
 fn parse(s: &str) -> u64 {
     let s = s.trim();
     if let Some(h) = s.strip_prefix("0x") { u64::from_str_radix(h, 16).unwrap() } else { s.parse::<i64>().unwrap() as u64 }
@@ -87,65 +99,48 @@ fn main() {
                 (HashSet::new(), Some((parse(&args[3]), parse(&args[4]))))
             };
             scan(pid, |base, data| {
-                let start = ((8 - base % 8) % 8) as usize;
-                let mut i = start;
-                while i + 8 <= data.len() {
-                    let v = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+                for (i, w) in aligned::<8>(base, data) {
+                    let v = u64::from_le_bytes(w);
                     let hit = match range { Some((lo, hi)) => v >= lo && v < hi, None => set.contains(&v) };
                     if hit { report(base + i as u64, format!(" -> {v:#x}")); }
-                    i += 8;
                 }
             });
         }
         "i32" => {
             let want = parse(&args[3]) as i64 as i32;
             scan(pid, |base, data| {
-                let mut i = ((4 - base % 4) % 4) as usize;
-                while i + 4 <= data.len() {
-                    if i32::from_le_bytes(data[i..i + 4].try_into().unwrap()) == want { report(base + i as u64, String::new()); }
-                    i += 4;
+                for (i, w) in aligned::<4>(base, data) {
+                    if i32::from_le_bytes(w) == want { report(base + i as u64, String::new()); }
                 }
             });
         }
-        // two i32 values, the second at most 16 bytes after (or before) the first
         "pair" => {
             let (a, b) = (parse(&args[3]) as i64 as i32, parse(&args[4]) as i64 as i32);
             scan(pid, |base, data| {
-                let mut i = ((4 - base % 4) % 4) as usize;
-                while i + 4 <= data.len() {
-                    if i32::from_le_bytes(data[i..i + 4].try_into().unwrap()) == a {
-                        for d in [-16i64, -12, -8, -4, 4, 8, 12, 16] {
-                            let j = i as i64 + d;
-                            if j >= 0 && (j as usize) + 4 <= data.len() && i32::from_le_bytes(data[j as usize..j as usize + 4].try_into().unwrap()) == b {
+                for (i, w) in aligned::<4>(base, data) {
+                    if i32::from_le_bytes(w) == a {
+                        for d in NEAR {
+                            if near(data, i, d).is_some_and(|w| i32::from_le_bytes(w) == b) {
                                 report(base + i as u64, format!(" {d:+}"));
                             }
                         }
                     }
-                    i += 4;
                 }
             });
         }
-        // two f32 ranges, the second at most 16 bytes after (or before) the first
         "fpair" => {
             let p = |i: usize| args[i].parse::<f32>().unwrap();
             let ((a0, a1), (b0, b1)) = ((p(3), p(4)), (p(5), p(6)));
-            let f = |data: &[u8], i: usize| f32::from_le_bytes(data[i..i + 4].try_into().unwrap());
             scan(pid, |base, data| {
-                let mut i = ((4 - base % 4) % 4) as usize;
-                while i + 4 <= data.len() {
-                    let v = f(data, i);
+                for (i, v) in aligned::<4>(base, data) {
+                    let v = f32::from_le_bytes(v);
                     if v >= a0 && v <= a1 {
-                        for d in [-16i64, -12, -8, -4, 4, 8, 12, 16] {
-                            let j = i as i64 + d;
-                            if j >= 0 && (j as usize) + 4 <= data.len() {
-                                let w = f(data, j as usize);
-                                if w >= b0 && w <= b1 {
-                                    report(base + i as u64, format!(" {v} {d:+} {w}"));
-                                }
+                        for d in NEAR {
+                            if let Some(w) = near(data, i, d).map(f32::from_le_bytes).filter(|w| *w >= b0 && *w <= b1) {
+                                report(base + i as u64, format!(" {v} {d:+} {w}"));
                             }
                         }
                     }
-                    i += 4;
                 }
             });
         }

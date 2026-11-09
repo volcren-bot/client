@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Print a labeled block of the menu-related i32 fields: snapmenu.py <pid> <label>"""
 import struct
 import sys
 

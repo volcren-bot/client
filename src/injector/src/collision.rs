@@ -434,18 +434,31 @@ pub enum Square<T> {
     Tiles(Box<[T; TILES]>),
 }
 
+impl<T: Cell> Square<T> {
+    pub fn tile(&self, index: usize) -> Option<T> {
+        match self {
+            Square::Missing => None,
+            Square::Open => Some(T::default()),
+            Square::Same(value) => Some(*value),
+            Square::Tiles(tiles) => Some(tiles[index]),
+        }
+    }
+}
+
 pub struct WorldCollision<T: Cell = u32> {
-    planes: Vec<Vec<Square<T>>>,
+    squares: Vec<Square<T>>,
 }
 
 impl<T: Cell> Default for WorldCollision<T> {
     fn default() -> Self {
         Self {
-            planes: (0..PLANES)
-                .map(|_| (0..SQUARES).map(|_| Square::Missing).collect())
-                .collect(),
+            squares: (0..PLANES * SQUARES).map(|_| Square::Missing).collect(),
         }
     }
+}
+
+pub(crate) fn plane_index(plane: i32) -> Option<usize> {
+    usize::try_from(plane).ok().filter(|&p| p < PLANES)
 }
 
 pub(crate) fn square_index(x: i32, y: i32) -> Option<(usize, usize)> {
@@ -468,22 +481,17 @@ fn same<T: Cell>(value: T) -> Square<T> {
 
 impl<T: Cell> WorldCollision<T> {
     pub fn flags(&self, plane: i32, x: i32, y: i32) -> Option<T> {
-        let squares = self.planes.get(usize::try_from(plane).ok()?)?;
+        let plane = plane_index(plane)?;
         let (square, tile) = square_index(x, y)?;
-        match &squares[square] {
-            Square::Missing => None,
-            Square::Open => Some(T::default()),
-            Square::Same(value) => Some(*value),
-            Square::Tiles(tiles) => Some(tiles[tile]),
-        }
+        self.square(plane, square).tile(tile)
     }
 
-    pub fn square(&self, plane: usize, region: u32) -> &Square<T> {
-        &self.planes[plane][region as usize]
+    pub fn square(&self, plane: usize, region: usize) -> &Square<T> {
+        &self.squares[plane * SQUARES + region]
     }
 
     pub fn add_square(&mut self, region: u32) {
-        for squares in &mut self.planes {
+        for squares in self.squares.as_chunks_mut::<SQUARES>().0 {
             if let Some(square @ Square::Missing) = squares.get_mut(region as usize) {
                 *square = Square::Open;
             }
@@ -491,7 +499,7 @@ impl<T: Cell> WorldCollision<T> {
     }
 
     pub fn remove_square(&mut self, region: u32) {
-        for squares in &mut self.planes {
+        for squares in self.squares.as_chunks_mut::<SQUARES>().0 {
             if let Some(square) = squares.get_mut(region as usize) {
                 *square = Square::Missing;
             }
@@ -499,16 +507,10 @@ impl<T: Cell> WorldCollision<T> {
     }
 
     pub(crate) fn add(&mut self, plane: i32, x: i32, y: i32, flags: u32) {
-        let Some(squares) = usize::try_from(plane)
-            .ok()
-            .and_then(|p| self.planes.get_mut(p))
-        else {
+        let (Some(plane), Some((square, tile))) = (plane_index(plane), square_index(x, y)) else {
             return;
         };
-        let Some((square, tile)) = square_index(x, y) else {
-            return;
-        };
-        let square = &mut squares[square];
+        let square = &mut self.squares[plane * SQUARES + square];
         match square {
             Square::Open => *square = Square::Tiles(Box::new([T::default(); TILES])),
             Square::Same(value) => *square = Square::Tiles(Box::new([*value; TILES])),
@@ -520,13 +522,11 @@ impl<T: Cell> WorldCollision<T> {
     }
 
     pub fn shrink(&mut self) {
-        for squares in &mut self.planes {
-            for square in squares.iter_mut() {
-                if let Square::Tiles(tiles) = square
-                    && tiles.iter().all(|t| *t == tiles[0])
-                {
-                    *square = same(tiles[0]);
-                }
+        for square in &mut self.squares {
+            if let Square::Tiles(tiles) = square
+                && tiles.iter().all(|t| *t == tiles[0])
+            {
+                *square = same(tiles[0]);
             }
         }
     }
@@ -545,13 +545,12 @@ impl<T: Cell> WorldCollision<T> {
             for (x, column) in columns.iter().enumerate() {
                 for (y, &setting) in column.iter().enumerate() {
                     let (wx, wy) = (base_x + x as i32, base_y + y as i32);
-                    let walked = plane as i32 - bridge(x, y) as i32;
+                    let bridged = bridge(x, y);
                     if setting & SETTING_BLOCKED != 0 {
-                        self.add(walked, wx, wy, flag::FLOOR);
+                        self.add(plane as i32 - bridged as i32, wx, wy, flag::FLOOR);
                     }
-                    let above = plane + bridge(x, y) as usize;
                     let floored = settings
-                        .get(above)
+                        .get(plane + bridged as usize)
                         .is_some_and(|p| p[x][y] & SETTING_HAS_FLOOR != 0);
                     if plane > 0 && !floored {
                         self.add(plane as i32, wx, wy, flag::NO_FLOOR);
@@ -667,30 +666,24 @@ impl WorldCollision<Movement> {
         };
         let mut out = MAGIC.to_vec();
         out.extend_from_slice(&key.to_le_bytes());
-        for (plane, squares) in self.planes.iter().enumerate() {
+        for (plane, squares) in self.squares.as_chunks::<SQUARES>().0.iter().enumerate() {
             for (region, square) in squares.iter().enumerate() {
-                if matches!(square, Square::Missing) {
-                    continue;
-                }
+                let kind = match square {
+                    Square::Missing => continue,
+                    Square::Open => OPEN,
+                    Square::Same(_) | Square::Tiles(_) => TILES_RLE,
+                };
                 out.push(plane as u8);
                 out.extend_from_slice(&(region as u16).to_le_bytes());
+                out.push(kind);
                 match square {
-                    Square::Missing => {}
-                    Square::Open => out.push(OPEN),
-                    Square::Same(value) => {
-                        out.push(TILES_RLE);
-                        push_run(&mut out, TILES, *value);
-                    }
+                    Square::Same(value) => push_run(&mut out, TILES, *value),
                     Square::Tiles(tiles) => {
-                        out.push(TILES_RLE);
-                        let mut at = 0;
-                        while at < TILES {
-                            let value = tiles[at];
-                            let run = tiles[at..].iter().take_while(|&&t| t == value).count();
-                            push_run(&mut out, run, value);
-                            at += run;
+                        for run in tiles.chunk_by(|a, b| a == b) {
+                            push_run(&mut out, run.len(), run[0]);
                         }
                     }
+                    Square::Missing | Square::Open => {}
                 }
             }
         }
@@ -713,7 +706,13 @@ impl WorldCollision<Movement> {
                 return Some(world);
             }
             let region = r.u16_le()? as usize;
-            let square = match r.u8()? {
+            let slot = world
+                .squares
+                .as_chunks_mut::<SQUARES>()
+                .0
+                .get_mut(plane as usize)?
+                .get_mut(region)?;
+            *slot = match r.u8()? {
                 OPEN => Square::Open,
                 TILES_RLE => {
                     let run = r.u16_le()? as usize;
@@ -735,7 +734,6 @@ impl WorldCollision<Movement> {
                 }
                 _ => return None,
             };
-            *world.planes.get_mut(plane as usize)?.get_mut(region)? = square;
         }
     }
 }
@@ -1052,15 +1050,15 @@ mod tests {
         }
         world.shrink();
         let no_floor = Movement::default().with(flag::NO_FLOOR);
-        assert!(matches!(world.square(1, region), Square::Same(v) if *v == no_floor));
+        assert!(matches!(world.square(1, region as usize), Square::Same(v) if *v == no_floor));
         assert_eq!(world.flags(1, 50 * 64 + 9, 50 * 64 + 9), Some(no_floor));
 
         let back = WorldCollision::from_bytes(&world.to_bytes(7), 7).unwrap();
-        assert!(matches!(back.square(1, region), Square::Same(v) if *v == no_floor));
-        assert!(matches!(back.square(0, region), Square::Open));
+        assert!(matches!(back.square(1, region as usize), Square::Same(v) if *v == no_floor));
+        assert!(matches!(back.square(0, region as usize), Square::Open));
 
         world.add(1, 50 * 64, 50 * 64, flag::WALL_EAST);
-        assert!(matches!(world.square(1, region), Square::Tiles(_)));
+        assert!(matches!(world.square(1, region as usize), Square::Tiles(_)));
         assert_eq!(world.flags(1, 50 * 64 + 9, 50 * 64 + 9), Some(no_floor));
     }
 }

@@ -254,11 +254,11 @@ fn load(version: Option<(&Path, &str)>) -> Data {
     let mut data = Data::default();
     let mut whole = version.is_some();
     for file in FILES {
-        let kept = version
-            .filter(|_| !bundled_only(file))
+        let local = version.filter(|_| !bundled_only(file));
+        let kept = local
             .and_then(|(dir, _)| read_local(&dir.join(format!("{}.tsv", file.name))))
             .and_then(|text| validate(file, &text).ok());
-        if kept.is_none() && version.is_some() && !bundled_only(file) {
+        if kept.is_none() && local.is_some() {
             eprintln!("transports: {}: using the bundled copy", file.name);
             whole = false;
         }
@@ -281,12 +281,9 @@ fn load(version: Option<(&Path, &str)>) -> Data {
 }
 
 fn load_current(root: Option<&Path>, versions: &Versions) -> Data {
-    let Some(root) = root else {
-        return load(None);
-    };
-    match versions.kept.first() {
-        Some(version) => load(Some((&root.join(&version.commit), &version.commit))),
-        None => load(None),
+    match (root, versions.kept.first()) {
+        (Some(root), Some(version)) => load(Some((&root.join(&version.commit), &version.commit))),
+        _ => load(None),
     }
 }
 
@@ -338,13 +335,14 @@ fn update(
     let mut texts = Vec::new();
     for file in FILES.iter().filter(|f| !bundled_only(f)) {
         let text = fetch(&new.commit, file).map_err(|e| format!("{}: {e}", file.name))?;
-        validate(file, &text).map_err(|e| format!("{}: {e}", file.name))?;
+        validate(file, &text)?;
         texts.push((file.name, text));
     }
     let dir = root.join(&new.commit);
     for (name, text) in &texts {
         crate::paths::write_atomic(&dir.join(format!("{name}.tsv")), text.as_bytes())?;
     }
+    versions.kept.retain(|v| v.commit != new.commit);
     versions.kept.insert(0, new.clone());
     versions.kept.truncate(KEPT_VERSIONS);
     versions.skip = None;
@@ -588,7 +586,7 @@ mod tests {
                 }
             },
         );
-        assert!(result.is_err_and(|why| why.starts_with("boats")));
+        assert_eq!(result, Err("boats: no Destination column".to_owned()));
         assert_eq!(commits(&root), [version(1).commit]);
         assert!(
             !root.join(version(2).commit).exists(),
@@ -639,6 +637,16 @@ mod tests {
             root.join("mine").exists(),
             "not named like a commit, so not ours"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_version_taken_again_is_kept_once() {
+        let root = temp("again");
+        take(&root, 1).unwrap();
+        take(&root, 2).unwrap();
+        assert_eq!(take(&root, 1), Ok(Checked::New(version(1))));
+        assert_eq!(commits(&root), [version(1).commit, version(2).commit]);
         let _ = std::fs::remove_dir_all(root);
     }
 

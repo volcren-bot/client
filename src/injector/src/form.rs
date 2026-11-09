@@ -122,7 +122,7 @@ pub const KINDS: [&str; 9] = [
 pub const LAYOUT_KINDS: [&str; 3] = ["equipment", "inventory", "prayer"];
 
 pub const EQUIPMENT_SLOTS: [usize; 12] = [0, 1, 2, 3, 4, 5, 7, 9, 10, 12, 13, 14];
-pub const INVENTORY_SLOTS: usize = 28;
+const INVENTORY_SLOTS: usize = 28;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Required {
@@ -193,10 +193,7 @@ fn parse_required(kind: &str, row: &Value) -> Result<Required, String> {
     {
         return Err("`doses` are numbers from 1".into());
     }
-    let mut seen = doses.clone();
-    seen.sort_unstable();
-    seen.dedup();
-    if seen.len() != doses.len() {
+    if has_repeats(doses.clone()) {
         return Err("`doses` lists a dose twice".into());
     }
     Ok(Required {
@@ -206,6 +203,13 @@ fn parse_required(kind: &str, row: &Value) -> Result<Required, String> {
         max: max as i32,
         doses: doses.into_iter().map(|d| d as u32).collect(),
     })
+}
+
+fn has_repeats<T: Ord>(mut values: Vec<T>) -> bool {
+    let count = values.len();
+    values.sort_unstable();
+    values.dedup();
+    values.len() != count
 }
 
 fn check_required(kind: &str, field: &Value) -> Result<Vec<Required>, String> {
@@ -221,11 +225,7 @@ fn check_required(kind: &str, field: &Value) -> Result<Vec<Required>, String> {
             parse_required(kind, row).map_err(|e| format!("required item {}: {e}", i + 1))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut slots: Vec<usize> = items.iter().filter_map(|r| r.slot).collect();
-    let named = slots.len();
-    slots.sort_unstable();
-    slots.dedup();
-    if slots.len() != named {
+    if has_repeats(items.iter().filter_map(|r| r.slot).collect()) {
         return Err("two required items name the same slot".into());
     }
     if kind == "inventory" && items.len() > INVENTORY_SLOTS {
@@ -513,14 +513,14 @@ fn parse_answer(line: &str, what: &str, key: &str) -> Result<Option<String>, Str
 }
 
 pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {
-    let reply: Value = serde_json::from_str(line.trim())
+    let mut reply: Value = serde_json::from_str(line.trim())
         .map_err(|e| format!("bad form reply from the loader: {e}"))?;
     if reply.get("cancelled").and_then(Value::as_bool) == Some(true) {
         return Ok(None);
     }
     reply
-        .get("values")
-        .cloned()
+        .get_mut("values")
+        .map(Value::take)
         .map(Some)
         .ok_or_else(|| "the loader's form reply has no values".into())
 }

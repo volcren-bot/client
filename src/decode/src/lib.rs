@@ -121,12 +121,6 @@ pub struct Minimap {
     pub zoom: i32,
 }
 
-impl GameState {
-    pub fn logged_in(&self) -> Option<bool> {
-        self.game_state.map(|state| state == game_state::LOGGED_IN)
-    }
-}
-
 pub fn game_state_name(state: i32) -> String {
     game_state::name(state).map_or_else(|| format!("unknown state {state}"), str::to_owned)
 }

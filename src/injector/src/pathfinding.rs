@@ -7,8 +7,8 @@ use std::{
 use crate::collision::{Movement, WorldCollision, flag};
 
 const BLOCKS: u16 = Movement::BLOCKS;
-pub(crate) const STRAIGHT: u32 = 10;
-pub(crate) const DIAGONAL: u32 = 11;
+const STRAIGHT: u32 = 10;
+const DIAGONAL: u32 = 11;
 const DOOR_COST: u32 = 30;
 
 pub(crate) const DIRECTIONS: [(i32, i32); 8] = [
@@ -54,10 +54,15 @@ impl Hasher for TileHasher {
 
 type TileMap<V> = HashMap<u32, V, BuildHasherDefault<TileHasher>>;
 
-const FROM_EAST: u16 = BLOCKS | flag::WALL_EAST as u16;
-const FROM_WEST: u16 = BLOCKS | flag::WALL_WEST as u16;
-const FROM_NORTH: u16 = BLOCKS | flag::WALL_NORTH as u16;
-const FROM_SOUTH: u16 = BLOCKS | flag::WALL_SOUTH as u16;
+pub(crate) fn straight_blocks(dx: i32, dy: i32) -> u16 {
+    let wall = match (dx, dy) {
+        (dx, 0) if dx < 0 => flag::WALL_EAST,
+        (_, 0) => flag::WALL_WEST,
+        (_, dy) if dy < 0 => flag::WALL_NORTH,
+        _ => flag::WALL_SOUTH,
+    };
+    BLOCKS | wall as u16
+}
 
 pub type Tile = (i32, i32);
 
@@ -85,7 +90,7 @@ pub fn can_step(
     can_step_with(world, plane, x, y, dx, dy, false)
 }
 
-pub fn can_step_with(
+fn can_step_with(
     world: &WorldCollision<Movement>,
     plane: i32,
     x: i32,
@@ -96,8 +101,8 @@ pub fn can_step_with(
 ) -> bool {
     use flag::*;
     let walkable = |x: i32, y: i32, mask: u16| walkable(world, plane, x, y, mask, doors);
-    let straight_x = |dx: i32| walkable(x + dx, y, if dx < 0 { FROM_EAST } else { FROM_WEST });
-    let straight_y = |dy: i32| walkable(x, y + dy, if dy < 0 { FROM_NORTH } else { FROM_SOUTH });
+    let straight_x = |dx: i32| walkable(x + dx, y, straight_blocks(dx, 0));
+    let straight_y = |dy: i32| walkable(x, y + dy, straight_blocks(0, dy));
     match (dx, dy) {
         (0, 0) => true,
         (dx, 0) => straight_x(dx),
@@ -223,7 +228,7 @@ pub fn find_path_with(
     Err(PathError::NoPath)
 }
 
-pub mod route_mask {
+mod route_mask {
     pub const WEST: u32 = 0x4024_0108;
     pub const EAST: u32 = 0x4024_0180;
     pub const SOUTH: u32 = 0x4024_0102;

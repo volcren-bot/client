@@ -1,12 +1,18 @@
 use std::cell::OnceCell;
 
-use ipc::state::{InterfaceLayout, interfaces::*};
+use ipc::state::{
+    InterfaceLayout, array,
+    interfaces::{CHILDREN_DATA, ENTRY_COMPONENT, ENTRY_SIZE, GROUP_SIZE},
+};
 use serde::{Deserialize, Serialize};
 
-use crate::memory::{Memory, byte, i32_pair, read_string};
+use crate::memory::{Memory, TABLE_BUCKETS, TABLE_COUNT, byte, i32_pair, read_string};
 
 const MAX_DEPTH: usize = 64;
 const MAX_BUCKETS: u32 = 1 << 16;
+const NODE_KEY: u64 = 0x0;
+const NODE_GROUP: u64 = 0x4;
+const NODE_NEXT: u64 = 0x10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Widget {
@@ -78,6 +84,7 @@ struct Tree<'a, M: Memory> {
     memory: &'a M,
     layout: &'a InterfaceLayout,
     client: u64,
+    groups: OnceCell<Option<u64>>,
     opened: OnceCell<Option<Vec<(i32, i32)>>>,
 }
 
@@ -87,8 +94,15 @@ impl<'a, M: Memory> Tree<'a, M> {
             memory,
             layout,
             client: memory.ptr(layout.module_base + layout.client as u64)?,
+            groups: OnceCell::new(),
             opened: OnceCell::new(),
         })
+    }
+
+    fn groups(&self) -> Option<u64> {
+        *self
+            .groups
+            .get_or_init(|| ipc::read::component_groups(self.memory, self.layout, self.client))
     }
 
     fn field(&self, component: u64, offset: u32) -> Option<i32> {
@@ -107,7 +121,7 @@ impl<'a, M: Memory> Tree<'a, M> {
     }
 
     fn component(&self, id: i32) -> Option<u64> {
-        ipc::read::component(self.memory, self.layout, self.client, id)
+        ipc::read::component_in(self.memory, self.layout, self.groups()?, id)
     }
 
     fn placed(&self, root: i32, group: u16, child: u16) -> Option<(u64, (i32, i32, bool))> {
@@ -130,8 +144,8 @@ impl<'a, M: Memory> Tree<'a, M> {
 
     fn read_sub_interfaces(&self) -> Option<Vec<(i32, i32)>> {
         let table = self.client + self.layout.sub_interfaces as u64;
-        let buckets = self.memory.ptr(table + TABLE_BUCKETS as u64)?;
-        let count = self.memory.i32(table + TABLE_BUCKET_COUNT as u64)? as u32;
+        let buckets = self.memory.ptr(table + TABLE_BUCKETS)?;
+        let count = self.memory.i32(table + TABLE_COUNT)? as u32;
         if count == 0 || count > MAX_BUCKETS {
             return None;
         }
@@ -144,10 +158,10 @@ impl<'a, M: Memory> Tree<'a, M> {
                     break;
                 }
                 found.push((
-                    self.memory.i32(node + NODE_KEY as u64)?,
-                    self.memory.i32(node + NODE_GROUP as u64)?,
+                    self.memory.i32(node + NODE_KEY)?,
+                    self.memory.i32(node + NODE_GROUP)?,
                 ));
-                node = self.memory.u64(node + NODE_NEXT as u64)?;
+                node = self.memory.u64(node + NODE_NEXT)?;
             }
         }
         Some(found)
@@ -446,12 +460,25 @@ pub struct WidgetTree {
 const MAX_GROUP: u64 = 1 << 14;
 
 fn group_size<M: Memory>(tree: &Tree<M>, group: i32) -> Option<u64> {
-    let manager = tree.memory.ptr(tree.client + tree.layout.manager as u64)?;
-    let groups = tree.memory.ptr(manager + tree.layout.groups as u64)?;
     let count = tree
         .memory
-        .u64(groups + group as u64 * GROUP_SIZE as u64 + ARRAY_COUNT as u64)?;
+        .u64(tree.groups()? + group as u64 * GROUP_SIZE as u64 + array::COUNT as u64)?;
     (count <= MAX_GROUP).then_some(count)
+}
+
+fn open_components<'t, M: Memory>(
+    tree: &'t Tree<M>,
+    root: i32,
+    sub_interfaces: &[SubInterface],
+) -> impl Iterator<Item = (i32, u64)> + 't {
+    open_groups(root, sub_interfaces)
+        .into_iter()
+        .flat_map(move |group| {
+            (0..group_size(tree, group).unwrap_or(0)).filter_map(move |child| {
+                let id = group << 16 | child as i32;
+                Some((id, tree.component(id)?))
+            })
+        })
 }
 
 pub fn component_addresses(
@@ -461,16 +488,10 @@ pub fn component_addresses(
 ) -> Option<Vec<(i32, i32, u64)>> {
     let tree = Tree::open(memory, layout)?;
     let mut found = Vec::new();
-    for group in open_groups(root, &listed_sub_interfaces(&tree)?) {
-        for child in 0..group_size(&tree, group).unwrap_or(0) {
-            let id = group << 16 | child as i32;
-            let Some(component) = tree.component(id) else {
-                continue;
-            };
-            found.push((id, -1, component));
-            for (index, child) in tree.children(component).unwrap_or_default() {
-                found.push((id, index as i32, child));
-            }
+    for (id, component) in open_components(&tree, root, &listed_sub_interfaces(&tree)?) {
+        found.push((id, -1, component));
+        for (index, child) in tree.children(component).unwrap_or_default() {
+            found.push((id, index as i32, child));
         }
     }
     Some(found)
@@ -488,32 +509,26 @@ pub fn find_tree(
     let tree = Tree::open(memory, layout)?;
     let sub_interfaces = listed_sub_interfaces(&tree)?;
     let mut widgets = Vec::new();
-    for group in open_groups(root, &sub_interfaces) {
-        for child in 0..group_size(&tree, group).unwrap_or(0) {
-            let id = group << 16 | child as i32;
-            let Some(component) = tree.component(id) else {
-                continue;
-            };
-            let Some(placed) = place(&tree, component, root) else {
-                continue;
-            };
-            let Some(widget) = widget_at(&tree, component, placed) else {
-                continue;
-            };
+    for (id, component) in open_components(&tree, root, &sub_interfaces) {
+        let Some(placed) = place(&tree, component, root) else {
+            continue;
+        };
+        let Some(widget) = widget_at(&tree, component, placed) else {
+            continue;
+        };
+        widgets.push(TreeWidget {
+            widget: widget.scaled(scale),
+            detail: detail_at(&tree, component),
+            dynamic: false,
+            owner: -1,
+        });
+        for (child, address) in dynamic_children(&tree, component, placed).unwrap_or_default() {
             widgets.push(TreeWidget {
-                widget: widget.scaled(scale),
-                detail: detail_at(&tree, component),
-                dynamic: false,
-                owner: -1,
+                widget: child.scaled(scale),
+                detail: detail_at(&tree, address),
+                dynamic: true,
+                owner: id,
             });
-            for (child, address) in dynamic_children(&tree, component, placed).unwrap_or_default() {
-                widgets.push(TreeWidget {
-                    widget: child.scaled(scale),
-                    detail: detail_at(&tree, address),
-                    dynamic: true,
-                    owner: id,
-                });
-            }
         }
     }
     Some(WidgetTree {
@@ -567,6 +582,7 @@ mod tests {
             memory: &m,
             layout: &LAYOUT,
             client: 0,
+            groups: OnceCell::new(),
             opened: OnceCell::new(),
         };
         let d = detail_at(&tree, c);
@@ -665,10 +681,10 @@ mod tests {
                              parent: i32,
                              pos: (i32, i32),
                              size: (i32, i32)| {
-            let array = groups + group * GROUP_SIZE as u64;
+            let group_array = groups + group * GROUP_SIZE as u64;
             let elements = 0x1000_0000 + group * 0x1_0000;
-            m.put_u64(array + ARRAY_COUNT as u64, count);
-            m.put_u64(array + ARRAY_DATA as u64, elements);
+            m.put_u64(group_array + array::COUNT as u64, count);
+            m.put_u64(group_array + array::DATA as u64, elements);
             let c = next;
             next += 0x1000;
             m.put_u64(
@@ -703,14 +719,14 @@ mod tests {
 
         let table = CLIENT + LAYOUT.sub_interfaces as u64;
         let buckets = 0x50_0000;
-        m.put_u64(table + TABLE_BUCKETS as u64, buckets);
-        m.put_i32(table + TABLE_BUCKET_COUNT as u64, 1);
+        m.put_u64(table + TABLE_BUCKETS, buckets);
+        m.put_i32(table + TABLE_COUNT, 1);
         let node = 0x60_0000;
         m.put_u64(buckets, node);
         m.put_u64(buckets + 8, 0x70_0000);
-        m.put_i32(node + NODE_KEY as u64, 165 << 16 | 40);
-        m.put_i32(node + NODE_GROUP as u64, 378);
-        m.put_u64(node + NODE_NEXT as u64, 0);
+        m.put_i32(node + NODE_KEY, 165 << 16 | 40);
+        m.put_i32(node + NODE_GROUP, 378);
+        m.put_u64(node + NODE_NEXT, 0);
         m
     }
 
@@ -729,9 +745,7 @@ mod tests {
     #[test]
     fn reads_the_sprite() {
         let mut m = lobby();
-        let c72 = m
-            .u64(0x1000_0000 + 378 * 0x1_0000 + 72 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
-            .unwrap();
+        let c72 = component_of(&m, 378, 72);
         m.put_i32(c72 + LAYOUT.sprite as u64, 1218);
         assert_eq!(find_widget(&m, &LAYOUT, 165, 378, 72).unwrap().sprite, 1218);
         let unknown = InterfaceLayout {
@@ -744,9 +758,7 @@ mod tests {
     #[test]
     fn scroll_moves_children() {
         let mut m = lobby();
-        let c57 = m
-            .u64(0x1000_0000 + 378 * 0x1_0000 + 57 * ENTRY_SIZE as u64 + ENTRY_COMPONENT as u64)
-            .unwrap();
+        let c57 = component_of(&m, 378, 57);
         m.put_i32(c57 + LAYOUT.scroll_x as u64 + 4, 50);
         assert_eq!(find_widget(&m, &LAYOUT, 165, 378, 72).unwrap().y, 242);
     }

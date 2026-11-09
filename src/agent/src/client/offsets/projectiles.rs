@@ -92,10 +92,17 @@ fn update_fields(instrs: &[Instruction], slope_rvas: &HashSet<u32>) -> Option<Pr
             helpers.entry(i.near_branch_target()).or_default().push(at);
         }
     }
-    let [target_call, source_call] = helpers.into_values().find(|calls| calls.len() == 2)?[..]
-    else {
+    let pairs: Vec<Vec<usize>> = helpers
+        .into_values()
+        .filter(|calls| calls.len() == 2)
+        .collect();
+    let [ref pair] = pairs[..] else {
         return None;
     };
+    let [target_call, source_call] = pair[..] else {
+        return None;
+    };
+
     let (target_actor, target_x, target_y, target_level) = position_args(&instrs[..target_call])?;
     let (source_actor, source_x, source_y, source_level) = position_args(&instrs[..source_call])?;
     let subtracted = |from: usize| {
@@ -283,7 +290,7 @@ pub fn find_projectiles(pe: &Pe) -> Result<Projectiles, ScanError> {
     }
     let mut updates = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         if instrs.iter().any(|i| {
             i.is_ip_rel_memory_operand() && slope_rvas.contains(&(i.ip_rel_memory_address() as u32))
         }) {
@@ -294,15 +301,8 @@ pub fn find_projectiles(pe: &Pe) -> Result<Projectiles, ScanError> {
     let mut fields = update_fields(&whole_function(pe, update, 0x800), &slope_rvas)
         .ok_or(ScanError::NotFound)?;
 
-    let callers: Vec<u32> = direct_calls(pe)
-        .iter()
-        .copied()
-        .filter(|&(_, target)| target == update)
-        .filter_map(|(site, _)| pe.function_containing(site))
+    let loops = caller_functions(pe, update)
         .filter_map(|(begin, _)| chunk_root(pe, begin))
-        .collect();
-    let loops = callers
-        .into_iter()
         .filter_map(|caller| {
             loop_fields(&whole_function(pe, caller, 0x400), fields.end_cycle)
                 .map(|(node, cycle)| (caller, node, cycle))
@@ -329,7 +329,7 @@ pub fn find_projectiles(pe: &Pe) -> Result<Projectiles, ScanError> {
         if end - begin > 0x400 {
             continue;
         }
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         ids.extend(constructor_id(&instrs, &fields));
     }
     fields.id = one(ids)?;

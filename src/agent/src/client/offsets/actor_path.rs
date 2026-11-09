@@ -9,19 +9,13 @@ pub struct ActorPath {
 }
 
 fn is_store(i: &Instruction) -> bool {
-    i.mnemonic() == Mnemonic::Mov
-        && i.op0_kind() == OpKind::Memory
-        && i.memory_base() == Register::RCX
-        && i.memory_index() == Register::None
-        && i.memory_size() == iced_x86::MemorySize::UInt32
-        && i.op1_kind() == OpKind::Register
+    dword_store(i, Register::RCX)
 }
 
 fn path_reset(function: u32, instrs: &[Instruction], local_x: u32) -> Option<ActorPath> {
-    if instrs.last()?.mnemonic() != Mnemonic::Ret
-        || instrs
-            .iter()
-            .any(|i| matches!(i.mnemonic(), Mnemonic::Call | Mnemonic::Jmp))
+    if instrs
+        .iter()
+        .any(|i| matches!(i.mnemonic(), Mnemonic::Call | Mnemonic::Jmp))
     {
         return None;
     }

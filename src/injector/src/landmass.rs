@@ -4,23 +4,29 @@ use std::{
 };
 
 use crate::{
-    collision::{Movement, REGION_SIZE, SQUARES, Square, TILES, WorldCollision, square_index},
+    collision::{
+        Movement, REGION_SIZE, SQUARES, Square, TILES, WorldCollision, plane_index, square_index,
+    },
     nav::{Closed, PLANES, Point, fold},
-    pathfinding::{DIRECTIONS, can_step_with},
+    pathfinding::{DIRECTIONS, straight_blocks},
 };
 
 type Labels = Option<Box<[u32; TILES]>>;
 
 pub struct Landmasses {
-    planes: Vec<Vec<Labels>>,
+    squares: Vec<Labels>,
     pub count: u32,
     merged: HashMap<u32, u32>,
 }
 
-fn standable(world: &WorldCollision<Movement>, plane: i32, x: i32, y: i32) -> bool {
-    world
-        .flags(plane, x, y)
-        .is_some_and(|m| m.opened().0 & (Movement::BLOCKS | Movement::NO_FLOOR) == 0)
+const STAND_BLOCKS: u16 = Movement::BLOCKS | Movement::NO_FLOOR;
+
+fn standable(flags: Option<Movement>) -> bool {
+    flags.is_some_and(|m| m.opened().0 & STAND_BLOCKS == 0)
+}
+
+fn step_onto(flags: Option<Movement>, sx: i32, sy: i32) -> bool {
+    flags.is_some_and(|m| m.opened().0 & (STAND_BLOCKS | straight_blocks(sx, sy)) == 0)
 }
 
 fn label_at(squares: &[Labels], square: usize, tile: usize) -> u32 {
@@ -33,74 +39,74 @@ fn set_label(squares: &mut [Labels], square: usize, tile: usize, label: u32) {
 
 impl Landmasses {
     pub fn build(world: &WorldCollision<Movement>, closed: &Closed) -> Self {
-        let mut count = 0;
-        let planes = (0..PLANES)
-            .map(|plane| Self::label(world, plane, closed, &mut count))
-            .collect();
-        Self {
-            planes,
-            count,
-            merged: HashMap::new(),
-        }
-    }
-
-    fn label(
-        world: &WorldCollision<Movement>,
-        plane: i32,
-        closed: &Closed,
-        count: &mut u32,
-    ) -> Vec<Labels> {
-        let mut squares: Vec<Labels> = (0..SQUARES).map(|_| None).collect();
-        let mut stack: Vec<(i32, i32)> = Vec::new();
-        for region in 0..SQUARES {
-            if matches!(world.square(plane as usize, region as u32), Square::Missing) {
-                continue;
+        let mut squares: Vec<Labels> = (0..PLANES as usize * SQUARES).map(|_| None).collect();
+        let mut gated = vec![false; squares.len()];
+        for &((x, y, plane), _) in closed {
+            if let (Some(plane), Some((square, _))) = (plane_index(plane), square_index(x, y)) {
+                gated[plane * SQUARES + square] = true;
             }
-            let (rx, ry) = (
-                (region >> 8) as i32 * REGION_SIZE,
-                (region & 0xff) as i32 * REGION_SIZE,
-            );
-            for dx in 0..REGION_SIZE {
-                for dy in 0..REGION_SIZE {
-                    let (x, y) = (rx + dx, ry + dy);
-                    let tile = (dx * REGION_SIZE + dy) as usize;
-                    if label_at(&squares, region, tile) != 0 || !standable(world, plane, x, y) {
+        }
+        let mut count = 0;
+        let mut stack: Vec<(i32, i32, usize)> = Vec::new();
+        for (plane, labels) in squares.as_chunks_mut::<SQUARES>().0.iter_mut().enumerate() {
+            for region in 0..SQUARES {
+                let square = world.square(plane, region);
+                if matches!(square, Square::Missing) {
+                    continue;
+                }
+                let (rx, ry) = (
+                    (region >> 8) as i32 * REGION_SIZE,
+                    (region & 0xff) as i32 * REGION_SIZE,
+                );
+                for tile in 0..TILES {
+                    if label_at(labels, region, tile) != 0 || !standable(square.tile(tile)) {
                         continue;
                     }
-                    *count += 1;
-                    set_label(&mut squares, region, tile, *count);
-                    stack.push((x, y));
-                    while let Some((x, y)) = stack.pop() {
+                    count += 1;
+                    set_label(labels, region, tile, count);
+                    stack.push((
+                        rx + tile as i32 / REGION_SIZE,
+                        ry + tile as i32 % REGION_SIZE,
+                        region,
+                    ));
+                    while let Some((x, y, here)) = stack.pop() {
+                        let gated = gated[plane * SQUARES + here];
                         for &(sx, sy) in &DIRECTIONS[..4] {
                             let (nx, ny) = (x + sx, y + sy);
-                            let Some((square, index)) = square_index(nx, ny) else {
+                            let Some((next, index)) = square_index(nx, ny) else {
                                 continue;
                             };
-                            if label_at(&squares, square, index) != 0
-                                || !standable(world, plane, nx, ny)
-                                || !can_step_with(world, plane, x, y, sx, sy, true)
-                                || closed.contains(&((x, y, plane), (sx, sy)))
+                            if label_at(labels, next, index) != 0
+                                || !step_onto(world.square(plane, next).tile(index), sx, sy)
+                                || (gated && closed.contains(&((x, y, plane as i32), (sx, sy))))
                             {
                                 continue;
                             }
-                            set_label(&mut squares, square, index, *count);
-                            stack.push((nx, ny));
+                            set_label(labels, next, index, count);
+                            stack.push((nx, ny, next));
                         }
                     }
                 }
             }
         }
-        squares
+        Self {
+            squares,
+            count,
+            merged: HashMap::new(),
+        }
     }
 
     fn raw(&self, x: i32, y: i32, plane: i32) -> u32 {
-        let Some(squares) = usize::try_from(plane).ok().and_then(|p| self.planes.get(p)) else {
-            return 0;
-        };
-        square_index(x, y).map_or(0, |(square, index)| label_at(squares, square, index))
+        match (plane_index(plane), square_index(x, y)) {
+            (Some(plane), Some((square, index))) => {
+                label_at(&self.squares, plane * SQUARES + square, index)
+            }
+            _ => 0,
+        }
     }
 
-    pub fn at(&self, x: i32, y: i32, plane: i32) -> u32 {
+    #[cfg(test)]
+    fn at(&self, x: i32, y: i32, plane: i32) -> u32 {
         self.root(self.raw(x, y, plane))
     }
 
@@ -111,7 +117,7 @@ impl Landmasses {
         landmass
     }
 
-    pub fn join(&mut self, a: u32, b: u32) {
+    fn join(&mut self, a: u32, b: u32) {
         let (a, b) = (self.root(a), self.root(b));
         if a != 0 && b != 0 && a != b {
             self.merged.insert(a, b);

@@ -57,14 +57,15 @@ fn log(direction: u8, opcode: u16, length: u32, payload: &[u8]) {
     }
 }
 
-fn read_payload(memory: &OwnMemory, data: u64, length: u64, skip: u64) -> Vec<u8> {
-    let wanted = length.min(skip + PAYLOAD_SIZE as u64);
-    let mut bytes = vec![0u8; wanted as usize];
-    if data == 0 || wanted == 0 || !memory.read(data, &mut bytes) {
-        return Vec::new();
+type Payload = [u8; PAYLOAD_SIZE + 1];
+
+fn read_payload(buffer: &mut Payload, data: u64, length: u64, skip: usize) -> &[u8] {
+    let wanted = (length as usize).min(skip + PAYLOAD_SIZE);
+    let bytes = &mut buffer[..wanted];
+    if data == 0 || wanted == 0 || !OwnMemory.read(data, bytes) {
+        return &[];
     }
-    bytes.drain(..(skip as usize).min(bytes.len()));
-    bytes
+    &bytes[skip.min(wanted)..]
 }
 
 fn observe_player() -> Option<()> {
@@ -109,7 +110,7 @@ fn record_received(out: u64, rule: &Packets) -> Option<()> {
         direction::RECEIVED,
         opcode,
         size as u32,
-        &read_payload(&memory, data, size, 0),
+        read_payload(&mut [0; PAYLOAD_SIZE + 1], data, size, 0),
     );
     Some(())
 }
@@ -127,7 +128,7 @@ fn record_sent(packet: u64, rule: &Packets) -> Option<()> {
         direction::SENT,
         kind,
         (written - 1) as u32,
-        &read_payload(&memory, data, written, 1),
+        read_payload(&mut [0; PAYLOAD_SIZE + 1], data, written, 1),
     );
     Some(())
 }
@@ -180,14 +181,7 @@ pub unsafe fn hook(module_base: u64, rule: Packets, layouts: Option<&PacketLayou
     };
     let (receive, _) = RECEIVE.get_or_init(|| (receive, rule));
     let (send, _) = SEND.get_or_init(|| (send, rule));
-    match (receive.enable(), send.enable()) {
-        (Ok(()), Ok(())) => println!("[Agent]: Packet log hooked.\r\n"),
-        (receive, send) => println!(
-            "[Agent]: Failed to enable the packet hooks: {:?} {:?}.\r\n",
-            receive.err(),
-            send.err()
-        ),
-    }
+    detour::enable_both(receive, send, "packet", "Packet log hooked");
 }
 
 pub unsafe fn unhook() {

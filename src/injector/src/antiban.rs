@@ -1,3 +1,5 @@
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -135,27 +137,23 @@ pub fn parse(payload: &str) -> Option<Config> {
     Some(config)
 }
 
-static CURRENT: std::sync::Mutex<(u64, Option<Config>)> = std::sync::Mutex::new((0, None));
+static CURRENT: Mutex<(u64, Option<Config>)> = Mutex::new((0, None));
 
-fn lock() -> std::sync::MutexGuard<'static, (u64, Option<Config>)> {
-    CURRENT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub fn set(config: Config) {
-    let mut current = lock();
+    let mut current = lock(&CURRENT);
     current.0 += 1;
     current.1 = Some(config);
 }
 
-pub fn current() -> (u64, Config) {
-    let current = lock();
-    (current.0, current.1.clone().unwrap_or_default())
-}
-
 pub fn current_value() -> Value {
-    let (version, config) = current();
+    let (version, config) = {
+        let current = lock(&CURRENT);
+        (current.0, current.1.clone().unwrap_or_default())
+    };
     let mut value = serde_json::to_value(config).unwrap_or_else(|_| json!({}));
     value["version"] = json!(version);
     value
@@ -167,7 +165,7 @@ pub struct Skip {
     pub index: u32,
 }
 
-static SKIPS: std::sync::Mutex<Vec<Skip>> = std::sync::Mutex::new(Vec::new());
+static SKIPS: Mutex<Vec<Skip>> = Mutex::new(Vec::new());
 
 pub fn skip_line(kind: &str, index: u32) -> String {
     format!("{SKIP_PREFIX}{kind} {index}")
@@ -183,18 +181,11 @@ pub fn parse_skip(payload: &str) -> Option<Skip> {
 }
 
 pub fn push_skip(skip: Skip) {
-    SKIPS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(skip);
+    lock(&SKIPS).push(skip);
 }
 
 pub fn take_skips() -> Vec<Skip> {
-    std::mem::take(
-        &mut *SKIPS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    )
+    std::mem::take(&mut *lock(&SKIPS))
 }
 
 #[cfg(test)]

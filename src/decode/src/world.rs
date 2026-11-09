@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+
 use ipc::read::{Table, local_player, table_get};
 use ipc::state::{Layout, WorldLayout};
 use serde::{Deserialize, Serialize};
@@ -328,24 +330,21 @@ pub fn item_containers(
     layout: &WorldLayout,
 ) -> Option<Vec<(i32, Vec<Item>)>> {
     let (buckets, count, end) = containers(memory, layout)?;
-    let mut seen = Vec::new();
-    let mut found = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut found = BTreeMap::new();
     for bucket in 0..count {
         let mut node = memory.u64(buckets + bucket * 8)?;
         for _ in 0..MAX_CHAIN {
-            if node == 0 || node == end || seen.contains(&node) {
+            if node == 0 || node == end || !seen.insert(node) {
                 break;
             }
-            seen.push(node);
-            let id = memory.i32(node)?;
-            if !found.iter().any(|(known, _)| *known == id) {
-                found.push((id, container_items(memory, layout, node)?));
+            if let Entry::Vacant(entry) = found.entry(memory.i32(node)?) {
+                entry.insert(container_items(memory, layout, node)?);
             }
             node = memory.u64(node + layout.container_next as u64)?;
         }
     }
-    found.sort_by_key(|(id, _)| *id);
-    Some(found)
+    Some(found.into_iter().collect())
 }
 
 pub fn varc(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<i32> {
@@ -379,13 +378,17 @@ pub fn varc(memory: &impl Memory, layout: &WorldLayout, id: i32) -> Option<i32> 
     None
 }
 
-fn world_view(
+fn world_view(memory: &impl Memory, layout: &WorldLayout, client: u64) -> Option<u64> {
+    let id = memory.i32(client + layout.world_view_id as u64)?;
+    table_get(memory, client + layout.world_views as u64, id)
+}
+
+fn world_view_with_base(
     memory: &impl Memory,
     layout: &WorldLayout,
     client: u64,
 ) -> Option<(u64, (i32, i32))> {
-    let id = memory.i32(client + layout.world_view_id as u64)?;
-    let view = table_get(memory, client + layout.world_views as u64, id)?;
+    let view = world_view(memory, layout, client)?;
     Some((view, i32_pair(memory, view + layout.base_x as u64)?))
 }
 
@@ -469,7 +472,7 @@ fn actors<M: Memory, T>(
 }
 
 pub fn npcs(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Npc>> {
-    let (view, base) = world_view(memory, layout, client(memory, layout)?)?;
+    let (view, base) = world_view_with_base(memory, layout, client(memory, layout)?)?;
     let indices = memory.ptr(view + layout.npc_indices as u64)?;
     let count = memory.i32(view + layout.npc_indices as u64 + 8)?;
     let list = (view + layout.npc_table as u64, indices, count);
@@ -531,7 +534,7 @@ const HITSPLAT_SIZE: u64 = 12;
 const HITSPLAT_SLOTS: u64 = 4;
 
 fn actor_at(memory: &impl Memory, layout: &WorldLayout, table: u32, index: i32) -> Option<u64> {
-    let (view, _) = world_view(memory, layout, client(memory, layout)?)?;
+    let view = world_view(memory, layout, client(memory, layout)?)?;
     table_get(memory, view + table as u64, index)
 }
 
@@ -682,7 +685,7 @@ pub fn world_debug(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Str
 
 pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>> {
     let client = client(memory, layout)?;
-    let (view, base) = world_view(memory, layout, client)?;
+    let (view, base) = world_view_with_base(memory, layout, client)?;
     let count = memory.i32(client + layout.player_count as u64)?;
     let list = (
         view + layout.players as u64,
@@ -794,7 +797,7 @@ pub fn projectiles(memory: &impl Memory, layout: &Layout) -> Option<Vec<Projecti
     let w = &layout.world;
     let p = &layout.projectiles;
     let client = client(memory, w)?;
-    let (_, (base_x, base_y)) = world_view(memory, w, client)?;
+    let (_, (base_x, base_y)) = world_view_with_base(memory, w, client)?;
     let cycle = memory.i32(layout.module_base + p.cycle as u64)?;
     let fields = [
         p.id,
@@ -906,8 +909,8 @@ const MAX_SPOT_ANIMS: u64 = 512;
 const SPOT_ANIM_NODE: u64 = 0x18;
 
 pub fn spot_anims(memory: &impl Memory, layout: &Layout) -> Option<Vec<SpotAnim>> {
-    let (own, _) = local_player(memory, layout)?;
     let client = ipc::read::client(memory, layout)?;
+    let (own, _) = ipc::read::local_player_in(memory, layout, client)?;
     let own_id = memory.i32(client + layout.player.world_view_id as u64)?;
     let mut objects = Vec::new();
     if own_id != TOP_LEVEL_VIEW
@@ -1223,7 +1226,7 @@ mod tests {
     fn actors_are_read_in_one_go_and_decode_the_same() {
         let mut m = grand_exchange();
         let client = m.ptr(LAYOUT.module_base + LAYOUT.client as u64).unwrap();
-        let (view, _) = world_view(&m, &LAYOUT, client).unwrap();
+        let view = world_view(&m, &LAYOUT, client).unwrap();
         let npc_span = actor_span(&LAYOUT, &npc_fields(&LAYOUT));
         let player_span = actor_span(&LAYOUT, &player_fields(&LAYOUT));
         let npcs_in = ipc::read::table_entries(&m, view + LAYOUT.npc_table as u64)

@@ -1,8 +1,8 @@
 use crate::collision::flag;
 
 pub const TILE_FLAG_BRIDGE: u8 = 2;
-pub const TILE_FLAG_UNDER_ROOF: u8 = 4;
-pub const TILE_FLAG_VIS_BELOW: u8 = 8;
+const TILE_FLAG_UNDER_ROOF: u8 = 4;
+const TILE_FLAG_VIS_BELOW: u8 = 8;
 
 pub fn tile_flag_text(bridge_above: bool, settings: u8) -> String {
     let mut text = String::new();

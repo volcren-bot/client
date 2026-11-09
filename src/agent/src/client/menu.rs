@@ -53,13 +53,27 @@ pub fn set_menu_layout(rule: MenuLayout) {
     let _ = LAYOUT_RULE.set(rule);
 }
 
-fn menu_object(memory: &impl Memory) -> Option<(u64, &'static Menu, u64)> {
-    let (module_base, rule) = MENU.get()?;
-    let client = read::client(memory, LAYOUT.get()?)?;
-    let object = memory
-        .ptr(client + rule.object as u64)
-        .filter(|&o| o != 0)?;
-    Some((*module_base, rule, object))
+#[derive(Clone, Copy)]
+struct MenuObject {
+    module_base: u64,
+    rule: &'static Menu,
+    object: u64,
+}
+
+impl MenuObject {
+    fn current(memory: &impl Memory) -> Option<Self> {
+        let (module_base, rule) = MENU.get()?;
+        let client = read::client(memory, LAYOUT.get()?)?;
+        Some(Self {
+            module_base: *module_base,
+            rule,
+            object: memory.ptr(client + rule.object as u64)?,
+        })
+    }
+
+    fn entry_vtable(&self) -> u64 {
+        self.module_base + self.rule.entry_vtable as u64
+    }
 }
 
 fn entries_vector(memory: &impl Memory, object: u64, vtable: u64, size: u64) -> Option<u64> {
@@ -102,6 +116,12 @@ fn string(memory: &impl Memory, address: u64, out: &mut [u8]) {
     }
 }
 
+fn byte(memory: &impl Memory, address: u64) -> u8 {
+    let mut byte = [0u8];
+    memory.read(address, &mut byte);
+    byte[0]
+}
+
 fn rank(entry: &MenuEntryInfo) -> u8 {
     if entry.cancel != 0 {
         3
@@ -127,8 +147,7 @@ fn read_entry(memory: &impl Memory, e: u64, rule: &Menu) -> Option<MenuEntryInfo
     memory.read(e + rule.kind as u64, &mut bytes);
     info.kind = bytes[0];
     info.category = bytes[1];
-    memory.read(e + rule.cancel as u64, &mut bytes[..1]);
-    info.cancel = bytes[0];
+    info.cancel = byte(memory, e + rule.cancel as u64);
     Some(info)
 }
 
@@ -144,27 +163,25 @@ fn minimenu(memory: &impl Memory, object: u64, vtable: u64) -> Option<u64> {
     Some(object + offset)
 }
 
-fn read_click(memory: &impl Memory) -> Option<(MenuEntryInfo, i32, i32, i32)> {
-    let (module_base, rule) = MENU.get()?;
+fn read_click(memory: &impl Memory, menu: MenuObject) -> Option<(MenuEntryInfo, i32, i32, i32)> {
     let click = CLICK.get()?;
-    let (_, minimenu) = open_minimenu(memory)?;
+    let minimenu = open_minimenu(memory, menu)?;
     let entry = minimenu + click.entry as u64;
-    if memory.u64(entry)? != module_base + rule.entry_vtable as u64 {
+    if memory.u64(entry)? != menu.entry_vtable() {
         return None;
     }
     let x = minimenu + click.click_x as u64;
     Some((
-        read_entry(memory, entry, rule)?,
+        read_entry(memory, entry, menu.rule)?,
         memory.i32(x)?,
         memory.i32(x + 4)?,
         memory.i32(minimenu + click.counter as u64)?,
     ))
 }
 
-fn read_open(memory: &impl Memory) -> Option<bool> {
+fn read_open(memory: &impl Memory, menu: MenuObject) -> Option<bool> {
     let offset = *OPEN.get()?;
-    let (_, _, object) = menu_object(memory)?;
-    Some(memory.u64(object + offset as u64)? != 0)
+    Some(memory.u64(menu.object + offset as u64)? != 0)
 }
 
 #[repr(C)]
@@ -182,11 +199,10 @@ struct LayoutOut {
 
 const _: () = assert!(std::mem::size_of::<LayoutOut>() == 0x68);
 
-fn read_geometry(minimenu: u64, path: &[u64]) -> Option<MenuGeometry> {
-    let (module_base, _) = MENU.get()?;
+fn read_geometry(menu: MenuObject, minimenu: u64, path: &[u64]) -> Option<MenuGeometry> {
     let layout = LAYOUT_RULE.get()?;
     let function: unsafe extern "C" fn(u64, *mut LayoutOut, *const [u64; 3]) -> *mut LayoutOut =
-        unsafe { function(module_base + layout.function as u64) };
+        unsafe { function(menu.module_base + layout.function as u64) };
     let empty = 0u64;
     let begin = if path.is_empty() {
         &empty as *const u64 as u64
@@ -215,36 +231,31 @@ fn read_geometry(minimenu: u64, path: &[u64]) -> Option<MenuGeometry> {
     })
 }
 
-fn read_selection(memory: &impl Memory) -> Option<(MenuEntryInfo, bool)> {
+fn read_selection(memory: &impl Memory, menu: MenuObject) -> Option<(MenuEntryInfo, bool)> {
     let selection = SELECTION.get()?;
-    let (_, _, object) = menu_object(memory)?;
-    let s = object + selection.offset as u64;
+    let s = menu.object + selection.offset as u64;
     let mut info = MenuEntryInfo::default();
     string(memory, s + selection.verb as u64, &mut info.option);
     string(memory, s + selection.name as u64, &mut info.target);
     info.id = memory.i32(s + selection.id as u64)?;
     info.index = memory.i32(s + selection.child as u64)?;
     info.action = memory.i32(s + selection.item as u64)?;
-    let mut byte = [0u8];
-    memory.read(s + selection.flags as u64, &mut byte);
-    info.kind = byte[0];
-    memory.read(s + selection.selected as u64, &mut byte);
-    Some((info, byte[0] != 0))
+    info.kind = byte(memory, s + selection.flags as u64);
+    Some((info, byte(memory, s + selection.selected as u64) != 0))
 }
 
-fn read_raw_entries(memory: &impl Memory) -> Option<Vec<MenuEntryInfo>> {
-    let (module_base, rule, object) = menu_object(memory)?;
-    let size = rule.entry_size as u64;
-    let vector = entries_vector(memory, object, module_base + rule.entry_vtable as u64, size)?;
+fn read_raw_entries(memory: &impl Memory, menu: MenuObject) -> Option<Vec<MenuEntryInfo>> {
+    let size = menu.rule.entry_size as u64;
+    let vector = entries_vector(memory, menu.object, menu.entry_vtable(), size)?;
     let (begin, end) = (
-        memory.u64(object + vector)?,
-        memory.u64(object + vector + 8)?,
+        memory.u64(menu.object + vector)?,
+        memory.u64(menu.object + vector + 8)?,
     );
     if end < begin || (end - begin) / size > MAX_ENTRIES {
         return None;
     }
     (0..(end - begin) / size)
-        .map(|k| read_entry(memory, begin + k * size, rule))
+        .map(|k| read_entry(memory, begin + k * size, menu.rule))
         .collect()
 }
 
@@ -265,13 +276,13 @@ fn sorted(entries: Vec<MenuEntryInfo>) -> Vec<MenuEntryInfo> {
     entries.into_iter().map(|(_, e)| e).collect()
 }
 
-fn open_minimenu(memory: &impl Memory) -> Option<(u64, u64)> {
+fn open_minimenu(memory: &impl Memory, menu: MenuObject) -> Option<u64> {
     let click = CLICK.get()?;
-    let (module_base, _, object) = menu_object(memory)?;
-    Some((
-        object,
-        minimenu(memory, object, module_base + click.minimenu_vtable as u64)?,
-    ))
+    minimenu(
+        memory,
+        menu.object,
+        menu.module_base + click.minimenu_vtable as u64,
+    )
 }
 
 fn vector(memory: &impl Memory, at: u64, size: u64, max: u64) -> Option<(u64, u64)> {
@@ -280,10 +291,14 @@ fn vector(memory: &impl Memory, at: u64, size: u64, max: u64) -> Option<(u64, u6
         .then_some((begin, (end - begin) / size))
 }
 
-fn read_rows(memory: &impl Memory, object: u64, rows: u64, max: u64) -> Option<Vec<MenuEntryInfo>> {
-    let (module_base, rule) = MENU.get()?;
+fn read_rows(
+    memory: &impl Memory,
+    menu: MenuObject,
+    rows: u64,
+    max: u64,
+) -> Option<Vec<MenuEntryInfo>> {
     let layout = LAYOUT_RULE.get()?;
-    let size = rule.entry_size as u64;
+    let size = menu.rule.entry_size as u64;
     let (begin, count) = vector(memory, rows, ROW_SIZE, max)?;
     (0..count)
         .map(|k| {
@@ -295,7 +310,7 @@ fn read_rows(memory: &impl Memory, object: u64, rows: u64, max: u64) -> Option<V
             } else {
                 let vector = VECTOR.load(Ordering::Relaxed) as u64;
                 let offset = list
-                    .checked_sub(object)
+                    .checked_sub(menu.object)
                     .filter(|&o| vector != 0 && o <= vector)?;
                 LIST_ENTRIES.store((vector - offset) as u32, Ordering::Relaxed);
                 vector - offset
@@ -303,10 +318,10 @@ fn read_rows(memory: &impl Memory, object: u64, rows: u64, max: u64) -> Option<V
             let (first, n) = vector(memory, list + entries, size, MAX_ENTRIES)?;
             let index = memory.u64(row + ROW_INDEX)?;
             let entry = first + index * size;
-            if index >= n || memory.u64(entry)? != module_base + rule.entry_vtable as u64 {
+            if index >= n || memory.u64(entry)? != menu.entry_vtable() {
                 return None;
             }
-            let mut info = read_entry(memory, entry, rule)?;
+            let mut info = read_entry(memory, entry, menu.rule)?;
             info.submenu = (memory.u64(row + layout.submenu as u64)? != 0) as u8;
             Some(info)
         })
@@ -334,7 +349,7 @@ fn open_path(memory: &impl Memory, minimenu: u64) -> Option<Vec<u64>> {
 
 fn read_submenus(
     memory: &OwnMemory,
-    object: u64,
+    menu: MenuObject,
     minimenu: u64,
 ) -> Vec<(u32, Vec<MenuEntryInfo>, MenuGeometry)> {
     let Some(layout) = LAYOUT_RULE.get() else {
@@ -355,8 +370,8 @@ fn read_submenus(
             break;
         };
         let (Some(entries), Some(geometry)) = (
-            read_rows(memory, object, sub, MENU_SUBMENU_ENTRIES as u64),
-            read_geometry(minimenu, &path[..=depth]),
+            read_rows(memory, menu, sub, MENU_SUBMENU_ENTRIES as u64),
+            read_geometry(menu, minimenu, &path[..=depth]),
         ) else {
             break;
         };
@@ -373,37 +388,32 @@ pub fn on_request() {
         return;
     };
     let other_thread = on_other_thread();
-    let raw = (!other_thread)
-        .then(|| read_raw_entries(&OwnMemory))
+    let memory = OwnMemory;
+    let menu = (!other_thread)
+        .then(|| MenuObject::current(&memory))
         .flatten();
-    let (click, selection, open) = match raw {
-        Some(_) => (
-            read_click(&OwnMemory),
-            read_selection(&OwnMemory),
-            read_open(&OwnMemory),
+    let raw = menu.and_then(|menu| read_raw_entries(&memory, menu));
+    let (click, selection, open) = match menu.filter(|_| raw.is_some()) {
+        Some(menu) => (
+            read_click(&memory, menu),
+            read_selection(&memory, menu),
+            read_open(&memory, menu),
         ),
         None => (None, None, None),
     };
-    let minimenu = (open == Some(true))
-        .then(|| open_minimenu(&OwnMemory))
-        .flatten();
+    let minimenu = menu
+        .filter(|_| open == Some(true))
+        .and_then(|menu| open_minimenu(&memory, menu).map(|minimenu| (menu, minimenu)));
     let entries = raw.map(|raw| match minimenu {
-        Some((object, minimenu)) => LAYOUT_RULE
+        Some((menu, minimenu)) => LAYOUT_RULE
             .get()
-            .and_then(|layout| {
-                read_rows(
-                    &OwnMemory,
-                    object,
-                    minimenu + layout.rows as u64,
-                    MAX_ENTRIES,
-                )
-            })
+            .and_then(|layout| read_rows(&memory, menu, minimenu + layout.rows as u64, MAX_ENTRIES))
             .unwrap_or_else(|| sorted(raw)),
         None => sorted(raw),
     });
-    let geometry = minimenu.and_then(|(_, minimenu)| read_geometry(minimenu, &[]));
+    let geometry = minimenu.and_then(|(menu, minimenu)| read_geometry(menu, minimenu, &[]));
     let submenus = match (minimenu, geometry) {
-        (Some((object, minimenu)), Some(_)) => read_submenus(&OwnMemory, object, minimenu),
+        (Some((menu, minimenu)), Some(_)) => read_submenus(&memory, menu, minimenu),
         _ => Vec::new(),
     };
     shared.write_menu_reply_with(|reply| {

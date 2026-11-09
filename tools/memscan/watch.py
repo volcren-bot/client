@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Report timestamped i32 changes in memory regions: watch.py <pid> <start,len[,label]>... (hex)"""
 import struct
 import sys
 import time

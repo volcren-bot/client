@@ -69,7 +69,6 @@ gl_functions! {
     uniform_2fv = c"glUniform2fv": fn(GLint, GLsizei, *const GLfloat);
     tex_storage_2d = c"glTexStorage2D": fn(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
     active_texture = c"glActiveTexture": fn(GLenum);
-    bind_texture = c"glBindTexture": fn(GLenum, GLuint);
 }
 
 static GL: OnceLock<Gl> = OnceLock::new();
@@ -163,10 +162,6 @@ impl FrameBuffers {
 }
 
 pub fn read_frame(offset_x: i32, offset_y: i32, width: i32, height: i32, dest: *mut u8) {
-    if dest.is_null() {
-        return;
-    }
-
     let gl = gl();
     let size = width * height * 4;
     let mut buffers = FRAME_BUFFERS.lock().unwrap();
@@ -337,10 +332,6 @@ pub fn draw_overlay(
     src: *const u8,
     serial: u32,
 ) {
-    if width <= 0 || height <= 0 {
-        return;
-    }
-
     let program = *OVERLAY_SHADER.get_or_init(|| link_program(OVERLAY_VS, OVERLAY_FS));
     let vao = vao();
 
@@ -371,7 +362,7 @@ pub fn draw_overlay(
 
         (gl.use_program)(program);
         (gl.active_texture)(TEXTURE0);
-        (gl.bind_texture)(TEXTURE_2D, texture);
+        glBindTexture(TEXTURE_2D, texture);
 
         let blend_was_enabled = glIsEnabled(BLEND) != 0;
         let mut prev_src = 0;

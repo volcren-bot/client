@@ -317,35 +317,39 @@ impl Form {
         let gap = spec_form::row_gap(&self.spec).map_or(ROW_GAP, |g| g as f32);
         let values = &mut self.values;
         if !columns {
-            let all: Vec<&Value> = fields.iter().collect();
-            Self::show_fields(ui, &all, gap, values, layouts, rules);
+            Self::show_fields(ui, fields, gap, values, layouts, rules);
             return;
         }
         let (checks, others): (Vec<&Value>, Vec<&Value>) = fields
             .iter()
             .partition(|field| spec_form::kind(field) == "check");
         if ui.available_width() < STACK_BELOW {
-            let all: Vec<&Value> = others.into_iter().chain(checks).collect();
-            Self::show_fields(ui, &all, gap, values, layouts, rules);
+            Self::show_fields(
+                ui,
+                others.into_iter().chain(checks),
+                gap,
+                values,
+                layouts,
+                rules,
+            );
             return;
         }
         ui.columns(2, |cols| {
-            Self::show_fields(&mut cols[0], &others, gap, values, layouts, rules);
-            Self::show_fields(&mut cols[1], &checks, gap, values, layouts, rules);
+            Self::show_fields(&mut cols[0], others, gap, values, layouts, rules);
+            Self::show_fields(&mut cols[1], checks, gap, values, layouts, rules);
         });
     }
 
-    fn show_fields(
+    fn show_fields<'a>(
         ui: &mut egui::Ui,
-        fields: &[&Value],
+        fields: impl IntoIterator<Item = &'a Value>,
         gap: f32,
         values: &mut HashMap<String, FieldValue>,
         layouts: &ScriptLayouts,
         rules: &KindRules,
     ) {
         let shown: Vec<&Value> = fields
-            .iter()
-            .copied()
+            .into_iter()
             .filter(|field| Self::visible(field, values))
             .collect();
         let mut rest = shown.as_slice();

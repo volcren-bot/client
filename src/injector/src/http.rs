@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 pub const CAPABILITY_PREFIX: &str = "\u{1e}HTTP";
 pub const REQUEST_PREFIX: &str = "\u{1e}HTTPREQ ";
 
-pub const DEFAULT_TIMEOUT_MS: u64 = 15_000;
+const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
-pub const MAX_REQUEST_BODY: usize = 1 << 20;
+const MAX_REQUEST_BODY: usize = 1 << 20;
 pub const MAX_RESPONSE_BODY: usize = 8 << 20;
 
 fn default_method() -> String {
@@ -92,14 +92,14 @@ pub fn reply_line(answer: &Result<Response, String>) -> String {
 }
 
 pub fn parse_reply(line: &str) -> Result<Response, String> {
-    let reply: serde_json::Value = serde_json::from_str(line.trim())
+    let mut reply: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|e| format!("bad HTTP reply from the loader: {e}"))?;
     if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) {
         return Err(error.to_owned());
     }
     let response = reply
-        .get("response")
-        .cloned()
+        .get_mut("response")
+        .map(serde_json::Value::take)
         .ok_or("the loader's HTTP reply has no response")?;
     serde_json::from_value(response).map_err(|e| format!("bad HTTP reply from the loader: {e}"))
 }

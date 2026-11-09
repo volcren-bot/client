@@ -1,6 +1,9 @@
-use std::sync::{
-    atomic::{AtomicBool, AtomicI64, Ordering},
-    OnceLock,
+use std::{
+    panic::catch_unwind,
+    sync::{
+        atomic::{AtomicBool, AtomicI64, Ordering},
+        OnceLock,
+    },
 };
 
 use ipc::{
@@ -134,18 +137,22 @@ unsafe extern "system" fn invalidated(client: u64, holder: u64) -> usize {
     let result = detour.call(client, holder);
     note_game_thread();
     if ENABLED.load(Ordering::Acquire) {
-        let memory = OwnMemory;
-        let offset = OFFSET.load(Ordering::Relaxed);
-        if let (Some(layout), Some(component)) = (
-            LAYOUT.get(),
-            memory.ptr(holder + rule.holder_component as u64),
-        ) {
-            if let Some(total) = real_total(&memory, layout) {
-                swap(&memory, component + rule.text as u64, total, total + offset);
-            }
-        }
+        let _ = catch_unwind(|| show_offset(holder, rule));
     }
     result
+}
+
+fn show_offset(holder: u64, rule: &ComponentInvalidate) {
+    let memory = OwnMemory;
+    let offset = OFFSET.load(Ordering::Relaxed);
+    if let (Some(layout), Some(component)) = (
+        LAYOUT.get(),
+        memory.ptr(holder + rule.holder_component as u64),
+    ) {
+        if let Some(total) = real_total(&memory, layout) {
+            swap(&memory, component + rule.text as u64, total, total + offset);
+        }
+    }
 }
 
 fn report(shared: ipc::state::Shared<'_>, sequence: u32, status: i32) {

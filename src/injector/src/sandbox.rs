@@ -495,7 +495,6 @@ fn pump_events(
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         let (changes, packets) = {
             let mut callbacks = callbacks.borrow_mut();
-            let callbacks = &mut *callbacks;
             if !callbacks.watching() {
                 std::thread::sleep(left);
                 return Ok(None);
@@ -576,6 +575,11 @@ fn packet_to_lua(lua: &Lua, packet: &ipc::packets::Entry) -> mlua::Result<mlua::
 }
 
 fn packet_filter(name: &str, opcodes: &[u16], sent: Option<bool>) -> mlua::Result<Filter> {
+    if opcodes.is_empty() {
+        return Err(mlua::Error::RuntimeError(format!(
+            "{name}: no packets given"
+        )));
+    }
     let direction = if sent.unwrap_or(false) {
         ipc::packets::direction::SENT
     } else {
@@ -588,11 +592,6 @@ fn packet_filter(name: &str, opcodes: &[u16], sent: Option<bool>) -> mlua::Resul
                 "{name}: packet {opcode} can't be listened for, only 0 to 255"
             )));
         }
-    }
-    if opcodes.is_empty() {
-        return Err(mlua::Error::RuntimeError(format!(
-            "{name}: no packets given"
-        )));
     }
     Ok(filter)
 }
@@ -633,7 +632,7 @@ fn collision_cut(
 
 type InputWorker = Option<Rc<Worker<Job>>>;
 
-fn cancel_input(worker: &InputWorker) {
+fn cancel_input(worker: Option<&Worker<Job>>) {
     if let Some(worker) = worker {
         worker.cancel();
     }
@@ -693,30 +692,28 @@ fn type_input((text, hold_ms): (String, Option<u32>)) -> mlua::Result<Input> {
     })
 }
 
-fn mouse_down_input(button: Option<String>) -> mlua::Result<Input> {
-    Ok(Input::Button {
-        button: button_arg(button)?,
-        down: true,
-    })
-}
-
-fn mouse_up_input(button: Option<String>) -> mlua::Result<Input> {
-    Ok(Input::Button {
-        button: button_arg(button)?,
-        down: false,
-    })
+fn button_input(down: bool) -> impl Fn(Option<String>) -> mlua::Result<Input> {
+    move |button| {
+        Ok(Input::Button {
+            button: button_arg(button)?,
+            down,
+        })
+    }
 }
 
 fn scroll_input(notches: i32) -> mlua::Result<Input> {
     Ok(Input::Scroll { notches })
 }
 
-fn key_down_input(key: u8) -> mlua::Result<Input> {
-    Ok(Input::Key { key, down: true })
+fn key_input(down: bool) -> impl Fn(u8) -> mlua::Result<Input> {
+    move |key| Ok(Input::Key { key, down })
 }
 
-fn key_up_input(key: u8) -> mlua::Result<Input> {
-    Ok(Input::Key { key, down: false })
+fn file_value(lua: &Lua, file: Option<Vec<u8>>, missing: mlua::Value) -> mlua::Result<mlua::Value> {
+    Ok(match file {
+        Some(bytes) => mlua::Value::String(lua.create_string(&bytes)?),
+        None => missing,
+    })
 }
 
 type Print = Rc<RefCell<dyn FnMut(String)>>;
@@ -746,11 +743,19 @@ impl Sandbox<'_> {
         let print = print.clone();
         self.set(
             name,
-            self.lua.create_function_mut(move |lua, args: A| {
+            self.lua.create_function(move |lua, args: A| {
                 let line = line(lua, args)?;
                 (print.borrow_mut())(line);
                 Ok(())
             })?,
+        )
+    }
+
+    fn value<T: Serialize + 'static>(&self, name: &str, read: fn() -> T) -> mlua::Result<()> {
+        self.set(
+            name,
+            self.lua
+                .create_function(move |lua, (): ()| to_lua(lua, &read()))?,
         )
     }
 
@@ -785,6 +790,14 @@ impl Sandbox<'_> {
         self.query_with(name, read, |lua, value| to_lua(lua, &value))
     }
 
+    fn read<T: Serialize + 'static>(
+        &self,
+        name: &str,
+        read: fn(u32) -> Result<T, String>,
+    ) -> mlua::Result<()> {
+        self.query(name, move |pid, ()| read(pid))
+    }
+
     fn menu_query<T: Serialize + 'static>(
         &self,
         name: &str,
@@ -792,7 +805,7 @@ impl Sandbox<'_> {
     ) -> mlua::Result<()> {
         let worker = self.worker.clone();
         self.query(name, move |pid, ()| {
-            cancel_input(&worker);
+            cancel_input(worker.as_deref());
             read(pid)
         })
     }
@@ -815,12 +828,12 @@ impl Sandbox<'_> {
     fn input<A: FromLuaMulti + 'static>(
         &self,
         name: &str,
-        make: fn(A) -> mlua::Result<Input>,
+        make: impl Fn(A) -> mlua::Result<Input> + 'static,
     ) -> mlua::Result<()> {
         let worker = self.worker.clone();
         self.action(name, move |pid, args| {
             let input = make(args)?;
-            cancel_input(&worker);
+            cancel_input(worker.as_deref());
             Ok(send_input(pid, &input))
         })
     }
@@ -828,7 +841,7 @@ impl Sandbox<'_> {
     fn input_async<A: FromLuaMulti + 'static>(
         &self,
         name: &str,
-        make: fn(A) -> mlua::Result<Input>,
+        make: impl Fn(A) -> mlua::Result<Input> + 'static,
     ) -> mlua::Result<()> {
         let worker = self.worker.clone();
         self.action(name, move |_, args| {
@@ -1430,8 +1443,8 @@ pub fn run_with_modules(
     s.query("widget_model", |pid, (group, child): (u16, u16)| {
         widget_model(pid, group, child)
     })?;
-    s.query("item_container", |pid, id: i32| item_container(pid, id))?;
-    s.query("sub_interfaces", |pid, (): ()| sub_interfaces(pid))?;
+    s.query("item_container", item_container)?;
+    s.read("sub_interfaces", sub_interfaces)?;
     let form = RefCell::new(form);
     s.set(
         "form",
@@ -1450,25 +1463,10 @@ pub fn run_with_modules(
             },
         )?,
     )?;
-    s.set(
-        "form_update",
-        lua.create_function(|lua, (): ()| match crate::form::take_update() {
-            Some(values) => to_lua(lua, &values),
-            None => Ok(mlua::Value::Nil),
-        })?,
-    )?;
-    s.set(
-        "antiban_config",
-        lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::current_value()))?,
-    )?;
-    s.set(
-        "transport_settings",
-        lua.create_function(|lua, (): ()| to_lua(lua, &crate::transports::current_settings()))?,
-    )?;
-    s.set(
-        "transports",
-        lua.create_function(|lua, (): ()| to_lua(lua, &crate::transports::current_value()))?,
-    )?;
+    s.value("form_update", crate::form::take_update)?;
+    s.value("antiban_config", crate::antiban::current_value)?;
+    s.value("transport_settings", crate::transports::current_settings)?;
+    s.value("transports", crate::transports::current_value)?;
     #[cfg(test)]
     s.set(
         "test_set_transports",
@@ -1480,10 +1478,7 @@ pub fn run_with_modules(
             Ok(())
         })?,
     )?;
-    s.set(
-        "antiban_skips",
-        lua.create_function(|lua, (): ()| to_lua(lua, &crate::antiban::take_skips()))?,
-    )?;
+    s.value("antiban_skips", crate::antiban::take_skips)?;
     #[cfg(test)]
     s.set(
         "test_skip",
@@ -1504,10 +1499,10 @@ pub fn run_with_modules(
         })?,
     )?;
     s.menu_query("menu", menu)?;
-    s.query("menu_click", |pid, (): ()| menu_click(pid))?;
+    s.read("menu_click", menu_click)?;
     s.menu_query("menu_open", menu_open)?;
     s.menu_query("menu_layout", menu_layout)?;
-    s.query("selected_widget", |pid, (): ()| selected_widget(pid))?;
+    s.read("selected_widget", selected_widget)?;
     s.query(
         "project",
         |pid, (points, via, shift): (Vec<mlua::Table>, Option<String>, Option<mlua::Table>)| {
@@ -1550,7 +1545,7 @@ pub fn run_with_modules(
     })?;
     s.query("varc", varc)?;
     s.query("varp", varp_value)?;
-    s.query("varps", |pid, (): ()| varps(pid))?;
+    s.read("varps", varps)?;
     s.query("varbit", varbit)?;
     s.query("enum_def", enum_def)?;
     s.query_with(
@@ -1559,13 +1554,7 @@ pub fn run_with_modules(
         |lua, files| {
             let list = lua.create_table()?;
             for (i, file) in files.into_iter().enumerate() {
-                list.set(
-                    i + 1,
-                    match file {
-                        Some(bytes) => mlua::Value::String(lua.create_string(&bytes)?),
-                        None => mlua::Value::Boolean(false),
-                    },
-                )?;
+                list.set(i + 1, file_value(lua, file, mlua::Value::Boolean(false))?)?;
             }
             Ok(mlua::Value::Table(list))
         },
@@ -1575,10 +1564,7 @@ pub fn run_with_modules(
         |pid, (index, archive, file): (u32, i32, i32)| {
             Ok(cache_files(pid, index, &[[archive, file]])?.pop().flatten())
         },
-        |lua, file| match file {
-            Some(bytes) => Ok(mlua::Value::String(lua.create_string(&bytes)?)),
-            None => Ok(mlua::Value::Nil),
-        },
+        |lua, file| file_value(lua, file, mlua::Value::Nil),
     )?;
     s.query("landmasses", |pid, points: Vec<mlua::Table>| {
         let points = points
@@ -1600,7 +1586,7 @@ pub fn run_with_modules(
         },
     )?;
     s.query("item_params", |pid, ids: Vec<i32>| item_params(pid, &ids))?;
-    s.query("npcs", |pid, (): ()| npcs(pid))?;
+    s.read("npcs", npcs)?;
     s.query("npc_model", |pid, index: i32| {
         Ok(npc_model(pid, index)?.map(script_model))
     })?;
@@ -1613,16 +1599,16 @@ pub fn run_with_modules(
     s.query("player_hitsplats", |pid, indices: Vec<i32>| {
         player_hitsplats(pid, &indices)
     })?;
-    s.query("client_cycle", |pid, (): ()| client_cycle(pid))?;
+    s.read("client_cycle", client_cycle)?;
     s.query("locs", locs)?;
-    s.query("map_regions", |pid, (): ()| map_regions(pid))?;
-    s.query("in_instance", |pid, (): ()| in_instance(pid))?;
-    s.query("server_tile", |pid, (): ()| server_tile(pid))?;
-    s.query("movement", |pid, (): ()| movement(pid))?;
-    s.query("ground_items", |pid, (): ()| ground_items(pid))?;
-    s.query("projectiles", |pid, (): ()| projectiles(pid))?;
-    s.query("spot_anims", |pid, (): ()| spot_anims(pid))?;
-    s.query("chat_messages", |pid, (): ()| chat_messages(pid))?;
+    s.read("map_regions", map_regions)?;
+    s.read("in_instance", in_instance)?;
+    s.read("server_tile", server_tile)?;
+    s.read("movement", movement)?;
+    s.read("ground_items", ground_items)?;
+    s.read("projectiles", projectiles)?;
+    s.read("spot_anims", spot_anims)?;
+    s.read("chat_messages", chat_messages)?;
     s.query(
         "find_path",
         |pid,
@@ -1724,11 +1710,11 @@ pub fn run_with_modules(
             )
         },
     )?;
-    s.query("players", |pid, (): ()| players(pid))?;
+    s.read("players", players)?;
     s.query("player_model", |pid, index: i32| {
         Ok(player_model(pid, index)?.map(script_model))
     })?;
-    s.query("world_select", |pid, (): ()| world_select(pid))?;
+    s.read("world_select", world_select)?;
     s.query("widget_children", |pid, (group, child): (u16, u16)| {
         widget_children(pid, group, child)
     })?;
@@ -1738,17 +1724,15 @@ pub fn run_with_modules(
         "bank_pin_enter",
         lua.create_function(move |_, (): ()| -> mlua::Result<&'static str> {
             let pid = need_client(pid)?;
-            cancel_input(&worker);
+            cancel_input(worker.as_deref());
             bank_pin_enter(pid, &crate::async_input::Blocking)
                 .map(crate::bank_pin::Outcome::name)
                 .map_err(mlua::Error::RuntimeError)
         })?,
     )?;
-    s.query("lamp_skill", |pid, (): ()| {
-        match game_state(pid)?.account_name {
-            Some(account) => crate::lamp::skill_for(&account),
-            None => Ok(None),
-        }
+    s.read("lamp_skill", |pid| match game_state(pid)?.account_name {
+        Some(account) => crate::lamp::skill_for(&account),
+        None => Ok(None),
     })?;
     s.set(
         "http_request",
@@ -1781,20 +1765,20 @@ pub fn run_with_modules(
     s.input("move", move_input)?;
     s.input("wind_mouse", wind_mouse_input)?;
     s.input("type_text", type_input)?;
-    s.input("mouse_down", mouse_down_input)?;
-    s.input("mouse_up", mouse_up_input)?;
+    s.input("mouse_down", button_input(true))?;
+    s.input("mouse_up", button_input(false))?;
     s.input("scroll", scroll_input)?;
-    s.input("key_down", key_down_input)?;
-    s.input("key_up", key_up_input)?;
+    s.input("key_down", key_input(true))?;
+    s.input("key_up", key_input(false))?;
     s.input_async("click_async", click_input)?;
     s.input_async("move_async", move_input)?;
     s.input_async("wind_mouse_async", wind_mouse_input)?;
     s.input_async("type_text_async", type_input)?;
-    s.input_async("mouse_down_async", mouse_down_input)?;
-    s.input_async("mouse_up_async", mouse_up_input)?;
+    s.input_async("mouse_down_async", button_input(true))?;
+    s.input_async("mouse_up_async", button_input(false))?;
     s.input_async("scroll_async", scroll_input)?;
-    s.input_async("key_down_async", key_down_input)?;
-    s.input_async("key_up_async", key_up_input)?;
+    s.input_async("key_down_async", key_input(true))?;
+    s.input_async("key_up_async", key_input(false))?;
     let worker = s.worker.clone();
     s.action("sleep_async", move |_, ms: u32| {
         Ok(queue(&worker, Job::Wait(ms)))
@@ -1811,11 +1795,7 @@ pub fn run_with_modules(
     s.with_worker("input_error", |worker, (): ()| {
         worker.and_then(Worker::take_error)
     })?;
-    s.with_worker("input_cancel", |worker, (): ()| {
-        if let Some(worker) = worker {
-            worker.cancel();
-        }
-    })?;
+    s.with_worker("input_cancel", |worker, (): ()| cancel_input(worker))?;
 
     s.action("draw_rect", |pid, args: ShapeArgs| {
         Ok(draw(pid, &shape_args(false, args)))
@@ -2476,23 +2456,18 @@ mod tests {
              assert(first.length == 60000 and first.logout_chance == 0)\n\
              assert(A.sleeps[1].length >= 6 * A.HOUR and A.sleeps[1].length <= 10 * A.HOUR)\n\
              local due = first.next\n\
-             -- only the length changed: the due time stays\n\
              plan('{\"breaks\":[{\"interval\":600000,\"length\":90000,\"randomness\":0.0,\"logout_chance\":0.0}],\"sleeps\":[{}]}')\n\
              assert(A.breaks[1].length == 90000 and A.breaks[1].next == due)\n\
              assert(A.sleeps[1].next == sleep_due)\n\
-             -- a new interval re-plans, and a second break gets its own plan\n\
-             plan('{\"breaks\":[{\"interval\":300000,\"length\":90000,\"randomness\":0.0,\"logout_chance\":0.5},{\"interval\":60000,\"length\":10000}],\"sleeps\":[]}')\n\
+             plan('{\"breaks\":[{\"interval\":300000,\"length\":90000,\"randomness\":0.0,\"logout_chance\":0.5},{\"interval\":60000,\"length\":10000,\"randomness\":0.0}],\"sleeps\":[]}')\n\
              assert(#A.breaks == 2 and #A.sleeps == 0)\n\
              assert(A.breaks[1].next ~= due and A.breaks[1].logout_chance == 0.5)\n\
              assert(A.breaks[2].logout_chance == 0.01)\n\
-             -- skipping: the next occurrence moves one interval on, and an unknown one is ignored\n\
              local second = A.breaks[2].next\n\
              test_skip('break', 1); test_skip('break', 7); test_skip('sleep', 0)\n\
              assert(A.sync_config())\n\
-             assert(A.breaks[2].next > second + 40000 and A.breaks[1].next < second + 400000)\n\
-             assert(A.breaks[2].next < second + 80000)\n\
+             assert(A.breaks[2].next == second + 60000 and A.breaks[1].next < second + 400000)\n\
              assert(not A.sync_config())\n\
-             -- off: nothing is ever due\n\
              plan('{\"breaks_enabled\":false,\"sleeps_enabled\":false}')\n\
              assert(#A.breaks == 0 and #A.sleeps == 0 and not A.break_due())\n\
              print('ok')",
@@ -2525,7 +2500,6 @@ mod tests {
              assert(T.skills_met(need({ 'Total', 1500 }, { 'Combat', 70 }), have))\n\
              assert(not T.skills_met(need({ 'Magic', 25 }, { 'Sailing', 1 }), have), 'an unknown skill is not met')\n\
              assert(T.walk_ticks({ x = 0, y = 0 }, { x = 100, y = 40 }) == 60)\n\
-             -- every kind of transport is tried 3 times, then left out\n\
              T.RETRY_PAUSE_MS = 0\n\
              local calls = 0\n\
              T.runners.spell = function() calls += 1 return false end\n\
@@ -3091,7 +3065,6 @@ local vars = {}
 Host.varbit = function(id) return vars[id] or 0 end
 assert(T.choose(home, far) == nil, 'nothing says a Nexus is built')
 assert(T.choose(home, tile(3000, 500)) == nil, 'and nothing can say a glory is, before a visit')
--- the Nexus's first slot holds teleport 10, which the cache names Barrows
 Host.enum_def = function(id) return if id == House.NEXUS_ENUM then { entries = { { key = 10, value = 500 } } } else nil end
 Host.cache_files = function() return { '\249\1\1' .. string.pack('>I3', House.NEXUS_NAME_PARAM) .. 'Barrows\0' } end
 vars[House.NEXUS_SLOT_VARBITS[1]] = 10
@@ -3457,7 +3430,6 @@ assert(not T.failed_lately(piece))
     fn cs2_scripts_and_database_rows_decode_and_bad_bytes_are_refused() {
         let (lines, result) = run_lines(
             "local Cs2 = require('cs2')\n\
-             -- a script named '' with `push 7; switch 0; get_varbit 99; return`, and one switch table { [5] = 1 }\n\
              local code = '\\0' .. string.pack('>I2i4', 0, 7) .. string.pack('>I2i4', 60, 0) .. string.pack('>I2i4', 25, 99) .. string.pack('>I2B', 21, 0)\n\
              local tables = string.char(1) .. string.pack('>I2', 1) .. string.pack('>i4i4', 5, 1)\n\
              local bytes = code .. string.pack('>i4', 4) .. string.rep('\\0', 12) .. tables .. string.pack('>I2', #tables)\n\
@@ -3467,7 +3439,6 @@ assert(not T.failed_lately(piece))
              assert(s.tables[1][5] == 1)\n\
              assert(Cs2.script('not a script at all, just text') == nil)\n\
              assert(Cs2.script(string.sub(bytes, 1, #bytes - 5)) == nil)\n\
-             -- a row: table 0, columns 2 (a string) and 19 (an int)\n\
              local row = '\\4\\0' .. '\\3\\50' .. string.char(2, 1, 36, 1) .. 'Demon Slayer\\0' .. string.char(19, 1, 0, 1) .. string.pack('>i4', 3) .. string.char(255, 0)\n\
              local r = Cs2.dbrow(row)\n\
              assert(r and r[2].values[1][1] == 'Demon Slayer' and r[19].values[1][1] == 3, 'row')\n\

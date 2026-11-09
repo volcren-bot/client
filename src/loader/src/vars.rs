@@ -82,13 +82,10 @@ impl Default for Inspector {
 }
 
 fn with_varbit(varp: i32, def: &VarbitDef, value: i32) -> i32 {
-    let bits = (def.msb - def.lsb + 1) as u32;
-    let mask = if bits >= 32 {
-        u32::MAX
-    } else {
-        (1u32 << bits) - 1
-    };
-    ((varp as u32 & !(mask << def.lsb)) | ((value as u32 & mask) << def.lsb)) as i32
+    let bits = (u32::from(def.msb) + 1).saturating_sub(u32::from(def.lsb));
+    let mask = 1u32.checked_shl(bits).map_or(u32::MAX, |bit| bit - 1);
+    let at_lsb = |bits: u32| bits.checked_shl(u32::from(def.lsb)).unwrap_or(0);
+    ((varp as u32 & !at_lsb(mask)) | at_lsb(value as u32 & mask)) as i32
 }
 
 pub fn diff(
@@ -315,6 +312,13 @@ mod tests {
             .map(|e| (e.name.as_str(), e.old.as_str(), e.new.as_str()))
             .collect();
         assert_eq!(names, [("MODE", "0", "3"), ("101", "0", "1")]);
+    }
+
+    #[test]
+    fn a_malformed_varbit_leaves_the_varp_alone() {
+        assert_eq!(with_varbit(-1, &def(0, 5, 2), 7), -1);
+        assert_eq!(with_varbit(0, &def(0, 40, 50), 7), 0);
+        assert_eq!(with_varbit(0, &def(0, 0, 31), -1), -1);
     }
 
     #[test]

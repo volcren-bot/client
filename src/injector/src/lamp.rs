@@ -1,6 +1,6 @@
 use std::sync::{Mutex, PoisonError};
 
-pub type Lookup = Box<dyn FnMut(&str) -> Result<Option<String>, String> + Send>;
+use crate::bank_pin::Lookup;
 
 static LOOKUP: Mutex<Option<Lookup>> = Mutex::new(None);
 

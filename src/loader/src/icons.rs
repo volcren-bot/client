@@ -234,6 +234,10 @@ impl Icons {
         for (key, image) in pictures {
             let entry = match image
                 .as_ref()
+                .filter(|image| {
+                    (1..=u32::from(u16::MAX)).contains(&image.width)
+                        && (1..=u32::from(u16::MAX)).contains(&image.height)
+                })
                 .and_then(|image| Some((image, image.pixels()?)))
             {
                 Some((image, rgba)) => {

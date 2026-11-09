@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
+use injector::bank_pin::{hash_name, parse_pin};
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
     rand::{SecureRandom, SystemRandom},
@@ -16,7 +17,7 @@ const FILE_NAME: &str = "accounts.bin";
 const AAD: &[u8] = b"volcren-accounts-v1";
 const PIN_LEN: usize = 4;
 const HASH_SHOWN: usize = 12;
-const MARGIN: i8 = 16;
+const MARGIN: f32 = 16.0;
 const INPUT_WIDTH: f32 = 300.0;
 const MIN_TEXT_WIDTH: f32 = 90.0;
 const ACCOUNT_REQUIRED: &str = "Enter the account name.";
@@ -55,14 +56,6 @@ pub struct Entry {
     pub pin: String,
     #[serde(default)]
     pub lamp_skill: String,
-}
-
-pub fn hash_name(account: &str) -> String {
-    injector::bank_pin::hash_name(account)
-}
-
-pub fn valid_pin(pin: &str) -> bool {
-    injector::bank_pin::parse_pin(pin).is_some()
 }
 
 pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
@@ -303,7 +296,7 @@ impl Accounts {
         if account.is_empty() {
             return Err(ACCOUNT_REQUIRED.into());
         }
-        if !valid_pin(&draft.pin) {
+        if parse_pin(&draft.pin).is_none() {
             return Err(PIN_INVALID.into());
         }
         let entry = Entry {
@@ -326,9 +319,7 @@ impl Accounts {
         match edit.field {
             Field::Name if text.is_empty() => return Err("The name can't be empty.".into()),
             Field::Name => entry.name = text.to_owned(),
-            Field::Pin if !valid_pin(text) => {
-                return Err(PIN_INVALID.into());
-            }
+            Field::Pin if parse_pin(text).is_none() => return Err(PIN_INVALID.into()),
             Field::Pin => entry.pin = text.to_owned(),
         }
         Ok(())
@@ -375,7 +366,7 @@ impl Accounts {
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
-            ui.add_space(f32::from(MARGIN));
+            ui.add_space(MARGIN);
             if self.working.is_empty() {
                 ui.label(egui::RichText::new("No accounts saved yet.").weak());
             } else {
@@ -540,13 +531,10 @@ impl Accounts {
         {
             entry.lamp_skill = skill;
         }
-        match finished {
-            Some(Some(edit)) => {
-                self.editing = None;
-                self.error = self.apply(&edit).err();
-            }
-            Some(None) => self.editing = None,
-            None => {}
+        match (finished, self.editing.take()) {
+            (Some(true), Some(edit)) => self.error = self.apply(&edit).err(),
+            (Some(_), _) => {}
+            (None, edit) => self.editing = edit,
         }
         if let Some(edit) = edit_start {
             self.editing = Some(edit);
@@ -704,7 +692,7 @@ fn click_cell(ui: &mut egui::Ui, text: &str) -> egui::Response {
     response
 }
 
-fn edit_cell(ui: &mut egui::Ui, edit: &mut Editing) -> Option<Option<Editing>> {
+fn edit_cell(ui: &mut egui::Ui, edit: &mut Editing) -> Option<bool> {
     let hint = match edit.field {
         Field::Name => "name",
         Field::Pin => "4 digits",
@@ -727,13 +715,7 @@ fn edit_cell(ui: &mut egui::Ui, edit: &mut Editing) -> Option<Option<Editing>> {
     if !response.lost_focus() {
         return None;
     }
-    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
-    Some((!cancelled).then(|| Editing {
-        index: edit.index,
-        field: edit.field,
-        text: edit.text.clone(),
-        fresh: false,
-    }))
+    Some(!ui.input(|i| i.key_pressed(egui::Key::Escape)))
 }
 
 #[cfg(test)]

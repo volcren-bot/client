@@ -45,11 +45,10 @@ unsafe fn import_slot(dll: &str, function: &str) -> Option<usize> {
                 return None;
             }
             let module = CStr::from_ptr((base + name) as *const _).to_string_lossy();
-            if module.eq_ignore_ascii_case(dll) {
-                let lookup = if names != 0 { names } else { slots };
+            if names != 0 && module.eq_ignore_ascii_case(dll) {
                 let mut i = 0;
                 loop {
-                    let thunk = ((base + lookup + i * 8) as *const u64).read_unaligned();
+                    let thunk = ((base + names + i * 8) as *const u64).read_unaligned();
                     if thunk == 0 {
                         break;
                     }

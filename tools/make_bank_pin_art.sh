@@ -1,13 +1,12 @@
 #!/bin/sh
-# Regenerates the art the bank PIN panel draws (src/bank_pin_overlay.rs); needs ImageMagick.
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../src/injector/assets"
 FONT=../../loader/assets/FiraCodeNerdFontMono-Bold.ttf
 LOGO=../../../../assets/logo.png
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-pack() { # image out.bin
+pack() {
     w=$(magick "$1" -format %w info:)
     h=$(magick "$1" -format %h info:)
     {

@@ -20,16 +20,12 @@ jobs:
             fail-fast: false
             matrix:
                 include:
-                    # Windows: cross-compiled from Linux with MinGW. Builds the whole workspace,
-                    # including the agent DLL, which only exists for Windows.
                     - name: windows
                       target: x86_64-pc-windows-gnu
                       build: cargo build --release --workspace --no-default-features --target x86_64-pc-windows-gnu
                       artifact_path: |
                           target/x86_64-pc-windows-gnu/release/*.exe
                           target/x86_64-pc-windows-gnu/release/*.dll
-                    # Linux: native build of the default members (injector and loader).
-                    # The agent is Windows-only and is not built here.
                     - name: linux
                       target: ""
                       build: cargo build --release --no-default-features
@@ -38,12 +34,10 @@ jobs:
                           target/release/loader
 
         steps:
-            # Full history: the mtime step below diffs against the commit the cached build came from.
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
 
-            # YYYY.MM.DD-<7 character commit>, from the commit's UTC date, so every job names the same build the same way.
             - name: Version
               run: |
                   echo "VOLCREN_VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
@@ -53,7 +47,6 @@ jobs:
               if: matrix.name == 'windows'
               run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
-            # rustup comes with the runner image. The version is pinned so a new Rust release doesn't invalidate the build cache.
             - name: Install Rust
               id: rust
               run: |
@@ -61,8 +54,6 @@ jobs:
                   rustup default "$RUST_VERSION"
                   echo "rustc=$(rustc -V | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
-            # Dependencies and this repo's own crates. Each run saves a new entry (the key ends in the commit) and starts from the
-            # latest one for the same Cargo.lock, so unchanged crates, including the injector's slow LTO link, are not rebuilt.
             - name: Cache cargo and target
               uses: actions/cache@v4
               with:
@@ -74,9 +65,6 @@ jobs:
                   restore-keys: |
                       build-${{ matrix.name }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}-
 
-            # Cargo decides a path crate is stale when a source file is newer than its cached build, and a fresh checkout makes
-            # every file new. Date every tracked file in the past, then touch only the files changed since the cached build.
-            # With no usable baseline, touch everything, which is a normal full build.
             - name: Restore source mtimes
               run: |
                   base=$(cat target/.built-commit 2>/dev/null || true)
@@ -89,8 +77,6 @@ jobs:
                       echo "No usable cached build: full rebuild."
                   fi
 
-            # Uses the `release` profile (full LTO, stripped) from the root Cargo.toml. `--no-default-features` leaves out the
-            # lib/ the injector can embed: this repo builds alone, and the loader always runs scripts with `--script`, which reads lib/ from disk.
             - name: Build release
               run: ${{ matrix.build }}
 
@@ -104,7 +90,6 @@ jobs:
                   path: ${{ matrix.artifact_path }}
                   if-no-files-found: error
 
-    # The Linux archive: the loader and a native injector, plus the Windows injector and agent that run inside Wine.
     package:
         name: package for Linux
         needs: build
@@ -146,7 +131,6 @@ jobs:
                   path: out/volcren-linux-*.tar.gz
                   if-no-files-found: error
 
-    # The Windows installer, built with WiX on real Windows and tested there. See docs/releases.md.
     msi:
         name: build and test the MSI
         needs: build
@@ -162,7 +146,6 @@ jobs:
                   name: volcren-windows-release
                   path: dist
 
-            # Windows Installer allows 255.255.65535 and ignores a fourth field, so the minute of the month keeps same-day builds apart.
             - name: Version
               shell: bash
               run: |
@@ -171,7 +154,6 @@ jobs:
                   echo "MSI_VERSION=$((10#$year)).$((10#$month)).$of_month" >> "$GITHUB_ENV"
                   echo "VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
-            # WiX 5 is the last version with no maintenance fee, and it runs on .NET 6.
             - uses: actions/setup-dotnet@v4
               with:
                   dotnet-version: 6.0.x
@@ -215,7 +197,6 @@ jobs:
                   path: out/volcren-windows-*.msi
                   if-no-files-found: error
 
-    # Writes and signs the manifest. It holds the signing key and nothing that can upload, and the key is only available to this Environment.
     sign:
         name: sign the manifest
         needs: [package, msi]
@@ -259,7 +240,6 @@ jobs:
                   rsign sign -W -s "$key" -t "$VERSION" -x "$RUNNER_TEMP/latest.minisig" manifest/latest.json
                   rm -f "$key"
 
-                  # One object, so a loader can never read a new signature with an old manifest.
                   jq -n --rawfile manifest manifest/latest.json --rawfile signature "$RUNNER_TEMP/latest.minisig" \
                       '{manifest: $manifest, signature: $signature}' > manifest/latest.signed.json
 
@@ -271,7 +251,6 @@ jobs:
                   path: manifest
                   if-no-files-found: error
 
-            # The same files the bucket gets, for the GitHub release job below (which has no access to the Supabase key).
             - name: Keep packages for the release
               uses: actions/upload-artifact@v4
               with:
@@ -282,8 +261,6 @@ jobs:
                       out/SHA256SUMS
                   if-no-files-found: error
 
-    # On every push to main: publish both platforms and the manifests to the public `client` bucket. latest.signed.json and
-    # latest.json go up last, so they never point at files that aren't there yet.
     publish:
         name: publish to the client bucket
         needs: [package, sign]
@@ -312,7 +289,6 @@ jobs:
             - name: Install rsign
               run: cargo install rsign2 --version 0.6.7 --locked
 
-            # Before anything is public: a manifest signed by a key the loader doesn't trust would stop every loader updating.
             - name: Check the signature
               run: |
                   jq -j .manifest manifest/latest.signed.json > signed.manifest
@@ -325,7 +301,6 @@ jobs:
                   done
                   [ -n "$verified" ] || { echo "The manifest isn't signed by a key in update.rs." >&2; exit 1; }
 
-            # The Supabase key is only in this step's environment, not in the tools installed above.
             - name: Upload
               env:
                   SUPABASE_URL: ${{ vars.SUPABASE_URL }}
@@ -335,11 +310,9 @@ jobs:
                       echo "Set the SUPABASE_URL repository variable and the SUPABASE_SERVICE_KEY secret." >&2
                       exit 1
                   fi
-                  # A secret pasted with a trailing newline would end the request headers early and turn the rest
-                  # of them into the start of the uploaded file, so only ever send the key without whitespace.
                   SUPABASE_URL="$(printf %s "$SUPABASE_URL" | tr -d '[:space:]')"
                   SUPABASE_SERVICE_KEY="$(printf %s "$SUPABASE_SERVICE_KEY" | tr -d '[:space:]')"
-                  upload() { # <local file> <path in the bucket> <content type> [cache-control]
+                  upload() {
                       curl -sS --fail -X POST "$SUPABASE_URL/storage/v1/object/client/$2" \
                           -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" -H "apikey: $SUPABASE_SERVICE_KEY" \
                           -H "x-upsert: true" -H "Content-Type: $3" -H "cache-control: ${4:-max-age=31536000}" \
@@ -352,7 +325,6 @@ jobs:
                   upload manifest/latest.signed.json latest.signed.json application/json max-age=60
                   upload manifest/latest.json latest.json application/json max-age=60
 
-                  # What was just published must be the manifests that were checked and uploaded, byte for byte.
                   sleep 2
                   public="$SUPABASE_URL/storage/v1/object/public/client"
                   for name in latest.json latest.signed.json; do
@@ -361,8 +333,6 @@ jobs:
                           || { echo "The published $name is not the manifest that was uploaded." >&2; exit 1; }
                   done
 
-    # After a successful publish: tag the commit and create a GitHub release with the same packages. Uses only the runner's
-    # `gh` and the job token, and runs apart from `publish` so the Supabase key never sits next to a write token.
     release:
         name: tag and release
         needs: publish
@@ -380,7 +350,6 @@ jobs:
                   name: release-packages
                   path: out
 
-            # Creates the tag at this commit. A re-run of the same commit finds the release already there and leaves it alone.
             - name: Create release
               run: |
                   if gh release view "$VERSION" > /dev/null 2>&1; then

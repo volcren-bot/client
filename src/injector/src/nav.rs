@@ -1,13 +1,14 @@
 use std::{
+    cell::Cell,
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
 };
 
 use crate::{
     Loc,
-    collision::{LocDef, LocText, flag, turned, wall_marks},
+    collision::{self, LocDef, LocText, flag, turned, wall_marks},
     pathfinding::{DIRECTIONS, step_cost, step_open},
-    scene_collision::RING,
+    projection::{GAME_OBJECT, WALL},
     scene_graph::mix,
 };
 
@@ -29,10 +30,9 @@ fn unfold((x, y, plane): Point) -> Point {
     }
 }
 
-pub const PLANES: i32 = 4;
+pub const PLANES: i32 = collision::PLANES as i32;
 pub const UNDERGROUND: i32 = 6400;
 const WORLDS: i32 = 2;
-const STAND_BLOCKS: u32 = flag::OBJECT | flag::FLOOR | flag::FLOOR_DECORATION;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Target {
@@ -126,9 +126,6 @@ impl Default for Request {
     }
 }
 
-const WALL: u8 = 0;
-const GAME: u8 = 2;
-
 pub fn scene_locs<'a>(
     flags: Flags,
     locs: &[Loc],
@@ -165,7 +162,7 @@ pub fn scene_locs<'a>(
             let shape = match (loc.kind, loc.shape, loc.rotation) {
                 (WALL, Some(shape @ (0 | 2)), Some(rotation)) => Some((shape, rotation)),
                 (WALL, None, _) => guess_wall(&on, loc.x, loc.y),
-                (GAME, Some(9), Some(rotation)) => Some((9, rotation)),
+                (GAME_OBJECT, Some(9), Some(rotation)) => Some((9, rotation)),
                 _ => None,
             };
             let loc = target(option);
@@ -211,10 +208,6 @@ pub struct Plan {
     pub reached: bool,
 }
 
-fn standable(flags: u32) -> bool {
-    flags != RING && flags & STAND_BLOCKS == 0
-}
-
 fn footprint_distance((x, y): (i32, i32), loc: &Target) -> i32 {
     let gap = |t: i32, start: i32, size: u8| (start - t).max(t - (start + size as i32 - 1)).max(0);
     gap(x, loc.x, loc.size_x).max(gap(y, loc.y, loc.size_y))
@@ -254,7 +247,7 @@ pub fn data_climbs(
         else {
             continue;
         };
-        if flags(x, y, plane).is_none_or(|f| !standable(f)) {
+        if !flags(x, y, plane).is_some_and(|f| f & flag::BLOCKED == 0) {
             continue;
         }
         out.push(Climb {
@@ -300,7 +293,7 @@ pub fn door_blocks(
     blocks
 }
 
-pub fn guess_wall(flags: &dyn Fn(i32, i32) -> Option<u32>, x: i32, y: i32) -> Option<(u8, u8)> {
+fn guess_wall(flags: &dyn Fn(i32, i32) -> Option<u32>, x: i32, y: i32) -> Option<(u8, u8)> {
     let mut found = None;
     for rotation in 0..4u8 {
         if wall_marks(0, rotation)
@@ -400,9 +393,18 @@ pub fn plan(
             climb_lists[climb_at[i] as usize - 1].push(n as u32);
         }
     }
+    let read = vec![Cell::new(None); size];
     let original = |x: i32, y: i32, plane: i32| {
-        let (rx, ry, rplane) = unfold((x, y, plane));
-        inside(x, y, plane).then(|| flags(rx, ry, rplane)).flatten()
+        if !inside(x, y, plane) {
+            return None;
+        }
+        let kept = &read[index(x, y, plane)];
+        kept.get().unwrap_or_else(|| {
+            let (rx, ry, rplane) = unfold((x, y, plane));
+            let found = flags(rx, ry, rplane);
+            kept.set(Some(found));
+            found
+        })
     };
     let open =
         |x: i32, y: i32, plane: i32| original(x, y, plane).map(|f| f & !opened[index(x, y, plane)]);
@@ -418,7 +420,7 @@ pub fn plan(
     let chebyshev = |(x, y, _): Point| (x - to.0).abs().max((y - to.1).abs());
 
     let mut cost = vec![u32::MAX; size];
-    let mut back = vec![u32::MAX; size];
+    let mut back = vec![0u32; size];
     let mut via = vec![WALK; size];
     let start = index(from.0, from.1, from.2);
     cost[start] = 0;
@@ -455,23 +457,19 @@ pub fn plan(
         let through = |x: i32, y: i32| open(x, y, plane);
         for (dx, dy) in DIRECTIONS {
             let (nx, ny) = (x + dx, y + dy);
-            if !inside(nx, ny, plane)
-                || !step_open(&through, x, y, dx, dy)
-                || step_closed(&closed, here, dx, dy)
-            {
+            if !inside(nx, ny, plane) || step_closed(&closed, here, dx, dy) {
                 continue;
             }
             let step = step_cost(dx, dy);
             let next = index(nx, ny, plane);
             if step_open(&walked, x, y, dx, dy) {
                 relax(next, step, WALK, &mut heap);
-                continue;
-            }
-            let door = [(nx, ny), (nx, y), (x, ny), (x, y)]
-                .iter()
-                .map(|&(tx, ty)| door_at[index(tx, ty, plane)])
-                .find(|&d| d != 0);
-            if let Some(door) = door {
+            } else if step_open(&through, x, y, dx, dy)
+                && let Some(door) = [(nx, ny), (nx, y), (x, ny), (x, y)]
+                    .iter()
+                    .map(|&(tx, ty)| door_at[index(tx, ty, plane)])
+                    .find(|&d| d != 0)
+            {
                 relax(next, step + options.door_cost, DOOR | (door - 1), &mut heap);
             }
         }
@@ -845,7 +843,7 @@ mod tests {
         let locs = [
             loc(0, WALL, 1, 1, Some(0), Some(2), true),
             loc(1, WALL, 3, 1, None, None, true),
-            loc(2, GAME, 2, 0, Some(10), Some(0), true),
+            loc(2, GAME_OBJECT, 2, 0, Some(10), Some(0), true),
             loc(3, WALL, 1, 1, Some(0), Some(2), true),
             loc(4, WALL, 1, 1, Some(0), Some(2), true),
             loc(0, WALL, 0, 2, Some(0), Some(2), false),
@@ -1297,8 +1295,8 @@ mod tests {
         let flags = lookup(&planes, w, h);
         let defs = [def(2, &["Open"]), def(2, &["Open"])];
         let locs = [
-            loc(0, GAME, 1, 1, Some(10), Some(0), true),
-            loc(1, GAME, 2, 2, Some(10), Some(0), true),
+            loc(0, GAME_OBJECT, 1, 1, Some(10), Some(0), true),
+            loc(1, GAME_OBJECT, 2, 2, Some(10), Some(0), true),
         ];
         let lookup_def = |id: i32| defs.get(id as usize);
         let (doors, climbables) = scene_locs(&flags, &locs, &lookup_def, &Request::default());

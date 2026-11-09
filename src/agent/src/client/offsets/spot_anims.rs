@@ -24,15 +24,6 @@ struct Fields {
 
 const LIST_RANGE: std::ops::Range<u64> = 0x100..0x1000;
 
-fn is_store(i: &Instruction, this: Register) -> bool {
-    i.mnemonic() == Mnemonic::Mov
-        && i.op0_kind() == OpKind::Memory
-        && i.memory_base() == this
-        && i.memory_index() == Register::None
-        && i.memory_size() == iced_x86::MemorySize::UInt32
-        && i.op1_kind() == OpKind::Register
-}
-
 fn stack_load(i: &Instruction) -> Option<u32> {
     (i.mnemonic() == Mnemonic::Mov
         && i.op0_kind() == OpKind::Register
@@ -74,7 +65,7 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
     let store_of = |register: Register| {
         one(instrs
             .iter()
-            .filter(|i| is_store(i, this) && i.op1_register() == register)
+            .filter(|i| dword_store(i, this) && i.op1_register() == register)
             .map(|i| i.memory_displacement64() as u32)
             .collect())
         .ok()
@@ -92,7 +83,7 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
         }
         instrs[at + 1..(at + 16).min(instrs.len())]
             .iter()
-            .find(|i| is_store(i, this) && i.op1_register() == Register::EDX)
+            .find(|i| dword_store(i, this) && i.op1_register() == Register::EDX)
             .map(|i| i.memory_displacement64() as u32)
     })?;
 
@@ -100,7 +91,7 @@ fn constructor_fields(instrs: &[Instruction]) -> Option<Fields> {
         .windows(2)
         .filter_map(|w| {
             let from = stack_load(&w[0])?;
-            (is_store(&w[1], this) && w[1].op1_register() == w[0].op0_register())
+            (dword_store(&w[1], this) && w[1].op1_register() == w[0].op0_register())
                 .then(|| (from, w[1].memory_displacement64() as u32))
         })
         .collect();
@@ -175,24 +166,18 @@ pub fn find_spot_anims(pe: &Pe) -> Result<SpotAnims, ScanError> {
     }
     let (constructor, fields) = one(constructors)?;
 
-    let calls = direct_calls(pe);
     let mut sites = Vec::new();
     for thunk in direct_jumps(pe)
         .filter(|&(_, target)| target == constructor)
         .filter_map(|(at, _)| pe.function_containing(at))
         .map(|(begin, _)| begin)
     {
-        for &(site, _) in calls.iter().filter(|&&(_, target)| target == thunk) {
+        for site in calls_to(pe, thunk) {
             let Some((begin, end)) = pe.function_containing(site) else {
                 continue;
             };
             if end - begin <= 0x200 {
-                sites.extend(
-                    calls
-                        .iter()
-                        .filter(|&&(_, target)| target == begin)
-                        .map(|&(caller, _)| caller),
-                );
+                sites.extend(calls_to(pe, begin));
             } else {
                 sites.push(site);
             }

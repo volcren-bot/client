@@ -1,7 +1,7 @@
 const M: u32 = 0x5bd1_e995;
 
-pub const BLOCKS: u32 = 6;
-pub const PROFILE_LEN: usize = BLOCKS as usize * 4;
+const BLOCKS: u32 = 6;
+const PROFILE_LEN: usize = BLOCKS as usize * 4;
 
 fn mix(h: u32, k: u32) -> u32 {
     let k = k.wrapping_mul(M);

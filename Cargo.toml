@@ -7,8 +7,6 @@ default-members = ["src/injector", "src/loader"]
 strip = true
 lto = true
 
-# Faster iteration build: same optimizations as release minus full LTO.
-# Use with: cargo build --profile fast
 [profile.fast]
 inherits = "release"
 lto = false

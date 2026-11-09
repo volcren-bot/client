@@ -1,7 +1,5 @@
-//! Embeds the loader's version (`VOLCREN_VERSION`).
 use std::process::Command;
 
-/// `YYYY.MM.DD-<7 character commit>`: `VOLCREN_VERSION` from the release workflow, else the checked out commit, else `dev`.
 fn version() -> String {
     let git = |args: &[&str]| {
         let output = Command::new("git")
@@ -33,7 +31,6 @@ fn version() -> String {
         })
 }
 
-/// The commit's Unix time, which orders releases: `VOLCREN_BUILD` from the release workflow, else the checked out commit, else 0, which never prompts an update.
 fn build() -> String {
     std::env::var("VOLCREN_BUILD")
         .ok()

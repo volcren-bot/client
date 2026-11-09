@@ -141,14 +141,7 @@ pub unsafe fn hook(module_base: u64, rule: VarcSetters) {
     };
     let (int, _) = SET_INT.get_or_init(|| (int, detour::function(at(rule.get_int))));
     let object = SET_OBJECT.get_or_init(|| object);
-    match (int.enable(), object.enable()) {
-        (Ok(()), Ok(())) => println!("[Agent]: Varc log hooked.\r\n"),
-        (int, object) => println!(
-            "[Agent]: Failed to enable the varc hooks: {:?} {:?}.\r\n",
-            int.err(),
-            object.err()
-        ),
-    }
+    detour::enable_both(int, object, "varc", "Varc log hooked");
 }
 
 pub unsafe fn unhook() {

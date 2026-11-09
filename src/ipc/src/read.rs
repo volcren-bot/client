@@ -3,10 +3,10 @@ use alloc::{string::String, vec, vec::Vec};
 use crate::state::{array, game_state, interfaces, part, InterfaceLayout, Layout};
 
 const MAX_CHAIN: usize = 64;
-const TABLE_BUCKETS: u64 = 0x8;
-const TABLE_COUNT: u64 = 0x10;
-const NODE_VALUE: u64 = 0x10;
-const NODE_NEXT: u64 = 0x18;
+pub const TABLE_BUCKETS: u64 = 0x8;
+pub const TABLE_COUNT: u64 = 0x10;
+pub const NODE_VALUE: u64 = 0x10;
+pub const NODE_NEXT: u64 = 0x18;
 const NODE_SIZE: usize = NODE_NEXT as usize + 8;
 
 pub trait Memory {
@@ -104,10 +104,14 @@ pub fn client(memory: &impl Memory, layout: &Layout) -> Option<u64> {
 }
 
 pub fn current_game_state(memory: &impl Memory, layout: &Layout) -> Option<i32> {
+    game_state_in(memory, layout, client(memory, layout)?)
+}
+
+pub fn game_state_in(memory: &impl Memory, layout: &Layout, client: u64) -> Option<i32> {
     if !layout.has(part::GAME_STATE) {
         return None;
     }
-    memory.i32(client(memory, layout)? + layout.game_state as u64)
+    memory.i32(client + layout.game_state as u64)
 }
 
 pub fn table_get(memory: &impl Memory, table: u64, key: i32) -> Option<u64> {
@@ -187,10 +191,13 @@ pub fn table_entries(memory: &impl Memory, table: u64) -> Vec<(i32, u64)> {
 }
 
 pub fn local_player(memory: &impl Memory, layout: &Layout) -> Option<(u64, u64)> {
+    local_player_in(memory, layout, client(memory, layout)?)
+}
+
+pub fn local_player_in(memory: &impl Memory, layout: &Layout, client: u64) -> Option<(u64, u64)> {
     if !layout.has(part::PLAYER) {
         return None;
     }
-    let client = client(memory, layout)?;
     let p = &layout.player;
     let view_id = memory.i32(client + p.world_view_id as u64)?;
     let index = memory.i32(client + p.player_index as u64)?;
@@ -209,17 +216,21 @@ const REGION_MAX_BYTES: u64 = 64 * REGION_MAX_STRIDE;
 const REGION_LIMIT: i32 = 256;
 
 pub fn map_regions(memory: &impl Memory, layout: &Layout) -> Option<Vec<[i32; 2]>> {
-    let (view, _) = local_player(memory, layout)?;
-    scene_loader(memory, client(memory, layout)?, view).map(|(_, regions)| regions)
+    local_scene_loader(memory, layout).map(|(_, regions)| regions)
 }
 
 pub fn in_instance(memory: &impl Memory, layout: &Layout) -> Option<bool> {
     if !layout.has(part::SCENE_LOADER) {
         return None;
     }
-    let (view, _) = local_player(memory, layout)?;
-    let (loader, _) = scene_loader(memory, client(memory, layout)?, view)?;
+    let (loader, _) = local_scene_loader(memory, layout)?;
     read_array(memory, loader + layout.scene_loader.instance_flag as u64).map(|[flag]| flag != 0)
+}
+
+fn local_scene_loader(memory: &impl Memory, layout: &Layout) -> Option<(u64, Vec<[i32; 2]>)> {
+    let client = client(memory, layout)?;
+    let (view, _) = local_player_in(memory, layout, client)?;
+    scene_loader(memory, client, view)
 }
 
 fn plausible(pointer: u64) -> bool {
@@ -323,9 +334,30 @@ pub fn component(
     client: u64,
     id: i32,
 ) -> Option<u64> {
-    let (group, child) = ((id as u32 >> 16) as u64, (id as u32 & 0xffff) as u64);
+    component_in(
+        memory,
+        layout,
+        component_groups(memory, layout, client)?,
+        id,
+    )
+}
+
+pub fn component_groups(
+    memory: &impl Memory,
+    layout: &InterfaceLayout,
+    client: u64,
+) -> Option<u64> {
     let manager = memory.ptr(client + layout.manager as u64)?;
-    let groups = memory.ptr(manager + layout.groups as u64)?;
+    memory.ptr(manager + layout.groups as u64)
+}
+
+pub fn component_in(
+    memory: &impl Memory,
+    layout: &InterfaceLayout,
+    groups: u64,
+    id: i32,
+) -> Option<u64> {
+    let (group, child) = ((id as u32 >> 16) as u64, (id as u32 & 0xffff) as u64);
     let children = groups + group * interfaces::GROUP_SIZE as u64;
     let header: [u8; 16] = read_array(memory, children + array::COUNT as u64)?;
     let count = le_u64(&header, 0);
@@ -345,11 +377,13 @@ pub fn component(
 pub const NAME_CLEAN: u64 = 0x18;
 
 pub fn local_name_object(memory: &impl Memory, layout: &Layout) -> Option<u64> {
-    if !layout.has(part::WORLD) || current_game_state(memory, layout) != Some(game_state::LOGGED_IN)
+    let client = client(memory, layout)?;
+    if !layout.has(part::WORLD)
+        || game_state_in(memory, layout, client) != Some(game_state::LOGGED_IN)
     {
         return None;
     }
-    let (_, player) = local_player(memory, layout)?;
+    let (_, player) = local_player_in(memory, layout, client)?;
     memory.ptr(player + layout.world.player_name as u64)
 }
 

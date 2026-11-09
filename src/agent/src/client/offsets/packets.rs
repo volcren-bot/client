@@ -235,13 +235,8 @@ pub fn find_packets(pe: &Pe) -> Result<Packets, ScanError> {
     }
     let (writer, data, cursor) = one(writers)?;
 
-    let sites: Vec<u32> = direct_calls(pe)
-        .iter()
-        .copied()
-        .filter(|&(_, target)| target == writer)
-        .map(|(site, _)| site)
-        .collect();
-    let site = one(sites)?;
+    let site = one(calls_to(pe, writer).collect())?;
+
     let (instrs, call) = site_function(pe, site).ok_or(ScanError::NotFound)?;
     let (send_type, send_buffer) = constructor_fields(&instrs, call).ok_or(ScanError::NotFound)?;
 

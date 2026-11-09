@@ -15,7 +15,7 @@ use alacritty_terminal::{
     term::{Config, Term, TermMode, cell::Flags, color::Colors},
     vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb},
 };
-use eframe::egui::{self, Color32};
+use eframe::egui::{self, Color32, Event as Input};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 const HISTORY: usize = 10_000;
@@ -419,7 +419,7 @@ impl Terminal {
             let events = ui.input(|i| i.events.clone());
             for event in events {
                 match event {
-                    Event_::Key {
+                    Input::Key {
                         key: egui::Key::Enter,
                         pressed: true,
                         ..
@@ -432,7 +432,7 @@ impl Terminal {
                             }
                         };
                     }
-                    Event_::Key {
+                    Input::Key {
                         key: egui::Key::C,
                         pressed: true,
                         modifiers,
@@ -447,14 +447,14 @@ impl Terminal {
                             ctx.copy_text(text);
                         }
                     }
-                    Event_::Text(text) => {
+                    Input::Text(text) => {
                         let alt = ui.input(|i| i.modifiers.alt);
                         type_into(
                             session,
                             &[if alt { b"\x1b".as_slice() } else { b"" }, text.as_bytes()].concat(),
                         );
                     }
-                    Event_::Paste(text) => {
+                    Input::Paste(text) => {
                         let text = if mode.contains(TermMode::BRACKETED_PASTE) {
                             format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
                         } else {
@@ -462,7 +462,7 @@ impl Terminal {
                         };
                         type_into(session, text.as_bytes());
                     }
-                    Event_::Key {
+                    Input::Key {
                         key,
                         pressed: true,
                         modifiers,
@@ -494,8 +494,6 @@ impl Terminal {
         }
     }
 }
-
-use egui::Event as Event_;
 
 fn type_into(session: &Session, bytes: &[u8]) {
     if let Ok(mut term) = session.term.lock() {

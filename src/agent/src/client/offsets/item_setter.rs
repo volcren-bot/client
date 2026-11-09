@@ -7,13 +7,13 @@ pub fn find_item_setter(pe: &Pe, containers: &ItemContainers) -> Result<u32, Sca
         containers.table + hash_table::BUCKETS as u32,
         containers.table + hash_table::BUCKET_COUNT as u32,
     );
+    let reads = |instrs: &[Instruction], global: u32| {
+        instrs
+            .iter()
+            .any(|i| i.is_ip_rel_memory_operand() && i.ip_rel_memory_address() as u32 == global)
+    };
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let reads = |instrs: &[Instruction], global: u32| {
-            instrs
-                .iter()
-                .any(|i| i.is_ip_rel_memory_operand() && i.ip_rel_memory_address() as u32 == global)
-        };
         let head = whole_function(pe, begin, end - begin);
         if !reads(&head, buckets) || !reads(&head, count) {
             continue;

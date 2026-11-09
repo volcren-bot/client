@@ -45,6 +45,10 @@ impl<'a> Art<'a> {
         }
     }
 
+    fn height_at(&self, width: i32) -> i32 {
+        (self.height * width / self.width).max(1)
+    }
+
     fn pixel(&self, x: i32, y: i32) -> Rgba {
         let at = ((y * self.width + x) * 4) as usize;
         Rgba {
@@ -74,7 +78,7 @@ fn over_shade(color: Rgba) -> Rgba {
 
 fn blit(art: &Art, x: i32, y: i32, width: i32, put: &mut dyn FnMut(i32, i32, Rgba)) {
     let width = width.clamp(1, art.width);
-    let height = (art.height * width / art.width).max(1);
+    let height = art.height_at(width);
     for dy in 0..height {
         for dx in 0..width {
             let color = art.pixel(dx * art.width / width, dy * art.height / height);
@@ -85,10 +89,10 @@ fn blit(art: &Art, x: i32, y: i32, width: i32, put: &mut dyn FnMut(i32, i32, Rgb
     }
 }
 
-pub fn paint(area: [i32; 4], put: &mut dyn FnMut(i32, i32, Rgba)) {
+pub fn paint(area: [i32; 4], [width, height]: [i32; 2], put: &mut dyn FnMut(i32, i32, Rgba)) {
     let [x1, y1, x2, y2] = area;
-    for y in y1..=y2 {
-        for x in x1..=x2 {
+    for y in y1.max(0)..=y2.min(height - 1) {
+        for x in x1.max(0)..=x2.min(width - 1) {
             let edge = x - x1 < BORDER_WIDTH
                 || x2 - x < BORDER_WIDTH
                 || y - y1 < BORDER_WIDTH
@@ -108,7 +112,7 @@ pub fn paint(area: [i32; 4], put: &mut dyn FnMut(i32, i32, Rgba)) {
     );
 
     let width = message.width.min(x2 - x1 + 1 - 2 * MARGIN);
-    let height = (message.height * width.max(1) / message.width).max(1);
+    let height = message.height_at(width.max(1));
     blit(
         &message,
         x1 + (x2 - x1 + 1 - width) / 2,
@@ -133,7 +137,7 @@ mod tests {
 
     fn painted(area: [i32; 4]) -> HashMap<(i32, i32), Rgba> {
         let mut canvas = HashMap::new();
-        paint(area, &mut |x, y, color| {
+        paint(area, [1000, 1000], &mut |x, y, color| {
             canvas.insert((x, y), color);
         });
         canvas

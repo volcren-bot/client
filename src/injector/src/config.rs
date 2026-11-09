@@ -36,13 +36,13 @@ pub struct VarbitDef {
 
 impl VarbitDef {
     pub fn value(&self, varp: i32) -> i32 {
-        let bits = (self.msb - self.lsb + 1) as u32;
+        let bits = (u32::from(self.msb) + 1).saturating_sub(u32::from(self.lsb));
         let mask = if bits >= 32 {
             u32::MAX
         } else {
             (1u32 << bits) - 1
         };
-        (((varp as u32) >> self.lsb) & mask) as i32
+        ((varp as u32).checked_shr(u32::from(self.lsb)).unwrap_or(0) & mask) as i32
     }
 }
 
@@ -220,7 +220,7 @@ pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
                 r.string()?;
             }
             15 | 16 | 65 | 160 | 251 => {}
-            12 | 44 | 46 | 47 | 49..=54 => r.skip(4)?,
+            12 | 44 | 46 | 47 | 49..=54 | 100..=109 => r.skip(4)?,
             13 | 14 | 27 | 42 | 113..=115 => r.skip(1)?,
             23 | 25 => r.skip(3)?,
             45 | 48 => r.skip(5)?,
@@ -234,7 +234,6 @@ pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
                     r.string()?;
                 }
             }
-            100..=109 => r.skip(4)?,
             161 => {
                 let n = r.u16()? as usize;
                 r.skip(2 * n)?;
@@ -319,6 +318,22 @@ mod tests {
             msb: 31,
         };
         assert_eq!(def.value(-16), 0x0fff_ffff);
+    }
+
+    #[test]
+    fn malformed_varbits_read_without_overflow() {
+        let reversed = VarbitDef {
+            varp: 0,
+            lsb: 9,
+            msb: 2,
+        };
+        assert_eq!(reversed.value(-1), 0);
+        let past_the_word = VarbitDef {
+            varp: 0,
+            lsb: 40,
+            msb: 255,
+        };
+        assert_eq!(past_the_word.value(-1), 0);
     }
 
     #[test]

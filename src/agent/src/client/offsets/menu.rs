@@ -96,10 +96,7 @@ fn entry_constructor(pe: &Pe, priority: u32) -> Result<EntryLayout, ScanError> {
         if let Some(ret) = instrs.iter().position(|i| i.mnemonic() == Mnemonic::Ret) {
             instrs.truncate(ret + 1);
         }
-        let vtable = instrs.iter().find_map(|lea| {
-            (lea.mnemonic() == Mnemonic::Lea && lea.is_ip_rel_memory_operand())
-                .then(|| lea.ip_rel_memory_address() as u32)
-        });
+        let vtable = instrs.iter().find_map(rip_lea);
         let mut inline: HashMap<Register, u32> = HashMap::new();
         let mut strings = Vec::new();
         let mut ids = None;
@@ -296,8 +293,7 @@ fn slot_owner_vtable(pe: &Pe, entry_constructor: u32, slot: u32) -> Result<u32, 
             continue;
         }
         found.extend(instrs.windows(2).filter_map(|w| {
-            let vtable = (w[0].mnemonic() == Mnemonic::Lea && w[0].is_ip_rel_memory_operand())
-                .then(|| w[0].ip_rel_memory_address() as u32)?;
+            let vtable = rip_lea(&w[0])?;
             (w[1].mnemonic() == Mnemonic::Mov
                 && w[1].op0_kind() == OpKind::Memory
                 && w[1].memory_base() == Register::RCX
@@ -311,23 +307,19 @@ fn slot_owner_vtable(pe: &Pe, entry_constructor: u32, slot: u32) -> Result<u32, 
 }
 
 pub fn find_menu_click(pe: &Pe, menu: &Menu) -> Result<MenuClick, ScanError> {
-    let mut seen = HashSet::new();
-    let mut found = Vec::new();
-    for hit in dword_hits(pe, menu.option)
-        .into_iter()
-        .filter(|&hit| lea_rdx_disp32(pe, hit))
-    {
-        let Some((begin, end)) = pe.function_containing(hit) else {
-            continue;
-        };
-        if seen.insert(begin) {
-            found.extend(click_setter(
-                &function_instrs(pe, begin, end.min(begin + 0x800)),
-                menu,
-            ));
-        }
-    }
-    let (entry, click_x, counter) = one(found)?;
+    let setters = functions_containing(
+        pe,
+        dword_hits(pe, menu.option)
+            .into_iter()
+            .filter(|&hit| lea_rdx_disp32(pe, hit)),
+    )
+    .into_iter()
+    .filter_map(|(begin, end)| {
+        click_setter(&function_instrs(pe, begin, end.min(begin + 0x800)), menu)
+    })
+    .collect();
+    let (entry, click_x, counter) = one(setters)?;
+
     let constructor = entry_constructor(pe, menu.priority)?.function;
     let minimenu_vtable = slot_owner_vtable(pe, constructor, entry)?;
     Ok(MenuClick {
@@ -496,22 +488,13 @@ pub fn find_selection(pe: &Pe, menu: &Menu) -> Result<Selection, ScanError> {
             getters.insert(begin);
         }
     }
-    let heads: Vec<(u32, Vec<Instruction>)> = pe
-        .functions
-        .iter()
-        .map(|&(begin, end)| {
-            (
-                begin,
-                decode_at(pe, begin, 8)
-                    .into_iter()
-                    .filter(|i| i.ip32() < end)
-                    .collect(),
-            )
-        })
-        .collect();
-    for (begin, instrs) in &heads {
-        if let Some(offset) = sub_object_getter(instrs, &getters) {
-            sub_objects.insert(*begin, offset);
+    for &(begin, end) in &pe.functions {
+        let head: Vec<Instruction> = decode_at(pe, begin, 8)
+            .into_iter()
+            .filter(|i| i.ip32() < end)
+            .collect();
+        if let Some(offset) = sub_object_getter(&head, &getters) {
+            sub_objects.insert(begin, offset);
         }
     }
     let calls = direct_calls(pe);
@@ -714,7 +697,7 @@ fn margin_store(instrs: &[Instruction], field: u32) -> Option<(u32, i32)> {
     let head = &instrs[..instrs.len().min(20)];
     let vtable = head.windows(4).find_map(|w| {
         let lea = &w[0];
-        (lea.mnemonic() == Mnemonic::Lea && lea.is_ip_rel_memory_operand()).then_some(())?;
+        let vtable = rip_lea(lea)?;
         w[1..]
             .iter()
             .any(|i| {
@@ -725,7 +708,7 @@ fn margin_store(instrs: &[Instruction], field: u32) -> Option<(u32, i32)> {
                     && i.op1_kind() == OpKind::Register
                     && i.op1_register() == lea.op0_register()
             })
-            .then(|| lea.ip_rel_memory_address() as u32)
+            .then_some(vtable)
     })?;
     let margin = head.iter().find_map(|i| {
         (i.mnemonic() == Mnemonic::Mov
@@ -739,7 +722,7 @@ fn margin_store(instrs: &[Instruction], field: u32) -> Option<(u32, i32)> {
     Some((vtable, margin))
 }
 
-fn calls(pe: &Pe, function: u32, target: u32) -> bool {
+fn method_calls(pe: &Pe, function: u32, target: u32) -> bool {
     decode_at(pe, function, 200)
         .iter()
         .take_while(|i| !is_ret(i))
@@ -816,7 +799,7 @@ fn find_margin(pe: &Pe, base: u64, check: u32, field: u32) -> Result<i32, ScanEr
         };
         if (0..16)
             .filter_map(|k| method_at(pe, base, vtable as usize + k * 8))
-            .any(|method| calls(pe, method as u32, check))
+            .any(|method| method_calls(pe, method as u32, check))
         {
             found.push(margin);
         }
@@ -901,11 +884,7 @@ pub fn find_menu_layout(pe: &Pe, click: &MenuClick) -> Result<MenuLayout, ScanEr
         .collect())?;
     let (check, field) = find_stay_open_check(pe, function)?;
     let margin = find_margin(pe, base, check, field)?;
-    let end = pe
-        .functions
-        .iter()
-        .find(|&&(begin, _)| begin == check)
-        .map_or(check, |&(_, end)| end);
+    let end = pe.function_containing(check).map_or(check, |(_, end)| end);
     let (path, open_row) =
         open_path(&function_instrs(pe, check, end)).ok_or(ScanError::NotFound)?;
     Ok(MenuLayout {
@@ -923,8 +902,12 @@ pub fn find_menu(pe: &Pe) -> Result<Menu, ScanError> {
     let (cancel, priority, kind) = ranker(pe)?;
     let entry = entry_constructor(pe, priority)?;
     let (entry_size, inner) = entry_size(pe, entry.function)?;
-    let outer = one(calls_to(pe, inner)
-        .filter_map(|site| pe.function_containing(site).map(|(b, _)| b))
+    if entry_size == 0 {
+        return Err(ScanError::NotFound);
+    }
+
+    let outer = one(caller_functions(pe, inner)
+        .map(|(begin, _)| begin)
         .collect())?;
     let object = one(stored_after_call(pe, outer))?;
     Ok(Menu {

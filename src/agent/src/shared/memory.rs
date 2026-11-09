@@ -40,10 +40,10 @@ pub fn version() -> [u8; VERSION_LEN] {
 }
 
 #[repr(C, packed)]
-pub struct SharedMemory {
-    pub header: Header,
-    pub img: [u8; IMAGE_DATA_SIZE],
-    pub overlay: [[u8; IMAGE_DATA_SIZE]; OVERLAY_SLOTS],
+struct SharedMemory {
+    header: Header,
+    img: [u8; IMAGE_DATA_SIZE],
+    overlay: [[u8; IMAGE_DATA_SIZE]; OVERLAY_SLOTS],
 }
 
 const BUFFER_SIZE: usize = size_of::<SharedMemory>();
@@ -56,10 +56,6 @@ pub struct MemoryManager {
 
 unsafe impl Send for MemoryManager {}
 unsafe impl Sync for MemoryManager {}
-
-fn mapping_name(pid: u32) -> CString {
-    CString::new(shared_memory_name(pid)).unwrap()
-}
 
 unsafe fn map_view(hmap: HANDLE) -> *mut SharedMemory {
     let view = MapViewOfFile(hmap, FILE_MAP_ALL_ACCESS, 0, 0, BUFFER_SIZE);
@@ -95,7 +91,7 @@ unsafe fn initial_cursor(pid: u32) -> (u8, [u8; 3], u8) {
 impl MemoryManager {
     pub unsafe fn create_map(pid: u32) -> Self {
         let version = version();
-        let name = mapping_name(pid);
+        let name = CString::new(shared_memory_name(pid)).unwrap();
         let hmap = CreateFileMappingA(
             HANDLE::default(),
             None,

@@ -28,19 +28,11 @@ const BOX_HEIGHT: u32 = 19;
 const PANEL_WIDTH: u32 = 765;
 const PANEL_HEIGHT: u32 = 480;
 
-fn immediate(instr: &Instruction) -> Option<u32> {
-    matches!(
-        instr.op1_kind(),
-        OpKind::Immediate8
-            | OpKind::Immediate8to32
-            | OpKind::Immediate32
-            | OpKind::Immediate8to64
-            | OpKind::Immediate32to64
-    )
-    .then(|| instr.immediate(1) as u32)
+fn immediate_u32(instr: &Instruction) -> Option<u32> {
+    immediate(instr).map(|value| value as u32)
 }
 
-fn global_store(instr: &Instruction) -> Option<u32> {
+fn stores_global(instr: &Instruction) -> Option<u32> {
     (instr.mnemonic() == Mnemonic::Mov
         && instr.op0_kind() == OpKind::Memory
         && instr.is_ip_rel_memory_operand())
@@ -49,23 +41,20 @@ fn global_store(instr: &Instruction) -> Option<u32> {
 
 fn layout_function(pe: &Pe) -> Result<(u32, u32), ScanError> {
     let mut found = Vec::new();
-    for site in dword_hits(pe, PANEL_WIDTH) {
-        let Some((begin, end)) = pe.function_containing(site) else {
-            continue;
-        };
+    for (begin, end) in functions_with_dword(pe, PANEL_WIDTH) {
         let instrs = function_instrs(pe, begin, end);
         let stores = |value: u32| {
             instrs.iter().any(|i| {
                 i.mnemonic() == Mnemonic::Mov
                     && i.op0_kind() == OpKind::Memory
                     && !i.is_ip_rel_memory_operand()
-                    && immediate(i) == Some(value)
+                    && immediate_u32(i) == Some(value)
             })
         };
         let sets_height = instrs.iter().any(|i| {
             i.mnemonic() == Mnemonic::Mov
                 && i.op0_kind() == OpKind::Register
-                && immediate(i) == Some(PANEL_HEIGHT)
+                && immediate_u32(i) == Some(PANEL_HEIGHT)
         });
         if !(stores(BOX_WIDTH) && stores(BOX_HEIGHT) && sets_height) {
             continue;
@@ -88,7 +77,6 @@ fn draw_function(pe: &Pe, layout: u32) -> Result<(u32, u32), ScanError> {
         end,
         instrs,
         at,
-        ..
     } in callers(pe, layout)
     {
         let passes_global = at > 0 && {
@@ -108,9 +96,9 @@ fn hovered(instrs: &[Instruction]) -> Result<u32, ScanError> {
     one(instrs
         .iter()
         .filter(|i| {
-            i.memory_size() == iced_x86::MemorySize::UInt32 && immediate(i) == Some(u32::MAX)
+            i.memory_size() == iced_x86::MemorySize::UInt32 && immediate_u32(i) == Some(u32::MAX)
         })
-        .filter_map(global_store)
+        .filter_map(stores_global)
         .collect())
 }
 
@@ -119,7 +107,7 @@ fn max_offset(instrs: &[Instruction]) -> Result<u32, ScanError> {
         .iter()
         .enumerate()
         .filter(|(_, i)| i.mnemonic() == Mnemonic::Idiv)
-        .filter_map(|(at, _)| instrs[at + 1..].iter().take(6).find_map(global_store))
+        .filter_map(|(at, _)| instrs[at + 1..].iter().take(6).find_map(stores_global))
         .collect())
 }
 
@@ -191,7 +179,7 @@ fn world_fields(
         .filter(|w| {
             w[1].op0_kind() == OpKind::Register
                 && w[1].op0_register() == w[0].op0_register()
-                && immediate(&w[1]) == Some(u32::MAX)
+                && immediate_u32(&w[1]) == Some(u32::MAX)
         })
         .filter_map(|w| field(&w[0]))
         .collect())?;
@@ -237,7 +225,7 @@ fn world_fields(
                         && i.op0_kind() == OpKind::Register
                         && i.op0_register() == element
                 })
-                .and_then(immediate)
+                .and_then(immediate_u32)
         })
         .collect())?;
 
@@ -262,18 +250,19 @@ fn open_function(pe: &Pe, max_offset: u32) -> Result<(u32, u32), ScanError> {
         let instrs = function_instrs(pe, begin, end);
         let Some(at) = instrs
             .iter()
-            .position(|i| global_store(i) == Some(max_offset) && i.op1_kind() == OpKind::Register)
+            .position(|i| stores_global(i) == Some(max_offset) && i.op1_kind() == OpKind::Register)
         else {
             continue;
         };
         let zero = instrs[at].op1_register();
         let before = &instrs[at.saturating_sub(4)..at];
         let offset = before.iter().rev().find_map(|i| {
-            global_store(i).filter(|_| i.op1_kind() == OpKind::Register && i.op1_register() == zero)
+            stores_global(i)
+                .filter(|_| i.op1_kind() == OpKind::Register && i.op1_register() == zero)
         });
         let open = before.iter().find_map(|i| {
-            global_store(i).filter(|_| {
-                i.memory_size() == iced_x86::MemorySize::UInt8 && immediate(i) == Some(1)
+            stores_global(i).filter(|_| {
+                i.memory_size() == iced_x86::MemorySize::UInt8 && immediate_u32(i) == Some(1)
             })
         });
         if let (Some(offset), Some(open)) = (offset, open) {

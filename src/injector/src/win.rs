@@ -83,9 +83,8 @@ use ipc::{
 };
 
 use crate::{
-    CONNECT_TIMEOUT, Client, Connection, DisplayName, GameState, Image, ItemIconRequest,
-    LoadReport, MODULE_PREFIX, Overlay, Position, Rgba, TotalXp, UNLOAD_TIMEOUT, Widget,
-    dll_version,
+    Client, Connection, DisplayName, GameState, Image, ItemIconRequest, LoadReport, Overlay,
+    Position, Rgba, TotalXp, Widget, dll_version,
     memory::Memory,
     projection::{self, Terrain, Via},
     state,
@@ -95,6 +94,9 @@ use crate::{
     world_select::WorldSelect,
 };
 
+const MODULE_PREFIX: &str = "agent";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const LOAD_LIBRARY_TIMEOUT_MS: u32 = 10_000;
 
 struct Handle(HANDLE);
@@ -145,7 +147,7 @@ struct SlotGuard<'a>(&'a Handle);
 impl<'a> SlotGuard<'a> {
     fn lock(mutex: &'a Handle, timeout: Duration) -> Option<Self> {
         matches!(
-            unsafe { WaitForSingleObject(mutex.0, timeout.as_millis() as u32) },
+            unsafe { WaitForSingleObject(mutex.0, wait_ms(timeout)) },
             WAIT_OBJECT_0 | WAIT_ABANDONED
         )
         .then_some(Self(mutex))
@@ -175,6 +177,9 @@ struct View {
     address: NonNull<c_void>,
     _mapping: Handle,
 }
+
+unsafe impl Send for View {}
+unsafe impl Sync for View {}
 
 impl View {
     fn new(mapping: Handle, access: FILE_MAP, size: usize) -> io::Result<Self> {
@@ -285,28 +290,31 @@ pub(crate) fn class_is(hwnd: HWND, name: &str) -> bool {
     from_wide(&class[..len.max(0) as usize]) == name
 }
 
-pub fn list_clients() -> Vec<Client> {
+fn each_jag_window(mut visit: impl FnMut(HWND, u32) -> bool) {
     unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let found = unsafe { &mut *(lparam as *mut Vec<(u32, String)>) };
-
+        let visit = unsafe { &mut *(lparam as *mut &mut dyn FnMut(HWND, u32) -> bool) };
         if !class_is(hwnd, "JagWindow") {
             return 1;
         }
-
         let mut pid = 0;
         unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-        if found.iter().any(|(p, _)| *p == pid) {
-            return 1;
-        }
-
-        let mut title = [0u16; 256];
-        let len = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
-        found.push((pid, from_wide(&title[..len.max(0) as usize])));
-        1
+        visit(hwnd, pid).into()
     }
 
+    let mut visit: &mut dyn FnMut(HWND, u32) -> bool = &mut visit;
+    unsafe { EnumWindows(Some(callback), &mut visit as *mut _ as LPARAM) };
+}
+
+pub fn list_clients() -> Vec<Client> {
     let mut windows: Vec<(u32, String)> = Vec::new();
-    unsafe { EnumWindows(Some(callback), &mut windows as *mut _ as LPARAM) };
+    each_jag_window(|hwnd, pid| {
+        if !windows.iter().any(|(p, _)| *p == pid) {
+            let mut title = [0u16; 256];
+            let len = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+            windows.push((pid, from_wide(&title[..len.max(0) as usize])));
+        }
+        true
+    });
 
     windows
         .into_iter()
@@ -449,7 +457,7 @@ pub fn load(pid: u32, dll: &Path, cursor: Option<&crate::Cursor>) -> Result<Load
     }
     let mut replaced = None;
     if agent_module(&before).is_some() {
-        let current = connection(pid);
+        let current = fresh_connection(pid);
         if is_loaded(&before) || current.as_ref().is_some_and(|c| c.version == version) {
             if let Some(cursor) = cursor {
                 let _ = set_cursor(pid, cursor);
@@ -563,7 +571,7 @@ fn wait_for_connection(pid: u32, version: &str, timeout: Duration) -> Option<Con
     loop {
         let written =
             |c: &Connection| c.protocol != 0 && (c.version == version || !c.is_compatible());
-        if let Some(connection) = connection(pid).filter(written) {
+        if let Some(connection) = fresh_connection(pid).filter(written) {
             if connection.offsets_found.is_some() || !connection.is_compatible() {
                 return Some(connection);
             }
@@ -576,12 +584,28 @@ fn wait_for_connection(pid: u32, version: &str, timeout: Duration) -> Option<Con
     }
 }
 
-fn read_header(pid: u32) -> Option<Result<Header, Incompatible>> {
-    let mapping = open_mapping(shared_memory_name(pid), FILE_MAP_READ)?;
-    let view = View::new(mapping, FILE_MAP_READ, HEADER_SIZE).ok()?;
+fn header_in(view: &View) -> Result<Header, Incompatible> {
     let mut header = [0u8; HEADER_SIZE];
     unsafe { copy_nonoverlapping(view.ptr::<u8>().as_ptr(), header.as_mut_ptr(), HEADER_SIZE) };
-    Some(Header::from_bytes(&header))
+    Header::from_bytes(&header)
+}
+
+fn fresh_header(pid: u32) -> Option<Result<Header, Incompatible>> {
+    let mapping = open_mapping(shared_memory_name(pid), FILE_MAP_READ)?;
+    Some(header_in(
+        &View::new(mapping, FILE_MAP_READ, HEADER_SIZE).ok()?,
+    ))
+}
+
+fn read_header(pid: u32) -> Option<Result<Header, Incompatible>> {
+    session(pid)
+        .ok()
+        .and_then(|session| session.shared(pid, |_| String::new()).ok().map(header_in))
+        .or_else(|| fresh_header(pid))
+}
+
+fn fresh_connection(pid: u32) -> Option<Connection> {
+    Some(Connection::from_header(fresh_header(pid)?))
 }
 
 pub fn connection(pid: u32) -> Option<Connection> {
@@ -665,10 +689,33 @@ struct Session {
     slot: OnceLock<Option<Handle>>,
     reply: OnceLock<Option<Handle>>,
     frame: OnceLock<Option<Handle>>,
+    shared: OnceLock<View>,
+    requests: Mutex<HashMap<u32, Arc<Handle>>>,
 }
 
-unsafe impl Send for Session {}
-unsafe impl Sync for Session {}
+impl Session {
+    fn shared(
+        &self,
+        pid: u32,
+        unmapped: impl FnOnce(io::Error) -> String,
+    ) -> Result<&View, String> {
+        if let Some(view) = self.shared.get() {
+            return Ok(view);
+        }
+        let view = shared_view(pid, overlay_offset(ipc::OVERLAY_SLOTS), unmapped)?;
+        Ok(self.shared.get_or_init(|| view))
+    }
+
+    fn request_mutex(&self, pid: u32, message: u32) -> Option<Arc<Handle>> {
+        let mut requests = lock(&self.requests);
+        if let Some(mutex) = requests.get(&message) {
+            return Some(mutex.clone());
+        }
+        let mutex = Arc::new(create_mutex(request_mutex_name(pid, message))?);
+        requests.insert(message, mutex.clone());
+        Some(mutex)
+    }
+}
 
 const SESSION_TTL: Duration = Duration::from_millis(500);
 
@@ -691,6 +738,8 @@ fn session(pid: u32) -> Result<Arc<Session>, String> {
         slot: OnceLock::new(),
         reply: OnceLock::new(),
         frame: OnceLock::new(),
+        shared: OnceLock::new(),
+        requests: Mutex::new(HashMap::new()),
     });
     sessions.push((pid, session.clone()));
     Ok(session)
@@ -729,7 +778,8 @@ fn ask<S>(
     mut status: impl FnMut(Shared<'_>) -> Option<(u32, S)>,
 ) -> Result<S, String> {
     let session = session(pid)?;
-    let mutex = create_mutex(request_mutex_name(pid, message))
+    let mutex = session
+        .request_mutex(pid, message)
         .ok_or("cannot take the agent's request slot")?;
     let Some(_slot) = SlotGuard::lock(&mutex, REQUEST_TIMEOUT) else {
         return Err("the agent is busy with another request".to_owned());
@@ -777,9 +827,14 @@ pub fn set_display_name(pid: u32, name: &str) -> Result<DisplayName, String> {
         name_status::KEPT => Ok(DisplayName::Kept { real }),
         name_status::WAITING => Ok(DisplayName::Waiting),
         name_status::OFF => Ok(DisplayName::Off),
-        name_status::LONG_NAME => Err("the client keeps this player's name as a long string, which can't be replaced safely".into()),
-        name_status::OTHER_THREAD => Err("the client runs its game on another thread than its window's, so the name isn't replaced".into()),
-        name_status::NOT_FOUND => Err("agent didn't find the client's appearance decoder, so it can't keep the name".into()),
+        name_status::LONG_NAME => Err(
+            "the client keeps this player's name as a long string, which can't be replaced safely"
+                .into(),
+        ),
+        name_status::OTHER_THREAD => Err(format!("{OTHER_THREAD}, so the name isn't replaced")),
+        name_status::NOT_FOUND => Err(
+            "agent didn't find the client's appearance decoder, so it can't keep the name".into(),
+        ),
         other => Err(format!("unknown display name status {other}")),
     }
 }
@@ -803,10 +858,18 @@ pub fn set_total_xp(pid: u32, offset: Option<i64>) -> Result<TotalXp, String> {
         },
     )?;
     match status {
-        total_xp_status::ON => Ok(TotalXp::Fake { offset: request.offset, real }),
+        total_xp_status::ON => Ok(TotalXp::Fake {
+            offset: request.offset,
+            real,
+        }),
         total_xp_status::OFF => Ok(TotalXp::Off),
-        total_xp_status::NOT_FOUND => Err("agent didn't find the client's component invalidation, so it can't fake the total XP".into()),
-        total_xp_status::OTHER_THREAD => Err("the client runs its game on another thread than its window's, so the total XP isn't faked".into()),
+        total_xp_status::NOT_FOUND => Err(
+            "agent didn't find the client's component invalidation, so it can't fake the total XP"
+                .into(),
+        ),
+        total_xp_status::OTHER_THREAD => {
+            Err(format!("{OTHER_THREAD}, so the total XP isn't faked"))
+        }
         other => Err(format!("unknown total XP status {other}")),
     }
 }
@@ -864,10 +927,19 @@ fn names(
         )?;
         match status.status {
             item_name_status::OK => names.extend((0..status.count as usize).map(|i| {
-                status.name(i).filter(|name| !name.is_empty()).map(game_text)
+                status
+                    .name(i)
+                    .filter(|name| !name.is_empty())
+                    .map(game_text)
             })),
-            item_name_status::NOT_FOUND => return Err("agent didn't find what it needs in the client to look these up".into()),
-            item_name_status::OTHER_THREAD => return Err("the client runs its game on another thread than its window's, so nothing can be looked up".into()),
+            item_name_status::NOT_FOUND => {
+                return Err(
+                    "agent didn't find what it needs in the client to look these up".into(),
+                );
+            }
+            item_name_status::OTHER_THREAD => {
+                return Err(format!("{OTHER_THREAD}, so nothing can be looked up"));
+            }
             item_name_status::TOO_MANY => return Err("too many ids in one request".into()),
             other => return Err(format!("unknown name status {other}")),
         }
@@ -959,7 +1031,16 @@ fn project_in_client(pid: u32, points: &[[i32; 3]]) -> Result<Vec<[f32; 2]>, Str
             |shared| shared.read_project_reply(100).map(|r| (r.sequence, r)),
         )?;
         match reply.status {
-            project_status::OK => screen.extend_from_slice(first(&reply.points, reply.count)),
+            project_status::OK if reply.count as usize == batch.len() => {
+                screen.extend_from_slice(&reply.points[..batch.len()]);
+            }
+            project_status::OK => {
+                return Err(format!(
+                    "agent projected {} of {} points",
+                    reply.count,
+                    batch.len()
+                ));
+            }
             project_status::NOT_IN_GAME => return Err("not logged in".into()),
             project_status::NOT_FOUND => {
                 return Err("agent didn't find the client's projection".into());
@@ -1076,7 +1157,7 @@ fn locs_reply(pid: u32, request: i32) -> Result<Box<LocsReply>, String> {
     ask(
         pid,
         ipc::input::LOCS_MESSAGE,
-        |shared| shared.write_locs_request(request),
+        |shared| shared.write_locs_request(&request),
         |shared| {
             shared
                 .read_locs_reply_into(&mut reply, 100)
@@ -1134,7 +1215,7 @@ pub fn locs(pid: u32, plane: Option<i32>) -> Result<Vec<crate::Loc>, String> {
     Ok(decode_locs_reply(&*locs_reply(pid, request)?))
 }
 
-pub fn clickable_locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
+fn clickable_locs(pid: u32) -> Result<Vec<crate::Loc>, String> {
     use ipc::state::locs_request::*;
     Ok(decode_locs_reply(&*locs_reply(
         pid,
@@ -1499,7 +1580,7 @@ fn of_client_mut<K, V>(cache: &mut PerClient<K, V>, pid: u32) -> &mut HashMap<K,
 
 static VARBITS: Mutex<PerClient<i32, Option<crate::config::VarbitDef>>> = Mutex::new(None);
 
-pub fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>, String> {
+fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>, String> {
     if let Some(def) = of_client(&lock(&VARBITS), pid).and_then(|defs| defs.get(&id)) {
         return Ok(*def);
     }
@@ -1517,10 +1598,12 @@ pub fn varbit_def(pid: u32, id: i32) -> Result<Option<crate::config::VarbitDef>,
     Ok(def)
 }
 
+fn known_varbit(pid: u32, id: i32) -> Result<crate::config::VarbitDef, String> {
+    varbit_def(pid, id)?.ok_or_else(|| format!("the cache has no varbit {id}"))
+}
+
 pub fn varbit(pid: u32, id: i32) -> Result<Option<i32>, String> {
-    let Some(def) = varbit_def(pid, id)? else {
-        return Err(format!("the cache has no varbit {id}"));
-    };
+    let def = known_varbit(pid, id)?;
     Ok(varp_value(pid, def.varp as usize)?.map(|varp| def.value(varp)))
 }
 
@@ -1567,22 +1650,31 @@ fn shown_locs(pid: u32, ids: &[u32]) -> Result<HashMap<u32, ShownLoc>, String> {
             .collect())
     };
     let mut shown = HashMap::new();
-    let mut transformed: Vec<(u32, u32)> = Vec::new();
+    let mut transforming = Vec::new();
     for (&id, def) in ids.iter().zip(lookup(ids)?) {
         let Some(def) = def else { continue };
         match &def.1.transforms {
             None => {
                 shown.insert(id, def);
             }
-            Some(t) => {
-                let value = match (t.varbit, t.varp) {
-                    (Some(bit), _) => varbit(pid, bit as i32)?,
-                    (None, Some(varp)) => varp_value(pid, varp as usize)?,
-                    (None, None) => None,
-                };
-                if let Some(to) = t.pick(value) {
-                    transformed.push((id, to));
+            Some(t) => transforming.push((id, t.clone())),
+        }
+    }
+    let mut transformed: Vec<(u32, u32)> = Vec::new();
+    if !transforming.is_empty() {
+        let varps = varps(pid)?;
+        let varp = |index: usize| varps.as_ref().and_then(|v| v.get(index).copied());
+        for (id, t) in transforming {
+            let value = match (t.varbit, t.varp) {
+                (Some(bit), _) => {
+                    let def = known_varbit(pid, bit as i32)?;
+                    varp(def.varp as usize).map(|v| def.value(v))
                 }
+                (None, Some(index)) => varp(index as usize),
+                (None, None) => None,
+            };
+            if let Some(to) = t.pick(value) {
+                transformed.push((id, to));
             }
         }
     }
@@ -1605,8 +1697,8 @@ fn cache_placements(
     if x1 > x2 || y1 > y2 || x1 < 0 || y1 < 0 {
         return Err(format!("{x1}, {y1} to {x2}, {y2} isn't an area"));
     }
-    let squares = ((x2 >> 6) - (x1 >> 6) + 1) * ((y2 >> 6) - (y1 >> 6) + 1);
-    if squares > CACHE_LOCS_MAX_SQUARES {
+    let squares = i64::from((x2 >> 6) - (x1 >> 6) + 1) * i64::from((y2 >> 6) - (y1 >> 6) + 1);
+    if squares > i64::from(CACHE_LOCS_MAX_SQUARES) {
         return Err(format!(
             "the area covers {squares} map squares, at most {CACHE_LOCS_MAX_SQUARES}"
         ));
@@ -1778,11 +1870,7 @@ fn cache_climbables(
 
 fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::WorldCollision, String> {
     use crate::{cache::*, collision::*};
-    let files: Vec<[i32; 2]> = regions
-        .iter()
-        .flat_map(|&r| [[r as i32, 0], [r as i32, 1]])
-        .collect();
-    let data = cache_files(pid, MAPS_INDEX, &files)?;
+    let data = cache_files(pid, MAPS_INDEX, &map_square_files(regions))?;
     let mut squares = Vec::new();
     for (pair, &region) in data.as_chunks::<2>().0.iter().zip(regions) {
         let (Some(terrain), Some(locs)) = (&pair[0], &pair[1]) else {
@@ -1816,6 +1904,13 @@ fn world_collision(pid: u32, regions: &[u32]) -> Result<crate::collision::WorldC
     Ok(world)
 }
 
+fn map_square_files(regions: &[u32]) -> Vec<[i32; 2]> {
+    regions
+        .iter()
+        .flat_map(|&r| [[r as i32, 0], [r as i32, 1]])
+        .collect()
+}
+
 const WORLD_SQUARE_BATCH: usize = 16;
 const WORLD_FORMAT: u64 = 8;
 
@@ -1829,7 +1924,7 @@ fn world_cache_dir() -> PathBuf {
         .join("injector")
 }
 
-pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
+fn world_movement(pid: u32) -> Result<WorldMovement, String> {
     use crate::{cache::*, collision::*};
     if let Some((_, _, world)) = lock(&WORLD).as_ref().filter(|(_, p, _)| *p == pid) {
         return Ok(world.clone());
@@ -1891,10 +1986,7 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
         world.add_square(region);
     }
     for (done, regions) in maps.ids.chunks(WORLD_SQUARE_BATCH).enumerate() {
-        let files: Vec<[i32; 2]> = regions
-            .iter()
-            .flat_map(|&r| [[r as i32, 0], [r as i32, 1]])
-            .collect();
+        let files = map_square_files(regions);
         let data = cache_files_batched(pid, MAPS_INDEX, &files, files.len())?;
         for (pair, &region) in data.as_chunks::<2>().0.iter().zip(regions) {
             let Some(settings) = pair[0].as_deref().and_then(decode_terrain) else {
@@ -1937,7 +2029,7 @@ pub fn world_movement(pid: u32) -> Result<WorldMovement, String> {
 }
 
 static WORLD_MAP: Mutex<Option<KeptWorldMap>> = Mutex::new(None);
-type KeptWorldMap = ((usize, u64), Arc<crate::landmass::WorldMap>);
+type KeptWorldMap = ((WorldMovement, u64), Arc<crate::landmass::WorldMap>);
 
 const LANDMASS_RADIUS: i32 = 3;
 
@@ -1951,9 +2043,12 @@ pub fn landmasses(pid: u32, points: &[[i32; 3]]) -> Result<Vec<u32>, String> {
 
 fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
     let world = world_movement(pid)?;
-    let id = (Arc::as_ptr(&world) as usize, crate::transports::version());
+    let version = crate::transports::version();
     let mut kept = lock(&WORLD_MAP);
-    if let Some((_, map)) = kept.as_ref().filter(|(key, _)| *key == id) {
+    if let Some((_, map)) = kept
+        .as_ref()
+        .filter(|((w, v), _)| Arc::ptr_eq(w, &world) && *v == version)
+    {
         return Ok(map.clone());
     }
     let started = Instant::now();
@@ -1969,9 +2064,10 @@ fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
         closed.insert((o, (d.0 - o.0, d.1 - o.1)));
         closed.insert((d, (o.0 - d.0, o.1 - d.1)));
     }
+    let both_ways: HashSet<_> = doors.iter().copied().collect();
     let exits: Vec<_> = doors
         .iter()
-        .filter(|&&(o, d)| !doors.contains(&(d, o)))
+        .filter(|&&(o, d)| !both_ways.contains(&(d, o)))
         .map(|&(o, d)| (d, o))
         .collect();
     let masses = crate::landmass::Landmasses::build(&world, &closed);
@@ -1995,7 +2091,7 @@ fn world_map(pid: u32) -> Result<Arc<crate::landmass::WorldMap>, String> {
         map.masses.count,
         started.elapsed().as_secs_f32()
     );
-    *kept = Some((id, map.clone()));
+    *kept = Some(((world, version), map.clone()));
     Ok(map)
 }
 
@@ -2055,8 +2151,9 @@ static SEEN_SCENES: Mutex<Vec<Arc<crate::scene_collision::SceneCollision>>> =
     Mutex::new(Vec::new());
 const SEEN_SCENES_KEPT: usize = 4;
 
-static REGION_FLAGS: Mutex<Vec<(u32, Arc<crate::collision::WorldCollision>)>> =
-    Mutex::new(Vec::new());
+type RegionFlags = HashMap<u32, Arc<crate::collision::WorldCollision>>;
+
+static REGION_FLAGS: LazyLock<Mutex<RegionFlags>> = LazyLock::new(Default::default);
 
 fn whole_squares((x1, y1, x2, y2): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {
     use crate::collision::REGION_SIZE;
@@ -2069,26 +2166,15 @@ fn whole_squares((x1, y1, x2, y2): (i32, i32, i32, i32)) -> (i32, i32, i32, i32)
     )
 }
 
-fn region_flags(
-    regions: &[(u32, Arc<crate::collision::WorldCollision>)],
-    plane: i32,
-    x: i32,
-    y: i32,
-) -> Option<u32> {
+fn region_flags(regions: &RegionFlags, plane: i32, x: i32, y: i32) -> Option<u32> {
     use crate::collision::{REGION_SIZE, region_id};
     let region = region_id(x.div_euclid(REGION_SIZE), y.div_euclid(REGION_SIZE));
-    regions
-        .iter()
-        .find(|(r, _)| *r == region)
-        .and_then(|(_, world)| world.flags(plane, x, y))
+    regions.get(&region)?.flags(plane, x, y)
 }
 
 const SCENE_EDGE: i32 = 4;
 
-fn cache_regions(
-    pid: u32,
-    (x1, y1, x2, y2): (i32, i32, i32, i32),
-) -> Result<Vec<(u32, Arc<crate::collision::WorldCollision>)>, String> {
+fn cache_regions(pid: u32, (x1, y1, x2, y2): (i32, i32, i32, i32)) -> Result<RegionFlags, String> {
     use crate::collision::{REGION_SIZE, region_id};
     let wanted: Vec<u32> = (x1.div_euclid(REGION_SIZE)..=x2.div_euclid(REGION_SIZE))
         .flat_map(|rx| {
@@ -2100,17 +2186,13 @@ fn cache_regions(
     let missing: Vec<u32> = wanted
         .iter()
         .copied()
-        .filter(|r| !cached.iter().any(|(c, _)| c == r))
+        .filter(|r| !cached.contains_key(r))
         .collect();
     if !missing.is_empty() {
         let world = Arc::new(world_collision(pid, &missing)?);
         cached.extend(missing.into_iter().map(|r| (r, world.clone())));
     }
-    Ok(cached
-        .iter()
-        .filter(|(r, _)| wanted.contains(r))
-        .cloned()
-        .collect())
+    Ok(wanted.iter().map(|r| (*r, cached[r].clone())).collect())
 }
 
 pub fn scene_route(
@@ -2155,13 +2237,16 @@ pub fn scene_route(
                 (x1, y1, x2, y2)
             } else {
                 whole_squares((
-                    x1.min(to.0 - 12),
-                    y1.min(to.1 - 12),
-                    x2.max(to.0 + 12),
-                    y2.max(to.1 + 12),
+                    x1.min(to.0.saturating_sub(12)),
+                    y1.min(to.1.saturating_sub(12)),
+                    x2.max(to.0.saturating_add(12)),
+                    y2.max(to.1.saturating_add(12)),
                 ))
             };
-            if bounds.2 - bounds.0 >= MAX_WINDOW || bounds.3 - bounds.1 >= MAX_WINDOW {
+            let span = |low: i32, high: i32| i64::from(high) - i64::from(low);
+            if span(bounds.0, bounds.2) >= i64::from(MAX_WINDOW)
+                || span(bounds.1, bounds.3) >= i64::from(MAX_WINDOW)
+            {
                 return Err(format!(
                     "{}, {} is too far from {}, {} for a route",
                     to.0, to.1, from.0, from.1
@@ -2281,7 +2366,7 @@ pub fn nav_plan(
     if state::current(&memory, &layout) != Some(LOGGED_IN) {
         return Err("not logged in".into());
     }
-    let (_, live) = crate::scene_collision::read_all(&memory, &layout)
+    let live = crate::scene_collision::read_all(&memory, &layout)
         .ok_or("the scene's collision maps can't be read")?;
     let scene = live
         .iter()
@@ -2411,7 +2496,7 @@ pub fn nav_plan(
                    goal: crate::nav::Point|
      -> Result<Option<crate::nav::Plan>, String> {
         let regions = if instance {
-            Vec::new()
+            RegionFlags::new()
         } else {
             let squares = |north: i32| {
                 cache_regions(
@@ -2525,32 +2610,25 @@ pub fn nav_plan(
     let actions = plan
         .actions
         .into_iter()
-        .map(|a| match a.what {
-            crate::nav::Use::Door(loc) => NavAction {
-                at: a.at + 1,
-                kind: "door",
-                to_plane: loc.plane,
-                loc,
-            },
-            crate::nav::Use::Climb(loc, _)
-                if request
-                    .door_options
-                    .iter()
-                    .any(|o| o.eq_ignore_ascii_case(&loc.option)) =>
-            {
-                NavAction {
-                    at: a.at + 1,
-                    kind: "door",
-                    to_plane: loc.plane,
-                    loc,
+        .map(|a| {
+            let (kind, to_plane, loc) = match a.what {
+                crate::nav::Use::Door(loc) => ("door", loc.plane, loc),
+                crate::nav::Use::Climb(loc, _)
+                    if request
+                        .door_options
+                        .iter()
+                        .any(|o| o.eq_ignore_ascii_case(&loc.option)) =>
+                {
+                    ("door", loc.plane, loc)
                 }
-            }
-            crate::nav::Use::Climb(loc, to_plane) => NavAction {
+                crate::nav::Use::Climb(loc, to_plane) => ("climb", to_plane, loc),
+            };
+            NavAction {
                 at: a.at + 1,
-                kind: "climb",
-                loc,
+                kind,
                 to_plane,
-            },
+                loc,
+            }
         })
         .collect();
     Ok(NavPlan {
@@ -2561,7 +2639,7 @@ pub fn nav_plan(
     })
 }
 
-pub type SceneCollision = (i32, i32, i32, Vec<Vec<u32>>);
+type SceneCollision = (i32, i32, i32, Vec<Vec<u32>>);
 
 pub fn scene_collision(pid: u32) -> Result<SceneCollision, String> {
     let (layout, memory) = reader(pid, part::COLLISION, "the scene's collision maps")?;
@@ -3013,7 +3091,7 @@ pub fn client_cycle(pid: u32) -> Result<i32, String> {
 }
 
 fn read_words(memory: &ProcessMemory, address: u64, count: usize) -> Option<Vec<i32>> {
-    let mut bytes = vec![0u8; count * 4];
+    let mut bytes = vec![0u8; count.checked_mul(4)?];
     memory.read(address, &mut bytes).then(|| {
         bytes
             .as_chunks::<4>()
@@ -3072,9 +3150,7 @@ pub fn widget_words(
 
 pub fn widget_dump(pid: u32, count: usize) -> Result<Vec<(i32, i32, Vec<i32>)>, String> {
     let (layout, memory) = interfaces_reader(pid)?;
-    let root =
-        decode::state::root_interface(&memory, &layout, decode::state::current(&memory, &layout))
-            .ok_or("no root interface")?;
+    let root = decode::state::root_interface(&memory, &layout).ok_or("no root interface")?;
     Ok(
         decode::widgets::component_addresses(&memory, &layout.interfaces, root)
             .ok_or("can't list the components")?
@@ -3325,8 +3401,6 @@ pub struct PacketWatcher {
     next: u64,
 }
 
-unsafe impl Send for PacketWatcher {}
-
 impl PacketWatcher {
     pub fn new(pid: u32) -> Result<Self, String> {
         let view = PACKET_LOG.open(pid, FILE_MAP_READ | FILE_MAP_WRITE, RELOAD)?;
@@ -3360,7 +3434,7 @@ impl PacketWatcher {
     }
 
     fn pending(&self) -> bool {
-        unsafe { packet_log::written(self.log()) > self.next }
+        self.written() > self.next
     }
 
     pub fn read(&mut self, limit: usize) -> packet_log::Page {
@@ -3564,7 +3638,7 @@ pub fn draw_batch(pid: u32, overlays: &[Overlay]) -> Result<(), String> {
 
 pub(crate) fn paint_overlay(
     pid: u32,
-    paint: impl FnOnce(&mut dyn FnMut(i32, i32, Rgba)),
+    paint: impl FnOnce([i32; 2], &mut dyn FnMut(i32, i32, Rgba)),
 ) -> Result<(), String> {
     with_overlay(
         pid,
@@ -3572,7 +3646,9 @@ pub(crate) fn paint_overlay(
         true,
         None,
         |buf, width, height| {
-            paint(&mut |x, y, color| unsafe { put_pixel(buf, width, height, x, y, color) })
+            paint([width, height], &mut |x, y, color| unsafe {
+                put_pixel(buf, width, height, x, y, color)
+            })
         },
     )
 }
@@ -3608,20 +3684,14 @@ const HOVER_RANGE: i32 = 16;
 const LOADING_INSET: i32 = 16;
 const GRID_RADIUS: i32 = 32;
 
+const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Rgba {
+    Rgba { r, g, b, a }
+}
+
 const STROKE_WIDTH: i32 = 2;
 const SCREEN_LIMIT: f32 = 100_000.0;
-const LABEL_SHADOW: Rgba = Rgba {
-    r: 0,
-    g: 0,
-    b: 0,
-    a: 255,
-};
-const TEXT_COLOR: Rgba = Rgba {
-    r: 255,
-    g: 255,
-    b: 255,
-    a: 255,
-};
+const LABEL_SHADOW: Rgba = rgba(0, 0, 0, 255);
+const TEXT_COLOR: Rgba = rgba(255, 255, 255, 255);
 const LABEL_SCALE: i32 = 2;
 const NPC_LABEL_DEFAULT_HEIGHT: i32 = 200;
 const NPC_LABEL_OFFSET: i32 = 40;
@@ -3629,12 +3699,7 @@ const TEXT_LEFT: i32 = 8;
 const UP_TEXT_HEIGHT: f32 = 20.0;
 const TEXT_MARGIN: i32 = 10;
 const TEXT_PADDING: i32 = 4;
-const TEXT_BACKGROUND: Rgba = Rgba {
-    r: 64,
-    g: 64,
-    b: 64,
-    a: 150,
-};
+const TEXT_BACKGROUND: Rgba = rgba(64, 64, 64, 150);
 const LAYERS: [&str; 22] = [
     "players",
     "world-entities",
@@ -3660,128 +3725,28 @@ const LAYERS: [&str; 22] = [
     "tile-location",
 ];
 
-const PLAYER_TILE_COLOR: Rgba = Rgba {
-    r: 41,
-    g: 98,
-    b: 255,
-    a: 255,
-};
-const LOCAL_PLAYER_TILE_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 184,
-    b: 212,
-    a: 255,
-};
-const NPC_TILE_COLOR: Rgba = Rgba {
-    r: 255,
-    g: 255,
-    b: 0,
-    a: 255,
-};
-const WORLD_ENTITY_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 0,
-    b: 255,
-    a: 255,
-};
-const INTERACTING_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 255,
-    b: 255,
-    a: 255,
-};
+const PLAYER_TILE_COLOR: Rgba = rgba(41, 98, 255, 255);
+const LOCAL_PLAYER_TILE_COLOR: Rgba = rgba(0, 184, 212, 255);
+const NPC_TILE_COLOR: Rgba = rgba(255, 255, 0, 255);
+const WORLD_ENTITY_COLOR: Rgba = rgba(0, 0, 255, 255);
+const INTERACTING_COLOR: Rgba = rgba(0, 255, 255, 255);
 const INTERACTING_SHIFT: f32 = 16.0;
 const ARROW_SCALE: f32 = 2.0;
-const OBJECT_TILE_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 255,
-    b: 0,
-    a: 255,
-};
-const GROUND_ITEM_COLOR: Rgba = Rgba {
-    r: 221,
-    g: 44,
-    b: 0,
-    a: 255,
-};
-const GROUND_OBJECT_COLOR: Rgba = Rgba {
-    r: 170,
-    g: 0,
-    b: 255,
-    a: 255,
-};
-const WALL_COLOR: Rgba = Rgba {
-    r: 158,
-    g: 158,
-    b: 158,
-    a: 255,
-};
-const DECORATION_COLOR: Rgba = Rgba {
-    r: 98,
-    g: 0,
-    b: 234,
-    a: 255,
-};
-const TILE_FLAG_COLOR: Rgba = Rgba {
-    r: 221,
-    g: 44,
-    b: 0,
-    a: 255,
-};
-const CHUNK_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 0,
-    b: 255,
-    a: 255,
-};
-const PROJECTILE_COLOR: Rgba = Rgba {
-    r: 255,
-    g: 0,
-    b: 0,
-    a: 255,
-};
-const PROJECTILE_PATH_COLOR: Rgba = Rgba {
-    r: 255,
-    g: 0,
-    b: 0,
-    a: 140,
-};
-const SPOT_ANIM_COLOR: Rgba = Rgba {
-    r: 255,
-    g: 0,
-    b: 255,
-    a: 255,
-};
-const MAP_SQUARE_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 255,
-    b: 0,
-    a: 255,
-};
-const LOCAL_VALID_MOVEMENT_COLOR: Rgba = Rgba {
-    r: 141,
-    g: 220,
-    b: 26,
-    a: 255,
-};
-const LINE_OF_SIGHT_COLOR: Rgba = Rgba {
-    r: 204,
-    g: 42,
-    b: 219,
-    a: 255,
-};
-const HOVER_COLOR: Rgba = Rgba {
-    r: 0,
-    g: 200,
-    b: 83,
-    a: 255,
-};
-const GRID_COLOR: Rgba = Rgba {
-    r: 255,
-    g: 255,
-    b: 255,
-    a: 90,
-};
+const OBJECT_TILE_COLOR: Rgba = rgba(0, 255, 0, 255);
+const GROUND_ITEM_COLOR: Rgba = rgba(221, 44, 0, 255);
+const GROUND_OBJECT_COLOR: Rgba = rgba(170, 0, 255, 255);
+const WALL_COLOR: Rgba = rgba(158, 158, 158, 255);
+const DECORATION_COLOR: Rgba = rgba(98, 0, 234, 255);
+const TILE_FLAG_COLOR: Rgba = rgba(221, 44, 0, 255);
+const CHUNK_COLOR: Rgba = rgba(0, 0, 255, 255);
+const PROJECTILE_COLOR: Rgba = rgba(255, 0, 0, 255);
+const PROJECTILE_PATH_COLOR: Rgba = rgba(255, 0, 0, 140);
+const SPOT_ANIM_COLOR: Rgba = rgba(255, 0, 255, 255);
+const MAP_SQUARE_COLOR: Rgba = rgba(0, 255, 0, 255);
+const LOCAL_VALID_MOVEMENT_COLOR: Rgba = rgba(141, 220, 26, 255);
+const LINE_OF_SIGHT_COLOR: Rgba = rgba(204, 42, 219, 255);
+const HOVER_COLOR: Rgba = rgba(0, 200, 83, 255);
+const GRID_COLOR: Rgba = rgba(255, 255, 255, 90);
 
 static LABEL_FONT: Mutex<Option<Arc<crate::font::Font>>> = Mutex::new(None);
 
@@ -3834,12 +3799,7 @@ fn widget_layer(layer: &str) -> Option<(i32, i32, i32, i32, Rgba)> {
         y,
         width,
         height,
-        Rgba {
-            r: (value >> 16) as u8,
-            g: (value >> 8) as u8,
-            b: value as u8,
-            a: 255,
-        },
+        rgba((value >> 16) as u8, (value >> 8) as u8, value as u8, 255),
     ))
 }
 
@@ -4040,23 +4000,14 @@ fn inside(corners: &[[f32; 2]], [px, py]: [f32; 2]) -> bool {
 }
 
 fn client_window(pid: u32) -> Option<HWND> {
-    unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let (pid, found) = unsafe { &mut *(lparam as *mut (u32, Option<HWND>)) };
-        if !class_is(hwnd, "JagWindow") {
-            return 1;
+    let mut found = None;
+    each_jag_window(|hwnd, owner| {
+        if owner == pid {
+            found = Some(hwnd);
         }
-        let mut owner = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, &mut owner) };
-        if owner == *pid {
-            *found = Some(hwnd);
-            return 0;
-        }
-        1
-    }
-
-    let mut search: (u32, Option<HWND>) = (pid, None);
-    unsafe { EnumWindows(Some(callback), &mut search as *mut _ as LPARAM) };
-    search.1
+        found.is_none()
+    });
+    found
 }
 
 fn cursor_canvas(pid: u32) -> Option<[f32; 2]> {
@@ -4098,14 +4049,8 @@ fn hovered_tile(pid: u32, centre: [i32; 2]) -> Result<Option<HoveredTile>, Strin
 fn with_terrain<T>(pid: u32, read: impl FnOnce(&Terrain) -> T) -> Result<T, String> {
     let (layout, memory) = reader(pid, 0, "")?;
     kept_terrain(pid, |terrain| {
-        match (
-            projection::ensure_terrain(&memory, &layout, terrain, || decorations(pid)),
-            terrain.as_ref(),
-        ) {
-            (Ok(()), Some(terrain)) => Ok(read(terrain)),
-            (Ok(()), None) => Err("the scene's terrain isn't known".into()),
-            (Err(why), _) => Err(why),
-        }
+        projection::ensure_terrain(&memory, &layout, terrain, || decorations(pid))
+            .map(|terrain| read(terrain))
     })
 }
 
@@ -4182,6 +4127,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     };
 
     let mut plan = Plan::default();
+    let (mut npcs, mut players, mut collision) = (Fetched(None), Fetched(None), Fetched(None));
 
     for (x, y, width, height, color) in layers.iter().filter_map(|layer| widget_layer(layer)) {
         plan.rects.push(Rect {
@@ -4201,12 +4147,12 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     }
 
     if on("npcs") {
-        for npc in npcs(pid)? {
+        for npc in npcs.get(|| crate::npcs(pid))? {
             actor_marker(
                 &mut plan,
                 (npc.local_x, npc.local_y),
                 npc.height,
-                npc_label(&npc),
+                npc_label(npc),
                 NPC_TILE_COLOR,
             );
         }
@@ -4214,20 +4160,14 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("players") {
         let me = state.position.map(|p| (p.local_x, p.local_y));
-        for player in players(pid)? {
+        for player in players.get(|| crate::players(pid))? {
             let local = (player.local_x, player.local_y);
             let color = if Some(local) == me {
                 LOCAL_PLAYER_TILE_COLOR
             } else {
                 PLAYER_TILE_COLOR
             };
-            actor_marker(
-                &mut plan,
-                local,
-                player.height,
-                player_label(&player),
-                color,
-            );
+            actor_marker(&mut plan, local, player.height, player_label(player), color);
         }
     }
 
@@ -4243,7 +4183,10 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     }
 
     if on("interacting") {
-        let (npcs, players) = (npcs(pid)?, players(pid)?);
+        let (npcs, players) = (
+            npcs.get(|| crate::npcs(pid))?,
+            players.get(|| crate::players(pid))?,
+        );
         let middle = |local_x, local_y, height: i32| {
             projection::Point::new(local_x, local_y, -label_height(height) / 2)
         };
@@ -4259,7 +4202,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                 .map(|p| middle(p.local_x, p.local_y, p.height))
         };
         let target = |npc: i32, player: i32| npc_at(npc).or_else(|| player_at(player));
-        for npc in &npcs {
+        for npc in npcs {
             if let Some(to) = target(npc.interacting_npc, npc.interacting_player) {
                 plan.arrow(
                     middle(npc.local_x, npc.local_y, npc.height),
@@ -4268,7 +4211,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
                 );
             }
         }
-        for player in &players {
+        for player in players {
             if let Some(to) = target(player.interacting_npc, player.interacting_player) {
                 plan.arrow(
                     middle(player.local_x, player.local_y, player.height),
@@ -4283,15 +4226,15 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
         let projectiles = projectiles(pid)?;
-        let npcs = if projectiles.iter().any(|p| p.target_npc >= 0) {
-            npcs(pid)?
+        let npcs: &[Npc] = if projectiles.iter().any(|p| p.target_npc >= 0) {
+            npcs.get(|| crate::npcs(pid))?
         } else {
-            Vec::new()
+            &[]
         };
-        let players = if projectiles.iter().any(|p| p.target_player >= 0) {
-            players(pid)?
+        let players: &[Player] = if projectiles.iter().any(|p| p.target_player >= 0) {
+            players.get(|| crate::players(pid))?
         } else {
-            Vec::new()
+            &[]
         };
         for p in projectiles
             .iter()
@@ -4338,7 +4281,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
 
     if on("objects") || on("ground-objects") || on("walls") || on("decorations") {
         let reply = cached_locs_reply(pid)?;
-        for loc in &reply.locs[..(reply.count as usize).min(reply.locs.len())] {
+        for loc in first(&reply.locs, reply.count) {
             let color = match loc.kind {
                 projection::GAME_OBJECT if on("objects") => OBJECT_TILE_COLOR,
                 projection::GROUND_DECORATION if on("ground-objects") => GROUND_OBJECT_COLOR,
@@ -4440,8 +4383,8 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     if on("line-of-sight") {
         let here = here()?;
         let (origin_x, origin_y) = scene_origin(&here);
-        let collision = scene_collision(pid)?;
-        let flag_at = |x: i32, y: i32| collision_at(&collision, x, y);
+        let collision = collision.get(|| crate::scene_collision(pid))?;
+        let flag_at = |x: i32, y: i32| collision_at(collision, x, y);
         let from = (here.x, here.y);
         for x in here.x - LOS_RANGE..=here.x + LOS_RANGE {
             for y in here.y - LOS_RANGE..=here.y + LOS_RANGE {
@@ -4540,7 +4483,7 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
             }
             if on("movement-flags") {
                 let names = crate::devtools::movement_flag_names(collision_at(
-                    &scene_collision(pid)?,
+                    collision.get(|| crate::scene_collision(pid))?,
                     x,
                     y,
                 ));
@@ -4710,6 +4653,17 @@ pub fn scene_tiles(pid: u32, layers: &[&str]) -> Result<usize, String> {
     Ok(drawn)
 }
 
+struct Fetched<T>(Option<T>);
+
+impl<T> Fetched<T> {
+    fn get(&mut self, fetch: impl FnOnce() -> Result<T, String>) -> Result<&T, String> {
+        match &mut self.0 {
+            Some(value) => Ok(value),
+            empty => Ok(empty.insert(fetch()?)),
+        }
+    }
+}
+
 fn collision_at((x1, y1, _, flags): &SceneCollision, x: i32, y: i32) -> u32 {
     flags
         .get((x - x1) as usize)
@@ -4742,8 +4696,8 @@ unsafe fn fill_rect(
     [left, top, rect_width, rect_height]: [i32; 4],
     color: Rgba,
 ) {
-    for y in top..top + rect_height {
-        for x in left..left + rect_width {
+    for y in top.max(0)..(top + rect_height).min(height) {
+        for x in left.max(0)..(left + rect_width).min(width) {
             unsafe { put_pixel(buf, width, height, x, y, color) };
         }
     }
@@ -4778,9 +4732,16 @@ fn with_overlay(
         return Err(format!("Client {pid} hasn't rendered a frame yet"));
     }
 
-    let view = shared_view(pid, overlay_offset(ipc::OVERLAY_SLOTS), |e| {
-        format!("Cannot map agent's shared memory in client {pid}: {e}")
-    })?;
+    let unmapped = |e| format!("Cannot map agent's shared memory in client {pid}: {e}");
+    let session = session(pid).ok();
+    let owned;
+    let view = match session.as_deref() {
+        Some(session) => session.shared(pid, unmapped)?,
+        None => {
+            owned = shared_view(pid, overlay_offset(ipc::OVERLAY_SLOTS), unmapped)?;
+            &owned
+        }
+    };
     let base = view.ptr::<u8>().as_ptr();
     unsafe {
         let serial_at = base.add(mem::offset_of!(Header, overlay_serial)) as *mut u32;
@@ -4789,7 +4750,7 @@ fn with_overlay(
         let current = *mode_at;
 
         let hash = hash.map(|h| (h ^ (width as u64) << 32 ^ height as u64) | 1);
-        if hash.is_some() && hash_at.read_unaligned() == hash.unwrap_or(0) && current == mode {
+        if hash.is_some_and(|h| hash_at.read_unaligned() == h) && current == mode {
             return Ok(());
         }
 
@@ -4819,13 +4780,13 @@ unsafe fn draw_rect(
 ) {
     let (left, right) = (x1.min(x2), x1.max(x2));
     let (top, bottom) = (y1.min(y2), y1.max(y2));
-    for x in left..=right {
+    for x in left.max(0)..=right.min(width - 1) {
         unsafe {
             put_pixel(buf, width, height, x, top, color);
             put_pixel(buf, width, height, x, bottom, color);
         }
     }
-    for y in top..=bottom {
+    for y in top.max(0)..=bottom.min(height - 1) {
         unsafe {
             put_pixel(buf, width, height, left, y, color);
             put_pixel(buf, width, height, right, y, color);
@@ -4860,26 +4821,15 @@ unsafe fn draw_arrow(
     let edge = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| {
         (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
     };
-    let low = corners
-        .map(|c| c[0].floor() as i32)
-        .into_iter()
-        .min()
-        .unwrap();
-    let high = corners
-        .map(|c| c[0].ceil() as i32)
-        .into_iter()
-        .max()
-        .unwrap();
-    let top = corners
-        .map(|c| c[1].floor() as i32)
-        .into_iter()
-        .min()
-        .unwrap();
-    let bottom = corners
-        .map(|c| c[1].ceil() as i32)
-        .into_iter()
-        .max()
-        .unwrap();
+    let extent = |axis: usize| {
+        corners.iter().fold((i32::MAX, i32::MIN), |(low, high), c| {
+            (
+                low.min(c[axis].floor() as i32),
+                high.max(c[axis].ceil() as i32),
+            )
+        })
+    };
+    let ((low, high), (top, bottom)) = (extent(0), extent(1));
     for y in top..=bottom {
         for x in low..=high {
             let p = [x as f32 + 0.5, y as f32 + 0.5];
@@ -4902,7 +4852,10 @@ unsafe fn draw_line(
     [x1, y1, x2, y2]: [i32; 4],
     color: Rgba,
 ) {
-    let (dx, dy) = ((x2 - x1).abs(), -(y2 - y1).abs());
+    let (dx, dy) = (
+        (i64::from(x2) - i64::from(x1)).abs(),
+        -(i64::from(y2) - i64::from(y1)).abs(),
+    );
     let (sx, sy) = (if x1 < x2 { 1 } else { -1 }, if y1 < y2 { 1 } else { -1 });
     let (mut x, mut y, mut err) = (x1, y1, dx + dy);
     for _ in 0..=dx.max(-dy).min(1 << 15) {
@@ -4913,11 +4866,11 @@ unsafe fn draw_line(
         let e2 = 2 * err;
         if e2 >= dy {
             err += dy;
-            x += sx;
+            x = x.wrapping_add(sx);
         }
         if e2 <= dx {
             err += dx;
-            y += sy;
+            y = y.wrapping_add(sy);
         }
     }
 }
@@ -5030,8 +4983,6 @@ pub struct ItemWatcher {
     slot: u32,
     next: u64,
 }
-
-unsafe impl Send for ItemWatcher {}
 
 impl ItemWatcher {
     pub fn new(pid: u32) -> Result<Self, String> {

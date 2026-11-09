@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     api::Api,
-    session::{get_ok, sha256_hex},
+    session::{get_bytes, sha256_hex},
     update::bucket_url,
 };
 
@@ -108,17 +108,12 @@ fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
     {
         return Err("the lib manifest has a path that can't be used".into());
     }
-    let mut response = get_ok(
+    let bytes = get_bytes(
         api.agent(),
         &bucket_url(api, &manifest.path),
         "the script library",
+        MAX_ARCHIVE_BYTES,
     )?;
-    let bytes = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_ARCHIVE_BYTES)
-        .read_to_vec()
-        .map_err(|e| format!("Couldn't download the script library: {e}"))?;
     if !manifest.sha256.eq_ignore_ascii_case(&sha256_hex(&bytes)) {
         return Err("The script library didn't match its checksum, so it was discarded.".into());
     }

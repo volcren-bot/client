@@ -70,6 +70,7 @@ Per frame:
 cargo build --release --target x86_64-pc-windows-gnu -p agent -p injector   # agent.dll, injector.exe
 cargo build --release                                                        # native loader + injector
 cargo fast-win; cargo fast-loader     # `fast` profile (release without full LTO) for iteration
+cargo b-loader; cargo b-agent; cargo b-injector   # release builds with a target dir each, so they run in parallel
 cargo lint                            # clippy, whole workspace, Windows target
 cargo test -p ipc -p decode -p injector -p loader
 ```

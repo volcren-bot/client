@@ -216,7 +216,7 @@ fn popped_stores(instrs: &[Instruction]) -> impl Iterator<Item = u32> + '_ {
 fn children(pe: &Pe) -> Result<u32, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         for (at, cmp) in instrs.iter().enumerate() {
             let Some(count) = field_operand(cmp, 0) else {
                 continue;

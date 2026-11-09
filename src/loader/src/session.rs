@@ -84,9 +84,9 @@ pub fn hex_decode(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
-    text.as_bytes()
-        .chunks(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
         .collect()
 }
 
@@ -205,6 +205,20 @@ pub fn get_ok(
     Ok(response)
 }
 
+pub fn get_bytes(
+    agent: &ureq::Agent,
+    url: &str,
+    what: &str,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
+    get_ok(agent, url, what)?
+        .body_mut()
+        .with_config()
+        .limit(limit)
+        .read_to_vec()
+        .map_err(|e| format!("Couldn't download {what}: {e}"))
+}
+
 fn fetch(
     api: &Api,
     id: &str,
@@ -213,13 +227,7 @@ fn fetch(
     name: &str,
     sha256: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let mut response = get_ok(api.agent(), url, name)?;
-    let bytes = response
-        .body_mut()
-        .with_config()
-        .limit(MAX_FILE_BYTES)
-        .read_to_vec()
-        .map_err(|e| format!("Couldn't download {name}: {e}"))?;
+    let bytes = get_bytes(api.agent(), url, name, MAX_FILE_BYTES)?;
     if let Some(expected) = sha256
         && !expected.eq_ignore_ascii_case(&sha256_hex(&bytes))
     {
@@ -265,12 +273,13 @@ fn download_to_memory(
     let mut source = None;
     let mut modules = Vec::new();
     for (file, name) in session.files.iter().zip(&names) {
-        let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
-        if *name != entry_name && !name.ends_with(".luau") && !name.ends_with(".lua") {
+        let is_entry = *name == entry_name;
+        if !is_entry && !name.ends_with(".luau") && !name.ends_with(".lua") {
             continue;
         }
+        let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
         let text = String::from_utf8(bytes).map_err(|_| format!("{name} isn't valid text."))?;
-        if *name == entry_name {
+        if is_entry {
             source = Some(text);
         } else {
             modules.push(((*name).to_owned(), text));
@@ -360,7 +369,7 @@ impl Beat {
 
     pub fn take(&mut self, now: Instant) -> Option<Stats> {
         let mut stats = std::mem::take(&mut self.pending);
-        stats.minutes = now.saturating_duration_since(self.last_taken).as_secs_f64() / 60.0;
+        stats.minutes += now.saturating_duration_since(self.last_taken).as_secs_f64() / 60.0;
         self.last_taken = now;
         (!stats.is_empty()).then_some(stats)
     }
@@ -393,6 +402,7 @@ impl Beat {
             Err(error) => {
                 if let Some(sent) = sent {
                     self.pending.add(sent.experience, sent.gold, &sent.custom);
+                    self.pending.minutes += sent.minutes;
                 }
                 self.failures += 1;
                 let backoff = Duration::from_secs(5u64 << self.failures.min(3)).min(MAX_BACKOFF);
@@ -477,6 +487,7 @@ mod tests {
         );
         assert_eq!(hex_decode("abc"), None);
         assert_eq!(hex_decode("zz"), None);
+        assert_eq!(hex_decode("+a"), None);
     }
 
     #[test]
@@ -567,6 +578,11 @@ mod tests {
         now += Duration::from_secs(10);
         let resent = beat.take(now).unwrap();
         assert_eq!(resent.experience, 50);
+        assert!(
+            (resent.minutes - 70.0 / 60.0).abs() < 1e-9,
+            "the failed window's minutes come with its stats: {}",
+            resent.minutes
+        );
         assert_eq!(
             beat.on_result(now, Some(resent), network()),
             Verdict::Continue

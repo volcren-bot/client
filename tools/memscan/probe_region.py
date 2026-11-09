@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Bisect the minimenu's stay-open region: probe_region.py <linux_pid> <wine_pid> <anchor_x> <anchor_y> [probe_x probe_y]"""
 import json
 import os
 import struct
@@ -60,7 +59,6 @@ def open_at_anchor():
         raise RuntimeError("menu did not open")
 
 def probe(px, py, settle=0.45):
-    """True when the menu is still open `settle` s after moving to (px, py)."""
     open_at_anchor()
     cmd("move", WPID, str(px), str(py))
     t0 = time.time()
@@ -71,7 +69,6 @@ def probe(px, py, settle=0.45):
     return open_flag()
 
 def bisect(lo, hi, fixed_x, horizontal, inside_low):
-    """Bisect (lo, hi) along an axis and return the last inside value."""
     assert probe(*((lo, fixed_x) if horizontal else (fixed_x, lo))) == inside_low
     assert probe(*((hi, fixed_x) if horizontal else (fixed_x, hi))) != inside_low
     while abs(hi - lo) > 2:
@@ -89,10 +86,8 @@ if __name__ == "__main__":
         print("single probe", px, py, "->", "INSIDE" if probe(px, py) else "outside")
         sys.exit(0)
     print("anchor", AX, AY, "mouse iu now:", mouse_iu())
-    # horizontal edges at anchor y
-    left = bisect(150, AX, AY, horizontal=True, inside_low=False)   # inside at high end
-    right = bisect(AX, 2700, AY, horizontal=True, inside_low=True)  # inside at low end
-    # vertical edges at anchor x
+    left = bisect(150, AX, AY, horizontal=True, inside_low=False)
+    right = bisect(AX, 2700, AY, horizontal=True, inside_low=True)
     top = bisect(150, AY, AX, horizontal=False, inside_low=False)
     bottom = bisect(AY, 1750, AX, horizontal=False, inside_low=True)
     print(f"stay-open region (physical): x [{left}, {right}] y [{top}, {bottom}]")

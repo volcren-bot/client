@@ -12,19 +12,9 @@ pub struct Minimap {
 const CONTENT_TYPE: u64 = 1338;
 const SCENE_TILES: u64 = 104;
 
-fn functions_with(pe: &Pe, value: u32) -> Vec<u32> {
-    let mut seen = HashSet::new();
-    dword_hits(pe, value)
-        .into_iter()
-        .filter_map(|hit| pe.function_containing(hit))
-        .map(|(begin, _)| begin)
-        .filter(|&begin| seen.insert(begin))
-        .collect()
-}
-
 fn content_type_calls(pe: &Pe) -> Vec<(u32, u32)> {
     let mut found = Vec::new();
-    for begin in functions_with(pe, CONTENT_TYPE as u32) {
+    for (begin, _) in functions_with_dword(pe, CONTENT_TYPE as u32) {
         let instrs = whole_function(pe, begin, 0x40000);
         for (at, _) in instrs.iter().enumerate().filter(|(_, i)| {
             i.mnemonic() == Mnemonic::Cmp
@@ -81,25 +71,6 @@ fn zoom_reads(instrs: &[Instruction]) -> Vec<u32> {
         }
     }
     found
-}
-
-pub(super) fn client_registers(instrs: &[Instruction], client: u32) -> HashSet<Register> {
-    instrs
-        .iter()
-        .filter(|i| {
-            i.mnemonic() == Mnemonic::Mov
-                && i.is_ip_rel_memory_operand()
-                && i.ip_rel_memory_address() as u32 == client
-        })
-        .map(|i| i.op0_register())
-        .collect()
-}
-
-pub(super) fn client_field(i: &Instruction, clients: &HashSet<Register>) -> Option<u32> {
-    (i.op1_kind() == OpKind::Memory
-        && clients.contains(&i.memory_base())
-        && i.memory_index() == Register::None)
-        .then(|| i.memory_displacement64() as u32)
 }
 
 fn angle_reads(instrs: &[Instruction], client: u32) -> Vec<u32> {
@@ -222,9 +193,9 @@ fn destination_compares(instrs: &[Instruction], object: u32) -> Vec<u32> {
 }
 
 pub fn find_destination(pe: &Pe, object: u32) -> Result<u32, ScanError> {
-    let found = functions_with(pe, object)
+    let found = functions_with_dword(pe, object)
         .into_iter()
-        .flat_map(|begin| destination_compares(&whole_function(pe, begin, 0x400), object))
+        .flat_map(|(begin, _)| destination_compares(&whole_function(pe, begin, 0x400), object))
         .collect();
     one(found)
 }
@@ -241,9 +212,7 @@ mod tests {
             0x48, 0x8b, 0xf2, 0x44, 0x3b, 0x00, 0x75, 0x05, 0x3b, 0x58, 0x04, 0x74, 0x60, 0x89,
             0x38, 0x48, 0x8b, 0x81, 0xb0, 0xea, 0x40, 0x00, 0x89, 0x58, 0x04,
         ];
-        let instrs: Vec<Instruction> = Decoder::with_ip(64, &code, 0x1000, DecoderOptions::NONE)
-            .into_iter()
-            .collect();
+        let instrs = decode(&code, 0x1000);
         assert_eq!(destination_compares(&instrs, 0x40eab0), vec![0]);
         assert_eq!(destination_compares(&instrs, 0x40eab8), Vec::<u32>::new());
     }

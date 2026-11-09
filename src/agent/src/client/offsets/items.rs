@@ -8,51 +8,31 @@ pub struct ObjTypeLookup {
 }
 
 const STRING_SIZE: u32 = 0x18;
-
-pub(super) fn string_rvas(pe: &Pe, name: &str) -> HashSet<u32> {
-    let mut needle = vec![0u8];
-    needle.extend_from_slice(name.as_bytes());
-    needle.push(0);
-    pe.image
-        .windows(needle.len())
-        .enumerate()
-        .filter(|(_, w)| *w == needle.as_slice())
-        .map(|(at, _)| at as u32 + 1)
-        .collect()
-}
+const MAX_ARCHIVE_STRIDE: u64 = 0x1000;
 
 pub(super) fn usertype_member(pe: &Pe, usertype: &str, member: &str) -> Result<u32, ScanError> {
     let usertypes = string_rvas(pe, usertype);
     let members = string_rvas(pe, member);
-    let in_code = |rva: u32| {
-        pe.code
-            .iter()
-            .any(|s| (s.rva..s.rva + s.size).contains(&(rva as usize)))
-    };
-    let ip_lea = |i: &Instruction| {
-        (i.mnemonic() == Mnemonic::Lea && i.is_ip_rel_memory_operand())
-            .then(|| i.ip_rel_memory_address() as u32)
-    };
 
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         if !instrs
             .iter()
-            .filter_map(ip_lea)
+            .filter_map(rip_lea)
             .any(|rva| usertypes.contains(&rva))
         {
             continue;
         }
         for (at, instr) in instrs.iter().enumerate() {
-            if !ip_lea(instr).is_some_and(|rva| members.contains(&rva)) {
+            if !rip_lea(instr).is_some_and(|rva| members.contains(&rva)) {
                 continue;
             }
             let code = instrs[at.saturating_sub(8)..at]
                 .iter()
                 .rev()
-                .filter_map(ip_lea)
-                .find(|&rva| in_code(rva));
+                .filter_map(rip_lea)
+                .find(|&rva| pe.in_code(rva as usize));
             found.extend(code);
         }
     }
@@ -164,11 +144,9 @@ pub(super) fn cache_reader(pe: &Pe, lookup: u32) -> Option<u32> {
 fn gamevals_index(pe: &Pe, client: u32) -> Result<u32, ScanError> {
     let names = string_rvas(pe, "gamevals");
     let loads_names = |target: u32| {
-        decode_at(pe, target, 80).iter().any(|i| {
-            i.mnemonic() == Mnemonic::Lea
-                && i.is_ip_rel_memory_operand()
-                && names.contains(&(i.ip_rel_memory_address() as u32))
-        })
+        decode_at(pe, target, 80)
+            .iter()
+            .any(|i| rip_lea(i).is_some_and(|rva| names.contains(&rva)))
     };
     let mut found = Vec::new();
     for (site, target) in direct_jumps(pe) {
@@ -176,10 +154,8 @@ fn gamevals_index(pe: &Pe, client: u32) -> Result<u32, ScanError> {
         let [global, field, jump] = instrs.as_slice() else {
             continue;
         };
-        let loads_client = global.mnemonic() == Mnemonic::Mov
-            && global.op0_register() == Register::RDX
-            && global.is_ip_rel_memory_operand()
-            && global.ip_rel_memory_address() as u32 == client;
+        let loads_client = global_load(global) == Some((Register::RDX, client));
+
         let offset =
             load_from(field, Register::RDX).filter(|_| field.op0_register() == Register::RDX);
         if loads_client && jump.ip32() == site && loads_names(target) {
@@ -196,6 +172,8 @@ fn cache_table(pe: &Pe, reader: u32) -> Option<CacheTable> {
         .find(|i| i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Register)
         .and_then(|i| memory_field(i, Register::RCX))?;
     let imul = at.find(|i| i.mnemonic() == Mnemonic::Imul && i.op_count() == 3)?;
+    let archive_stride =
+        Some(imul.immediate(2)).filter(|stride| (1..=MAX_ARCHIVE_STRIDE).contains(stride))? as u32;
     let archive = imul.op0_register();
     let add = at.find(|i| i.mnemonic() == Mnemonic::Add && i.op0_register() == archive)?;
     let archives = memory_field(add, Register::RCX)?;
@@ -210,6 +188,7 @@ fn cache_table(pe: &Pe, reader: u32) -> Option<CacheTable> {
         .find(|i| i.mnemonic() == Mnemonic::Cmp && i.op0_kind() == OpKind::Register)
         .and_then(|i| memory_field(i, archive))?;
     let shl = at.find(|i| i.mnemonic() == Mnemonic::Shl && i.op1_kind() == OpKind::Immediate8)?;
+    let file_stride = 1u32.checked_shl(shl.immediate(1) as u32)?;
     let file = shl.op0_register();
     let add = at.find(|i| i.mnemonic() == Mnemonic::Add && i.op0_register() == file)?;
     let files = memory_field(add, archive)?;
@@ -217,11 +196,12 @@ fn cache_table(pe: &Pe, reader: u32) -> Option<CacheTable> {
     Some(CacheTable {
         archive_count: count,
         archives,
-        archive_stride: imul.immediate(2) as u32,
+        archive_stride,
         archive_missing,
         file_count,
         files,
-        file_stride: 1 << shl.immediate(1),
+        file_stride,
+
         file_missing,
     })
 }

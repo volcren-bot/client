@@ -72,7 +72,7 @@ pub fn find_npc_model(pe: &Pe, npc_definition: u32) -> Result<NpcModel, ScanErro
     })
 }
 
-pub const MAX_BOUNDS: usize = 4;
+const MAX_BOUNDS: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModelVertices {
@@ -173,7 +173,7 @@ pub fn find_model_vertices(pe: &Pe, rule: &NpcModel) -> Result<ModelVertices, Sc
     let (height, bounds_slot) =
         model_height(pe, rule.get_model, rule.bounding_box).ok_or(ScanError::NotFound)?;
     let mut found = Vec::new();
-    for &(begin, _, _) in &pe.raw_functions {
+    for &(begin, _) in &pe.functions {
         if !is_root(pe, begin) {
             continue;
         }
@@ -203,7 +203,7 @@ pub struct ActorOrientation {
 }
 
 fn reg_load(instrs: &[Instruction], reg: Register) -> Option<(Register, u32)> {
-    for i in instrs.iter().rev() {
+    for (at, i) in instrs.iter().enumerate().rev() {
         if i.op0_kind() != OpKind::Register || i.op0_register() != reg {
             continue;
         }
@@ -216,10 +216,7 @@ fn reg_load(instrs: &[Instruction], reg: Register) -> Option<(Register, u32)> {
             {
                 Some((i.memory_base(), i.memory_displacement64() as u32))
             }
-            OpKind::Register => {
-                let at = instrs.iter().position(|j| j.ip() == i.ip())?;
-                reg_load(&instrs[..at], i.op1_register())
-            }
+            OpKind::Register => reg_load(&instrs[..at], i.op1_register()),
             _ => None,
         };
     }
@@ -228,17 +225,14 @@ fn reg_load(instrs: &[Instruction], reg: Register) -> Option<(Register, u32)> {
 
 pub fn find_actor_orientation(pe: &Pe) -> Result<ActorOrientation, ScanError> {
     let mut found = Vec::new();
-    for at in dword_hits(pe, 0x7ff) {
-        let Some((begin, end)) = pe.function_containing(at) else {
-            continue;
-        };
+    for (begin, end) in functions_with_dword(pe, 0x7ff) {
         let instrs = function_instrs(pe, begin, end);
         for (n, and) in instrs.iter().enumerate() {
             let masks = and.mnemonic() == Mnemonic::And
                 && and.op0_kind() == OpKind::Register
                 && matches!(and.op1_kind(), OpKind::Immediate32 | OpKind::Immediate8to32)
                 && and.immediate(1) == 0x7ff;
-            if !masks || n == 0 || and.ip() + 1 < at as u64 && and.next_ip() <= at as u64 {
+            if !masks || n == 0 {
                 continue;
             }
             let sub = &instrs[n - 1];
@@ -362,7 +356,7 @@ fn model_faces(instrs: &[Instruction], vertices: &ModelVertices) -> Option<Model
 
 pub fn find_model_faces(pe: &Pe, vertices: &ModelVertices) -> Result<ModelFaces, ScanError> {
     let mut found = Vec::new();
-    for &(begin, _, _) in &pe.raw_functions {
+    for &(begin, _) in &pe.functions {
         if !is_root(pe, begin) {
             continue;
         }
@@ -380,10 +374,8 @@ pub fn find_model_faces(pe: &Pe, vertices: &ModelVertices) -> Result<ModelFaces,
 }
 
 pub fn render_slots(image: &[u8], function: u32) -> Vec<u32> {
-    let Some(pe) = Pe::parse(image) else {
-        return Vec::new();
-    };
-    let instrs = whole_function(&pe, function, 0x200);
+    let instrs = image_function(image, function, 0x200);
+
     let mut offsets: HashMap<Register, i64> = HashMap::from([(Register::RCX, 0)]);
     let mut found = Vec::new();
     for i in &instrs {

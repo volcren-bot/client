@@ -1,5 +1,8 @@
 use ipc::{
-    read::{NAME_CLEAN, SHORT_STRING_MAX, client, local_name_object, local_player, short_string},
+    read::{
+        NAME_CLEAN, SHORT_STRING_MAX, client, game_state_in, local_name_object, local_player,
+        local_player_in, short_string,
+    },
     state::{Layout, NameRequest, SKILL_NAMES, array, game_state as states, interfaces, part},
 };
 
@@ -132,12 +135,27 @@ pub fn ui_scale(memory: &impl Memory, layout: &Layout) -> Option<f32> {
     scale(memory, layout, client(memory, layout)?)
 }
 
-pub fn root_interface(memory: &impl Memory, layout: &Layout, state: Option<i32>) -> Option<i32> {
+pub fn root_interface(memory: &impl Memory, layout: &Layout) -> Option<i32> {
+    let client = client(memory, layout)?;
+    root_interface_in(
+        memory,
+        layout,
+        client,
+        game_state_in(memory, layout, client),
+    )
+}
+
+fn root_interface_in(
+    memory: &impl Memory,
+    layout: &Layout,
+    client: u64,
+    state: Option<i32>,
+) -> Option<i32> {
     if !layout.has(part::INTERFACES) || !matches!(state, Some(states::LOGGED_IN | states::LOADING))
     {
         return None;
     }
-    memory.i32(client(memory, layout)? + layout.interfaces.root as u64)
+    memory.i32(client + layout.interfaces.root as u64)
 }
 
 fn login(memory: &impl Memory, layout: &Layout, scale: f32) -> Option<Login> {
@@ -206,7 +224,7 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
     let Some(client) = client(memory, layout) else {
         return GameState::default();
     };
-    let state = current(memory, layout);
+    let state = game_state_in(memory, layout, client);
     let logged_in = state == Some(states::LOGGED_IN);
     let on_login_screen = matches!(
         state,
@@ -225,11 +243,11 @@ pub fn game_state(memory: &impl Memory, layout: &Layout) -> GameState {
             ))
         })
         .flatten();
-    let player = local_player(memory, layout);
+    let player = local_player_in(memory, layout, client);
     let name_object = (logged_in && layout.has(part::WORLD))
         .then(|| memory.ptr(player?.1 + layout.world.player_name as u64))
         .flatten();
-    let root = root_interface(memory, layout, state);
+    let root = root_interface_in(memory, layout, client, state);
     let minimap_object = (logged_in && layout.has(part::MINIMAP))
         .then(|| memory.ptr(client + layout.minimap.object as u64))
         .flatten();

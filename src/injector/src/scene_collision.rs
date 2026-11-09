@@ -38,17 +38,13 @@ pub fn read(memory: &impl Memory, layout: &Layout) -> Option<SceneCollision> {
     maps.read(memory, plane)
 }
 
-pub fn read_all(
-    memory: &impl Memory,
-    layout: &Layout,
-) -> Option<(i32, Vec<Option<SceneCollision>>)> {
-    let (plane, maps) = maps(memory, layout)?;
-    Some((
-        plane,
+pub fn read_all(memory: &impl Memory, layout: &Layout) -> Option<Vec<Option<SceneCollision>>> {
+    let (_, maps) = maps(memory, layout)?;
+    Some(
         (0..maps.count.min(PLANES))
             .map(|p| maps.read(memory, p))
             .collect(),
-    ))
+    )
 }
 
 struct Maps {
@@ -100,16 +96,34 @@ impl Maps {
         if memory.u64(columns + array::COUNT as u64)? != width as u64 {
             return None;
         }
-        let data = memory.ptr(columns + array::DATA as u64)?;
-        let mut flags = Vec::with_capacity((width * height) as usize);
-        for x in 0..width as u64 {
-            let column = data + x * collision_map::COLUMN_SIZE as u64;
-            if memory.u64(column + array::COUNT as u64)? != height as u64 {
+        let mut headers = vec![0u8; width as usize * collision_map::COLUMN_SIZE];
+        if !memory.read(memory.ptr(columns + array::DATA as u64)?, &mut headers) {
+            return None;
+        }
+        let field =
+            |header: &[u8], at: usize| u64::from_le_bytes(header.as_chunks::<8>().0[at / 8]);
+        let mut bytes = vec![0u8; (width * height) as usize * 4];
+        let column_bytes = height as usize * 4;
+        for (header, column) in headers
+            .as_chunks::<{ collision_map::COLUMN_SIZE }>()
+            .0
+            .iter()
+            .zip(bytes.chunks_exact_mut(column_bytes))
+        {
+            let values = field(header, array::DATA);
+            if field(header, array::COUNT) != height as u64
+                || values == 0
+                || !memory.read(values, column)
+            {
                 return None;
             }
-            let values = memory.i32s(memory.ptr(column + array::DATA as u64)?, height as usize)?;
-            flags.extend(values.into_iter().map(|v| v as u32));
         }
+        let flags = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&v| u32::from_le_bytes(v))
+            .collect();
         Some(SceneCollision {
             base_x: self.base_x,
             base_y: self.base_y,
@@ -204,6 +218,7 @@ mod tests {
         m.put_u64(map + 0x10 + 0x10, COLUMNS);
         for x in 0..3u64 {
             let column = COLUMNS + x * 0x18;
+            m.put_u64(column, 0);
             m.put_u64(column + 0x8, 2);
             m.put_u64(column + 0x10, DATA + x * 8);
             m.put_i32(DATA + x * 8, (x * 10) as i32);
@@ -216,8 +231,7 @@ mod tests {
         assert_eq!(read.flags(3201, 3099), Some(20));
         assert_eq!(read.flags(3202, 3100), None);
         assert_eq!(read.bounds(), (3199, 3099, 3201, 3100));
-        let (plane, all) = read_all(&m, &layout).expect("read all");
-        assert_eq!(plane, 1);
+        let all = read_all(&m, &layout).expect("read all");
         assert_eq!(all.len(), 2);
         assert_eq!(all[0], None);
         assert_eq!(all[1].as_ref(), Some(&read));

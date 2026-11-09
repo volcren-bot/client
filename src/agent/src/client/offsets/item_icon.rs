@@ -1,11 +1,11 @@
-use super::{items::string_rvas, *};
+use super::*;
 
 const COLOURS: [&str; 3] = ["<col=ffff00>", "<col=ffffff>", "<col=00ff80>"];
 const THOUSANDS: u64 = 100_000;
 const MILLIONS: u64 = 10_000_000;
 
-fn rip_leas(pe: &Pe, target: u32) -> Vec<u32> {
-    let mut found = Vec::new();
+fn functions_naming(pe: &Pe, strings: &[HashSet<u32>]) -> Vec<HashSet<(u32, u32)>> {
+    let mut found = vec![HashSet::new(); strings.len()];
     for (rva, data) in pe.code_sections() {
         for (offset, window) in data.windows(7).enumerate() {
             let rex = window[0] & 0xf8 == 0x48;
@@ -13,9 +13,16 @@ fn rip_leas(pe: &Pe, target: u32) -> Vec<u32> {
             if !rex || !lea {
                 continue;
             }
-            let next = (rva + offset) as i64 + 7;
-            if next + i32::from_le_bytes(window[3..7].try_into().unwrap()) as i64 == target as i64 {
-                found.push((rva + offset) as u32);
+            let site = (rva + offset) as u32;
+            let target =
+                site as i64 + 7 + i32::from_le_bytes(window[3..7].try_into().unwrap()) as i64;
+            let Ok(target) = u32::try_from(target) else {
+                continue;
+            };
+            for (holders, rvas) in found.iter_mut().zip(strings) {
+                if rvas.contains(&target) {
+                    holders.extend(pe.function_containing(site));
+                }
             }
         }
     }
@@ -31,20 +38,14 @@ fn compares(instrs: &[Instruction], value: u64) -> bool {
 }
 
 fn stack_text(pe: &Pe) -> Result<u32, ScanError> {
-    let mut functions: Option<HashSet<(u32, u32)>> = None;
-    for colour in COLOURS {
-        let holders: HashSet<(u32, u32)> = string_rvas(pe, colour)
-            .into_iter()
-            .flat_map(|rva| rip_leas(pe, rva))
-            .filter_map(|site| pe.function_containing(site))
-            .collect();
-        functions = Some(match functions {
-            Some(so_far) => &so_far & &holders,
-            None => holders,
-        });
-    }
+    let strings: Vec<HashSet<u32>> = COLOURS
+        .iter()
+        .map(|colour| string_rvas(pe, colour))
+        .collect();
+    let mut holders = functions_naming(pe, &strings).into_iter();
+    let first = holders.next().unwrap_or_default();
+    let functions = holders.fold(first, |so_far, holders| &so_far & &holders);
     let candidates: Vec<u32> = functions
-        .unwrap_or_default()
         .into_iter()
         .filter(|&(begin, end)| {
             let instrs = whole_function(pe, begin, end - begin);
@@ -57,13 +58,7 @@ fn stack_text(pe: &Pe) -> Result<u32, ScanError> {
 
 pub fn find_item_icon(pe: &Pe) -> Result<u32, ScanError> {
     let text = stack_text(pe)?;
-    let sites: Vec<u32> = direct_calls(pe)
-        .iter()
-        .filter(|&&(_, target)| target == text)
-        .filter_map(|&(site, _)| pe.function_containing(site))
-        .map(|(begin, _)| begin)
-        .collect();
-    let chunk = one(sites)?;
+    let chunk = one(caller_functions(pe, text).map(|(begin, _)| begin).collect())?;
     let builder = chunk_root(pe, chunk).ok_or(ScanError::NotFound)?;
     let homes = decode_at(pe, builder, 2)
         .iter()

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# PostToolUse hook (Write|Edit): format the touched file, then lint it.
-# Formatting is silent. Lint findings go to stderr with exit 2 so Claude sees and fixes them.
 set -uo pipefail
 
 f=$(jq -r '.tool_response.filePath // .tool_input.file_path // empty')
@@ -14,7 +12,6 @@ while [[ $dir != "$root" && ! -f $dir/Cargo.toml ]]; do dir=$(dirname "$dir"); d
 cd "$dir" || exit 0
 edition=$(grep -m1 '^edition' Cargo.toml | sed 's/[^0-9]//g')
 rustfmt --edition "${edition:-2024}" "$f" >/dev/null 2>&1
-# clippy is crate-wide; keep only diagnostics that point at the edited file.
 out=$(timeout 150 cargo clippy --quiet --message-format=short 2>&1 | grep -F "${f#"$dir"/}" || true)
 
 if [[ -n "$out" ]]; then

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Dump i32 fields of memory regions to a file for diffing: dump.py <pid> <out> <start:hex> <len:hex> [...]"""
 import struct
 import sys
 

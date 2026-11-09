@@ -9,11 +9,7 @@ pub struct Projection {
 }
 
 fn reads_client(pe: &Pe, function: u32, client: u32) -> bool {
-    decode_at(pe, function, 12).iter().any(|i| {
-        i.mnemonic() == Mnemonic::Mov
-            && i.is_ip_rel_memory_operand()
-            && i.ip_rel_memory_address() as u32 == client
-    })
+    !client_registers(&decode_at(pe, function, 12), client).is_empty()
 }
 
 pub fn find_projection(pe: &Pe, client: u32) -> Result<Projection, ScanError> {

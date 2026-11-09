@@ -59,20 +59,20 @@ fn container_slot_getter(instrs: &[Instruction]) -> Option<(u32, u32, u32, u32, 
 pub fn find_item_containers(pe: &Pe) -> Result<ItemContainers, ScanError> {
     const INTERFACE_THRESHOLD: u32 = -70000i32 as u32;
 
-    let handlers: HashSet<(u32, u32)> = dword_hits(pe, INTERFACE_THRESHOLD)
-        .into_iter()
-        .filter_map(|hit| pe.function_containing(hit))
+    let handlers = functions_with_dword(pe, INTERFACE_THRESHOLD);
+    let targets: HashSet<u32> = direct_calls(pe)
+        .iter()
+        .filter(|&&(site, _)| {
+            handlers
+                .iter()
+                .any(|&(begin, end)| (begin..end).contains(&site))
+        })
+        .map(|&(_, target)| target)
         .collect();
-    let calls = direct_calls(pe);
-    let mut getters = Vec::new();
-    for &(site, target) in calls {
-        if handlers
-            .iter()
-            .any(|&(begin, end)| (begin..end).contains(&site))
-        {
-            getters.extend(container_slot_getter(&decode_at(pe, target, 30)));
-        }
-    }
+    let getters: Vec<_> = targets
+        .iter()
+        .filter_map(|&target| container_slot_getter(&decode_at(pe, target, 30)))
+        .collect();
     let pick = |miss: bool| {
         one(getters
             .iter()
@@ -298,7 +298,7 @@ pub fn find_actor_lists(pe: &Pe) -> Result<ActorLists, ScanError> {
             for buckets in loads(8) {
                 let table = buckets.wrapping_sub(hash_table::BUCKETS as u32);
                 if dwords.contains(&(buckets + 8))
-                    && table != npc_indices - 8
+                    && table != npc_indices.wrapping_sub(8)
                     && buckets != npc_indices
                 {
                     *scores.entry(table).or_default() += 1;
@@ -331,7 +331,7 @@ pub struct ActorNames {
     pub npc_animation: u32,
 }
 
-pub const NPC_ANIMATION: u32 = 0x4d8;
+const NPC_ANIMATION: u32 = 0x4d8;
 
 fn npc_name_getter(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
     let flag = instrs.iter().take(12).find_map(|i| {

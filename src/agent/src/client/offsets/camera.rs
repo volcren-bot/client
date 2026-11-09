@@ -9,18 +9,6 @@ pub struct Camera {
 
 const CAM_FORCEANGLE: u32 = 5504;
 
-fn client_registers(instrs: &[Instruction], client: u32) -> HashSet<Register> {
-    instrs
-        .iter()
-        .filter(|i| {
-            i.mnemonic() == Mnemonic::Mov
-                && i.is_ip_rel_memory_operand()
-                && i.ip_rel_memory_address() as u32 == client
-        })
-        .map(|i| i.op0_register())
-        .collect()
-}
-
 fn position(pe: &Pe, client: u32) -> Result<u32, ScanError> {
     let instrs = decode_at(pe, lua_binding(pe, "worldToScreenCoord")?, 24);
     let clients = client_registers(&instrs, client);
@@ -41,22 +29,16 @@ fn position(pe: &Pe, client: u32) -> Result<u32, ScanError> {
 }
 
 fn angles(pe: &Pe, client: u32) -> Result<(u32, u32), ScanError> {
+    let subtracts = |i: &Instruction, value: u32| {
+        i.mnemonic() == Mnemonic::Sub && i.op0_kind() == OpKind::Register && imm32(i) == Some(value)
+    };
+    let is_je =
+        |i: &Instruction| i.mnemonic() == Mnemonic::Je && i.op0_kind() == OpKind::NearBranch64;
     let mut found = Vec::new();
-    for hit in dword_hits(pe, CAM_FORCEANGLE) {
-        let Some((begin, end)) = pe.function_containing(hit) else {
-            continue;
-        };
-        let instrs = decode(pe.bytes(begin, end), begin);
+    for (begin, end) in functions_with_dword(pe, CAM_FORCEANGLE) {
+        let instrs = function_instrs(pe, begin, end);
         let clients = client_registers(&instrs, client);
-        let subtracts = |i: &Instruction, value: u32| {
-            i.mnemonic() == Mnemonic::Sub
-                && i.op0_kind() == OpKind::Register
-                && imm32(i) == Some(value)
-        };
-        let is_je =
-            |i: &Instruction| i.mnemonic() == Mnemonic::Je && i.op0_kind() == OpKind::NearBranch64;
-        for at in 0..instrs.len().saturating_sub(6) {
-            let w = &instrs[at..at + 6];
+        for w in instrs.windows(6) {
             if !(subtracts(&w[0], CAM_FORCEANGLE)
                 && is_je(&w[1])
                 && subtracts(&w[2], 1)

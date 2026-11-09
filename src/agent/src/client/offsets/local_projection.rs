@@ -1,9 +1,4 @@
-use super::{
-    minimap::{client_field, client_registers},
-    projection::Projection,
-    scene::Scene,
-    *,
-};
+use super::{projection::Projection, scene::Scene, *};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalProjection {
@@ -333,11 +328,7 @@ fn tile_model(pe: &Pe) -> Result<(u32, u32), ScanError> {
     };
     let mut found = Vec::new();
     for at in (0..pe.image.len().saturating_sub(0x28)).step_by(8) {
-        if pe
-            .code
-            .iter()
-            .any(|s| (s.rva..s.rva + s.size).contains(&at))
-        {
+        if pe.in_code(at) {
             continue;
         }
         let Some(first) = u64_at(pe.image, at) else {

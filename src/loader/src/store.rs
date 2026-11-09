@@ -120,12 +120,11 @@ impl Store {
         let width = ui.available_width();
         ui.horizontal_wrapped(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search scripts").desired_width((width * 0.4).clamp(100.0, 220.0)));
-            let categories = self.categories();
             egui::ComboBox::from_id_salt("store-category")
                 .selected_text(if self.category.is_empty() { "All categories" } else { &self.category })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.category, String::new(), "All categories");
-                    for category in categories {
+                    for category in self.categories() {
                         ui.selectable_value(&mut self.category, category.clone(), category);
                     }
                 });
@@ -215,15 +214,15 @@ impl Store {
                     });
                     ui.horizontal_wrapped(|ui| {
                         let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.credits, me.min_balance_minutes));
-                            let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
-                            let button = match &blocked {
-                                Some(reason) => button.on_disabled_hover_text(reason),
-                                None => button,
-                            };
-                            if button.clicked() {
-                                run = Some(Box::new(script.clone()));
-                            }
-                            price_ui(ui, script);
+                        let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
+                        let button = match &blocked {
+                            Some(reason) => button.on_disabled_hover_text(reason),
+                            None => button,
+                        };
+                        if button.clicked() {
+                            run = Some(Box::new(script.clone()));
+                        }
+                        price_ui(ui, script);
                         ui.label(format!("{} online", script.online));
                     });
                     if !script.description.is_empty() {

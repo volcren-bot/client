@@ -20,7 +20,7 @@ const HESITATE_CHANCE: f64 = 0.03;
 const GUST_CHANCE: f64 = 0.05;
 const SUBSTEP_CHANCE: f64 = 0.02;
 
-pub const MAX_TIMEOUT_MS: u32 = 30_000;
+const MAX_TIMEOUT_MS: u32 = 30_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Options {

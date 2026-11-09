@@ -155,20 +155,10 @@ pub struct InterfaceLayout {
 
 pub mod interfaces {
     pub const GROUP_SIZE: usize = 0x18;
-    pub const ARRAY_COUNT: usize = super::array::COUNT;
-    pub const ARRAY_DATA: usize = super::array::DATA;
     pub const ENTRY_SIZE: usize = 0x10;
     pub const ENTRY_COMPONENT: usize = 0x8;
     pub const CHILDREN_DATA: usize = 0x8;
-    pub const TABLE_BUCKETS: usize = 0x8;
-    pub const TABLE_BUCKET_COUNT: usize = 0x10;
-    pub const NODE_KEY: usize = 0x0;
-    pub const NODE_GROUP: usize = 0x4;
-    pub const NODE_NEXT: usize = 0x10;
-    pub const ROOT_LOBBY: i32 = 165;
     pub const ROOT_FIXED: i32 = 548;
-    pub const ROOT_RESIZABLE: i32 = 161;
-    pub const ROOT_RESIZABLE_MODERN: i32 = 164;
 }
 
 #[repr(C)]
@@ -365,12 +355,6 @@ pub mod collision_map {
     pub const COLUMNS: usize = 0x10;
     pub const COLUMN_SIZE: usize = 0x18;
     pub const BORDER: usize = 1;
-}
-
-pub mod world {
-    pub const INVENTORY: i32 = 93;
-    pub const EQUIPMENT: i32 = 94;
-    pub const BANK: i32 = 95;
 }
 
 pub mod array {
@@ -1070,7 +1054,7 @@ pub struct Shared<'a> {
 }
 
 macro_rules! seqlocked {
-    ($sequence:ident, $field:ident: $ty:ty; request $write:ident, $read:ident($attempts:expr)) => {
+    ($sequence:ident, $field:ident: $ty:ty; write $write:ident) => {
         pub fn $write(self, value: &$ty) -> u32 {
             let this = self.this();
             unsafe {
@@ -1079,43 +1063,6 @@ macro_rules! seqlocked {
                     addr_of_mut!((*this).$field),
                     value,
                 )
-            }
-        }
-
-        pub fn $read(self) -> Option<(u32, $ty)> {
-            let this = self.this();
-            unsafe {
-                seqlock_read(
-                    addr_of!((*this).$sequence),
-                    addr_of!((*this).$field),
-                    $attempts,
-                )
-            }
-        }
-    };
-    ($sequence:ident, $field:ident: $ty:ty; reply $write:ident, $read:ident) => {
-        pub fn $write(self, value: &$ty) {
-            let this = self.this();
-            unsafe {
-                seqlock_write(
-                    addr_of_mut!((*this).$sequence),
-                    addr_of_mut!((*this).$field),
-                    value,
-                );
-            }
-        }
-
-        seqlocked!($sequence, $field: $ty; read $read);
-    };
-    ($sequence:ident, $field:ident: $ty:ty; fill $write:ident) => {
-        pub fn $write(self, fill: impl FnOnce(&mut $ty)) {
-            let this = self.this();
-            unsafe {
-                seqlock_write_with(
-                    addr_of_mut!((*this).$sequence),
-                    addr_of_mut!((*this).$field),
-                    |data| fill(&mut *data),
-                );
             }
         }
     };
@@ -1131,6 +1078,36 @@ macro_rules! seqlocked {
                 .map(|(_, value)| value)
             }
         }
+    };
+    ($sequence:ident, $field:ident: $ty:ty; fill $write:ident) => {
+        pub fn $write(self, fill: impl FnOnce(&mut $ty)) {
+            let this = self.this();
+            unsafe {
+                seqlock_write_with(
+                    addr_of_mut!((*this).$sequence),
+                    addr_of_mut!((*this).$field),
+                    |data| fill(&mut *data),
+                );
+            }
+        }
+    };
+    ($sequence:ident, $field:ident: $ty:ty; request $write:ident, $read:ident($attempts:expr)) => {
+        seqlocked!($sequence, $field: $ty; write $write);
+
+        pub fn $read(self) -> Option<(u32, $ty)> {
+            let this = self.this();
+            unsafe {
+                seqlock_read(
+                    addr_of!((*this).$sequence),
+                    addr_of!((*this).$field),
+                    $attempts,
+                )
+            }
+        }
+    };
+    ($sequence:ident, $field:ident: $ty:ty; reply $write:ident, $read:ident) => {
+        seqlocked!($sequence, $field: $ty; write $write);
+        seqlocked!($sequence, $field: $ty; read $read);
     };
 }
 
@@ -1155,17 +1132,7 @@ impl<'a> Shared<'a> {
         self.ptr.as_ptr()
     }
 
-    pub fn write(self, layout: &Layout) {
-        let this = self.this();
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).sequence),
-                addr_of_mut!((*this).layout),
-                layout,
-            );
-        }
-    }
-
+    seqlocked!(sequence, layout: Layout; write write);
     seqlocked!(request_sequence, name_request: NameRequest; request write_name_request, read_name_request(1));
     seqlocked!(status_sequence, name_status: NameStatus; reply write_name_status, read_name_status);
     seqlocked!(xp_request_sequence, total_xp_request: TotalXpRequest; request write_total_xp_request, read_total_xp_request(1));
@@ -1181,6 +1148,7 @@ impl<'a> Shared<'a> {
     seqlocked!(model_request_sequence, model_request: ModelRequest; request write_model_request, read_model_request(1));
     seqlocked!(model_reply_sequence, model_reply: ModelReply; fill write_model_reply_with);
     seqlocked!(model_reply_sequence, model_reply: ModelReply; read read_model_reply);
+    seqlocked!(locs_request_sequence, locs_request: i32; request write_locs_request, read_locs_request(1));
     seqlocked!(locs_reply_sequence, locs_reply: LocsReply; fill write_locs_reply_with);
     seqlocked!(cache_request_sequence, cache_request: CacheRequest; request write_cache_request, read_cache_request(1));
     seqlocked!(cache_reply_sequence, cache_reply: CacheReply; fill write_cache_reply_with);
@@ -1207,28 +1175,6 @@ impl<'a> Shared<'a> {
                 1,
             )
             .map(|(s, _)| s)
-        }
-    }
-
-    pub fn write_locs_request(self, request: i32) -> u32 {
-        let this = self.this();
-        unsafe {
-            seqlock_write(
-                addr_of_mut!((*this).locs_request_sequence),
-                addr_of_mut!((*this).locs_request),
-                &request,
-            )
-        }
-    }
-
-    pub fn read_locs_request(self) -> Option<(u32, i32)> {
-        let this = self.this();
-        unsafe {
-            seqlock_read(
-                addr_of!((*this).locs_request_sequence),
-                addr_of!((*this).locs_request),
-                1,
-            )
         }
     }
 

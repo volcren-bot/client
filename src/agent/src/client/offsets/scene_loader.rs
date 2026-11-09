@@ -9,10 +9,7 @@ pub fn find_instance_flag(pe: &Pe) -> Result<u32, ScanError> {
     let mut stores: HashMap<i32, (HashSet<u32>, HashSet<u32>)> = HashMap::new();
     for (rva, data) in pe.code_sections() {
         for (at, _) in data.iter().enumerate().filter(|(_, &byte)| byte == 0xc6) {
-            let Some(&[_, modrm, d0, d1, d2, d3, imm]) = data
-                .get(at..at + 7)
-                .map(|w| <&[u8; 7]>::try_from(w).unwrap())
-            else {
+            let Some(&[_, modrm, d0, d1, d2, d3, imm]) = data[at..].first_chunk::<7>() else {
                 continue;
             };
             if modrm & 0xf8 != 0x80 || modrm & 7 == 4 || imm > 1 {

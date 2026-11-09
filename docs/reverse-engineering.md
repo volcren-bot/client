@@ -31,9 +31,9 @@ One client exe per game update, named `client-<file date>-<first 8 hex of sha256
 
 ### `tools/memscan`: live memory scanner
 
-Linux-only CLI (own `Cargo.toml`, not in the workspace; `cargo build --release` inside it). Scans a client running under Wine through `/proc/<pid>/mem`: exact 8-byte values or a `[lo, hi)` range (pointers into a region), aligned `i32`s, or `pair`s (two `i32`s within 16 bytes, for x/y). Arguments in `src/main.rs`.
+Linux-only CLI (own `Cargo.toml`, not in the workspace; `cargo build --release` inside it). Scans a client running under Wine through `/proc/<pid>/mem`: exact 8-byte values or a `[lo, hi)` range (pointers into a region), aligned `i32`s, `pair`s (two `i32`s within 16 bytes, for x/y) or `fpair`s (an `f32` in one range with one in another within 16 bytes). Arguments in `src/main.rs`.
 
-Workflow: scan for a value you can see in game, change it in game, rescan to narrow, then turn the hit into an offset rule. The Python helpers beside it (`dump.py` and `watch.py` to dump or watch `i32` fields for differential scans, `snapmenu.py`, `probe_region.py`) document their usage in their headers; `snapmenu.py` hardcodes addresses from one build.
+Workflow: scan for a value you can see in game, change it in game, rescan to narrow, then turn the hit into an offset rule. The Python helpers beside it read `/proc/<pid>/mem` too: `dump.py <pid> <out> <start> <len> [<start> <len>...]` writes the `i32` fields of regions to a file for diffing, `watch.py <pid> <start,len[,label]>...` prints timestamped `i32` changes in regions (addresses and lengths in hex), `snapmenu.py <pid> <label>` prints a labelled block of the menu's `i32` fields, and `probe_region.py <linux pid> <wine pid> <anchor x> <anchor y> [<probe x> <probe y>]` bisects the region the minimenu stays open in (with `WINEPREFIX` set, and `INJECTOR` for another injector than the release build). `snapmenu.py` and `probe_region.py` hardcode addresses from one build.
 
 Under Wine, memory diffs that skip stack regions (`0x7ffffe...`) miss anything on the main thread's stack, such as the menu object below.
 

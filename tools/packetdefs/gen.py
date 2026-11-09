@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Builds the loader's packet table (src/loader/src/packet_defs.tsv) from the decompiled Java client in standalone/src."""
 import re
 import struct
 import sys
@@ -9,7 +8,6 @@ WIDTH = r"(?:0xFF|255)"
 
 
 def braced(text, open_at):
-    """The text between the `{` at `open_at` and its match."""
     depth, i = 0, open_at
     while i < len(text):
         depth += (text[i] == "{") - (text[i] == "}")
@@ -20,15 +18,13 @@ def braced(text, open_at):
 
 
 def methods(source):
-    """name -> [(parameters, body)] of every method in a class source, overloads included."""
     found = {}
     for m in re.finditer(r"\n   (?:(?:public|static|final|protected|private) )*[\w\[\].<>]+ (\w+)\(([^)]*)\) \{", source):
         found.setdefault(m.group(1), []).append((m.group(2), braced(source, m.end() - 1)))
     return found
 
 
-def classify(params, body):
-    """The wire kind a buffer read method decodes, or None when it isn't a plain one."""
+def classify(body):
     text = re.sub(r"\s+", " ", body)
     reads = len(re.findall(r"\bah\[", text))
     if reads == 0:
@@ -72,7 +68,6 @@ def classify(params, body):
             adjusted = shifts[index]
     if sorted(shifts) != list(range(0, reads * 8, 8)) or adjusted not in (None, 0):
         return None
-    # a sign test with any other constant than the type's own is a decoy's junk
     limit = {2: ("32767", "65536"), 3: ("8388607", "16777216"), 4: (None, None)}[reads]
     sign_test = re.findall(r"if \(\w+ > (-?\d+)\)", text)
     signed = False
@@ -96,7 +91,6 @@ def kind_width(kind):
 
 
 def reads_in(block, buffer, classes):
-    """The reads of `block` in order as (kind or '?', depth) for a buffer variable; depth counts the braces around the read."""
     out = []
     depth = 0
     for m in re.finditer(r"[{}]|\b(\w+)\.(\w+)\(\s*(\w+)?", block):
@@ -111,7 +105,6 @@ def reads_in(block, buffer, classes):
             elif first == buffer and owner in ("xw", "PacketBuffer") and name in classes:
                 out.append((classes[name], depth))
             elif owner == buffer or first == buffer:
-                # a call on the buffer that isn't a read it knows: the layout can't be trusted
                 out.append(("?", depth))
     return out
 
@@ -120,7 +113,6 @@ IGNORED_WORDS = {"return", "boolean", "false", "true", "null", "this", "throw", 
 
 
 def hints(block):
-    """The readable names a handler touches (RuneLite named them), in order: what the packet is about."""
     found = []
     for word in re.findall(r"\b[A-Za-z_]\w{4,}\b", block):
         if word not in IGNORED_WORDS and not re.fullmatch(r"var\d+|do_L\w+", word) and word not in found:
@@ -129,7 +121,6 @@ def hints(block):
 
 
 def load_names(path, build):
-    """(opcode -> (name, field names) for `build`, hint -> (name, field names) for any build) from names.tsv."""
     by_opcode, by_hint = {}, {}
     if path.exists():
         for line in path.read_text().splitlines():
@@ -155,28 +146,25 @@ def main():
     build = re.sub(r"^client-|\.exe$", "", exe.name) if exe else "unknown"
     names_by_opcode, names_by_hint = load_names(Path(__file__).with_name("names.tsv"), build)
 
-    # the buffer class: every read method in it by name
     xw_methods = methods((src / "xw.java").read_text())
     classes = {}
     for name, overloads in xw_methods.items():
-        kinds = {classify(params, body) for params, body in overloads} - {None}
+        kinds = {classify(body) for _, body in overloads} - {None}
         if len(kinds) == 1:
             classes[name] = kinds.pop()
 
-    # reads that go through another read: a boolean is a byte tested against 1
     for name, overloads in xw_methods.items():
-        for params, body in overloads:
+        for _, body in overloads:
             m = re.search(r"return \((?:\w+\.)?(\w+)\([^()]*\) & 1\) == 1;", body)
             if m and classes.get(m.group(1)) == "u8":
                 classes[name] = "bool"
 
     jc = (src / "jc.java").read_text()
-    packets = {}  # constant name -> (opcode, size)
+    packets = {}
     for m in re.finditer(r"jc (\w+) = new jc\((\d+), (-?\d+)\)", jc):
         packets[m.group(1)] = (int(m.group(2)), int(m.group(3)))
     by_opcode = {op: (name, size) for name, (op, size) in packets.items()}
 
-    # client packets: only the ones names.tsv names (`S<opcode>`), with the size the Java client gives them
     sent_sizes = {int(m.group(1)): int(m.group(2)) for m in re.finditer(r"jo \w+ = new jo\((\d+), (-?\d+)\)", (src / "jo.java").read_text())}
 
     client = (src / "Client.java").read_text()
@@ -191,21 +179,19 @@ def main():
         for m in re.finditer(rf"(?:== jc\.{name}|jc\.{name} ==[^)]*)\) \{{", client):
             block = braced(client, m.end() - 1)
             buffer = "var6"
-            # the same field reads may sit in a method of its own
             call = re.match(r"\s*(?:boolean \w+ = )?(?:return )?(?:\w+\.)?(\w+)\((\w+), ", block)
             if call and call.group(1) in client_methods and "return" in block[:60]:
                 for _, body in client_methods[call.group(1)]:
                     b = re.search(r"PacketBuffer (\w+) = \w+\.af", body)
                     if b:
                         block, buffer = body, b.group(1)
-            # decoy copies of a handler elsewhere name their buffer variable differently
             owners = [o for o, n in re.findall(r"\b(var\d+)\.(\w+)\(", block) if n in classes]
             owners += [v for o, n, v in re.findall(r"\b(xw|PacketBuffer)\.(\w+)\((var\d+)", block) if n in classes]
             buffer = max(set(owners), key=owners.count) if owners else buffer
             reads = reads_in(block, buffer, classes)
             ok = all(kind != "?" and depth == 0 for kind, depth in reads)
             if not reads and re.search(r"\bvar\d+\.[a-z]\w*\(-?\d+\)|\b\w+\.\w+\(var\d+, -?\d+\)", block):
-                ok = False  # it reads something this doesn't know
+                ok = False
             kinds = [kind for kind, _ in reads]
             if ok and size >= 0 and kinds:
                 total = [kind_width(kind) for kind in kinds]
@@ -215,18 +201,13 @@ def main():
         good = {layout for layout in layouts if layout is not None}
         if size == 0:
             layout = ()
-        elif size > 0 and layouts == {()}:
-            layout = ("ignored",)  # the client takes the packet and never looks at its bytes
-        elif size < 0 and layouts == {()}:
-            layout = None  # no read it knows says nothing about a packet of varying size (its handler passes the buffer on)
+        elif layouts == {()}:
+            layout = ("ignored",) if size > 0 else None
         elif len(good) == 1 and None not in layouts:
             layout = next(iter(good))
         else:
             layout = None
-        if layout is None:
-            stats["size only"] += 1
-        else:
-            stats["layout"] += 1
+        stats["size only" if layout is None else "layout"] += 1
         label, field_names = names_by_opcode.get(opcode) or next((names_by_hint[h] for h in touched if h in names_by_hint), ("", ""))
         rows.append((opcode, size, label, layout, touched[:4], field_names))
 
@@ -247,16 +228,13 @@ def main():
             if size is None:
                 print(f"gen: no client packet {opcode} for {name}", file=sys.stderr)
                 continue
-            # a packet that carries nothing has a layout; the others only a size
             print("S", opcode, size, name, "-" if size == 0 else "", "", field_names, sep="\t")
     print(f"gen: {stats}", file=sys.stderr)
 
 
 def verify_exe(exe, sizes):
-    """Finds the size table (int32 per opcode) in the native client and checks it against the Java sizes."""
     data = exe.read_bytes()
-    known = [s for s in sizes]
-    head = [s for s in known[:12]]
+    head = sizes[:12]
     if None in head:
         print("exe check: opcodes 0..11 not all known", file=sys.stderr)
         return
@@ -265,9 +243,9 @@ def verify_exe(exe, sizes):
     if at < 0 or data.find(needle, at + 1) >= 0:
         print("exe check: the size table was not found exactly once", file=sys.stderr)
         return
-    table = struct.unpack_from(f"<{len(known)}i", data, at)
-    bad = [op for op, (a, b) in enumerate(zip(table, known)) if b is not None and a != b]
-    print(f"exe check: table at file offset {at:#x}, {len(known)} opcodes, {len(bad)} differ {bad[:10]}", file=sys.stderr)
+    table = struct.unpack_from(f"<{len(sizes)}i", data, at)
+    bad = [op for op, (a, b) in enumerate(zip(table, sizes)) if b is not None and a != b]
+    print(f"exe check: table at file offset {at:#x}, {len(sizes)} opcodes, {len(bad)} differ {bad[:10]}", file=sys.stderr)
 
 
 if __name__ == "__main__":

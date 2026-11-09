@@ -102,12 +102,7 @@ fn long_bracket_end(text: &[u8], from: usize, level: usize) -> usize {
     let mut i = from;
     while i < text.len() {
         if text[i] == b']'
-            && text[i + 1..]
-                .iter()
-                .take(level)
-                .filter(|&&c| c == b'=')
-                .count()
-                == level
+            && text[i + 1..].iter().take(level).all(|&c| c == b'=')
             && text.get(i + 1 + level) == Some(&b']')
         {
             return i + level + 2;
@@ -360,11 +355,13 @@ impl Highlighter {
         let mut hasher = DefaultHasher::new();
         (source, dark, font.size.to_bits(), hidden).hash(&mut hasher);
         let key = hasher.finish();
-        if self.key != key || self.job.is_none() {
+        if self.key != key {
             self.key = key;
-            self.job = Some(layout_job(source, font, dark, hidden));
+            self.job = None;
         }
-        self.job.clone().unwrap()
+        self.job
+            .get_or_insert_with(|| layout_job(source, font, dark, hidden))
+            .clone()
     }
 }
 

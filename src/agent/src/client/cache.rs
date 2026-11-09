@@ -285,22 +285,23 @@ unsafe fn read_files(
         let mut out = [0u64; 2];
         reader(index, &mut out, archive, file, 0);
         let [control, buffer] = out;
-        let length = (buffer != 0)
-            .then(|| memory.u64(buffer + BUFFER_LENGTH))
+        let contents = (buffer != 0)
+            .then(|| {
+                memory
+                    .u64(buffer + BUFFER_LENGTH)
+                    .zip(memory.ptr(buffer + BUFFER_DATA))
+            })
             .flatten();
-        let data = (buffer != 0)
-            .then(|| memory.ptr(buffer + BUFFER_DATA))
-            .flatten();
-        let copied = match (length, data) {
-            (Some(length), Some(data)) if length as usize <= room.len() => {
+        let copied = match contents {
+            Some((length, data)) if length as usize <= room.len() => {
                 if length == 0 || memory.read(data, &mut room[..length as usize]) {
                     Copied::Bytes(length as usize)
                 } else {
                     Copied::Missing
                 }
             }
-            (Some(_), Some(_)) => Copied::NoRoom,
-            _ => Copied::Missing,
+            Some(_) => Copied::NoRoom,
+            None => Copied::Missing,
         };
         release(control);
         copied

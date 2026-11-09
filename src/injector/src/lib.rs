@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 pub use decode::{
     GameState, Position, ServerTile,
     chat::ChatMessage,
@@ -301,7 +299,7 @@ impl Image {
 
     pub fn pixels(&self) -> Option<Vec<u8>> {
         let bytes = self.rgba.as_bytes();
-        if bytes.len() != (self.width * self.height * 4) as usize * 2 {
+        if bytes.len() != self.width as usize * self.height as usize * 8 {
             return None;
         }
         bytes
@@ -338,10 +336,6 @@ pub use win::{
     widget_model, widget_tree, widget_words, world_debug, world_entities, world_route,
     world_select,
 };
-
-pub const MODULE_PREFIX: &str = "agent";
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-pub const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn dll_version(dll: &[u8]) -> String {
     String::from_utf8_lossy(&ipc::build_id(dll)).into_owned()
@@ -745,6 +739,17 @@ pub enum CursorStyle {
 }
 
 impl CursorStyle {
+    const ALL: [Self; 4] = [Self::Off, Self::Cross, Self::Dot, Self::X];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Cross => "cross",
+            Self::Dot => "dot",
+            Self::X => "x",
+        }
+    }
+
     pub fn value(self) -> u8 {
         match self {
             Self::Off => ipc::cursor_style::OFF,
@@ -764,17 +769,11 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn args(&self, pid: u32) -> Vec<String> {
-        let style = match self.style {
-            CursorStyle::Off => "off",
-            CursorStyle::Cross => "cross",
-            CursorStyle::Dot => "dot",
-            CursorStyle::X => "x",
-        };
         let [r, g, b] = self.color;
         vec![
             "cursor".into(),
             pid.to_string(),
-            style.into(),
+            self.style.name().into(),
             r.to_string(),
             g.to_string(),
             b.to_string(),
@@ -786,16 +785,10 @@ impl Cursor {
         let ["cursor", pid, style, r, g, b, size] = args else {
             return None;
         };
-        let style = match *style {
-            "off" => CursorStyle::Off,
-            "cross" => CursorStyle::Cross,
-            "dot" => CursorStyle::Dot,
-            "x" => CursorStyle::X,
-            other => {
-                return Some(Err(format!(
-                    "Invalid cursor style: {other} (off, cross, dot or x)"
-                )));
-            }
+        let Some(style) = CursorStyle::ALL.into_iter().find(|s| s.name() == *style) else {
+            return Some(Err(format!(
+                "Invalid cursor style: {style} (off, cross, dot or x)"
+            )));
         };
         Some(parse_pid(pid).and_then(|pid| {
             Ok((
@@ -919,6 +912,26 @@ mod tests {
             Input::from_args(&["button", "1", "left", "held"]),
             Some(Err(_))
         ));
+    }
+
+    #[test]
+    fn cursor_round_trips_through_args() {
+        for style in CursorStyle::ALL {
+            let cursor = Cursor {
+                style,
+                color: [1, 2, 3],
+                size: 9,
+            };
+            let args = cursor.args(7);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            assert_eq!(Cursor::from_args(&args), Some(Ok((7, cursor))));
+        }
+        assert_eq!(
+            Cursor::from_args(&["cursor", "7", "ring", "1", "2", "3", "9"]),
+            Some(Err(
+                "Invalid cursor style: ring (off, cross, dot or x)".into()
+            ))
+        );
     }
 
     #[test]

@@ -38,56 +38,41 @@ fn script_id(head: &str) -> Option<i32> {
 }
 
 impl Names {
-    fn from_files<'a>(files: impl Iterator<Item = (&'a str, &'a str)>, source: String) -> Self {
-        let mut names = Self {
-            source,
-            ..Self::default()
-        };
-        for (file, head) in files {
-            let (Some(name), Some(id)) = (script_name(file), script_id(head)) else {
-                continue;
-            };
-            names.by_id.insert(id, name.to_owned());
-            names
-                .by_name
-                .entry(name.to_ascii_lowercase())
-                .or_default()
-                .push(id);
-        }
-        names
+    fn add(&mut self, name: &str, head: &str) {
+        let Some(id) = script_id(head) else { return };
+        self.by_id.insert(id, name.to_owned());
+        self.by_name
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .push(id);
     }
 
     pub fn from_zip(zip: &[u8]) -> Result<Self, String> {
         let mut archive = zip::ZipArchive::new(Cursor::new(zip))
             .map_err(|e| format!("the download isn't a zip: {e}"))?;
-        let source = String::from_utf8_lossy(archive.comment())
-            .chars()
-            .take(7)
-            .collect();
-        let mut files = Vec::new();
+        let mut names = Self {
+            source: String::from_utf8_lossy(archive.comment())
+                .chars()
+                .take(7)
+                .collect(),
+            ..Self::default()
+        };
         for index in 0..archive.len() {
             let file = archive.by_index(index).map_err(|e| e.to_string())?;
             let Ok(path) = file.name() else { continue };
-            let Some(base) = path
-                .rsplit('/')
-                .next()
-                .filter(|base| script_name(base).is_some())
-                .map(str::to_owned)
-            else {
+            let base = path
+                .rsplit_once('/')
+                .map_or(&*path, |(_, base)| base)
+                .to_owned();
+            let Some(name) = script_name(&base) else {
                 continue;
             };
             let mut head = Vec::new();
             file.take(HEAD)
                 .read_to_end(&mut head)
                 .map_err(|e| format!("{base}: {e}"))?;
-            files.push((base, String::from_utf8_lossy(&head).into_owned()));
+            names.add(name, &String::from_utf8_lossy(&head));
         }
-        let names = Self::from_files(
-            files
-                .iter()
-                .map(|(file, head)| (file.as_str(), head.as_str())),
-            source,
-        );
         if names.is_empty() {
             return Err("the download has no script names".into());
         }
@@ -130,16 +115,14 @@ impl Names {
 
 #[cfg(test)]
 pub fn names_for_test(pairs: &[(i32, &str)]) -> Names {
-    let files: Vec<(String, String)> = pairs
-        .iter()
-        .map(|(id, name)| (format!("[clientscript,{name}].cs2"), format!("// {id}\n")))
-        .collect();
-    Names::from_files(
-        files
-            .iter()
-            .map(|(file, head)| (file.as_str(), head.as_str())),
-        "test".into(),
-    )
+    let mut names = Names {
+        source: "test".into(),
+        ..Names::default()
+    };
+    for (id, name) in pairs {
+        names.add(name, &format!("// {id}\n"));
+    }
+    names
 }
 
 #[cfg(test)]

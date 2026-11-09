@@ -17,6 +17,22 @@ pub unsafe fn enable<T: Function>(detour: &GenericDetour<T>, hook: &str, done: &
     }
 }
 
+pub unsafe fn enable_both<A: Function, B: Function>(
+    first: &GenericDetour<A>,
+    second: &GenericDetour<B>,
+    hooks: &str,
+    done: &str,
+) {
+    match (first.enable(), second.enable()) {
+        (Ok(()), Ok(())) => println!("[Agent]: {done}.\r\n"),
+        (first, second) => println!(
+            "[Agent]: Failed to enable the {hooks} hooks: {:?} {:?}.\r\n",
+            first.err(),
+            second.err()
+        ),
+    }
+}
+
 pub unsafe fn disable<T: Function>(
     detour: Option<&GenericDetour<T>>,
     hook: &str,

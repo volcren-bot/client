@@ -17,17 +17,10 @@ pub struct TypeModels {
 
 fn group_lookup(pe: &Pe, reader: u32, group: u64) -> Result<u32, ScanError> {
     let mut found = Vec::new();
-    for &(site, target) in direct_calls(pe) {
-        if target != reader {
-            continue;
-        }
-        let Some((begin, end)) = pe.function_containing(site) else {
-            continue;
-        };
-        let instrs = decode(pe.bytes(begin, end), begin);
-        let Some(at) = instrs.iter().position(|i| i.ip32() == site) else {
-            continue;
-        };
+    for Caller {
+        begin, instrs, at, ..
+    } in callers(pe, reader)
+    {
         let loads_group = instrs[at.saturating_sub(8)..at].iter().any(|i| {
             i.mnemonic() == Mnemonic::Mov
                 && i.op0_register() == Register::R8D
@@ -53,7 +46,7 @@ fn npc_type_get_model(pe: &Pe, get_model: u32, npc_definition: u32) -> Result<u3
         if chunk_root(pe, begin) != Some(get_model) {
             continue;
         }
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         for (at, i) in instrs.iter().enumerate() {
             if field_load(i, npc_definition) != Some(Register::RCX) {
                 continue;
@@ -85,11 +78,9 @@ fn seq_frames(pe: &Pe) -> Result<(u32, u32, u32), ScanError> {
     }
     let skeletal = one(checks)?;
     let (mut counts, mut arrays) = (Vec::new(), Vec::new());
-    for &(site, target) in direct_calls(pe) {
-        if target != skeletal {
-            continue;
-        }
+    for site in calls_to(pe, skeletal) {
         let instrs = decode_at(pe, site, 4);
+
         let [_, test, jne, read] = instrs.as_slice() else {
             continue;
         };

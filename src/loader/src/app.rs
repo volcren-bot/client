@@ -1,4 +1,6 @@
 use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     sync::{
         Arc, Mutex, RwLock,
@@ -159,7 +161,7 @@ struct StoreRun {
     session_id: String,
     script_id: String,
     community: bool,
-    closed: std::sync::mpsc::Receiver<()>,
+    closed: Receiver<()>,
     lib_version: String,
     price: i64,
     rank: i64,
@@ -203,11 +205,11 @@ struct Run {
     xp: crate::xp::XpTracker,
     breaks: crate::breaks::BreaksTracker,
     counters: crate::counters::CountersTracker,
-    started: std::time::Instant,
-    ended: Option<std::time::Instant>,
+    started: Instant,
+    ended: Option<Instant>,
     tools_tab: ToolsTab,
     names: Vec<String>,
-    xp_next: std::time::Instant,
+    xp_next: Instant,
     xp_reading: bool,
     editors: crate::layouts::Editors,
 }
@@ -221,7 +223,7 @@ impl Run {
         store: Option<StoreRun>,
         settings: &Settings,
     ) -> Self {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         Self {
             id,
             title,
@@ -251,12 +253,12 @@ impl Run {
 
     fn run_time(&self) -> Duration {
         self.ended
-            .unwrap_or_else(std::time::Instant::now)
+            .unwrap_or_else(Instant::now)
             .saturating_duration_since(self.started)
     }
 
-    fn loaded_target(&self) -> Option<Target> {
-        self.target.clone().filter(|t| t.client.loaded.is_some())
+    fn loaded_target(&self) -> Option<&Target> {
+        self.target.as_ref().filter(|t| t.client.loaded.is_some())
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -337,10 +339,10 @@ fn width_button(ui: &mut egui::Ui, enabled: bool, label: &str, width: f32) -> eg
     )
 }
 
-fn client_caption(ui: &mut egui::Ui, target: Option<&Target>) {
-    match target {
-        Some(target) => {
-            ui.weak(format!("Client {}.", target.client.pid));
+fn client_caption(ui: &mut egui::Ui, pid: Option<u32>) {
+    match pid {
+        Some(pid) => {
+            ui.weak(format!("Client {pid}."));
         }
         None => {
             ui.label("Select a client with agent loaded in the Clients tab.");
@@ -863,7 +865,7 @@ impl LogTable<'_> {
     fn show(
         &self,
         ui: &mut egui::Ui,
-        columns: Vec<(&str, egui_extras::Column)>,
+        columns: &[(&str, egui_extras::Column)],
         rows: usize,
         row: impl FnMut(egui_extras::TableRow<'_, '_>),
     ) {
@@ -882,17 +884,12 @@ impl LogTable<'_> {
             if self.clickable {
                 table = table.sense(egui::Sense::click());
             }
-            let titles: Vec<&str> = columns.iter().map(|(title, _)| *title).collect();
             for (_, column) in columns {
-                table = table.column(column);
+                table = table.column(*column);
             }
             table
-                .header(self.row_height, |mut header| {
-                    for title in titles {
-                        header.col(|ui| {
-                            ui.strong(title);
-                        });
-                    }
+                .header(self.row_height, |header| {
+                    crate::theme::table_header(header, columns.iter().map(|(title, _)| *title));
                 })
                 .body(|body| body.rows(self.row_height, rows, row));
         });
@@ -1115,7 +1112,7 @@ struct LogLine {
 struct Log {
     lines: Vec<LogLine>,
     tags: Vec<String>,
-    tag_index: std::collections::HashMap<String, usize>,
+    tag_index: HashMap<String, usize>,
     filter: Option<usize>,
     view: Vec<usize>,
     text: String,
@@ -1332,6 +1329,20 @@ type LogJobKey = (
     egui::Color32,
 );
 
+struct LaidOut {
+    wrap_width: f32,
+    pixels_per_point: f32,
+    probe: Arc<egui::Galley>,
+    galley: Arc<egui::Galley>,
+}
+
+struct LogJob {
+    key: LogJobKey,
+    job: egui::text::LayoutJob,
+    entry_of_line: Vec<usize>,
+    laid_out: RefCell<Option<LaidOut>>,
+}
+
 pub struct LoaderApp {
     settings: Settings,
     tab: Tab,
@@ -1351,7 +1362,7 @@ pub struct LoaderApp {
     run_target: Option<String>,
     start_prompt: Option<StartPrompt>,
     reload_prompt: Option<String>,
-    remembered_forms: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    remembered_forms: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
     dev_tab: DevTab,
@@ -1381,7 +1392,7 @@ pub struct LoaderApp {
     log_tab: LogTab,
     followed_tab: (Tab, Option<u64>),
     loader_log: Log,
-    log_job: Option<(LogJobKey, egui::text::LayoutJob, Vec<usize>)>,
+    log_job: Option<LogJob>,
     breaks_tab: BreaksTab,
     feedback: feedback::Page,
     gpu: Option<String>,
@@ -1394,6 +1405,17 @@ pub struct LoaderApp {
     rx: Receiver<Event>,
 }
 
+fn selected_in<'a>(targets: &'a [Target], selected: Option<&str>) -> Option<&'a Target> {
+    let key = selected?;
+    targets
+        .iter()
+        .find(|t| t.key() == key && t.client.foreign_bot.is_none())
+}
+
+fn loaded_in<'a>(targets: &'a [Target], selected: Option<&str>) -> Option<&'a Target> {
+    selected_in(targets, selected).filter(|t| t.client.loaded.is_some())
+}
+
 fn run_in(runs: &mut [Run], id: Option<u64>) -> Option<&mut Run> {
     runs.iter_mut().find(|r| Some(r.id) == id)
 }
@@ -1404,6 +1426,18 @@ fn editors_of(runs: &mut [Run], id: Option<u64>) -> Option<&mut crate::layouts::
 
 static EMPTY_LAYOUTS: std::sync::LazyLock<crate::layouts::ScriptLayouts> =
     std::sync::LazyLock::new(Default::default);
+
+static EMPTY_RULES: crate::layouts::Rules = crate::layouts::Rules {
+    required: Vec::new(),
+    locked: Vec::new(),
+};
+
+fn rules_in(
+    form: &Option<crate::form::Form>,
+    kind: crate::layouts::Kind,
+) -> &crate::layouts::Rules {
+    form.as_ref().map_or(&EMPTY_RULES, |form| form.rules(kind))
+}
 
 impl LoaderApp {
     pub fn new(cc: &eframe::CreationContext<'_>, instance: update::Instance) -> Self {
@@ -1554,12 +1588,12 @@ impl LoaderApp {
     }
 
     fn stop_all(&mut self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(3);
         for run in &mut self.runs {
             run.script.stop();
         }
         for store in self.runs.iter().filter_map(|r| r.store.as_ref()) {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let left = deadline.saturating_duration_since(Instant::now());
             let _ = store.closed.recv_timeout(left);
         }
     }
@@ -1648,15 +1682,10 @@ impl LoaderApp {
             && !self.client_in_use(target.client.pid)
     }
 
-    fn free_client(&self, pid: u32) -> Option<Target> {
+    fn free_client(&self, pid: u32) -> Option<&Target> {
         self.targets
             .iter()
             .find(|t| t.client.pid == pid && self.client_free(t))
-            .cloned()
-    }
-
-    fn restart_target(&self, run: &Run) -> Option<Target> {
-        self.free_client(run.target.as_ref()?.client.pid)
     }
 
     fn restart_refusal(&self, run: &Run) -> Option<String> {
@@ -1666,7 +1695,9 @@ impl LoaderApp {
         if let Some(why) = self.run_block(run.target.as_ref()) {
             return Some(why);
         }
-        self.restart_target(run)
+        run.target
+            .as_ref()
+            .and_then(|t| self.free_client(t.client.pid))
             .is_none()
             .then(|| "Its client is gone or busy. Start the script from the Scripts page.".into())
     }
@@ -1732,7 +1763,7 @@ impl LoaderApp {
         quote: Quote,
     ) {
         let credits = self.auth.me().map_or(0, |me| me.credits);
-        let target = self.free_client(start.target.client.pid);
+        let target = self.free_client(start.target.client.pid).cloned();
         let refusal = session::start_block(&start.script, &quote, credits);
         let (Some(target), None) = (target, refusal.as_ref()) else {
             let why = refusal.unwrap_or_else(|| "Its client is gone or busy.".into());
@@ -1829,14 +1860,14 @@ impl LoaderApp {
     }
 
     fn drive_xp(&mut self, ctx: &egui::Context) {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let mut reads = Vec::new();
         for run in &mut self.runs {
             if !run.is_running() {
                 continue;
             }
             ctx.request_repaint_after(Duration::from_secs(1));
-            let Some(target) = run.target.as_ref().filter(|t| t.client.loaded.is_some()) else {
+            let Some(target) = run.loaded_target() else {
                 continue;
             };
             if run.xp_reading || now < run.xp_next {
@@ -1872,11 +1903,11 @@ impl LoaderApp {
         session_id: String,
         process: crate::script::Process,
         interval: Duration,
-    ) -> std::sync::mpsc::Receiver<()> {
+    ) -> Receiver<()> {
         let (tx, ctx, api) = (self.tx.clone(), ctx.clone(), self.api.clone());
         let (closing, closed) = channel();
         thread::spawn(move || {
-            let _closing: std::sync::mpsc::Sender<()> = closing;
+            let _closing: Sender<()> = closing;
             session::keep(&api, &session_id, &process, interval, |kept| {
                 let session_id = session_id.clone();
                 let _ = tx.send(match kept {
@@ -1896,7 +1927,7 @@ impl LoaderApp {
 
     fn store_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let Some(me) = self.auth.me().cloned() else {
+        if self.auth.me().is_none() {
             match self.auth {
                 Auth::Restoring => {
                     ui.label(RESTORING_SIGN_IN);
@@ -1912,13 +1943,16 @@ impl LoaderApp {
                 }
             }
             return;
-        };
+        }
         if !self.store.loaded && !self.store.loading && self.store.error.is_none() {
             self.fetch_scripts(&ctx);
         }
         let target = self.run_target_ui(ui);
         let block = self.run_block(target.as_ref());
-        match self.store.ui(ui, &me, block.as_deref()) {
+        let Some(me) = self.auth.me() else {
+            return;
+        };
+        match self.store.ui(ui, me, block.as_deref()) {
             Some(store::Action::Refresh) => {
                 self.fetch_scripts(&ctx);
                 self.api_job(&ctx, |api| Event::Me(api.me()));
@@ -1994,8 +2028,8 @@ impl LoaderApp {
             }
             if extra {
                 ui.label(format!(
-                        "This would be your {nth} script running at once. Every script past the first adds a fee on top of its own price:"
-                    ));
+                    "This would be your {nth} script running at once. Every script past the first adds a fee on top of its own price:"
+                ));
             }
             ui.add_space(4.0);
             egui::Grid::new("start_cost")
@@ -2079,9 +2113,9 @@ impl LoaderApp {
             ui.label(format!("by {}", script.author));
             ui.add_space(6.0);
             ui.label(
-                    "This is a community script. It was written by a community member and has not been reviewed by the Volcren team. \
-                     It runs on your computer and controls your game client, so only run scripts from people you trust.",
-                );
+                "This is a community script. It was written by a community member and has not been reviewed by the Volcren team. \
+                 It runs on your computer and controls your game client, so only run scripts from people you trust.",
+            );
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(
@@ -2209,7 +2243,7 @@ impl LoaderApp {
         );
         let live = run
             .filter(|r| r.is_running())
-            .map(|r| (r.log.texts(), r.names.clone(), r.loaded_target()));
+            .map(|r| (r.log.texts(), r.names.clone(), r.loaded_target().cloned()));
         thread::spawn(move || {
             let diagnostics = feedback::diagnostics(&versions, include_system);
             let report = match live {
@@ -2246,7 +2280,11 @@ impl LoaderApp {
             return;
         };
         let title = run.title.clone();
-        let (log, mut names, target) = (run.log.texts(), run.names.clone(), run.loaded_target());
+        let (log, mut names, target) = (
+            run.log.texts(),
+            run.names.clone(),
+            run.loaded_target().cloned(),
+        );
         self.feedback.fetched_at = None;
         self.background(ctx, move |settings| {
             let snapshot =
@@ -2358,21 +2396,17 @@ impl LoaderApp {
     }
 
     fn update_banner_ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        let Some(available) = self.update.clone() else {
+        let Some(available) = &self.update else {
             return;
         };
-        let (release, kind) = (available.release, available.kind);
+        let (release, kind) = (&available.release, available.kind);
         let running = self.start_in_progress();
         let status = match (&self.update_state, kind) {
-            (_, update::Kind::Dev) => {
-                Some("Development build: updates aren't installed here.".to_owned())
-            }
-            (UpdateState::Failed(error), _) => Some(error.clone()),
-            (_, update::Kind::Auto { .. }) if running => {
-                Some("Stop running scripts to update".to_owned())
-            }
+            (_, update::Kind::Dev) => Some("Development build: updates aren't installed here."),
+            (UpdateState::Failed(error), _) => Some(error.as_str()),
+            (_, update::Kind::Auto { .. }) if running => Some("Stop running scripts to update"),
             (_, update::Kind::Auto { admin: true }) => {
-                Some("An administrator has to approve the update.".to_owned())
+                Some("An administrator has to approve the update.")
             }
             _ => None,
         };
@@ -2395,7 +2429,7 @@ impl LoaderApp {
                     );
                     ui.label(format!("Version {} is available", release.version));
                     ui.label(format!("You have version {}", update::VERSION));
-                    if let Some(status) = &status {
+                    if let Some(status) = status {
                         ui.label(status);
                     }
                 });
@@ -2415,19 +2449,19 @@ impl LoaderApp {
                 });
             });
         });
+        if clicked {
+            if kind == update::Kind::Manual {
+                if let Some(url) = release.download_url(&self.api) {
+                    let _ = webbrowser::open(&url);
+                }
+            } else {
+                let release = release.clone();
+                self.start_update(ctx, release);
+            }
+        }
         if dismissed {
             self.update = None;
             ctx.request_repaint();
-        }
-        if !clicked {
-            return;
-        }
-        if kind == update::Kind::Manual {
-            if let Some(url) = release.download_url(&self.api) {
-                let _ = webbrowser::open(&url);
-            }
-        } else {
-            self.start_update(ctx, release);
         }
     }
 
@@ -2580,7 +2614,7 @@ impl LoaderApp {
             layers.extend(self.widgets.highlight_layers());
         }
         let Some(target) = (!layers.is_empty())
-            .then(|| self.selected_loaded_target())
+            .then(|| loaded_in(&self.targets, self.selected.as_deref()))
             .flatten()
         else {
             self.tiles = None;
@@ -2605,7 +2639,7 @@ impl LoaderApp {
                 self.tiles = Some(TilesWorker::start(
                     ctx,
                     self.tx.clone(),
-                    target,
+                    target.clone(),
                     self.settings.clone(),
                     layers,
                 ))
@@ -2617,7 +2651,7 @@ impl LoaderApp {
         if !self.packets.capture {
             return;
         }
-        let Some(target) = self.selected_loaded_target() else {
+        let Some(target) = loaded_in(&self.targets, self.selected.as_deref()) else {
             return;
         };
         let now = Instant::now();
@@ -2634,6 +2668,7 @@ impl LoaderApp {
             return;
         }
         let (pid, since) = (target.client.pid, self.packets.start(target.client.pid));
+        let target = target.clone();
         self.background(ctx, move |settings| Event::Packets {
             pid,
             result: backend::packets(&target, &settings, since),
@@ -2644,7 +2679,7 @@ impl LoaderApp {
         if !self.vars.enabled {
             return;
         }
-        let Some(target) = self.selected_loaded_target() else {
+        let Some(target) = loaded_in(&self.targets, self.selected.as_deref()) else {
             return;
         };
         let now = Instant::now();
@@ -2658,6 +2693,7 @@ impl LoaderApp {
             known,
             varc_since,
         } = self.vars.start(pid);
+        let target = target.clone();
         self.background(ctx, move |settings| {
             let tick_count = || {
                 backend::state(&target, &settings)
@@ -2709,14 +2745,14 @@ impl LoaderApp {
         if !self.widgets.follow_mouse || !self.widget_inspector_showing() {
             return;
         }
-        let Some(target) = self.selected_loaded_target() else {
+        let Some(target) = loaded_in(&self.targets, self.selected.as_deref()) else {
             return;
         };
         ctx.request_repaint_after(crate::widgets::FOLLOW_EVERY);
         if !self.widgets.follow_due(Instant::now()) {
             return;
         }
-        let pid = target.client.pid;
+        let (pid, target) = (target.client.pid, target.clone());
         self.background(ctx, move |settings| {
             let result = backend::connection(&target, &settings).map(|connection| {
                 connection
@@ -2764,24 +2800,19 @@ impl LoaderApp {
 
     fn widgets_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let target = self.selected_loaded_target();
+        let pid = self.selected_loaded_target().map(|t| t.client.pid);
+        let mut refresh = false;
         ui.horizontal_wrapped(|ui| {
             let busy = self.widgets.reading();
-            if ui.add_enabled(target.is_some() && !busy, egui::Button::new("Refresh")).clicked()
-                && let Some(target) = target.clone()
-            {
-                self.refresh_widgets(&ctx, target);
-            }
+            refresh = ui.add_enabled(pid.is_some() && !busy, egui::Button::new("Refresh")).clicked();
             ui.checkbox(&mut self.widgets.hide_hidden, "Hide hidden");
             ui.checkbox(&mut self.widgets.follow_mouse, "Follow mouse")
                 .on_hover_text("Selects the widget under the client's mouse, looking about ten times a second. Move the mouse over the client and the tree follows; untick it to keep the selection.");
         });
-        client_caption(ui, target.as_ref());
-        if let Some(target) = target
-            && !self.widgets.has_read()
-            && !self.widgets.reading()
-            && self.widgets.error.is_none()
-        {
+        client_caption(ui, pid);
+        refresh |=
+            !self.widgets.has_read() && !self.widgets.reading() && self.widgets.error.is_none();
+        if refresh && let Some(target) = self.selected_loaded_target().cloned() {
             self.refresh_widgets(&ctx, target);
         }
         if let Some(error) = &self.widgets.error {
@@ -2790,8 +2821,12 @@ impl LoaderApp {
         ui.separator();
         let inspector = &mut self.widgets;
         let mut picked = inspector.selected;
-        let open = inspector.open_path();
         let reveal = std::mem::take(&mut inspector.reveal);
+        let open = if reveal {
+            inspector.open_path()
+        } else {
+            HashSet::new()
+        };
         ui.columns(2, |columns| {
             egui::ScrollArea::both().id_salt("widget_tree").auto_shrink([false, false]).show(&mut columns[0], |ui| {
                 for &root in &inspector.built().roots {
@@ -2820,7 +2855,7 @@ impl LoaderApp {
         if !self.script_inspector.enabled {
             return;
         }
-        let Some(target) = self.selected_loaded_target() else {
+        let Some(target) = loaded_in(&self.targets, self.selected.as_deref()) else {
             return;
         };
         let now = Instant::now();
@@ -2832,6 +2867,7 @@ impl LoaderApp {
             target.client.pid,
             self.script_inspector.start(target.client.pid),
         );
+        let target = target.clone();
         self.background(ctx, move |settings| Event::ScriptRuns {
             pid,
             result: backend::script_runs(&target, &settings, since)
@@ -2843,7 +2879,7 @@ impl LoaderApp {
         if !self.inventory.enabled {
             return;
         }
-        let Some(target) = self.selected_loaded_target() else {
+        let Some(target) = loaded_in(&self.targets, self.selected.as_deref()) else {
             return;
         };
         let now = Instant::now();
@@ -2859,6 +2895,7 @@ impl LoaderApp {
             known_containers,
             known_items,
         } = self.inventory.start(pid);
+        let target = target.clone();
         self.background(ctx, move |settings| {
             let read = || -> Result<crate::inventory::Poll, String> {
                 let (page, baseline) = match since {
@@ -2876,7 +2913,7 @@ impl LoaderApp {
                             &target,
                             &settings,
                             injector::ITEM_CHANGES_NOW,
-                            std::time::Duration::ZERO,
+                            Duration::ZERO,
                         )?;
                         (page, Some(backend::item_containers(&target, &settings)?))
                     }
@@ -2934,7 +2971,7 @@ impl LoaderApp {
     }
 
     fn inventory_ui(&mut self, ui: &mut egui::Ui) {
-        let target = self.selected_loaded_target();
+        let pid = self.selected_loaded_target().map(|t| t.client.pid);
         let inspector = &mut self.inventory;
         let icons = &mut self.icons;
         ui.horizontal_wrapped(|ui| {
@@ -2950,7 +2987,7 @@ impl LoaderApp {
                 inspector.clear();
             }
         });
-        client_caption(ui, target.as_ref());
+        client_caption(ui, pid);
         if let Some(error) = inspector.error.iter().chain(&icons.error).next() {
             error_label(ui, error);
         }
@@ -3003,10 +3040,10 @@ impl LoaderApp {
         if !self.icons.due(now) {
             return;
         }
-        let Some(target) = self.selected_loaded_target() else {
+        let Some(target) = loaded_in(&self.targets, self.selected.as_deref()) else {
             return;
         };
-        let batch = self.icons.start();
+        let (batch, target) = (self.icons.start(), target.clone());
         self.background(ctx, move |settings| {
             let mut pictures = Vec::new();
             let mut read = || -> Result<(), String> {
@@ -3038,7 +3075,7 @@ impl LoaderApp {
     }
 
     fn script_log_ui(&mut self, ui: &mut egui::Ui) {
-        let target = self.selected_loaded_target();
+        let pid = self.selected_loaded_target().map(|t| t.client.pid);
         let mut load_names = false;
         let inspector = &mut self.script_inspector;
         ui.horizontal_wrapped(|ui| {
@@ -3058,7 +3095,7 @@ impl LoaderApp {
                 inspector.clear();
             }
         });
-        client_caption(ui, target.as_ref());
+        client_caption(ui, pid);
         if let Some(error) = &inspector.names_error {
             error_label(ui, error);
         }
@@ -3091,7 +3128,7 @@ impl LoaderApp {
         };
         table.show(
             ui,
-            vec![
+            &[
                 ("Tick", narrow(60.0)),
                 ("Script", narrow(240.0)),
                 ("Arguments", narrow(260.0)),
@@ -3142,7 +3179,7 @@ impl LoaderApp {
             .default_open(false)
             .show(ui, |ui| self.varps_ui(ui));
         ui.separator();
-        let target = self.selected_loaded_target();
+        let pid = self.selected_loaded_target().map(|t| t.client.pid);
         let inspector = &mut self.vars;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut inspector.enabled, "Enable");
@@ -3155,7 +3192,7 @@ impl LoaderApp {
                 inspector.clear();
             }
         });
-        client_caption(ui, target.as_ref());
+        client_caption(ui, pid);
         let visible = inspector.visible();
         ui.weak(format!(
             "{} shown of {} kept. Client variables are listed as their index.",
@@ -3182,7 +3219,7 @@ impl LoaderApp {
         };
         table.show(
             ui,
-            vec![
+            &[
                 ("Tick", narrow(60.0)),
                 ("Kind", narrow(100.0)),
                 ("Name", narrow(220.0)),
@@ -3226,7 +3263,7 @@ impl LoaderApp {
     }
 
     fn packets_ui(&mut self, ui: &mut egui::Ui) {
-        let target = self.selected_loaded_target();
+        let pid = self.selected_loaded_target().map(|t| t.client.pid);
         let monitor = &mut self.packets;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut monitor.capture, "Enable");
@@ -3242,16 +3279,16 @@ impl LoaderApp {
             }
         });
         ui.horizontal(|ui| {
-                ui.label("Filter");
-                let menu_width = 170.0;
-                ui.add(egui::TextEdit::singleline(&mut monitor.filter).desired_width((ui.available_width() - menu_width).max(120.0)).hint_text("40, VARP_LARGE or !PLAYER_INFO"))
-                    .on_hover_text("Only these packets, or with a ! in front, all but these. Opcodes or names (see the Names menu), separated by commas or spaces. UNKNOWN stands for the packets without a name.");
-                packet_names_menu(ui, monitor);
-                if ui.add_enabled(!monitor.filter.is_empty(), egui::Button::new("✖").small()).on_hover_text("Clear the filter").clicked() {
-                    monitor.filter.clear();
-                }
-            });
-        client_caption(ui, target.as_ref());
+            ui.label("Filter");
+            let menu_width = 170.0;
+            ui.add(egui::TextEdit::singleline(&mut monitor.filter).desired_width((ui.available_width() - menu_width).max(120.0)).hint_text("40, VARP_LARGE or !PLAYER_INFO"))
+                .on_hover_text("Only these packets, or with a ! in front, all but these. Opcodes or names (see the Names menu), separated by commas or spaces. UNKNOWN stands for the packets without a name.");
+            packet_names_menu(ui, monitor);
+            if ui.add_enabled(!monitor.filter.is_empty(), egui::Button::new("✖").small()).on_hover_text("Clear the filter").clicked() {
+                monitor.filter.clear();
+            }
+        });
+        client_caption(ui, pid);
         let visible = monitor.visible();
         let table = monitor.table();
         ui.weak(format!(
@@ -3280,7 +3317,7 @@ impl LoaderApp {
         let selected = monitor.selected;
         log.show(
             ui,
-            vec![
+            &[
                 ("Time", narrow(70.0)),
                 ("", narrow(24.0)),
                 ("Opcode", narrow(56.0)),
@@ -3384,25 +3421,25 @@ impl LoaderApp {
                 let def = monitor.table().lookup(packet.sent, packet.opcode);
                 let decoded = def.map(|def| crate::packet_defs::decode(def, &bytes, packet.length));
                 egui::ScrollArea::vertical().id_salt("packet_detail").auto_shrink([false, false]).show(ui, |ui| {
-                        if let (Some(def), Some(decoded)) = (def, &decoded) {
-                            let fields: Vec<String> = decoded.fields.iter().map(|(label, value)| format!("{label} = {value}")).collect();
-                            let title = if def.name.is_empty() { format!("opcode {}", def.opcode) } else { def.name.clone() };
-                            ui.label(egui::RichText::new(format!("{title}  {}", fields.join("  ·  "))).font(font.clone()).strong())
-                                .on_hover_text(format!("Layout: {}.", monitor.table().source));
-                            if !def.has_fields() {
-                                ui.weak("The layout of this packet isn't known (its handler reads conditionally or in a loop).");
-                            }
-                            if !def.touches.is_empty() {
-                                ui.weak(format!("the client's handler touches: {}", def.touches.join(", ")));
-                            }
-                            if let Some(note) = &decoded.note {
-                                ui.colored_label(ui.visuals().warn_fg_color, note);
-                            }
+                    if let (Some(def), Some(decoded)) = (def, &decoded) {
+                        let fields: Vec<String> = decoded.fields.iter().map(|(label, value)| format!("{label} = {value}")).collect();
+                        let title = if def.name.is_empty() { format!("opcode {}", def.opcode) } else { def.name.clone() };
+                        ui.label(egui::RichText::new(format!("{title}  {}", fields.join("  ·  "))).font(font.clone()).strong())
+                            .on_hover_text(format!("Layout: {}.", monitor.table().source));
+                        if !def.has_fields() {
+                            ui.weak("The layout of this packet isn't known (its handler reads conditionally or in a loop).");
                         }
-                        for line in crate::packets::hex_dump(&bytes) {
-                            ui.label(egui::RichText::new(line).font(font.clone()));
+                        if !def.touches.is_empty() {
+                            ui.weak(format!("the client's handler touches: {}", def.touches.join(", ")));
                         }
-                    });
+                        if let Some(note) = &decoded.note {
+                            ui.colored_label(ui.visuals().warn_fg_color, note);
+                        }
+                    }
+                    for line in crate::packets::hex_dump(&bytes) {
+                        ui.label(egui::RichText::new(line).font(font.clone()));
+                    }
+                });
             }
         }
     }
@@ -3478,7 +3515,7 @@ impl LoaderApp {
         let target = self.selected_loaded_target();
         let action = crate::script::write(&self.accounts).ui(ui, target.is_some());
         if let Some(crate::accounts::Action::ReadClientName) = action
-            && let Some(target) = target
+            && let Some(target) = target.cloned()
         {
             let ctx = ui.ctx().clone();
             self.background(&ctx, move |settings| {
@@ -3604,8 +3641,12 @@ impl LoaderApp {
                     }
                 }
                 Event::Me(result) => match result {
-                    Ok(me) => self.auth = Auth::SignedIn(me),
-                    Err(ApiError::Unauthorized | ApiError::SignedOut(_)) => self.sign_out(Some("your session expired.".into())),
+                    Ok(me) => self.refresh_me(me),
+                    Err(ApiError::Unauthorized | ApiError::SignedOut(_)) => {
+                        if self.auth.me().is_some() {
+                            self.sign_out(Some("your session expired.".into()));
+                        }
+                    }
                     Err(error) => self.error(format!("Couldn't refresh your account: {error}")),
                 },
                 Event::Scripts(result) => {
@@ -3715,7 +3756,7 @@ impl LoaderApp {
                 Event::XpState { run: id, result } => {
                     if let Some(run) = self.run_by_id_mut(id) {
                         run.xp_reading = false;
-                        run.xp_next = std::time::Instant::now() + XP_READ_EVERY;
+                        run.xp_next = Instant::now() + XP_READ_EVERY;
                         if let Ok(state) = &result {
                             for name in feedback::names_of(state) {
                                 if !run.names.contains(&name) {
@@ -3789,12 +3830,13 @@ impl LoaderApp {
                     Err(error) => self.error(format!("Reading the game state of {pid} failed: {error}")),
                 },
                 Event::Varps { pid, read, result } => match result {
-                    Ok(varps) => {
-                        let previous = match &varps {
-                            Some(varps) => self.varps.replace(varps.clone()),
-                            None => self.varps.clone(),
-                        };
-                        self.report_varps(pid, read, varps.as_deref(), previous.as_deref());
+                    Ok(None) => self.info(format!("{pid}: No varps (not logged in).")),
+                    Ok(Some(varps)) => {
+                        let text = varps_report(read, &varps, self.varps.as_deref());
+                        self.varps = Some(varps);
+                        if let Some(text) = text {
+                            self.info(format!("{pid}: {text}"));
+                        }
                     }
                     Err(error) => self.error(format!("Reading the varps of {pid} failed: {error}")),
                 },
@@ -3899,64 +3941,6 @@ impl LoaderApp {
         self.info(format!("{pid}: {text}"));
     }
 
-    fn report_varps(
-        &mut self,
-        pid: u32,
-        read: Read,
-        varps: Option<&[i32]>,
-        previous: Option<&[i32]>,
-    ) {
-        let Some(varps) = varps else {
-            self.info(format!("{pid}: No varps (not logged in)."));
-            return;
-        };
-        let varp = |id: usize| varps.get(id).copied();
-        let text = match read {
-            Read::Varp(id) => match varp(id) {
-                Some(value) => format!("{}.", varp_text(None, id, value)),
-                None => format!("Varp {id}: no such varp, the client has {}.", varps.len()),
-            },
-            Read::KnownVarps => {
-                let lines: Vec<String> = KNOWN_VARPS
-                    .iter()
-                    .map(|&(name, id)| match varp(id) {
-                        Some(value) => format!("  {}", varp_text(Some(name), id, value)),
-                        None => format!("  {name} ({id}): missing"),
-                    })
-                    .collect();
-                format!("Known varps:\n{}", lines.join("\n"))
-            }
-            Read::VarpChanges => match previous {
-                Some(previous) => {
-                    let changes: Vec<String> = varps
-                        .iter()
-                        .enumerate()
-                        .filter(|&(id, value)| previous.get(id) != Some(value))
-                        .map(|(id, value)| {
-                            let before = previous
-                                .get(id)
-                                .map_or_else(|| "none".to_owned(), i32::to_string);
-                            format!("  {} (was {before})", varp_text(None, id, *value))
-                        })
-                        .collect();
-                    match changes.len() {
-                        0 => "No varps changed since the previous read.".into(),
-                        n => format!(
-                            "{n} varps changed since the previous read:\n{}",
-                            changes.join("\n")
-                        ),
-                    }
-                }
-                None => {
-                    "Varps read; click again after changing something in game to see what changed."
-                        .into()
-                }
-            },
-            _ => return,
-        };
-        self.info(format!("{pid}: {text}"));
-    }
-
     fn report_offsets(&mut self, pid: u32, found: Option<bool>) {
         match found {
             Some(true) => self.info(format!("Game state offsets found in {pid}.")),
@@ -3971,37 +3955,37 @@ impl LoaderApp {
         let field = (ui.available_width() - 190.0).clamp(120.0, 760.0);
         let mut log_lines_changed = false;
         egui::ScrollArea::both().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("settings").num_columns(3).max_col_width(field).show(ui, |ui| {
-            ui.label("agent DLL");
-            ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(field));
-            if ui.button("Browse…").clicked() {
-                pick_file(&mut self.settings.dll, "DLL", "dll");
-            }
-            ui.end_row();
-
-            ui.label("lib folder").on_hover_text("Optional. Scripts you run from a file read require(\"../lib/...\") from this folder, e.g. your lib checkout. Store scripts always use the downloaded lib.");
-            ui.add(egui::TextEdit::singleline(&mut self.settings.lib_dir).desired_width(field).hint_text("empty: the lib beside the script, or the built-in one"));
-            if ui.button("Browse…").clicked() {
-                pick_folder(&mut self.settings.lib_dir);
-            }
-            ui.end_row();
-
-            if !cfg!(windows) {
-                ui.label("injector.exe");
-                ui.add(egui::TextEdit::singleline(&mut self.settings.helper).desired_width(field));
+            egui::Grid::new("settings").num_columns(3).max_col_width(field).show(ui, |ui| {
+                ui.label("agent DLL");
+                ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(field));
                 if ui.button("Browse…").clicked() {
-                    pick_file(&mut self.settings.helper, "Executable", "exe");
+                    pick_file(&mut self.settings.dll, "DLL", "dll");
                 }
                 ui.end_row();
-            }
 
-            ui.label("output lines").on_hover_text("How many lines each output tab keeps. A tab lays out all of its lines again whenever one is added, so more lines cost more CPU and memory.");
-            log_lines_changed = ui.add(egui::DragValue::new(&mut self.settings.log_lines).range(backend::LOG_LINES).speed(50.0)).changed();
-            ui.end_row();
-        });
-        self.whitelist_page
-            .ui(ui, &mut crate::script::write(&self.http_whitelist));
-        self.transport_settings_ui(ui);
+                ui.label("lib folder").on_hover_text("Optional. Scripts you run from a file read require(\"../lib/...\") from this folder, e.g. your lib checkout. Store scripts always use the downloaded lib.");
+                ui.add(egui::TextEdit::singleline(&mut self.settings.lib_dir).desired_width(field).hint_text("empty: the lib beside the script, or the built-in one"));
+                if ui.button("Browse…").clicked() {
+                    pick_folder(&mut self.settings.lib_dir);
+                }
+                ui.end_row();
+
+                if !cfg!(windows) {
+                    ui.label("injector.exe");
+                    ui.add(egui::TextEdit::singleline(&mut self.settings.helper).desired_width(field));
+                    if ui.button("Browse…").clicked() {
+                        pick_file(&mut self.settings.helper, "Executable", "exe");
+                    }
+                    ui.end_row();
+                }
+
+                ui.label("output lines").on_hover_text("How many lines each output tab keeps. A tab lays out all of its lines again whenever one is added, so more lines cost more CPU and memory.");
+                log_lines_changed = ui.add(egui::DragValue::new(&mut self.settings.log_lines).range(backend::LOG_LINES).speed(50.0)).changed();
+                ui.end_row();
+            });
+            self.whitelist_page
+                .ui(ui, &mut crate::script::write(&self.http_whitelist));
+            self.transport_settings_ui(ui);
         });
         if log_lines_changed {
             let keep = self.settings.log_lines;
@@ -4063,8 +4047,7 @@ impl LoaderApp {
             }
             if data.busy {
                 ui.spinner();
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(250));
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
             }
         });
         if !data.message.is_empty() {
@@ -4384,15 +4367,17 @@ impl LoaderApp {
             None => {}
         }
 
-        let selected = self.selected_target();
-        let loaded = selected.as_ref().is_some_and(|t| t.client.loaded.is_some());
+        let loaded = self
+            .selected_target()
+            .is_some_and(|t| t.client.loaded.is_some());
         let can_unload = self.busy.is_none() && loaded;
 
         ui.add_space(8.0);
         ui.heading("Client options");
         ui.add_space(4.0);
+        let mut changed = false;
+        let mut set_name = false;
         ui.vertical(|ui| {
-            let mut changed = false;
             egui::Grid::new("client_options").num_columns(2).spacing(egui::vec2(16.0, 6.0)).show(ui, |ui| {
                 ui.label("Mouse cursor");
                 ui.horizontal_wrapped(|ui| {
@@ -4424,18 +4409,21 @@ impl LoaderApp {
                         .on_hover_text(hint);
                     let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let label = if self.display_name.trim().is_empty() { "Reset" } else { "Set" };
-                    if (ui.add_enabled(can_unload, egui::Button::new(label)).on_hover_text(hint).clicked() || submitted)
-                        && let Some(target) = selected.clone()
-                    {
-                        self.set_display_name(&ctx, target);
-                    }
+                    set_name = ui.add_enabled(can_unload, egui::Button::new(label)).on_hover_text(hint).clicked() || submitted;
                 });
                 ui.end_row();
             });
-            if changed && let Some(target) = selected {
+        });
+        if (set_name || changed)
+            && let Some(target) = self.selected_target().cloned()
+        {
+            if set_name {
+                self.set_display_name(&ctx, target.clone());
+            }
+            if changed {
                 self.set_cursor(&ctx, target);
             }
-        });
+        }
     }
     fn step_selected_client(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
@@ -4469,29 +4457,22 @@ impl LoaderApp {
         self.selected = Some(keys[next].clone());
     }
 
-    fn selected_target(&self) -> Option<Target> {
-        self.selected
-            .as_ref()
-            .and_then(|key| {
-                self.targets
-                    .iter()
-                    .find(|t| &t.key() == key && t.client.foreign_bot.is_none())
-            })
-            .cloned()
+    fn selected_target(&self) -> Option<&Target> {
+        selected_in(&self.targets, self.selected.as_deref())
     }
 
-    fn selected_loaded_target(&self) -> Option<Target> {
-        self.selected_target().filter(|t| t.client.loaded.is_some())
+    fn selected_loaded_target(&self) -> Option<&Target> {
+        loaded_in(&self.targets, self.selected.as_deref())
     }
 
     fn loaded_target_ui(&self, ui: &mut egui::Ui) -> Option<Target> {
         let target = self.selected_loaded_target();
-        match &target {
+        match target {
             Some(target) => ui.label(format!("Client {}.", target.client.pid)),
             None => ui.label("Select a client with agent loaded in the Clients tab."),
         };
         ui.add_space(6.0);
-        target
+        target.cloned()
     }
 
     fn state_ui(&mut self, ui: &mut egui::Ui) {
@@ -4616,7 +4597,7 @@ impl LoaderApp {
                         let elapsed = run.run_time();
                         run.counters.update(counters, elapsed);
                     }
-                    ScriptEvent::Breaks(plan) => run.breaks.update(plan, std::time::Instant::now()),
+                    ScriptEvent::Breaks(plan) => run.breaks.update(plan, Instant::now()),
                     ScriptEvent::Finished { stopped: true, .. } => run.info("Script stopped."),
                     ScriptEvent::Finished { result: Ok(()), .. } => run.info("Script finished."),
                     ScriptEvent::Finished {
@@ -4624,7 +4605,7 @@ impl LoaderApp {
                     } => run.error(format!("Script failed: {error}")),
                 }
                 if finished {
-                    self.runs[index].ended = Some(std::time::Instant::now());
+                    self.runs[index].ended = Some(Instant::now());
                     self.keep_run_record(ctx, index);
                 }
             }
@@ -4795,24 +4776,27 @@ impl LoaderApp {
     }
 
     fn run_target_ui(&mut self, ui: &mut egui::Ui) -> Option<Target> {
-        let free: Vec<Target> = self
+        let free: Vec<(&Target, String)> = self
             .targets
             .iter()
             .filter(|t| self.client_free(t))
-            .cloned()
+            .map(|t| (t, t.key()))
             .collect();
-        if !free.iter().any(|t| Some(t.key()) == self.run_target) {
-            self.run_target = free.first().map(Target::key);
+        if !free
+            .iter()
+            .any(|(_, key)| Some(key) == self.run_target.as_ref())
+        {
+            self.run_target = free.first().map(|(_, key)| key.clone());
         }
         ui.horizontal(|ui| {
             ui.label("Run on");
             let label = |t: &Target| format!("client {} ({})", t.client.pid, t.client.title);
-            let current = free.iter().find(|t| Some(t.key()) == self.run_target);
+            let current = free.iter().find(|(_, key)| Some(key) == self.run_target.as_ref());
             egui::ComboBox::from_id_salt("run_target")
-                .selected_text(current.map_or_else(|| "no free client".to_owned(), label))
+                .selected_text(current.map_or_else(|| "no free client".to_owned(), |(t, _)| label(t)))
                 .show_ui(ui, |ui| {
-                    for t in &free {
-                        ui.selectable_value(&mut self.run_target, Some(t.key()), label(t));
+                    for (t, key) in &free {
+                        ui.selectable_value(&mut self.run_target, Some(key.clone()), label(t));
                     }
                 });
             if free.is_empty() {
@@ -4893,15 +4877,14 @@ impl LoaderApp {
         let Some(run) = self.run() else {
             return;
         };
-        let title = run.title.clone();
         let running = run.is_running();
         let paused = running && run.script.is_paused();
         let stopping = run.script.stop_requested();
         let is_store = run.store.is_some();
-        let form_sent = run.form_sent.clone();
-        let waiting = run.form.is_some() && form_sent.is_none();
-        let changed_form = run.form.as_ref().is_some_and(|f| {
-            matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != form_sent.as_ref())
+        let form_sent = run.form_sent.is_some();
+        let waiting = run.form.is_some() && !form_sent;
+        let changed_form = form_sent && run.form.as_ref().is_some_and(|f| {
+            matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != run.form_sent.as_ref())
         });
         let submit_label = run
             .form
@@ -4917,12 +4900,12 @@ impl LoaderApp {
         let run_id = run.id;
         let restartable = !running && is_store;
         let restart_refusal = self.restart_refusal(run);
-        ui.add(egui::Label::new(egui::RichText::new(&title).heading()).truncate());
+        ui.add(egui::Label::new(egui::RichText::new(&run.title).heading()).truncate());
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
         let mut restart = false;
         ui.horizontal_wrapped(|ui| {
-            if form_sent.is_some() {
+            if form_sent {
                 update = ui
                     .add_enabled(running && !stopping && changed_form, egui::Button::new("Update"))
                     .on_hover_text("Sends the changed settings to the running script.")
@@ -5006,24 +4989,21 @@ impl LoaderApp {
             .map(|form| form.title.clone())
             .unwrap_or_default();
         let mut read: Option<(crate::layouts::Kind, bool)> = None;
-        let rules_of = |kind| {
-            self.run()
-                .and_then(|r| r.form.as_ref())
-                .map(|form| form.rules(kind).clone())
-                .unwrap_or_default()
-        };
-        let rules = [
-            crate::layouts::Kind::Equipment,
-            crate::layouts::Kind::Inventory,
-            crate::layouts::Kind::Prayer,
-        ]
-        .map(rules_of);
-        let [equipment_rules, inventory_rules, prayer_rules] = &rules;
-        let unknown: Vec<i32> = rules
-            .iter()
-            .flat_map(|r| r.unknown(&self.known_items))
-            .filter(|id| !self.asking_items.contains(id))
-            .collect();
+        let unknown: Vec<i32> = self
+            .run()
+            .and_then(|r| r.form.as_ref())
+            .map(|form| {
+                [
+                    crate::layouts::Kind::Equipment,
+                    crate::layouts::Kind::Inventory,
+                    crate::layouts::Kind::Prayer,
+                ]
+                .into_iter()
+                .flat_map(|kind| form.rules(kind).unknown(&self.known_items))
+                .filter(|id| !self.asking_items.contains(id))
+                .collect()
+            })
+            .unwrap_or_default();
         egui::ScrollArea::both()
             .min_scrolled_height(0.0)
             .id_salt(("tools_tab", tools_tab as u8))
@@ -5045,15 +5025,16 @@ impl LoaderApp {
                         }
                     },
                     ToolsTab::Equipment => {
-                        let saved = self.layouts.entry(form_title.clone()).or_default();
-                        if let Some(editors) = editors_of(&mut self.runs, self.active_run)
+                        let saved = self.layouts.entry(form_title).or_default();
+                        if let Some(Run { editors, form, .. }) =
+                            run_in(&mut self.runs, self.active_run)
                             && crate::layouts::equipment_ui(
                                 ui,
                                 &mut editors.equipment,
                                 &mut saved.equipment,
                                 &mut self.icons,
                                 can_read,
-                                equipment_rules,
+                                rules_in(form, crate::layouts::Kind::Equipment),
                                 &self.known_items,
                             ) == Some(crate::layouts::Action::Read)
                         {
@@ -5061,15 +5042,16 @@ impl LoaderApp {
                         }
                     }
                     ToolsTab::Inventory => {
-                        let saved = self.layouts.entry(form_title.clone()).or_default();
-                        if let Some(editors) = editors_of(&mut self.runs, self.active_run)
+                        let saved = self.layouts.entry(form_title).or_default();
+                        if let Some(Run { editors, form, .. }) =
+                            run_in(&mut self.runs, self.active_run)
                             && crate::layouts::inventory_ui(
                                 ui,
                                 &mut editors.inventory,
                                 &mut saved.inventory,
                                 &mut self.icons,
                                 can_read,
-                                inventory_rules,
+                                rules_in(form, crate::layouts::Kind::Inventory),
                                 &self.known_items,
                             ) == Some(crate::layouts::Action::Read)
                         {
@@ -5081,9 +5063,9 @@ impl LoaderApp {
                             .run()
                             .and_then(|r| r.xp.rows().into_iter().find(|row| row.name == "Prayer"))
                             .and_then(|row| u32::try_from(row.level).ok());
-                        let saved = self.layouts.entry(form_title.clone()).or_default();
-                        let action =
-                            editors_of(&mut self.runs, self.active_run).and_then(|editors| {
+                        let saved = self.layouts.entry(form_title).or_default();
+                        let action = run_in(&mut self.runs, self.active_run).and_then(
+                            |Run { editors, form, .. }| {
                                 crate::layouts::prayer_ui(
                                     ui,
                                     &mut editors.prayer,
@@ -5091,9 +5073,10 @@ impl LoaderApp {
                                     &mut self.icons,
                                     can_read,
                                     level,
-                                    prayer_rules,
+                                    rules_in(form, crate::layouts::Kind::Prayer),
                                 )
-                            });
+                            },
+                        );
                         match action {
                             Some(crate::layouts::Action::Read) => {
                                 read = Some((crate::layouts::Kind::Prayer, false))
@@ -5118,7 +5101,7 @@ impl LoaderApp {
     }
 
     fn describe_items(&mut self, ctx: &egui::Context, ids: Vec<i32>) {
-        let Some(target) = self.layout_target() else {
+        let Some(target) = self.layout_target().cloned() else {
             return;
         };
         self.asking_items.extend(&ids);
@@ -5145,7 +5128,7 @@ impl LoaderApp {
             .unwrap_or(&EMPTY_LAYOUTS)
     }
 
-    fn layout_target(&self) -> Option<Target> {
+    fn layout_target(&self) -> Option<&Target> {
         self.run()
             .and_then(Run::loaded_target)
             .or_else(|| self.selected_loaded_target())
@@ -5156,7 +5139,7 @@ impl LoaderApp {
         let Some(run) = self.active_run else {
             return;
         };
-        let Some(target) = self.layout_target() else {
+        let Some(target) = self.layout_target().cloned() else {
             if let Some(editors) = editors_of(&mut self.runs, Some(run)) {
                 editors.equipment.reading = false;
                 editors.inventory.reading = false;
@@ -5235,7 +5218,7 @@ impl LoaderApp {
                 dosed.sort_unstable();
                 dosed.dedup();
                 if !dosed.is_empty() {
-                    let families: std::collections::HashMap<i32, Vec<u32>> = dosed
+                    let families: HashMap<i32, Vec<u32>> = dosed
                         .iter()
                         .zip(backend::item_doses(&target, &settings, &dosed)?)
                         .filter_map(|(&id, family)| {
@@ -5507,9 +5490,9 @@ impl LoaderApp {
     }
 
     fn reload_prompt_ui(&mut self, ctx: &egui::Context) {
-        let Some(disk) = self.reload_prompt.clone() else {
+        if self.reload_prompt.is_none() {
             return;
-        };
+        }
         let name = self.script_file.name();
         let unsaved = self
             .script_file
@@ -5545,7 +5528,9 @@ impl LoaderApp {
                 });
             });
         let Some(choice) = choice else { return };
-        self.reload_prompt = None;
+        let Some(disk) = self.reload_prompt.take() else {
+            return;
+        };
         let Some(reload) = choice else { return };
         self.script_file.disk = Some(disk.clone());
         if reload {
@@ -5585,12 +5570,12 @@ impl LoaderApp {
         if width_button(ui, !running, "Open…", width).clicked() {
             self.open_script();
         }
-        let last = self.last_script.clone();
+        let last = self.last_script.as_deref();
         if width_button(ui, !running && last.is_some(), "Open last", width)
-            .on_hover_text(last.as_deref().unwrap_or("No file has been opened yet."))
+            .on_hover_text(last.unwrap_or("No file has been opened yet."))
             .on_disabled_hover_text("No file has been opened yet.")
             .clicked()
-            && let Some(path) = last
+            && let Some(path) = self.last_script.clone()
         {
             self.open_path(std::path::Path::new(&path));
         }
@@ -6257,10 +6242,7 @@ impl LoaderApp {
                 ui.weak("Used by the scripts you start. It is saved as you edit.");
                 return;
             }
-            let Some(view) = self
-                .run()
-                .and_then(|r| r.breaks.view(std::time::Instant::now()))
-            else {
+            let Some(view) = self.run().and_then(|r| r.breaks.view(Instant::now())) else {
                 ui.add_space(6.0);
                 ui.weak("The script hasn't reported any breaks yet.");
                 return;
@@ -6448,26 +6430,43 @@ impl LoaderApp {
             warning,
             error,
         );
-        if self
-            .log_job
-            .as_ref()
-            .is_none_or(|(cached, _, _)| *cached != key)
-        {
+        if self.log_job.as_ref().is_none_or(|cached| cached.key != key) {
             let log = self.log_ref(tab);
-            let job = log.layout_job(font, normal, warning, error);
-            self.log_job = Some((key, job, log.entry_of_line()));
+            self.log_job = Some(LogJob {
+                job: log.layout_job(font.clone(), normal, warning, error),
+                entry_of_line: log.entry_of_line(),
+                laid_out: RefCell::new(None),
+                key,
+            });
         }
-        let cached_job = self.log_job.as_ref().map(|(_, job, _)| job);
-        let entry_of_line = self
-            .log_job
-            .as_ref()
-            .map_or(&[][..], |(_, _, entries)| entries);
+        let Some(log_job) = self.log_job.as_ref() else {
+            return;
+        };
+        let entry_of_line = &log_job.entry_of_line;
         let log = self.log_ref(tab);
         let text = log.text.as_str();
+        let probe = ui.fonts_mut(|fonts| fonts.layout_no_wrap(" ".into(), font, normal));
+        let pixels_per_point = ui.ctx().pixels_per_point();
         let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = cached_job.cloned().unwrap_or_default();
+            let wrap_width = wrap_width.round();
+            let mut laid_out = log_job.laid_out.borrow_mut();
+            if let Some(kept) = laid_out.as_ref()
+                && kept.wrap_width == wrap_width
+                && kept.pixels_per_point == pixels_per_point
+                && Arc::ptr_eq(&kept.probe, &probe)
+            {
+                return kept.galley.clone();
+            }
+            let mut job = log_job.job.clone();
             job.wrap.max_width = wrap_width;
-            ui.fonts_mut(|fonts| fonts.layout_job(job))
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            *laid_out = Some(LaidOut {
+                wrap_width,
+                pixels_per_point,
+                probe: probe.clone(),
+                galley: galley.clone(),
+            });
+            galley
         };
         egui::ScrollArea::vertical()
             .min_scrolled_height(0.0)
@@ -6658,6 +6657,51 @@ fn paint_matches(
         }
     }
     find.jump = false;
+}
+
+fn varps_report(read: Read, varps: &[i32], previous: Option<&[i32]>) -> Option<String> {
+    let varp = |id: usize| varps.get(id).copied();
+    Some(match read {
+        Read::Varp(id) => match varp(id) {
+            Some(value) => format!("{}.", varp_text(None, id, value)),
+            None => format!("Varp {id}: no such varp, the client has {}.", varps.len()),
+        },
+        Read::KnownVarps => {
+            let lines: Vec<String> = KNOWN_VARPS
+                .iter()
+                .map(|&(name, id)| match varp(id) {
+                    Some(value) => format!("  {}", varp_text(Some(name), id, value)),
+                    None => format!("  {name} ({id}): missing"),
+                })
+                .collect();
+            format!("Known varps:\n{}", lines.join("\n"))
+        }
+        Read::VarpChanges => match previous {
+            Some(previous) => {
+                let changes: Vec<String> = varps
+                    .iter()
+                    .enumerate()
+                    .filter(|&(id, value)| previous.get(id) != Some(value))
+                    .map(|(id, value)| {
+                        let before = previous
+                            .get(id)
+                            .map_or_else(|| "none".to_owned(), i32::to_string);
+                        format!("  {} (was {before})", varp_text(None, id, *value))
+                    })
+                    .collect();
+                match changes.len() {
+                    0 => "No varps changed since the previous read.".into(),
+                    n => format!(
+                        "{n} varps changed since the previous read:\n{}",
+                        changes.join("\n")
+                    ),
+                }
+            }
+            None => "Varps read; click again after changing something in game to see what changed."
+                .into(),
+        },
+        _ => return None,
+    })
 }
 
 fn varp_text(name: Option<&str>, id: usize, value: i32) -> String {
@@ -6992,7 +7036,7 @@ fn widget_node_ui(
     ui: &mut egui::Ui,
     inspector: &crate::widgets::Inspector,
     index: usize,
-    open: &std::collections::HashSet<usize>,
+    open: &HashSet<usize>,
     reveal: bool,
     picked: &mut Option<(i32, i32)>,
 ) {

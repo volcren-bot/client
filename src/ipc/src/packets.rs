@@ -232,7 +232,7 @@ pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field
         let codes = fields
             .as_ref()
             .and_then(|fields| fields.iter().map(encode_field).collect::<Option<Vec<_>>>())
-            .filter(|codes| codes.len() < LAYOUT_FIELDS);
+            .filter(|codes| codes.len() <= LAYOUT_FIELDS);
         let count = match codes {
             Some(codes) => {
                 for (i, &code) in codes.iter().enumerate() {
@@ -251,13 +251,13 @@ pub unsafe fn publish_layouts(log: *const Log, layouts: &[(i32, Option<Vec<Field
 
 pub unsafe fn read_layouts(log: *const Log) -> Option<Vec<Layout>> {
     let ready = (*log).layouts_ready.load(Ordering::Acquire) as usize;
-    let count = ready.checked_sub(1)?;
+    let count = ready.checked_sub(1)?.min(LAYOUT_IDS);
     Some(
         (0..count)
             .map(|id| {
                 let slot = addr_of!((*log).layouts[id]);
                 let n = read_volatile(addr_of!((*slot).fields_count));
-                let fields = (n != NO_LAYOUT && (n as usize) < LAYOUT_FIELDS)
+                let fields = (n != NO_LAYOUT && (n as usize) <= LAYOUT_FIELDS)
                     .then(|| {
                         (0..n as usize)
                             .map(|i| decode_field(read_volatile(addr_of!((*slot).fields[i]))))
@@ -391,17 +391,16 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
         addr_of!((*log).entries),
         since,
         limit,
-        |at, slot| {
-            let stored = (read_volatile(addr_of!((*slot).stored)) as usize).min(PAYLOAD_SIZE);
-            let payload = read_volatile(addr_of!((*slot).payload))[..stored].to_vec();
-            Entry {
-                sequence: at,
-                time_ms: read_volatile(addr_of!((*slot).time_ms)),
-                direction: read_volatile(addr_of!((*slot).direction)),
-                opcode: read_volatile(addr_of!((*slot).opcode)),
-                length: read_volatile(addr_of!((*slot).length)),
-                payload,
-            }
+        |at, slot| Entry {
+            sequence: at,
+            time_ms: read_volatile(addr_of!((*slot).time_ms)),
+            direction: read_volatile(addr_of!((*slot).direction)),
+            opcode: read_volatile(addr_of!((*slot).opcode)),
+            length: read_volatile(addr_of!((*slot).length)),
+            payload: ring::read_prefix(
+                addr_of!((*slot).payload),
+                read_volatile(addr_of!((*slot).stored)),
+            ),
         },
     )
 }
@@ -501,10 +500,17 @@ mod tests {
                     (0, Some(vec![])),
                     (-1, None),
                     (2, Some(vec![u16le.clone()])),
+                    (32, Some(vec![u16le.clone(); LAYOUT_FIELDS])),
+                    (34, Some(vec![u16le.clone(); LAYOUT_FIELDS + 1])),
                 ],
             );
             let layouts = read_layouts(memory.0).unwrap();
-            assert_eq!(layouts.len(), 3);
+            assert_eq!(layouts.len(), 5);
+            assert_eq!(
+                layouts[3].fields.as_ref().map(Vec::len),
+                Some(LAYOUT_FIELDS)
+            );
+            assert_eq!(layouts[4].fields, None);
             assert_eq!(
                 layouts[0],
                 Layout {

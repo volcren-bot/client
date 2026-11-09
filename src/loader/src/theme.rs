@@ -97,71 +97,46 @@ pub fn sidebar_child<T: PartialEq>(
     dim: bool,
     last: bool,
 ) -> egui::Response {
-    let selected = *current == value;
-    let (rect, response) = select_row(ui, selected, || *current = value);
-    let text = if dim && !selected {
-        COMMENT
-    } else {
-        row_text_color(selected, response.hovered())
-    };
-    sidebar_row(
-        ui,
-        rect,
-        selected || response.hovered(),
-        text,
-        |job, font| {
-            for (s, color) in [
-                ("│  ", COMMENT),
-                (if last { "└─ " } else { "├─ " }, COMMENT),
-                (name, text),
-            ] {
-                job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
-            }
-        },
-    );
-    response
+    sidebar_row(ui, current, value, dim, |text| {
+        [
+            ("│  ", COMMENT),
+            (if last { "└─ " } else { "├─ " }, COMMENT),
+            (name, text),
+        ]
+    })
 }
 
-fn select_row(
+fn sidebar_row<'a, T: PartialEq, const N: usize>(
     ui: &mut egui::Ui,
-    selected: bool,
-    select: impl FnOnce(),
-) -> (egui::Rect, egui::Response) {
+    current: &mut T,
+    value: T,
+    dim: bool,
+    pieces: impl FnOnce(Color32) -> [(&'a str, Color32); N],
+) -> egui::Response {
+    let selected = *current == value;
     let (rect, mut response) = ui.allocate_exact_size(
         vec2(ui.available_width(), ui.spacing().interact_size.y),
         egui::Sense::click(),
     );
     if response.clicked() && !selected {
-        select();
+        *current = value;
         response.mark_changed();
     }
-    (
-        rect,
-        response.on_hover_cursor(egui::CursorIcon::PointingHand),
-    )
-}
-
-fn row_text_color(selected: bool, hovered: bool) -> Color32 {
-    if selected {
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let hovered = response.hovered();
+    let text = if selected {
         BLUE
+    } else if dim {
+        COMMENT
     } else if hovered {
         FG
     } else {
         FG_DARK
-    }
-}
-
-fn sidebar_row(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    highlighted: bool,
-    text: Color32,
-    append: impl FnOnce(&mut egui::text::LayoutJob, &egui::FontId),
-) {
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    if highlighted {
+    };
+    if selected || hovered {
         ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
     }
     let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
@@ -174,13 +149,16 @@ fn sidebar_row(
         },
         ..Default::default()
     };
-    append(&mut job, &font);
+    for (piece, color) in pieces(text) {
+        job.append(piece, 0.0, egui::TextFormat::simple(font.clone(), color));
+    }
     let galley = ui.painter().layout_job(job);
     ui.painter().galley(
         egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
         galley,
         text,
     );
+    response
 }
 
 pub fn apply(ctx: &egui::Context) {
@@ -329,27 +307,15 @@ pub fn sidebar_item<T: PartialEq>(
     name: &str,
     last: bool,
 ) -> egui::Response {
-    let selected = *current == value;
-    let (rect, response) = select_row(ui, selected, || *current = value);
-    let text = row_text_color(selected, response.hovered());
-    sidebar_row(
-        ui,
-        rect,
-        selected || response.hovered(),
-        text,
-        |job, font| {
-            for (s, color) in [
-                (if last { "└─ " } else { "├─ " }, COMMENT),
-                (icon, text),
-                (" ", text),
-                (name, text),
-                ("/", text),
-            ] {
-                job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
-            }
-        },
-    );
-    response
+    sidebar_row(ui, current, value, false, |text| {
+        [
+            (if last { "└─ " } else { "├─ " }, COMMENT),
+            (icon, text),
+            (" ", text),
+            (name, text),
+            ("/", text),
+        ]
+    })
 }
 
 const SIDEBAR_FONT_SIZE: f32 = 15.0;

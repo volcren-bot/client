@@ -1,9 +1,5 @@
 pub use ipc::read::{Memory, read_string};
-
-pub(crate) const TABLE_BUCKETS: u64 = 0x8;
-pub(crate) const TABLE_COUNT: u64 = 0x10;
-pub(crate) const NODE_VALUE: u64 = 0x10;
-pub(crate) const NODE_NEXT: u64 = 0x18;
+pub(crate) use ipc::read::{NODE_NEXT, NODE_VALUE, TABLE_BUCKETS, TABLE_COUNT};
 
 pub(crate) fn byte(memory: &impl Memory, address: u64) -> Option<u8> {
     let mut b = [0u8];

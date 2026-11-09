@@ -46,7 +46,14 @@ fn log(run: &Run) {
 struct Event {
     event_type: i32,
     arg_count: u16,
-    args: Vec<(u8, i32)>,
+    args: [(u8, i32); ARG_COUNT],
+    kept: usize,
+}
+
+impl Event {
+    fn args(&self) -> &[(u8, i32)] {
+        &self.args[..self.kept]
+    }
 }
 
 fn read_event(event: u64, rule: &ScriptRuns) -> Option<Event> {
@@ -57,25 +64,28 @@ fn read_event(event: u64, rule: &ScriptRuns) -> Option<Event> {
         return None;
     }
     let args = memory.u64(event + rule.args as u64)?;
-    let mut kept = Vec::new();
+    let mut read = [(arg_kind::OTHER, 0); ARG_COUNT];
+    let mut kept = 0;
     if args != 0 {
-        for i in 0..(count as usize).min(ARG_COUNT) {
+        for (i, slot) in read.iter_mut().enumerate().take(count as usize) {
             let at = args + i as u64 * ARG_SIZE as u64;
             let mut kind = [0u8];
             if !memory.read(at + ARG_KIND as u64, &mut kind) {
                 break;
             }
-            kept.push(match kind[0] {
+            *slot = match kind[0] {
                 KIND_INT => (arg_kind::INT, memory.i32(at)?),
                 2 => (arg_kind::STRING, 0),
                 _ => (arg_kind::OTHER, 0),
-            });
+            };
+            kept = i + 1;
         }
     }
     Some(Event {
         event_type,
         arg_count: count as u16,
-        args: kept,
+        args: read,
+        kept,
     })
 }
 
@@ -104,7 +114,7 @@ unsafe extern "system" fn run(
                     tick: TICK.read(),
                     depth,
                     arg_count: event.arg_count,
-                    args: &event.args,
+                    args: event.args(),
                 })
             }));
         }

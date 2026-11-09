@@ -102,7 +102,7 @@ pub struct Skills {
     pub count: u32,
 }
 
-pub use ipc::state::array;
+use ipc::state::array;
 
 pub mod hash_table {
     pub const BUCKETS: usize = 0x8;
@@ -125,8 +125,9 @@ pub struct Pe<'a> {
     image: &'a [u8],
     code: Vec<Section>,
     functions: Vec<(u32, u32)>,
-    raw_functions: Vec<(u32, u32, u32)>,
+    unwinds: Vec<u32>,
     calls: OnceCell<Vec<(u32, u32)>>,
+    rdx_leas: OnceCell<Vec<(u32, u32)>>,
 }
 
 const UNW_FLAG_CHAININFO: u8 = 4;
@@ -134,12 +135,12 @@ const UNW_FLAG_CHAININFO: u8 = 4;
 fn chunk_root(pe: &Pe, begin: u32) -> Option<u32> {
     let mut begin = begin;
     for _ in 0..8 {
-        let index = pe.raw_functions.partition_point(|&(b, _, _)| b < begin);
-        let &(b, _, unwind) = pe.raw_functions.get(index)?;
+        let index = pe.functions.partition_point(|&(b, _)| b < begin);
+        let &(b, _) = pe.functions.get(index)?;
         if b != begin {
             return None;
         }
-        let unwind = unwind as usize;
+        let unwind = pe.unwinds[index] as usize;
         let flags = *pe.image.get(unwind)? >> 3;
         if flags & UNW_FLAG_CHAININFO == 0 {
             return Some(begin);
@@ -151,15 +152,9 @@ fn chunk_root(pe: &Pe, begin: u32) -> Option<u32> {
 }
 
 fn function_head(pe: &Pe, begin: u32, end: u32, limit: usize) -> Vec<Instruction> {
-    Decoder::with_ip(
-        64,
-        pe.bytes(begin, end.max(begin)),
-        begin as u64,
-        DecoderOptions::NONE,
-    )
-    .into_iter()
-    .take(limit)
-    .collect()
+    instructions(pe.bytes(begin, end), begin)
+        .take(limit)
+        .collect()
 }
 
 fn function_instrs(pe: &Pe, begin: u32, end: u32) -> Vec<Instruction> {
@@ -177,8 +172,12 @@ fn before_padding(mut instrs: Vec<Instruction>) -> Vec<Instruction> {
 }
 
 fn whole_function(pe: &Pe, begin: u32, max: u32) -> Vec<Instruction> {
-    let end = (begin + max).min(pe.image.len() as u32);
-    before_padding(function_instrs(pe, begin, end))
+    image_function(pe.image, begin, max)
+}
+
+fn image_function(image: &[u8], begin: u32, max: u32) -> Vec<Instruction> {
+    let end = (begin as usize + max as usize).min(image.len());
+    before_padding(decode(&image[(begin as usize).min(end)..end], begin))
 }
 
 fn u64_at(data: &[u8], at: usize) -> Option<u64> {
@@ -192,11 +191,15 @@ fn calls_to<'p>(pe: &'p Pe, target: u32) -> impl Iterator<Item = u32> + 'p {
         .map(|&(site, _)| site)
 }
 
+fn caller_functions<'p>(pe: &'p Pe, target: u32) -> impl Iterator<Item = (u32, u32)> + 'p {
+    calls_to(pe, target).filter_map(|site| pe.function_containing(site))
+}
+
 struct Caller {
-    pub begin: u32,
-    pub end: u32,
-    pub instrs: Vec<Instruction>,
-    pub at: usize,
+    begin: u32,
+    end: u32,
+    instrs: Vec<Instruction>,
+    at: usize,
 }
 
 fn callers<'p>(pe: &'p Pe, target: u32) -> impl Iterator<Item = Caller> + 'p {
@@ -211,6 +214,65 @@ fn callers<'p>(pe: &'p Pe, target: u32) -> impl Iterator<Item = Caller> + 'p {
             at,
         })
     })
+}
+
+fn functions_containing(pe: &Pe, hits: impl IntoIterator<Item = u32>) -> Vec<(u32, u32)> {
+    let mut functions: Vec<(u32, u32)> = hits
+        .into_iter()
+        .filter_map(|hit| pe.function_containing(hit))
+        .collect();
+    functions.sort_unstable();
+    functions.dedup();
+    functions
+}
+
+fn functions_with_dword(pe: &Pe, value: u32) -> Vec<(u32, u32)> {
+    functions_containing(pe, dword_hits(pe, value))
+}
+
+fn string_rvas(pe: &Pe, name: &str) -> HashSet<u32> {
+    let mut needle = vec![0u8];
+    needle.extend_from_slice(name.as_bytes());
+    needle.push(0);
+    pe.image
+        .windows(needle.len())
+        .enumerate()
+        .filter(|(_, w)| *w == needle.as_slice())
+        .map(|(at, _)| at as u32 + 1)
+        .collect()
+}
+
+fn rip_lea(i: &Instruction) -> Option<u32> {
+    (i.mnemonic() == Mnemonic::Lea && i.is_ip_rel_memory_operand())
+        .then(|| i.ip_rel_memory_address() as u32)
+}
+
+fn dword_store(i: &Instruction, base: Register) -> bool {
+    i.mnemonic() == Mnemonic::Mov
+        && i.op0_kind() == OpKind::Memory
+        && i.memory_base() == base
+        && i.memory_index() == Register::None
+        && i.memory_size() == iced_x86::MemorySize::UInt32
+        && i.op1_kind() == OpKind::Register
+}
+
+fn client_registers(instrs: &[Instruction], client: u32) -> HashSet<Register> {
+    instrs
+        .iter()
+        .filter(|i| {
+            i.mnemonic() == Mnemonic::Mov
+                && i.is_ip_rel_memory_operand()
+                && i.ip_rel_memory_address() as u32 == client
+        })
+        .map(|i| i.op0_register())
+        .collect()
+}
+
+fn client_field(i: &Instruction, clients: &HashSet<Register>) -> Option<u32> {
+    (i.op1_kind() == OpKind::Memory
+        && clients.contains(&i.memory_base())
+        && i.memory_index() == Register::None)
+        .then(|| i.memory_displacement64() as u32)
 }
 
 fn calls(instrs: &[Instruction]) -> impl Iterator<Item = (usize, u32)> + '_ {
@@ -288,25 +350,28 @@ impl<'a> Pe<'a> {
             }
         }
 
-        let mut functions = Vec::with_capacity(exception_size / 12);
-        let mut raw_functions = Vec::with_capacity(exception_size / 12);
         let entries = image.get(exception_rva..exception_rva.checked_add(exception_size)?)?;
-        for entry in entries.as_chunks::<12>().0 {
-            let (begin, end, unwind) = (u32_at(entry, 0)?, u32_at(entry, 4)?, u32_at(entry, 8)?);
-            if end > begin {
-                functions.push((begin, end));
-                raw_functions.push((begin, end, unwind));
-            }
-        }
-        functions.sort_unstable();
-        raw_functions.sort_unstable();
+        let mut entries: Vec<(u32, u32, u32)> = entries
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|entry| Some((u32_at(entry, 0)?, u32_at(entry, 4)?, u32_at(entry, 8)?)))
+            .collect::<Option<_>>()?;
+        entries.retain(|&(begin, end, _)| end > begin && end as usize <= image.len());
+        entries.sort_unstable();
+        let functions = entries
+            .iter()
+            .map(|&(begin, end, _)| (begin, end))
+            .collect();
+        let unwinds = entries.iter().map(|&(_, _, unwind)| unwind).collect();
 
         Some(Self {
             image,
             code,
             functions,
-            raw_functions,
+            unwinds,
             calls: OnceCell::new(),
+            rdx_leas: OnceCell::new(),
         })
     }
 
@@ -317,7 +382,8 @@ impl<'a> Pe<'a> {
     }
 
     fn bytes(&self, begin: u32, end: u32) -> &[u8] {
-        &self.image[begin as usize..end as usize]
+        let end = (end as usize).min(self.image.len());
+        &self.image[(begin as usize).min(end)..end]
     }
 
     fn code_sections(&self) -> impl Iterator<Item = (usize, &'a [u8])> + '_ {
@@ -480,18 +546,10 @@ fn world_base_in(code: &[u8], rva: u32) -> Option<u32> {
 }
 
 pub fn find_actor_position(pe: &Pe) -> Result<ActorPosition, ScanError> {
-    let mut candidates: Vec<(u32, u32)> = dword_hits(pe, LOCAL_MIN)
-        .into_iter()
-        .filter_map(|hit| pe.function_containing(hit))
-        .collect();
-    candidates.sort_unstable();
-    candidates.dedup();
-
-    let max_bytes = LOCAL_MAX.to_le_bytes();
     let mut found = Vec::new();
-    for (begin, end) in candidates {
+    for (begin, end) in functions_with_dword(pe, LOCAL_MIN) {
         let code = pe.bytes(begin, end);
-        if !code.windows(4).any(|w| w == max_bytes) {
+        if !has_dword(code, LOCAL_MAX) {
             continue;
         }
 
@@ -597,7 +655,9 @@ fn world_view_getter(instrs: &[Instruction]) -> Option<(u32, u32, u32)> {
     (is_add && is_jmp).then(|| (id, add.immediate(1) as u32, jmp.near_branch_target() as u32))
 }
 
-fn hash_table_offset(pe: &Pe, rva: u32) -> Option<u32> {
+const MAX_THUNKS: u32 = 8;
+
+fn hash_table_offset(pe: &Pe, rva: u32, thunks: u32) -> Option<u32> {
     let instrs = decode_at(pe, rva, 8);
     if let [add, jmp, ..] = instrs.as_slice() {
         if add.mnemonic() == Mnemonic::Add
@@ -605,7 +665,8 @@ fn hash_table_offset(pe: &Pe, rva: u32) -> Option<u32> {
             && jmp.mnemonic() == Mnemonic::Jmp
             && jmp.op0_kind() == OpKind::NearBranch64
         {
-            let inner = hash_table_offset(pe, jmp.near_branch_target() as u32)?;
+            let inner =
+                hash_table_offset(pe, jmp.near_branch_target() as u32, thunks.checked_sub(1)?)?;
             return (add.immediate(1) as u32).checked_add(inner);
         }
     }
@@ -639,14 +700,31 @@ fn hash_table_offset(pe: &Pe, rva: u32) -> Option<u32> {
 }
 
 fn direct_calls<'p>(pe: &'p Pe) -> &'p [(u32, u32)] {
-    pe.calls.get_or_init(|| scan_direct_calls(pe))
+    pe.calls.get_or_init(|| {
+        rel32_branches(pe, 0xe8)
+            .filter(|&(_, target)| usize::try_from(target).is_ok_and(|target| pe.in_code(target)))
+            .map(|(site, target)| (site as u32, target as u32))
+            .collect()
+    })
 }
 
-fn scan_direct_calls(pe: &Pe) -> Vec<(u32, u32)> {
-    rel32_branches(pe, 0xe8)
-        .filter(|&(_, target)| usize::try_from(target).is_ok_and(|target| pe.in_code(target)))
-        .map(|(site, target)| (site as u32, target as u32))
-        .collect()
+fn rdx_leas<'p>(pe: &'p Pe) -> &'p [(u32, u32)] {
+    pe.rdx_leas.get_or_init(|| {
+        let mut found = Vec::new();
+        for (rva, data) in pe.code_sections() {
+            for (offset, w) in data.windows(7).enumerate() {
+                if w[..3] != [0x48, 0x8d, 0x15] {
+                    continue;
+                }
+                let site = (rva + offset) as u32;
+                let target =
+                    (site as i64 + 7 + i32::from_le_bytes(w[3..7].try_into().unwrap()) as i64)
+                        as u32;
+                found.push((site, target));
+            }
+        }
+        found
+    })
 }
 
 fn call_targets(pe: &Pe) -> Vec<u32> {
@@ -689,13 +767,10 @@ fn player_getter(pe: &Pe, call: u32) -> Option<(u32, u32)> {
 }
 
 fn client_global(pe: &Pe, offsets: &[u32]) -> Result<u32, ScanError> {
-    let mut functions: Vec<(u32, u32)> = offsets
-        .iter()
-        .flat_map(|&offset| dword_hits(pe, offset))
-        .filter_map(|hit| pe.function_containing(hit))
-        .collect();
-    functions.sort_unstable();
-    functions.dedup();
+    let functions = functions_containing(
+        pe,
+        offsets.iter().flat_map(|&offset| dword_hits(pe, offset)),
+    );
 
     const VOLATILE: [Register; 7] = [
         Register::RAX,
@@ -741,24 +816,23 @@ fn client_global(pe: &Pe, offsets: &[u32]) -> Result<u32, ScanError> {
 }
 
 pub fn find_local_player(pe: &Pe) -> Result<LocalPlayer, ScanError> {
-    let calls = direct_calls(pe);
     let getters: Vec<(u32, (u32, u32, u32))> = call_targets(pe)
         .into_iter()
         .filter_map(|target| Some((target, world_view_getter(&decode_at(pe, target, 3))?)))
         .collect();
     let (getter, (world_view_id, manager, lookup)) = single(&getters)?;
     let world_views = manager
-        .checked_add(hash_table_offset(pe, lookup).ok_or(ScanError::NotFound)?)
+        .checked_add(hash_table_offset(pe, lookup, MAX_THUNKS).ok_or(ScanError::NotFound)?)
         .ok_or(ScanError::NotFound)?;
 
     let mut player = None;
-    for &(site, _) in calls.iter().filter(|&&(_, target)| target == getter) {
+    for site in calls_to(pe, getter) {
         let Some((index, lookup)) = player_getter(pe, site) else {
             continue;
         };
         let found = (
             index,
-            hash_table_offset(pe, lookup).ok_or(ScanError::NotFound)?,
+            hash_table_offset(pe, lookup, MAX_THUNKS).ok_or(ScanError::NotFound)?,
         );
         if player.is_some_and(|p| p != found) {
             return Err(ScanError::Ambiguous(2));
@@ -779,11 +853,7 @@ pub fn find_local_player(pe: &Pe) -> Result<LocalPlayer, ScanError> {
 }
 
 fn registered_code(pe: &Pe, site: u32) -> Option<u32> {
-    let code_lea = |i: &Instruction| {
-        (i.mnemonic() == Mnemonic::Lea && i.is_ip_rel_memory_operand())
-            .then(|| i.ip_rel_memory_address() as u32)
-            .filter(|&rva| pe.in_code(rva as usize))
-    };
+    let code_lea = |i: &Instruction| rip_lea(i).filter(|&rva| pe.in_code(rva as usize));
     for instr in decode_at(pe, site, 12) {
         if let Some(code) = code_lea(&instr) {
             return Some(code);
@@ -799,33 +869,12 @@ fn registered_code(pe: &Pe, site: u32) -> Option<u32> {
 }
 
 fn lua_binding(pe: &Pe, name: &str) -> Result<u32, ScanError> {
-    let mut needle = vec![0u8];
-    needle.extend_from_slice(name.as_bytes());
-    needle.push(0);
-    let strings: HashSet<u32> = pe
-        .image
-        .windows(needle.len())
-        .enumerate()
-        .filter(|(_, w)| *w == needle.as_slice())
-        .map(|(at, _)| at as u32 + 1)
+    let strings = string_rvas(pe, name);
+    let implementations: HashSet<u32> = rdx_leas(pe)
+        .iter()
+        .filter(|(_, target)| strings.contains(target))
+        .filter_map(|&(site, _)| registered_code(pe, site))
         .collect();
-
-    let mut implementations = HashSet::new();
-    for (rva, data) in pe.code_sections() {
-        for (offset, w) in data.windows(7).enumerate() {
-            if w[..3] != [0x48, 0x8d, 0x15] {
-                continue;
-            }
-            let site = (rva + offset) as u32;
-            let target =
-                (site as i64 + 7 + i32::from_le_bytes(w[3..7].try_into().unwrap()) as i64) as u32;
-            if !strings.contains(&target) {
-                continue;
-            }
-            implementations.extend(registered_code(pe, site));
-        }
-    }
-
     single(&implementations.into_iter().collect::<Vec<_>>())
 }
 
@@ -1112,7 +1161,7 @@ pub fn find_login_panel(pe: &Pe, game_state: u32) -> Result<LoginPanel, ScanErro
     let (mut panel_x_candidates, mut screen_candidates, mut y_candidates) =
         (Vec::new(), Vec::new(), Vec::new());
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         panel_x_candidates.extend(panel_x_write(&instrs));
         screen_candidates.extend(login_state_reads(&instrs, game_state));
         screen_candidates.extend(login_screen_compares(&instrs, game_state));
@@ -1123,7 +1172,7 @@ pub fn find_login_panel(pe: &Pe, game_state: u32) -> Result<LoginPanel, ScanErro
     let box_candidates = pe
         .functions
         .iter()
-        .flat_map(|&(begin, end)| login_box_writes(&decode(pe.bytes(begin, end), begin), panel_x))
+        .flat_map(|&(begin, end)| login_box_writes(&function_instrs(pe, begin, end), panel_x))
         .collect();
     let (box_x, center_x) = one(box_candidates)?;
 
@@ -1317,7 +1366,7 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
     let mut layouts = Vec::new();
     let mut lookups = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         if let Some(found) = component_layout_function(&instrs) {
             layouts.push((begin, found));
         }
@@ -1327,17 +1376,9 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
     let (kind, id, sub_interfaces) = one(lookups)?;
 
     let calls = direct_calls(pe);
-    let callers_of = |target: u32| -> Vec<(u32, (u32, u32))> {
-        calls
-            .iter()
-            .filter(|&&(_, t)| t == target)
-            .filter_map(|&(site, _)| Some((site, pe.function_containing(site)?)))
-            .collect()
-    };
-
     let mut loops = Vec::new();
-    for (_, (begin, end)) in callers_of(layout_rva) {
-        if let Some(found) = component_tree_loop(&decode(pe.bytes(begin, end), begin), width) {
+    for (begin, end) in caller_functions(pe, layout_rva) {
+        if let Some(found) = component_tree_loop(&function_instrs(pe, begin, end), width) {
             loops.push((begin, found));
         }
     }
@@ -1349,11 +1390,10 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
         .filter(|&t| t <= loop_rva && loop_rva - t <= 0x20)
         .collect();
     let mut roots = Vec::new();
-    let loop_callers: Vec<(u32, (u32, u32))> = loop_entries
+    for (begin, end) in loop_entries
         .iter()
-        .flat_map(|&entry| callers_of(entry))
-        .collect();
-    for (_, (begin, end)) in loop_callers {
+        .flat_map(|&entry| caller_functions(pe, entry))
+    {
         let targets: Vec<u32> = calls
             .iter()
             .filter(|&&(site, _)| (begin..end).contains(&site))
@@ -1372,7 +1412,7 @@ pub fn find_interfaces(pe: &Pe) -> Result<Interfaces, ScanError> {
     let (resize_root, manager, groups) = one(roots)?;
 
     let mut root_candidates = Vec::new();
-    for &(site, _) in calls.iter().filter(|&&(_, t)| t == resize_root) {
+    for site in calls_to(pe, resize_root) {
         let before = (8..=40).rev().find_map(|back| {
             let instrs = decode_at(pe, site.saturating_sub(back), 16);
             instrs

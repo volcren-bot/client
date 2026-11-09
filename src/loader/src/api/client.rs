@@ -134,13 +134,13 @@ impl Api {
     }
 
     fn access_token(&self) -> Result<String, ApiError> {
-        let needs_refresh = {
-            let slot = self.lock()?;
-            slot.as_ref().ok_or(ApiError::Unauthorized)?.needs_refresh()
-        };
-        if needs_refresh {
-            self.refresh(None)?;
+        let slot = self.lock()?;
+        let session = slot.as_ref().ok_or(ApiError::Unauthorized)?;
+        if !session.needs_refresh() {
+            return Ok(session.access_token.clone());
         }
+        drop(slot);
+        self.refresh(None)?;
         let slot = self.lock()?;
         Ok(slot
             .as_ref()
@@ -156,17 +156,14 @@ impl Api {
         query: &[(&str, &str)],
         body: Option<&impl Serialize>,
     ) -> Result<T, ApiError> {
-        let mut token = self.access_token()?;
-        for attempt in 0..2 {
-            match self.send(method, path, query, body, &token) {
-                Err(ApiError::Unauthorized) if attempt == 0 => {
-                    self.refresh(Some(&token))?;
-                    token = self.access_token()?;
-                }
-                result => return result,
+        let token = self.access_token()?;
+        match self.send(method, path, query, body, &token) {
+            Err(ApiError::Unauthorized) => {
+                self.refresh(Some(&token))?;
+                self.send(method, path, query, body, &self.access_token()?)
             }
+            result => result,
         }
-        Err(ApiError::Unauthorized)
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T, ApiError> {

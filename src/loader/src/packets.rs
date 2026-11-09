@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    cell::OnceCell,
+    time::{Duration, Instant},
+};
 
 use injector::{Packet, PacketPage};
 
@@ -242,13 +245,14 @@ impl Monitor {
     }
 
     pub fn visible(&self) -> View<'_, Packet, (bool, bool, String, bool)> {
-        let filter = Filter::parse(&self.filter, self.table());
+        let filter = OnceCell::new();
         let (sent, received) = (self.sent, self.received);
         let table = self.table();
         self.shown.view(
             &self.packets,
             (sent, received, self.filter.clone(), self.layouts.is_some()),
             |p| {
+                let filter = filter.get_or_init(|| Filter::parse(&self.filter, table));
                 let named = table
                     .lookup(p.sent, p.opcode)
                     .is_some_and(|d| !d.name.is_empty());
@@ -256,9 +260,7 @@ impl Monitor {
             },
         )
     }
-}
 
-impl Monitor {
     pub fn selected_packet(&self) -> Option<&Packet> {
         let sequence = self.selected?;
         self.packets.iter().rev().find(|p| p.sequence == sequence)

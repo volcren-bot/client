@@ -39,54 +39,46 @@ pub struct Node {
     pub detail: WidgetDetail,
     pub kind: Kind,
     pub children: Vec<usize>,
+    parent: Option<usize>,
 }
 
 #[derive(Default)]
 pub struct Built {
     pub nodes: Vec<Node>,
     pub roots: Vec<usize>,
+    by_key: HashMap<(i32, i32), usize>,
 }
 
 impl Built {
-    pub fn new(tree: &WidgetTree) -> Self {
-        let mut nodes: Vec<Node> = Vec::with_capacity(tree.widgets.len());
-        let mut by_id: HashMap<i32, usize> = HashMap::new();
-        for TreeWidget {
-            widget,
-            detail,
-            dynamic,
-            ..
-        } in &tree.widgets
-        {
-            if !dynamic {
-                by_id.insert(widget.id, nodes.len());
-            }
-            nodes.push(Node {
-                widget: widget.clone(),
-                detail: detail.clone(),
-                kind: Kind::Static,
-                children: Vec::new(),
-            });
-        }
+    pub fn new(tree: WidgetTree) -> Self {
+        let by_id: HashMap<i32, usize> = tree
+            .widgets
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| !w.dynamic)
+            .map(|(index, w)| (w.widget.id, index))
+            .collect();
         let opened_in: HashMap<i32, i32> = tree
             .sub_interfaces
             .iter()
             .map(|sub| (sub.group, sub.parent))
             .collect();
+        let mut nodes: Vec<Node> = Vec::with_capacity(tree.widgets.len());
+        let mut by_key = HashMap::with_capacity(tree.widgets.len());
         let mut roots = Vec::new();
         let mut links: Vec<(usize, u8, usize)> = Vec::new();
         for (
             index,
             TreeWidget {
                 widget,
+                detail,
                 dynamic,
                 owner,
-                ..
             },
-        ) in tree.widgets.iter().enumerate()
+        ) in tree.widgets.into_iter().enumerate()
         {
-            let (parent, kind) = if *dynamic {
-                (by_id.get(owner).copied(), Kind::Dynamic)
+            let (parent, kind) = if dynamic {
+                (by_id.get(&owner).copied(), Kind::Dynamic)
             } else if widget.parent != -1 {
                 (by_id.get(&widget.parent).copied(), Kind::Static)
             } else if widget.group == tree.root {
@@ -100,35 +92,42 @@ impl Built {
                     Kind::Nested,
                 )
             };
-            nodes[index].kind = if parent.is_none() { Kind::Root } else { kind };
             match parent {
                 Some(parent) => links.push((parent, kind_order(kind), index)),
                 None => roots.push(index),
             }
+            by_key.entry((widget.id, widget.index)).or_insert(index);
+            nodes.push(Node {
+                widget,
+                detail,
+                kind: if parent.is_none() { Kind::Root } else { kind },
+                children: Vec::new(),
+                parent,
+            });
         }
         links.sort_unstable();
         for (parent, _, child) in links {
             nodes[parent].children.push(child);
         }
-        Self { nodes, roots }
+        Self {
+            nodes,
+            roots,
+            by_key,
+        }
     }
 
     pub fn find(&self, id: i32, index: i32) -> Option<usize> {
-        self.nodes
-            .iter()
-            .position(|node| node.widget.id == id && node.widget.index == index)
+        self.by_key.get(&(id, index)).copied()
     }
 
     pub fn path_to(&self, target: usize) -> Vec<usize> {
-        let mut parent_of = HashMap::new();
-        for (index, node) in self.nodes.iter().enumerate() {
-            for &child in &node.children {
-                parent_of.insert(child, index);
-            }
-        }
         let mut path = vec![target];
-        while let Some(&parent) = parent_of.get(path.last().unwrap()) {
+        let mut at = target;
+        while let Some(parent) = self.nodes[at].parent
+            && path.len() <= self.nodes.len()
+        {
             path.push(parent);
+            at = parent;
         }
         path.reverse();
         path
@@ -143,8 +142,10 @@ impl Built {
                 continue;
             }
             let area = i64::from(widget.width) * i64::from(widget.height);
-            let inside = (widget.x..widget.x + widget.width).contains(&x)
-                && (widget.y..widget.y + widget.height).contains(&y);
+            let spans = |start: i32, length: i32, at: i32| {
+                (i64::from(start)..i64::from(start) + i64::from(length)).contains(&i64::from(at))
+            };
+            let inside = spans(widget.x, widget.width, x) && spans(widget.y, widget.height, y);
             if !widget.hidden
                 && area > 0
                 && inside
@@ -256,7 +257,7 @@ impl Inspector {
             Ok(Poll { tree, names }) => {
                 self.error = None;
                 self.names.extend(names);
-                self.built = Built::new(&tree);
+                self.built = Built::new(tree);
                 self.read = true;
                 if self
                     .selected
@@ -475,7 +476,7 @@ mod tests {
 
     #[test]
     fn links_dynamic_then_static_then_nested() {
-        let built = Built::new(&tree());
+        let built = Built::new(tree());
         assert_eq!(built.roots, [0]);
         assert_eq!(built.nodes[0].children, [1]);
         assert_eq!(built.nodes[1].children, [2]);
@@ -490,14 +491,22 @@ mod tests {
     fn a_widget_with_nowhere_to_hang_is_a_root() {
         let mut tree = tree();
         tree.sub_interfaces.clear();
-        let built = Built::new(&tree);
+        let built = Built::new(tree);
         assert_eq!(built.roots, [0, 2]);
         assert_eq!(built.nodes[2].kind, Kind::Root);
     }
 
     #[test]
+    fn a_parent_cycle_ends_the_path() {
+        let mut tree = tree();
+        tree.widgets[1].widget.parent = tree.widgets[1].widget.id;
+        let built = Built::new(tree);
+        assert!(built.path_to(1).len() <= built.nodes.len() + 1);
+    }
+
+    #[test]
     fn picks_the_smallest_widget_under_a_point() {
-        let built = Built::new(&tree());
+        let built = Built::new(tree());
         assert_eq!(built.under(41, 41, true), Some(4));
         assert_eq!(built.under(31, 31, true), Some(3));
         assert_eq!(built.under(100, 100, true), Some(2));
@@ -509,7 +518,7 @@ mod tests {
     fn hidden_widgets_are_not_picked() {
         let mut tree = tree();
         tree.widgets[3].widget.hidden = true;
-        let built = Built::new(&tree);
+        let built = Built::new(tree);
         assert_eq!(built.under(31, 31, true), Some(2));
         assert_eq!(built.under(31, 31, false), Some(2));
     }

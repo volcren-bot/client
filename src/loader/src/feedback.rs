@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -285,7 +285,7 @@ fn runs_dir() -> Option<PathBuf> {
     crate::paths::project_dirs().map(|dirs| dirs.data_dir().join("runs"))
 }
 
-fn record_path(dir: &std::path::Path, session_id: &str) -> Option<PathBuf> {
+fn record_path(dir: &Path, session_id: &str) -> Option<PathBuf> {
     crate::session::safe_id(session_id).map(|id| dir.join(format!("{id}.bin")))
 }
 
@@ -314,7 +314,7 @@ pub fn prune() {
     }
 }
 
-fn prune_in(dir: &std::path::Path) {
+fn prune_in(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -377,9 +377,9 @@ impl Page {
             Ok(sessions) => {
                 self.sessions = sessions;
                 self.error = None;
-                let known: Vec<String> =
-                    self.sessions.iter().map(|s| s.session_id.clone()).collect();
-                self.drafts.retain(|id, _| known.contains(id));
+                let sessions = &self.sessions;
+                self.drafts
+                    .retain(|id, _| sessions.iter().any(|s| s.session_id == *id));
             }
             Err(error) => self.error = Some(error),
         }
@@ -528,7 +528,6 @@ pub fn session_ui(
     });
     let reports = match session.reports {
         0 => String::new(),
-        1 => " (1 sent on this run)".to_owned(),
         n => format!(" ({n} sent on this run)"),
     };
     let header = egui::CollapsingHeader::new(format!("Report a bug{reports}"))
@@ -580,10 +579,9 @@ pub fn report(
     snapshot: Option<Value>,
     diagnostics: Value,
 ) -> Report {
-    let scrubbed = scrubbed_log(log, names);
     Report {
         description,
-        log: Some(scrubbed).filter(|log| !log.is_empty()),
+        log: Some(scrubbed_log(log, names)).filter(|log| !log.is_empty()),
         snapshot,
         diagnostics,
     }
@@ -785,7 +783,7 @@ mod tests {
 
     #[test]
     fn a_record_file_needs_a_well_formed_session_id() {
-        let dir = std::path::Path::new("/x");
+        let dir = Path::new("/x");
         assert!(record_path(dir, "../etc/passwd").is_none());
         assert_eq!(
             record_path(dir, "0f7f8a2e-5b1b-4f6d-9c2a-1d2e3f4a5b6c"),

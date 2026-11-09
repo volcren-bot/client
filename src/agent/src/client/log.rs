@@ -99,9 +99,6 @@ impl<T> SharedLog<T> {
 }
 
 pub unsafe fn wake(mut mask: u32, event_name: fn(u32, u32) -> String, mut gone: impl FnMut(u32)) {
-    if mask == 0 {
-        return;
-    }
     let pid = GetCurrentProcessId();
     while mask != 0 {
         let slot = mask.trailing_zeros();

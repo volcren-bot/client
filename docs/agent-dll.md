@@ -8,7 +8,7 @@ How offsets are found, and what is known about the client's internals: [reverse-
 
 1. **Load.** The injector copies the DLL to `%TEMP%\agent\<name>-<version>.dll` (so a new build can replace a loaded one) and injects it (`injector load <pid> <dll>`, or the loader's Load/Reload).
 2. **Start.** `client::hooks::start` runs on a new thread: find the client window (`JagRenderView`), run every `find_*` offset rule, install the hooks (`retour` detours), and point the client's `USER32!GetFocus` import at the agent (`client::focus`, below).
-3. **Every frame** (OpenGL swap hook): read game state into `AGENT_STATE_<pid>`, capture the frame if a reader turned `capture_enabled` on (only `injector screenshot` reads pixels; Luau never does), draw the overlay (re-uploaded only when its serial changes, from the slot the serial selects), then after the real swap bump `frame_serial` and set `AGENT_FRAME_<pid>`. Rule results are logged to the client console and summarised in the header's `offsets_state`, which the loader shows.
+3. **Every frame** (OpenGL swap hook): read game state into `AGENT_STATE_<pid>`, capture the frame if a reader turned `capture_enabled` on (only `injector screenshot` reads pixels; Luau never does), draw the overlay (re-uploaded only when its serial changes, from the slot the serial selects; capture and overlay are both skipped while the viewport is larger than `IMAGE_DATA_SIZE` holds), then after the real swap bump `frame_serial` and set `AGENT_FRAME_<pid>`. Rule results are logged to the client console and summarised in the header's `offsets_state`, which the loader shows.
 4. **Commands** arrive as custom window messages (`ipc::input::*_MESSAGE`) on the window-procedure hook: open console, set modifiers, set display name, offset total XP, resolve item/game-val names, project world points, read the menu, models, locs and the cache, and draw item icons (a cache request of kind `ITEM_ICONS`: the agent calls the client's own icon builder on the game thread, see "Item icons" in [reverse-engineering.md](reverse-engineering.md)). A locs request names a plane, or all of them, optionally only the clickable locs (`ipc::state::locs_request`); each loc carries its plane in its flags, and walls and decorations their shape and rotation from their config byte (`offsets::scene::find_loc_configs`, Java's `Scene.getConfig`).
 5. **Unload** on the named event `AGENT_UNLOAD_<pid>` (works with the window hook off): unhook, wait for hook calls to drain, stop the listener, close mappings, `FreeLibraryAndExitThread`.
 
@@ -21,7 +21,7 @@ The DLL exports only `DllMain`: the injector loads it with `LoadLibraryW` and ta
 | Path | Contents |
 | --- | --- |
 | `src/lib.rs` | Crate root. |
-| `src/shared/` | `main.rs` DLL entry, `memory.rs` shared-memory manager, `sync.rs` unload event, `windows.rs` the `WI_*` message ids and the `JagRenderView` lookup. |
+| `src/shared/` | `main.rs` DLL entry, `memory.rs` shared-memory manager, `sync.rs` unload event, `windows.rs` the `JagRenderView` lookup. |
 | `src/client/hooks.rs` | Hook installation, per-frame work, message handling. |
 | `src/client/focus.rs` | The `GetFocus` import patch: finds the slot by walking the main module's import descriptors (PE32+), writes it under `VirtualProtect`, restores it on unload. |
 | `src/client/offsets.rs`, `offsets/*.rs` | Offset rules, one module per feature. |

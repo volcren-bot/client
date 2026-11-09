@@ -3,6 +3,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::nav::{Point, UNDERGROUND, fold};
+
 pub const PREFIX: &str = "\u{1e}TRANSPORTS ";
 
 pub const SETTINGS_PREFIX: &str = "\u{1e}TRANSPORT_SETTINGS ";
@@ -124,9 +126,9 @@ pub const LINK_GATED_KIND: &str = "link_gated";
 pub const SHORTCUT_GATED_KIND: &str = "shortcut_gated";
 pub const SHORTCUT_KIND: &str = "agility_shortcuts";
 
-pub const MAX_SHORTCUT_HOP: i32 = 70;
-pub const MAX_LINK_HOP: i32 = 15;
-pub const MAX_CLIMB_HOP: i32 = 350;
+const MAX_SHORTCUT_HOP: i32 = 70;
+const MAX_LINK_HOP: i32 = 15;
+const MAX_CLIMB_HOP: i32 = 350;
 
 pub fn is_shortcut(t: &Transport) -> bool {
     clicks_object(t) && hop(t).is_some_and(|hop| hop <= MAX_SHORTCUT_HOP)
@@ -148,20 +150,13 @@ pub fn menu_option(menu: &str) -> Option<&str> {
     }
 }
 
-fn underground(tile: Tile) -> bool {
-    tile.y >= crate::nav::UNDERGROUND
+fn folded(tile: Tile) -> Point {
+    fold((tile.x, tile.y, tile.plane))
 }
 
 fn hop(t: &Transport) -> Option<i32> {
-    let (o, d) = (t.origin?, t.destination?);
-    let folded = |tile: Tile| {
-        if underground(tile) {
-            tile.y - crate::nav::UNDERGROUND
-        } else {
-            tile.y
-        }
-    };
-    Some((o.x - d.x).abs().max((folded(o) - folded(d)).abs()))
+    let (o, d) = (folded(t.origin?), folded(t.destination?));
+    Some((o.0 - d.0).abs().max((o.1 - d.1).abs()))
 }
 
 fn clicks_object(t: &Transport) -> bool {
@@ -256,10 +251,11 @@ pub fn gated(t: &Transport) -> bool {
         && t.note.is_empty())
 }
 
-pub fn changes_plane(t: &Transport) -> bool {
+fn changes_plane(t: &Transport) -> bool {
     let (Some(o), Some(d)) = (t.origin, t.destination) else {
         return false;
     };
+    let underground = |tile: Tile| tile.y >= UNDERGROUND;
     o.plane != d.plane || underground(o) != underground(d)
 }
 
@@ -316,7 +312,7 @@ fn clauses(text: &str) -> Result<Vec<Clause>, String> {
             let at = s.find(['=', '>', '<', '&', '@']).ok_or_else(bad)?;
             Ok(Clause {
                 id: s[..at].trim().parse().map_err(|_| bad())?,
-                op: s[at..].chars().next().ok_or_else(bad)?,
+                op: s.as_bytes()[at] as char,
                 value: s[at + 1..].trim().parse().map_err(|_| bad())?,
             })
         })

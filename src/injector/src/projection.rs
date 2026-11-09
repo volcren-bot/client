@@ -31,11 +31,11 @@ pub const WALL_DECORATION: u8 = 1;
 pub const GAME_OBJECT: u8 = 2;
 pub const GROUND_DECORATION: u8 = 3;
 
-pub const NEEDS: u64 = part::PROJECTION | part::CAMERA | part::INTERFACES;
+const NEEDS: u64 = part::PROJECTION | part::CAMERA | part::INTERFACES;
 
 const TILE_SHIFT: i32 = 7;
 const TILE: i32 = 1 << TILE_SHIFT;
-const PLANES: i32 = 4;
+const PLANES: i32 = crate::collision::PLANES as i32;
 const BRIDGE: u8 = 2;
 const TILE_ENTRY_SIZE: usize = 16;
 const TILE_ENTRY_OBJECT: usize = 8;
@@ -56,11 +56,10 @@ fn truncate(value: f32) -> i32 {
 }
 
 fn i32s<const N: usize>(memory: &impl Memory, address: u64) -> Option<[i32; N]> {
-    let mut bytes = [0u8; 16];
-    let bytes = bytes.get_mut(..N * 4)?;
-    memory.read(address, bytes).then(|| {
-        core::array::from_fn(|i| i32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap()))
-    })
+    let mut bytes = [[0u8; 4]; N];
+    memory
+        .read(address, bytes.as_flattened_mut())
+        .then(|| bytes.map(i32::from_le_bytes))
 }
 
 const WINDOW_SIZE: usize = 512;
@@ -92,32 +91,37 @@ impl<'a, M: Memory> Window<'a, M> {
         window
     }
 
-    fn get<const N: usize>(&self, offset: u64) -> Option<[u8; N]> {
-        let end = offset + N as u64;
-        if self.filled && offset >= self.low && end <= self.high {
+    fn get<const N: usize, const K: usize>(&self, offset: u64) -> Option<[[u8; N]; K]> {
+        let mut bytes = [[0; N]; K];
+        let flat = bytes.as_flattened_mut();
+        let end = offset + flat.len() as u64;
+        let read = if self.filled && offset >= self.low && end <= self.high {
             let at = (offset - self.low) as usize;
-            return self.bytes[at..at + N].try_into().ok();
-        }
-        let mut bytes = [0; N];
-        self.memory
-            .read(self.base + offset, &mut bytes)
-            .then_some(bytes)
+            flat.copy_from_slice(&self.bytes[at..at + flat.len()]);
+            true
+        } else {
+            self.memory.read(self.base + offset, flat)
+        };
+        read.then_some(bytes)
     }
 
     fn i32(&self, offset: u64) -> Option<i32> {
-        self.get(offset).map(i32::from_le_bytes)
+        self.i32s::<1>(offset).map(|[v]| v)
     }
 
     fn f32(&self, offset: u64) -> Option<f32> {
-        self.get(offset).map(f32::from_le_bytes)
+        self.get::<4, 1>(offset).map(|[v]| f32::from_le_bytes(v))
+    }
+
+    fn ptr(&self, offset: u64) -> Option<u64> {
+        self.get::<8, 1>(offset)
+            .map(|[v]| u64::from_le_bytes(v))
+            .filter(|&p| p != 0)
     }
 
     fn i32s<const N: usize>(&self, offset: u64) -> Option<[i32; N]> {
-        let mut out = [0; N];
-        for (i, v) in out.iter_mut().enumerate() {
-            *v = self.i32(offset + i as u64 * 4)?;
-        }
-        Some(out)
+        self.get::<4, N>(offset)
+            .map(|values| values.map(i32::from_le_bytes))
     }
 }
 
@@ -132,7 +136,7 @@ struct Camera {
 }
 
 impl Camera {
-    fn read(memory: &impl Memory, layout: &Layout, client: u64, trig: [u8; 16]) -> Option<Self> {
+    fn read(memory: &impl Memory, layout: &Layout, client: u64, trig: [f32; 4]) -> Option<Self> {
         let p = &layout.projection;
         let canvas = memory.ptr(client + layout.interfaces.canvas as u64)?;
         let view = memory.ptr(canvas + p.view_holder as u64 + p.view as u64)?;
@@ -163,9 +167,7 @@ impl Camera {
         let ui = canvas_fields.i32s::<2>(p.ui_size as u64)?;
         Some(Self {
             position: camera.i32s(layout.camera.position as u64)?,
-            trig: core::array::from_fn(|i| {
-                f32::from_le_bytes(trig[i * 4..i * 4 + 4].try_into().unwrap())
-            }),
+            trig,
             zoom: camera.i32(p.zoom as u64)?,
             center: view_fields.i32s(p.view_center as u64)?,
             offset: [
@@ -215,18 +217,18 @@ impl Camera {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneKey {
-    pub scene: u64,
+    scene: u64,
     pub plane: i32,
-    pub base: [i32; 2],
-    pub heights: u64,
-    pub tiles: u64,
+    base: [i32; 2],
+    heights: u64,
+    tiles: u64,
 }
 
 fn scene_and_trig(
     memory: &impl Memory,
     layout: &Layout,
     client: u64,
-) -> Option<(SceneKey, [u8; 16])> {
+) -> Option<(SceneKey, [f32; 4])> {
     let p = &layout.projection;
     let world_view = memory.ptr(client + p.top_world_view as u64)?;
     let has_player = layout.has(part::PLAYER);
@@ -240,10 +242,7 @@ fn scene_and_trig(
         world_view,
         &fields[..if has_player { 3 } else { 2 }],
     );
-    let scene = view
-        .get(p.scene as u64)
-        .map(u64::from_le_bytes)
-        .filter(|&p| p != 0)?;
+    let scene = view.ptr(p.scene as u64)?;
     let base = if has_player {
         view.i32s(layout.player.base_x as u64)?
     } else {
@@ -259,20 +258,15 @@ fn scene_and_trig(
             (p.trig as u64, 16),
         ],
     );
-    let pointer = |offset: u64| {
-        fields
-            .get(offset)
-            .map(u64::from_le_bytes)
-            .filter(|&p| p != 0)
-    };
     let key = SceneKey {
         scene,
         plane,
         base,
-        heights: pointer(p.heights as u64)?,
-        tiles: pointer(p.tiles as u64)?,
+        heights: fields.ptr(p.heights as u64)?,
+        tiles: fields.ptr(p.tiles as u64)?,
     };
-    Some((key, fields.get(p.trig as u64)?))
+    let trig: [[u8; 4]; 4] = fields.get(p.trig as u64)?;
+    Some((key, trig.map(f32::from_le_bytes)))
 }
 
 pub struct Terrain {
@@ -286,7 +280,7 @@ pub struct Terrain {
 }
 
 impl Terrain {
-    pub fn read(memory: &impl Memory, layout: &Layout, key: SceneKey) -> Option<Self> {
+    fn read(memory: &impl Memory, layout: &Layout, key: SceneKey) -> Option<Self> {
         let p = &layout.projection;
         let [size_x, size_y] = [
             memory.i32(key.scene + p.size_x as u64)?,
@@ -307,13 +301,7 @@ impl Terrain {
             .as_chunks::<TILE_ENTRY_SIZE>()
             .0
             .iter()
-            .map(|e| {
-                u64::from_le_bytes(
-                    e[TILE_ENTRY_OBJECT..TILE_ENTRY_OBJECT + 8]
-                        .try_into()
-                        .unwrap(),
-                )
-            })
+            .map(|e| u64::from_le_bytes(e.as_chunks::<8>().0[TILE_ENTRY_OBJECT / 8]))
             .collect();
         Some(Self {
             key,
@@ -338,10 +326,7 @@ impl Terrain {
         self.size
     }
 
-    pub fn set_decorations(
-        &mut self,
-        decorations: impl IntoIterator<Item = ((i32, i32, i32), i32)>,
-    ) {
+    fn set_decorations(&mut self, decorations: impl IntoIterator<Item = ((i32, i32, i32), i32)>) {
         self.decorations = decorations
             .into_iter()
             .filter(|&(_, height)| height != 0)
@@ -375,18 +360,21 @@ impl Terrain {
                 .tile_index(1, tx, ty)
                 .is_some_and(|i| self.settings[i] & BRIDGE != 0);
         let plane = if bridge { plane + 1 } else { plane };
-        let (ax, ay) = (x - (tx << TILE_SHIFT), y - (ty << TILE_SHIFT));
+        let (ax, ay) = (
+            x.wrapping_sub(tx << TILE_SHIFT),
+            y.wrapping_sub(ty << TILE_SHIFT),
+        );
         let h = |dx: i32, dy: i32| self.height(plane, tx + dx, ty + dy);
         let north = h(0, 1)
-            .wrapping_mul(TILE - ax)
+            .wrapping_mul(TILE.wrapping_sub(ax))
             .wrapping_add(h(1, 1).wrapping_mul(ax))
             >> TILE_SHIFT;
         let south = h(1, 0)
             .wrapping_mul(ax)
-            .wrapping_add(h(0, 0).wrapping_mul(TILE - ax))
+            .wrapping_add(h(0, 0).wrapping_mul(TILE.wrapping_sub(ax)))
             >> TILE_SHIFT;
         south
-            .wrapping_mul(TILE - ay)
+            .wrapping_mul(TILE.wrapping_sub(ay))
             .wrapping_add(north.wrapping_mul(ay))
             >> TILE_SHIFT
     }
@@ -416,10 +404,8 @@ impl Terrain {
                 vertex_count * 3,
             )?;
             let vertex = |i: i32| -> Option<Vertex> {
-                vertices
-                    .get(i as usize * 3..i as usize * 3 + 3)?
-                    .try_into()
-                    .ok()
+                let at = usize::try_from(i).ok()? * 3;
+                vertices.get(at..at + 3)?.try_into().ok()
             };
             return indices
                 .as_chunks::<3>()
@@ -431,10 +417,11 @@ impl Terrain {
         memory.ptr(tile + p.tile_paint as u64)?;
         let [x, y, plane] = i32s(memory, tile + p.tile_x as u64)?;
         let corners = PAINT_CORNERS.map(|[dx, dy]| {
+            let (cx, cy) = (x.wrapping_add(dx), y.wrapping_add(dy));
             [
-                (x + dx) << TILE_SHIFT,
-                self.height(plane, x + dx, y + dy),
-                (y + dy) << TILE_SHIFT,
+                cx << TILE_SHIFT,
+                self.height(plane, cx, cy),
+                cy << TILE_SHIFT,
             ]
         });
         Some(
@@ -449,7 +436,7 @@ impl Terrain {
         self.bilinear(x, y, plane, (x >> TILE_SHIFT, y >> TILE_SHIFT))
     }
 
-    pub fn flat_ground(&self, x: i32, y: i32, plane: i32) -> i32 {
+    fn flat_ground(&self, x: i32, y: i32, plane: i32) -> i32 {
         if self.in_scene(x >> TILE_SHIFT, y >> TILE_SHIFT) {
             self.heightmap(x, y, plane)
         } else {
@@ -457,7 +444,7 @@ impl Terrain {
         }
     }
 
-    pub fn ground_on(
+    fn ground_on(
         &mut self,
         memory: &impl Memory,
         layout: &Layout,
@@ -517,15 +504,26 @@ fn inside(px: i32, py: i32, [a, b, c]: &Triangle) -> bool {
 fn barycentric(px: i32, py: i32, [a, b, c]: &Triangle) -> i32 {
     let [(ax, ah, ay), (bx, bh, by), (cx, ch, cy)] = [a, b, c].map(|v| (v[0], v[1], v[2]));
     let (dx, dy) = (px.wrapping_sub(cx), py.wrapping_sub(cy));
-    let den =
-        ((ay - cy).wrapping_mul(cx - bx)).wrapping_add((by - cy).wrapping_mul(ax - cx)) as f32;
-    let wa = ((by - cy).wrapping_mul(dx)).wrapping_add(dy.wrapping_mul(cx - bx)) as f32 / den;
-    let wb = ((cy - ay).wrapping_mul(dx)).wrapping_add(dy.wrapping_mul(ax - cx)) as f32 / den;
+    let (ay_cy, by_cy, cx_bx, ax_cx) = (
+        ay.wrapping_sub(cy),
+        by.wrapping_sub(cy),
+        cx.wrapping_sub(bx),
+        ax.wrapping_sub(cx),
+    );
+    let den = ay_cy
+        .wrapping_mul(cx_bx)
+        .wrapping_add(by_cy.wrapping_mul(ax_cx)) as f32;
+    let wa = by_cy.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(cx_bx)) as f32 / den;
+    let wb = ay_cy
+        .wrapping_neg()
+        .wrapping_mul(dx)
+        .wrapping_add(dy.wrapping_mul(ax_cx)) as f32
+        / den;
     let wc = 1.0 - wa - wb;
     truncate(bh as f32 * wb + ah as f32 * wa + wc * ch as f32)
 }
 
-pub const NEAR_PLANE: f32 = 50.0;
+const NEAR_PLANE: f32 = 50.0;
 
 pub type Decoration = ((i32, i32, i32), i32);
 
@@ -550,14 +548,14 @@ impl Point {
     }
 }
 
-pub fn ensure_terrain(
+pub fn ensure_terrain<'a>(
     memory: &impl Memory,
     layout: &Layout,
-    terrain: &mut Option<Terrain>,
+    terrain: &'a mut Option<Terrain>,
     decorations: impl FnOnce() -> Vec<Decoration>,
-) -> Result<(), String> {
+) -> Result<&'a mut Terrain, String> {
     let client = client(memory, layout)?;
-    scene_terrain(memory, layout, client, terrain, decorations).map(drop)
+    scene_terrain(memory, layout, client, terrain, decorations).map(|(_, _, terrain)| terrain)
 }
 
 fn unavailable(what: &str) -> String {
@@ -571,20 +569,28 @@ fn client(memory: &impl Memory, layout: &Layout) -> Result<u64, String> {
     read::client(memory, layout).ok_or_else(|| unavailable("client"))
 }
 
-fn scene_terrain(
+fn scene_terrain<'a>(
     memory: &impl Memory,
     layout: &Layout,
     client: u64,
-    terrain: &mut Option<Terrain>,
+    terrain: &'a mut Option<Terrain>,
     decorations: impl FnOnce() -> Vec<Decoration>,
-) -> Result<(SceneKey, [u8; 16]), String> {
+) -> Result<(SceneKey, [f32; 4], &'a mut Terrain), String> {
     let (key, trig) = scene_and_trig(memory, layout, client).ok_or_else(|| unavailable("scene"))?;
-    if terrain.as_ref().is_none_or(|t| t.key() != key) {
-        let mut fresh = Terrain::read(memory, layout, key).ok_or_else(|| unavailable("terrain"))?;
-        fresh.set_decorations(decorations());
-        *terrain = Some(fresh);
-    }
-    Ok((key, trig))
+    let current = match terrain.take() {
+        Some(kept) if kept.key == key => kept,
+        stale => match Terrain::read(memory, layout, key) {
+            Some(mut fresh) => {
+                fresh.set_decorations(decorations());
+                fresh
+            }
+            None => {
+                *terrain = stale;
+                return Err(unavailable("terrain"));
+            }
+        },
+    };
+    Ok((key, trig, terrain.insert(current)))
 }
 
 pub fn project(
@@ -597,10 +603,9 @@ pub fn project(
     decorations: impl FnOnce() -> Vec<Decoration>,
 ) -> Result<Vec<[f32; 2]>, String> {
     let client = client(memory, layout)?;
-    let (key, trig) = scene_terrain(memory, layout, client, terrain, decorations)?;
+    let (key, trig, terrain) = scene_terrain(memory, layout, client, terrain, decorations)?;
     let mut camera =
         Camera::read(memory, layout, client, trig).ok_or_else(|| unavailable("camera"))?;
-    let terrain = terrain.as_mut().unwrap();
     if let Some([dx, dy, plane]) = shift {
         let [fx, _, fy] = i32s::<3>(memory, client + layout.camera.focal as u64)
             .ok_or_else(|| unavailable("camera's focal point"))?;

@@ -1578,98 +1578,96 @@ pub fn equipment_ui(
             spell_ui(ui, &mut editor.draft, icons);
             return;
         }
-        {
-            ui.set_width(COLUMN_WIDTH);
-            editor.header(ui, saved);
-            ui.add_space(6.0);
-            let hint = if rules.required.is_empty() {
-                "Right-click to empty."
-            } else {
-                "Right-click to empty.\nPadlocked items are the script's."
-            };
-            action = editor.read_ui(ui, Some(hint), can_read, false);
-            ui.add_space(6.0);
-            ui.horizontal_top(|ui| {
-                ui.add_space(margin);
-                let (grid, _) = ui.allocate_exact_size(
-                    egui::vec2(width, 5.0 * cell.y + 4.0 * gap),
-                    egui::Sense::hover(),
+        ui.set_width(COLUMN_WIDTH);
+        editor.header(ui, saved);
+        ui.add_space(6.0);
+        let hint = if rules.required.is_empty() {
+            "Right-click to empty."
+        } else {
+            "Right-click to empty.\nPadlocked items are the script's."
+        };
+        action = editor.read_ui(ui, Some(hint), can_read, false);
+        ui.add_space(6.0);
+        ui.horizontal_top(|ui| {
+            ui.add_space(margin);
+            let (grid, _) = ui.allocate_exact_size(
+                egui::vec2(width, 5.0 * cell.y + 4.0 * gap),
+                egui::Sense::hover(),
+            );
+            for &(slot, column, row) in &EQUIPMENT_CELLS {
+                let min = grid.min
+                    + egui::vec2(column as f32 * (cell.x + gap), row as f32 * (cell.y + gap));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(egui::Rect::from_min_size(min, cell))
+                        .layout(egui::Layout::left_to_right(egui::Align::Min)),
                 );
-                for &(slot, column, row) in &EQUIPMENT_CELLS {
-                    let min = grid.min
-                        + egui::vec2(column as f32 * (cell.x + gap), row as f32 * (cell.y + gap));
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(egui::Rect::from_min_size(min, cell))
-                            .layout(egui::Layout::left_to_right(egui::Align::Min)),
-                    );
-                    let name = slot_name(slot);
-                    let (item, text, hover) = match editor.draft.slot(slot) {
-                        EquipmentSlot::Item(item) => {
-                            (Some(item), "", format!("{name}: {}", item_hover(item)))
-                        }
-                        EquipmentSlot::Empty => (None, "", format!("{name}: must be empty.")),
-                        EquipmentSlot::Any => (
-                            None,
-                            "any",
-                            format!("{name}: anything or nothing may be worn."),
-                        ),
-                    };
-                    let hover = if slot == SECONDARY_AMMO_SLOT {
-                        format!("{hover}\n{SECONDARY_AMMO_HINT}")
-                    } else {
-                        hover
-                    };
-                    let response = slot_ui(
-                        &mut child,
-                        icons,
-                        item,
-                        text,
-                        editor.selected == Some(slot),
-                        egui::Sense::click(),
-                    )
-                    .on_hover_text(hover);
-                    if response.clicked() {
-                        editor.selected = Some(slot);
+                let name = slot_name(slot);
+                let (item, text, hover) = match editor.draft.slot(slot) {
+                    EquipmentSlot::Item(item) => {
+                        (Some(item), "", format!("{name}: {}", item_hover(item)))
                     }
-                    if response.secondary_clicked() {
-                        editor.selected = Some(slot);
-                        let slot = editor.draft.slot_mut(slot);
-                        if !matches!(slot, EquipmentSlot::Item(item) if item.locked) {
-                            *slot = EquipmentSlot::Empty;
-                        }
+                    EquipmentSlot::Empty => (None, "", format!("{name}: must be empty.")),
+                    EquipmentSlot::Any => (
+                        None,
+                        "any",
+                        format!("{name}: anything or nothing may be worn."),
+                    ),
+                };
+                let hover = if slot == SECONDARY_AMMO_SLOT {
+                    format!("{hover}\n{SECONDARY_AMMO_HINT}")
+                } else {
+                    hover
+                };
+                let response = slot_ui(
+                    &mut child,
+                    icons,
+                    item,
+                    text,
+                    editor.selected == Some(slot),
+                    egui::Sense::click(),
+                )
+                .on_hover_text(hover);
+                if response.clicked() {
+                    editor.selected = Some(slot);
+                }
+                if response.secondary_clicked() {
+                    editor.selected = Some(slot);
+                    let slot = editor.draft.slot_mut(slot);
+                    if !matches!(slot, EquipmentSlot::Item(item) if item.locked) {
+                        *slot = EquipmentSlot::Empty;
                     }
                 }
-            });
-            ui.add_space(6.0);
-            ui.vertical_centered(|ui| {
-                if let Some(slot) = editor.selected {
-                    ui.strong(slot_name(slot));
-                    if slot == SECONDARY_AMMO_SLOT {
-                        ui.weak(SECONDARY_AMMO_HINT);
+            }
+        });
+        ui.add_space(6.0);
+        ui.vertical_centered(|ui| {
+            if let Some(slot) = editor.selected {
+                ui.strong(slot_name(slot));
+                if slot == SECONDARY_AMMO_SLOT {
+                    ui.weak(SECONDARY_AMMO_HINT);
+                }
+                match editor.draft.slot_mut(slot) {
+                    EquipmentSlot::Item(item) => {
+                        item_ui(ui, item, false);
                     }
-                    match editor.draft.slot_mut(slot) {
-                        EquipmentSlot::Item(item) => {
-                            item_ui(ui, item, false);
-                        }
-                        state => {
-                            const EMPTY: &str = "Must be empty";
-                            const ANY: &str = "Any";
-                            egui::ComboBox::from_id_salt("equipment_slot_mode")
-                                .selected_text(if *state == EquipmentSlot::Any {
-                                    ANY
-                                } else {
-                                    EMPTY
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(state, EquipmentSlot::Empty, EMPTY);
-                                    ui.selectable_value(state, EquipmentSlot::Any, ANY);
-                                });
-                        }
+                    state => {
+                        const EMPTY: &str = "Must be empty";
+                        const ANY: &str = "Any";
+                        egui::ComboBox::from_id_salt("equipment_slot_mode")
+                            .selected_text(if *state == EquipmentSlot::Any {
+                                ANY
+                            } else {
+                                EMPTY
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(state, EquipmentSlot::Empty, EMPTY);
+                                ui.selectable_value(state, EquipmentSlot::Any, ANY);
+                            });
                     }
                 }
-            });
-        }
+            }
+        });
     };
     let gap = 24.0;
     if ui.available_width() >= COLUMN_WIDTH + gap + COLUMN_WIDTH {
@@ -2162,8 +2160,8 @@ pub fn apply_inventory(draft: &mut Inventory, read: Read) {
         draft.pouch = pouch;
         for (at, item) in locked {
             let held = draft.slots.iter().flatten().any(|i| item.counts_as(i.id));
-            if !held && draft.slots[at].is_none() {
-                draft.slots[at] = Some(item);
+            if !held && let Some(slot @ None) = draft.slots.get_mut(at) {
+                *slot = Some(item);
             }
         }
     }

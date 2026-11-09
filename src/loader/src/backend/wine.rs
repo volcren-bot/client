@@ -26,7 +26,9 @@ enum Lane {
     Events,
 }
 
-static SERVERS: OnceLock<Mutex<HashMap<(PathBuf, Lane), Arc<Mutex<Server>>>>> = OnceLock::new();
+type Registry = HashMap<(PathBuf, Lane), Arc<Mutex<Server>>>;
+
+static SERVERS: OnceLock<Mutex<Registry>> = OnceLock::new();
 
 struct Server {
     child: Child,
@@ -109,7 +111,7 @@ fn ensure_connection(
     location: &Location,
     helper: &Path,
 ) -> Result<Arc<Mutex<Server>>, String> {
-    let registry = SERVERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let registry = SERVERS.get_or_init(Default::default);
     let lock_registry = || {
         registry
             .lock()
@@ -193,7 +195,7 @@ pub fn scan(settings: &Settings) -> Scan {
     };
 
     for location in locations {
-        match run::<Vec<Client>>(&location, &helper, &["list"]) {
+        match run_on::<Vec<Client>>(Lane::Main, &location, &helper, &["list"]) {
             Ok(clients) => scan
                 .targets
                 .extend(clients.into_iter().map(|client| Target {
@@ -215,7 +217,7 @@ pub fn load(target: &Target, settings: &Settings, cursor: &Cursor) -> Result<Loa
     let cursor = cursor.args(target.client.pid);
     let mut args = vec!["load", pid.as_str(), dll.as_str()];
     args.extend(cursor[2..].iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    run_on(Lane::Main, &target.location, &helper, &args)
 }
 
 pub fn unload(target: &Target, settings: &Settings) -> Result<(), String> {
@@ -632,19 +634,16 @@ fn run_args<T: DeserializeOwned>(
     settings: &Settings,
     args: &[String],
 ) -> Result<T, String> {
-    run(&target.location, &helper(settings)?, &strs(args))
+    run_on(
+        Lane::Main,
+        &target.location,
+        &helper(settings)?,
+        &strs(args),
+    )
 }
 
 fn strs(strings: &[String]) -> Vec<&str> {
     strings.iter().map(String::as_str).collect()
-}
-
-fn run<T: DeserializeOwned>(
-    location: &Location,
-    helper: &Path,
-    args: &[&str],
-) -> Result<T, String> {
-    run_on(Lane::Main, location, helper, args)
 }
 
 fn run_on<T: DeserializeOwned>(

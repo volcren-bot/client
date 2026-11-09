@@ -1,5 +1,6 @@
 use std::{
     ffi::c_void,
+    panic::catch_unwind,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
@@ -88,7 +89,8 @@ unsafe extern "system" fn decoded(player: *mut c_void, buffer: *mut c_void) -> u
     let result = detour.call(player, buffer);
     note_game_thread();
     if ACTIVE.load(Ordering::Acquire) {
-        on_appearance(player as u64, *actor_id);
+        let (player, actor_id) = (player as u64, *actor_id);
+        let _ = catch_unwind(|| on_appearance(player, actor_id));
     }
     result
 }
@@ -108,9 +110,7 @@ fn on_appearance(player: u64, actor_id: u32) {
         return;
     };
     let status = apply(&mut keeper, &memory, object, &kept, Some(kept.display));
-    let real = keeper.kept.and_then(|k| k.real);
-    let sequence = keeper.sequence;
-    report(&mut keeper, sequence, status, real);
+    report_kept(&mut keeper, status);
 }
 
 pub fn on_request() {
@@ -157,8 +157,7 @@ pub fn on_request() {
         Some(object) => apply(&mut keeper, &memory, object, &kept, shown),
         None => name_status::WAITING,
     };
-    let real = keeper.kept.and_then(|k| k.real);
-    report(&mut keeper, sequence, status, real);
+    report_kept(&mut keeper, status);
 }
 
 fn apply(
@@ -206,6 +205,11 @@ fn restore(keeper: &mut Keeper, memory: &impl Memory, layout: &Layout) {
     if text(&clean) == text(&kept.account) && text(&display) == text(&kept.display) {
         memory.write(object, &real);
     }
+}
+
+fn report_kept(keeper: &mut Keeper, status: i32) {
+    let (sequence, real) = (keeper.sequence, keeper.kept.and_then(|k| k.real));
+    report(keeper, sequence, status, real);
 }
 
 fn report(keeper: &mut Keeper, sequence: u32, status: i32, real: Option<[u8; 24]>) {

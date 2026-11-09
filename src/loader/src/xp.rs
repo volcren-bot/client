@@ -35,9 +35,6 @@ impl XpTracker {
     }
 
     pub fn update(&mut self, skills: Vec<SkillXp>, at: Duration) {
-        if self.first.is_empty() {
-            self.first = skills.clone();
-        }
         for skill in &skills {
             if !self.first.iter().any(|first| first.name == skill.name) {
                 self.first.push(skill.clone());
@@ -47,21 +44,23 @@ impl XpTracker {
         self.read_at = at;
     }
 
+    fn gains(&self) -> impl Iterator<Item = (&SkillXp, i64)> {
+        self.latest.iter().filter_map(|skill| {
+            let first = self.first.iter().find(|first| first.name == skill.name)?;
+            let gained = skill.xp - first.xp;
+            (gained > 0).then_some((skill, gained))
+        })
+    }
+
     pub fn total(&self) -> i64 {
-        self.rows().iter().map(|row| row.gained).sum()
+        self.gains().map(|(_, gained)| gained).sum()
     }
 
     pub fn rows(&self) -> Vec<XpRow> {
         let hours = self.read_at.as_secs_f64() / 3600.0;
         let mut rows: Vec<XpRow> = self
-            .latest
-            .iter()
-            .filter_map(|skill| {
-                let first = self.first.iter().find(|first| first.name == skill.name)?;
-                let gained = skill.xp - first.xp;
-                if gained <= 0 {
-                    return None;
-                }
+            .gains()
+            .map(|(skill, gained)| {
                 let per_hour = (hours > 0.0).then(|| (gained as f64 / hours).round() as i64);
                 let to_level = per_hour
                     .filter(|&rate| rate > 0 && skill.level < 99)
@@ -69,13 +68,13 @@ impl XpTracker {
                         let missing = (xp_for_level(skill.level + 1) - skill.xp).max(0) as f64;
                         Duration::from_secs_f64(missing / rate as f64 * 3600.0)
                     });
-                Some(XpRow {
+                XpRow {
                     name: skill.name.clone(),
                     level: skill.level,
                     gained,
                     per_hour,
                     to_level,
-                })
+                }
             })
             .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.gained));

@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, VecDeque},
+    collections::BinaryHeap,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -8,7 +8,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::pathfinding::{DIRECTIONS, Route, Tile, game_route, step_open};
+use crate::{
+    collision::flag,
+    pathfinding::{DIRECTIONS, Route, Tile, game_route, step_open},
+};
 
 const FORWARD: [(i32, i32); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
 const ATTACH_CANDIDATES: usize = 8;
@@ -75,39 +78,43 @@ fn bfs(flags: Flags, a: Tile, b: Tile, pad: i32, max_len: usize) -> Option<Vec<T
     let (w, h) = (a.0.max(b.0) + pad - x1 + 1, a.1.max(b.1) + pad - y1 + 1);
     let index = |(x, y): Tile| ((x - x1) * h + (y - y1)) as usize;
     let mut from = vec![u32::MAX; (w * h) as usize];
-    let mut steps = vec![0u32; (w * h) as usize];
     from[index(a)] = index(a) as u32;
-    let mut queue = VecDeque::from([a]);
-    while let Some((x, y)) = queue.pop_front() {
-        if (x, y) == b {
-            let mut path = vec![b];
-            let mut at = b;
-            while at != a {
-                let i = from[index(at)] as i32;
-                at = (x1 + i / h, y1 + i % h);
-                path.push(at);
+    let (mut frontier, mut next) = (vec![a], Vec::new());
+    for steps in 0.. {
+        for (x, y) in frontier.drain(..) {
+            if (x, y) == b {
+                let mut path = vec![b];
+                let mut at = b;
+                while at != a {
+                    let i = from[index(at)] as i32;
+                    at = (x1 + i / h, y1 + i % h);
+                    path.push(at);
+                }
+                path.reverse();
+                return Some(path);
             }
-            path.reverse();
-            return Some(path);
-        }
-        let here = index((x, y));
-        if steps[here] as usize + 1 >= max_len {
-            continue;
-        }
-        for (dx, dy) in DIRECTIONS {
-            let n = (x + dx, y + dy);
-            if !(x1..x1 + w).contains(&n.0)
-                || !(y1..y1 + h).contains(&n.1)
-                || from[index(n)] != u32::MAX
-            {
+            if steps + 1 >= max_len {
                 continue;
             }
-            if step_open(&flags, x, y, dx, dy) {
-                from[index(n)] = here as u32;
-                steps[index(n)] = steps[here] + 1;
-                queue.push_back(n);
+            let here = index((x, y));
+            for (dx, dy) in DIRECTIONS {
+                let n = (x + dx, y + dy);
+                if !(x1..x1 + w).contains(&n.0)
+                    || !(y1..y1 + h).contains(&n.1)
+                    || from[index(n)] != u32::MAX
+                {
+                    continue;
+                }
+                if step_open(&flags, x, y, dx, dy) {
+                    from[index(n)] = here as u32;
+                    next.push(n);
+                }
             }
         }
+        if next.is_empty() {
+            return None;
+        }
+        std::mem::swap(&mut frontier, &mut next);
     }
     None
 }
@@ -167,7 +174,7 @@ fn flags_hash(flags: Flags, (x1, y1, x2, y2): (i32, i32, i32, i32)) -> u64 {
 }
 
 fn standable(flags: Flags, x: i32, y: i32) -> bool {
-    flags(x, y).is_some_and(|f| f & 0x0024_0100 == 0)
+    flags(x, y).is_some_and(|f| f & flag::BLOCKED == 0)
 }
 
 fn build(flags: Flags, key: Key) -> Lattice {
@@ -272,16 +279,18 @@ fn lattice(flags: Flags, bounds: (i32, i32, i32, i32), options: &Options) -> Arc
 
 fn attach(flags: Flags, lattice: &Lattice, tile: Tile) -> Vec<(usize, Vec<Tile>)> {
     let mut near: Vec<usize> = (0..lattice.nodes.len()).collect();
-    let distance = |n: usize| {
-        (lattice.nodes[n].0 - tile.0)
-            .abs()
-            .max((lattice.nodes[n].1 - tile.1).abs())
+    let rank = |n: usize| {
+        let (x, y) = lattice.nodes[n];
+        ((x - tile.0).abs().max((y - tile.1).abs()), n)
     };
-    near.sort_by_key(|&n| distance(n));
+    if near.len() > ATTACH_CANDIDATES {
+        near.select_nth_unstable_by_key(ATTACH_CANDIDATES - 1, |&n| rank(n));
+        near.truncate(ATTACH_CANDIDATES);
+    }
+    near.sort_unstable_by_key(|&n| rank(n));
     let max_len = lattice.leg_len();
     let mut found: Vec<(usize, Vec<Tile>)> = near
         .into_iter()
-        .take(ATTACH_CANDIDATES)
         .filter_map(|n| bfs(flags, tile, lattice.nodes[n], 6, max_len).map(|path| (n, path)))
         .collect();
     found.sort_by_key(|(_, path)| path.len());
@@ -324,14 +333,21 @@ pub fn route(
     if short(baseline) {
         return plain;
     }
-    let routed = (0..RETRIES).find_map(|attempt| {
-        let options = Options {
-            seed: mix(options.seed.wrapping_add(attempt)),
-            ..*options
+    let lattice = lattice(flags, bounds, options);
+    let routed = lattice.contains(to).then(|| {
+        let ends = Ends {
+            starts: attach(flags, &lattice, from),
+            ends: attach(flags, &lattice, to),
         };
-        over_lattice(flags, bounds, from, to, &options, baseline)
+        (0..RETRIES).find_map(|attempt| {
+            let options = Options {
+                seed: mix(options.seed.wrapping_add(attempt)),
+                ..*options
+            };
+            over_lattice(flags, &lattice, &ends, from, to, &options, baseline)
+        })
     });
-    match routed {
+    match routed.flatten() {
         Some(tiles) => Some(reached(tiles)),
         None => plain
             .filter(|p| p.reached)
@@ -385,20 +401,20 @@ fn offset_route(
     Some(tiles)
 }
 
+struct Ends {
+    starts: Vec<(usize, Vec<Tile>)>,
+    ends: Vec<(usize, Vec<Tile>)>,
+}
+
 fn over_lattice(
     flags: Flags,
-    bounds: (i32, i32, i32, i32),
+    lattice: &Lattice,
+    Ends { starts, ends }: &Ends,
     from: Tile,
     to: Tile,
     options: &Options,
     plain_len: usize,
 ) -> Option<Vec<Tile>> {
-    let lattice = lattice(flags, bounds, options);
-    if !lattice.contains(to) {
-        return None;
-    }
-    let starts = attach(flags, &lattice, from);
-    let ends = attach(flags, &lattice, to);
     if starts.is_empty() || ends.is_empty() {
         return None;
     }
@@ -410,7 +426,7 @@ fn over_lattice(
     let mut cost = vec![f64::INFINITY; n];
     let mut previous = vec![(usize::MAX, usize::MAX); n];
     let mut queue = BinaryHeap::new();
-    for (node, path) in &starts {
+    for (node, path) in starts {
         let c = (path.len() - 1) as f64 * noise(lattice.nodes[*node], from);
         if c < cost[*node] {
             cost[*node] = c;
@@ -464,7 +480,7 @@ fn over_lattice(
     };
     let tiles = if options.offset > 0 {
         let nodes: Vec<Tile> = chain.iter().map(|&n| lattice.nodes[n]).collect();
-        offset_route(flags, &lattice, from, to, &nodes, options).unwrap_or_else(over_edges)
+        offset_route(flags, lattice, from, to, &nodes, options).unwrap_or_else(over_edges)
     } else {
         over_edges()
     };

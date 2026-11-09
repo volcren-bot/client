@@ -1,4 +1,10 @@
-use std::{io, ptr::null_mut, sync::Mutex, thread::sleep, time::Duration};
+use std::{
+    io,
+    ptr::null_mut,
+    sync::{Mutex, PoisonError},
+    thread::sleep,
+    time::Duration,
+};
 
 use ipc::input;
 use windows_sys::Win32::{
@@ -57,9 +63,7 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
         }
         Input::WindMouse { x, y, options } => {
             let (ox, oy) = canvas_offset(pid);
-            let start = connection(pid)
-                .filter(|c| c.is_compatible() && c.mouse_x > -1)
-                .map(|c| (c.mouse_x as f64, c.mouse_y as f64));
+            let start = seen_mouse(pid).map(|(x, y)| (f64::from(x), f64::from(y)));
             let post_move =
                 |px: i32, py: i32| post(window, WM_MOUSEMOVE, 0, point(px + ox, py + oy));
             wind_mouse::run_with(start, (*x, *y), options, post_move, |duration| {
@@ -83,11 +87,12 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
         Input::Button { button, down } => {
             let (x, y) = mouse_at(pid)?;
             let (down_message, up_message, held) = button_messages(*button);
-            if *down {
-                post(window, down_message, held, point(x, y))
+            let (message, flags) = if *down {
+                (down_message, held)
             } else {
-                post(window, up_message, 0, point(x, y))
-            }
+                (up_message, 0)
+            };
+            post(window, message, flags, point(x, y))
         }
         Input::Scroll { notches } => {
             let (x, y) = mouse_at(pid)?;
@@ -98,8 +103,9 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
                     io::Error::last_os_error()
                 ));
             }
-            let delta =
-                (-notches.saturating_mul(WHEEL_DELTA)).clamp(i16::MIN as i32, i16::MAX as i32);
+            let delta = notches
+                .saturating_mul(-WHEEL_DELTA)
+                .clamp(i16::MIN as i32, i16::MAX as i32);
             post(
                 window,
                 WM_MOUSEWHEEL,
@@ -133,11 +139,17 @@ fn button_messages(button: MouseButton) -> (u32, u32, WPARAM) {
     }
 }
 
+fn seen_mouse(pid: u32) -> Option<(i32, i32)> {
+    connection(pid)
+        .filter(|c| c.is_compatible() && c.mouse_x > -1)
+        .map(|c| (c.mouse_x, c.mouse_y))
+}
+
 fn mouse_at(pid: u32) -> Result<(i32, i32), String> {
     let (ox, oy) = canvas_offset(pid);
     for _ in 0..25 {
-        if let Some(c) = connection(pid).filter(|c| c.is_compatible() && c.mouse_x > -1) {
-            return Ok((c.mouse_x + ox, c.mouse_y + oy));
+        if let Some((x, y)) = seen_mouse(pid) {
+            return Ok((x + ox, y + oy));
         }
         sleep(Duration::from_millis(20));
     }
@@ -210,13 +222,11 @@ fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Resul
             break;
         }
         let vk = (key & 0xff) as u32;
-        let shift_state = (key >> 8) as usize;
-        let wanted = (if shift_state & 1 != 0 {
-            input::SHIFT
-        } else {
-            0
-        }) | (if shift_state & 2 != 0 { input::CTRL } else { 0 })
-            | (if shift_state & 4 != 0 { input::ALT } else { 0 });
+        let wanted = [input::SHIFT, input::CTRL, input::ALT]
+            .into_iter()
+            .enumerate()
+            .filter(|&(bit, _)| key >> (8 + bit) & 1 != 0)
+            .fold(0, |wanted, (_, modifier)| wanted | modifier);
         if wanted != held {
             post(window, input::MODIFIERS_MESSAGE, wanted ^ held, 0)?;
             held = wanted;
@@ -235,7 +245,7 @@ fn type_text(window: HWND, text: &str, hold: Duration, pace: &dyn Pace) -> Resul
 static RENDER_VIEWS: Mutex<Vec<(u32, usize)>> = Mutex::new(Vec::new());
 
 fn render_view(pid: u32) -> Option<HWND> {
-    let mut known = RENDER_VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut known = RENDER_VIEWS.lock().unwrap_or_else(PoisonError::into_inner);
     known.retain(|&(p, window)| p != pid || unsafe { IsWindow(window as HWND) } != 0);
     if let Some(&(_, window)) = known.iter().find(|&&(p, _)| p == pid) {
         return Some(window as HWND);

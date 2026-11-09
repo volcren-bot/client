@@ -57,6 +57,10 @@ pub(crate) fn prefix<const N: usize>(data: &[u8]) -> ([u8; N], u8) {
     (bytes, stored as u8)
 }
 
+pub(crate) unsafe fn read_prefix<const N: usize>(source: *const [u8; N], stored: u8) -> Vec<u8> {
+    read_volatile(source)[..(stored as usize).min(N)].to_vec()
+}
+
 pub(crate) unsafe fn push<S: Slot, const N: usize>(
     header: &Header,
     entries: *const [S; N],

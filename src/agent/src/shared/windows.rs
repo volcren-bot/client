@@ -8,18 +8,6 @@ use windows::{
     },
 };
 
-pub const WI_CONSOLE: u32 = ipc::input::OPEN_CONSOLE_MESSAGE;
-pub const WI_MODIFIERS: u32 = ipc::input::MODIFIERS_MESSAGE;
-pub const WI_NAME: u32 = ipc::input::NAME_MESSAGE;
-pub const WI_TOTAL_XP: u32 = ipc::input::TOTAL_XP_MESSAGE;
-pub const WI_ITEM_NAMES: u32 = ipc::input::ITEM_NAMES_MESSAGE;
-pub const WI_GAME_VALS: u32 = ipc::input::GAME_VALS_MESSAGE;
-pub const WI_PROJECT: u32 = ipc::input::PROJECT_MESSAGE;
-pub const WI_MENU: u32 = ipc::input::MENU_MESSAGE;
-pub const WI_MODEL: u32 = ipc::input::MODEL_MESSAGE;
-pub const WI_LOCS: u32 = ipc::input::LOCS_MESSAGE;
-pub const WI_CACHE: u32 = ipc::input::CACHE_MESSAGE;
-
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

@@ -33,6 +33,16 @@ struct State<J> {
     error: Option<String>,
 }
 
+impl<J> State<J> {
+    fn live(&self, generation: u64) -> bool {
+        !self.closed && self.generation == generation
+    }
+
+    fn pending(&self) -> bool {
+        self.busy || !self.queue.is_empty()
+    }
+}
+
 struct Shared<J> {
     state: Mutex<State<J>>,
     changed: Condvar,
@@ -51,8 +61,7 @@ struct Task<'a, J> {
 
 impl<J> Pace for Task<'_, J> {
     fn cancelled(&self) -> bool {
-        let state = self.shared.lock();
-        state.closed || state.generation != self.generation
+        !self.shared.lock().live(self.generation)
     }
 
     fn sleep(&self, duration: Duration) -> bool {
@@ -60,11 +69,9 @@ impl<J> Pace for Task<'_, J> {
         let (state, _) = self
             .shared
             .changed
-            .wait_timeout_while(state, duration, |s| {
-                !s.closed && s.generation == self.generation
-            })
+            .wait_timeout_while(state, duration, |s| s.live(self.generation))
             .unwrap_or_else(PoisonError::into_inner);
-        !state.closed && state.generation == self.generation
+        state.live(self.generation)
     }
 }
 
@@ -127,8 +134,7 @@ impl<J> Worker<J> {
     }
 
     pub fn busy(&self) -> bool {
-        let state = self.shared.lock();
-        state.busy || !state.queue.is_empty()
+        self.shared.lock().pending()
     }
 
     pub fn wait(&self) {
@@ -136,7 +142,7 @@ impl<J> Worker<J> {
         drop(
             self.shared
                 .changed
-                .wait_while(state, |s| s.busy || !s.queue.is_empty())
+                .wait_while(state, |s| s.pending())
                 .unwrap_or_else(PoisonError::into_inner),
         );
     }

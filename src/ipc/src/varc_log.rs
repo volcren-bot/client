@@ -87,10 +87,6 @@ pub unsafe fn is_compatible(log: *const Log) -> bool {
     ring::Header::is_compatible::<Slot, SLOT_COUNT>(addr_of!((*log).header))
 }
 
-unsafe fn read_text(source: *const [u8; TEXT_SIZE], stored: u8) -> Vec<u8> {
-    read_volatile(source)[..(stored as usize).min(TEXT_SIZE)].to_vec()
-}
-
 pub unsafe fn push(log: *const Log, time_ms: u64, change: &Change) {
     let (old_text, old_stored) = ring::prefix::<TEXT_SIZE>(change.old_text);
     let (new_text, new_stored) = ring::prefix::<TEXT_SIZE>(change.new_text);
@@ -126,11 +122,11 @@ pub unsafe fn read_since(log: *const Log, since: u64, limit: usize) -> Page {
             new_int: read_volatile(addr_of!((*slot).new_int)),
             old_length: read_volatile(addr_of!((*slot).old_length)),
             new_length: read_volatile(addr_of!((*slot).new_length)),
-            old_text: read_text(
+            old_text: ring::read_prefix(
                 addr_of!((*slot).old_text),
                 read_volatile(addr_of!((*slot).old_stored)),
             ),
-            new_text: read_text(
+            new_text: ring::read_prefix(
                 addr_of!((*slot).new_text),
                 read_volatile(addr_of!((*slot).new_stored)),
             ),

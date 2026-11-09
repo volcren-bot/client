@@ -1,4 +1,4 @@
-use super::{items::string_rvas, *};
+use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Scene {
@@ -385,7 +385,7 @@ pub struct DecorationLayout {
 pub fn find_decoration_layout(pe: &Pe, scene: &Scene) -> Result<DecorationLayout, ScanError> {
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         for w in instrs.windows(5) {
             let (Some((a, base, x_offset)), Some((_, b2, height))) =
                 (mem_load(&w[0], 4), mem_load(&w[1], 4))
@@ -437,14 +437,12 @@ pub fn find_loc_names(pe: &Pe) -> Result<LocNames, ScanError> {
     let colors = string_rvas(pe, "<col=00FFFF>");
     let mut found = Vec::new();
     for &(begin, end) in &pe.functions {
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         for (n, i) in instrs.iter().enumerate() {
-            if !(i.mnemonic() == Mnemonic::Lea
-                && i.is_ip_rel_memory_operand()
-                && colors.contains(&(i.ip_rel_memory_address() as u32)))
-            {
+            if !rip_lea(i).is_some_and(|rva| colors.contains(&rva)) {
                 continue;
             }
+
             let before = &instrs[n.saturating_sub(20)..n];
             let Some(name) = before.iter().rev().find_map(|j| {
                 (j.mnemonic() == Mnemonic::Lea

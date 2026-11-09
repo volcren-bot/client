@@ -44,10 +44,10 @@ pub fn host_of(uri: &Uri) -> Result<String, String> {
     Ok(host.trim_end_matches('.').to_ascii_lowercase())
 }
 
-fn check(allowed: &Whitelist, uri: &Uri) -> Result<(), String> {
+fn checked_host(allowed: &Whitelist, uri: &Uri) -> Result<String, String> {
     let host = host_of(uri)?;
     if allowed.allows(&host) {
-        Ok(())
+        Ok(host)
     } else {
         Err(format!(
             "{host} isn't on the HTTP whitelist; add it under Settings in the loader"
@@ -109,22 +109,22 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
         {
             return Err(format!("http_request: the {name} header can't be set"));
         }
-        headers.push((name.as_str(), value.as_str()));
+        let private = PRIVATE_HEADERS.contains(&lower.as_str());
+        headers.push((name.as_str(), value.as_str(), private));
     }
 
     for _ in 0..=MAX_REDIRECTS {
-        check(allowed, &uri)?;
+        let host = checked_host(allowed, &uri)?;
         let left = total
             .checked_sub(started.elapsed())
             .filter(|left| !left.is_zero())
             .ok_or("the request timed out")?;
-        let same_host =
-            host_of(&uri)? == first_host && (!first_https || uri.scheme_str() == Some("https"));
+        let same_host = host == first_host && (!first_https || uri.scheme_str() == Some("https"));
         let mut builder = http::Request::builder()
             .method(method.as_str())
             .uri(uri.clone());
-        for &(name, value) in &headers {
-            if same_host || !PRIVATE_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+        for &(name, value, private) in &headers {
+            if same_host || !private {
                 builder = builder.header(name, value);
             }
         }

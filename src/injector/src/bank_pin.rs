@@ -223,20 +223,26 @@ impl Client for Live<'_> {
         let mut child = 0;
         while let Ok(Some(part)) = crate::widget(self.pid, GROUP as u16, child) {
             if !part.hidden && part.width > 0 && part.height > 0 {
-                let [x1, y1, x2, y2] = [
-                    part.x,
-                    part.y,
-                    part.x + part.width - 1,
-                    part.y + part.height - 1,
-                ];
-                area = Some(area.map_or([x1, y1, x2, y2], |a| {
-                    [a[0].min(x1), a[1].min(y1), a[2].max(x2), a[3].max(y2)]
+                let (x2, y2) = (
+                    part.x.saturating_add(part.width - 1),
+                    part.y.saturating_add(part.height - 1),
+                );
+                area = Some(area.map_or([part.x, part.y, x2, y2], |a| {
+                    [
+                        a[0].min(part.x),
+                        a[1].min(part.y),
+                        a[2].max(x2),
+                        a[3].max(y2),
+                    ]
                 }));
             }
             child += 1;
         }
+
         if let Some(area) = area {
-            let _ = crate::paint_overlay(self.pid, |put| crate::bank_pin_overlay::paint(area, put));
+            let _ = crate::paint_overlay(self.pid, |size, put| {
+                crate::bank_pin_overlay::paint(area, size, put)
+            });
         }
     }
 }
@@ -452,17 +458,22 @@ impl Keypad<'_> {
         if !self.hovering(&button)? {
             return Ok(false);
         }
-        let hold_ms = self.left(CLICK_HOLD_MS);
-        self.client.send(&Input::Button {
-            button: MouseButton::Left,
-            down: true,
-        })?;
-        self.sleep(hold_ms)?;
-        self.client.send(&Input::Button {
-            button: MouseButton::Left,
-            down: false,
-        })?;
+        self.press(
+            |down| Input::Button {
+                button: MouseButton::Left,
+                down,
+            },
+            CLICK_HOLD_MS,
+        )?;
         Ok(true)
+    }
+
+    fn press(&mut self, input: impl Fn(bool) -> Input, hold: (f64, f64)) -> Step<()> {
+        let hold_ms = self.left(hold);
+        self.client.send(&input(true))?;
+        self.sleep(hold_ms)?;
+        self.client.send(&input(false))?;
+        Ok(())
     }
 
     fn type_digits(&mut self, pin: [u8; 4]) -> Step<bool> {
@@ -489,17 +500,13 @@ impl Keypad<'_> {
     }
 
     fn press_space(&mut self) -> Step<()> {
-        let hold_ms = self.left(KEY_HOLD_MS);
-        self.client.send(&Input::Key {
-            key: VK_SPACE,
-            down: true,
-        })?;
-        self.sleep(hold_ms)?;
-        self.client.send(&Input::Key {
-            key: VK_SPACE,
-            down: false,
-        })?;
-        Ok(())
+        self.press(
+            |down| Input::Key {
+                key: VK_SPACE,
+                down,
+            },
+            KEY_HOLD_MS,
+        )
     }
 
     fn failed(&self) -> Step<bool> {

@@ -648,7 +648,7 @@ fn run_script(args: &[&str]) -> ExitCode {
                         if let Some(values) = form::parse_update(payload) {
                             form::push_update(values);
                         }
-                    } else if replies_in.send(line.clone()).is_err() {
+                    } else if replies_in.send(std::mem::take(&mut line)).is_err() {
                         break;
                     }
                 }

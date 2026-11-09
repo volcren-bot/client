@@ -138,7 +138,7 @@ pub fn find_item_pile(pe: &Pe, decoration: &DecorationLayout) -> Result<u32, Sca
         if end - begin > 0x800 {
             continue;
         }
-        let instrs = decode(pe.bytes(begin, end), begin);
+        let instrs = function_instrs(pe, begin, end);
         found.extend(pile_store(&instrs, decoration));
     }
     one(found)

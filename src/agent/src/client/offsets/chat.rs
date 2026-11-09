@@ -30,7 +30,7 @@ fn case_code(pe: &Pe, cases: &[u32], case: usize) -> Option<Vec<Instruction>> {
         .filter(|&c| c > begin)
         .min()
         .unwrap_or(begin + 0x1000);
-    Some(decode(pe.bytes(begin, end), begin))
+    Some(function_instrs(pe, begin, end))
 }
 
 fn uid_table(pe: &Pe, lookup: u32) -> Option<u32> {
