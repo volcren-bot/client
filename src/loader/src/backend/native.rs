@@ -132,7 +132,6 @@ pub fn item_stackable(
     injector::item_stackable(target.client.pid, ids)
 }
 
-/// For each item, its dose or charge family `(number, id)`, or `None` when its name ends in no number.
 pub fn item_doses(
     target: &Target,
     _settings: &Settings,
@@ -157,7 +156,6 @@ pub fn sprites(
     injector::sprites(target.client.pid, ids)
 }
 
-/// One read of the item log is at most `ITEM_CHANGES_PER_READ` changes; with nothing new it blocks up to `wait`.
 pub fn item_changes(
     target: &Target,
     _settings: &Settings,
@@ -212,12 +210,10 @@ pub fn players(target: &Target, _settings: &Settings) -> Result<Vec<Player>, Str
     injector::players(target.client.pid)
 }
 
-/// One read of the packet log is at most `PACKETS_PER_READ` packets, as through the helper.
 pub fn packets(target: &Target, _settings: &Settings, since: u64) -> Result<PacketPage, String> {
     injector::packets(target.client.pid, since, 1000)
 }
 
-/// What the agent read about every server packet from the client's code, once it has.
 pub fn packet_layouts(
     target: &Target,
     _settings: &Settings,
@@ -225,7 +221,6 @@ pub fn packet_layouts(
     injector::packet_layouts(target.client.pid)
 }
 
-/// One read of the script log is at most `SCRIPT_RUNS_PER_READ` runs, as through the helper.
 pub fn script_runs(
     target: &Target,
     _settings: &Settings,
@@ -246,7 +241,6 @@ pub fn connection(target: &Target, _settings: &Settings) -> Result<Option<Connec
     Ok(injector::connection(target.client.pid))
 }
 
-/// `lib` is only for scripts run from a local file: store scripts get the downloaded lib beside them.
 pub fn script_command(
     target: Option<&Target>,
     settings: &Settings,

@@ -1,45 +1,31 @@
-//! What is known about the packets the Packet Inspector shows: names and field layouts, read from the running client or `packet_defs.tsv`.
-
 use std::sync::OnceLock;
 
 const TABLE: &str = include_str!("packet_defs.tsv");
 
-/// The transform a one byte value (or the low byte of a longer one) goes through on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transform {
     None,
-    /// The wire byte is the value plus 128.
     Add,
-    /// The wire byte is the value negated.
     Neg,
-    /// The wire byte is 128 minus the value.
     Sub,
 }
 
-/// How a field is stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Kind {
-    /// `shifts` is the shift in bits of each wire byte in the value.
     Int {
         signed: bool,
         shifts: Vec<u8>,
         transform: Transform,
     },
     Bool,
-    /// Bytes up to a 0 terminator.
     Str,
-    /// A 0 byte, then a string.
     Str0,
-    /// One byte below 128, else two bytes minus 0x8000.
     Smart,
-    /// Seven bits per byte while the high bit is set.
     Varint,
-    /// The packet's bytes, which the client takes without reading them.
     Ignored,
 }
 
 impl Kind {
-    /// Whether both read the same bytes the same way: the client's code doesn't say whether a short is signed, only its caller does.
     fn same_wire(&self, other: &Kind) -> bool {
         match (self, other) {
             (
@@ -58,7 +44,6 @@ impl Kind {
         }
     }
 
-    /// Reads `token` as the generator writes it: `u8`, `i16leadd`, `i32:2.3.0.1`, `str`, ...
     fn parse(token: &str) -> Option<Self> {
         match token {
             "bool" => return Some(Kind::Bool),
@@ -119,14 +104,10 @@ impl Kind {
 pub struct Def {
     pub sent: bool,
     pub opcode: u16,
-    /// The payload size the client expects: -1 a length byte follows, -2 a length short.
     pub size: i32,
     pub name: String,
-    /// Names the client's handler touches, hinting at what the packet is about.
     pub touches: Vec<String>,
-    /// A name for each field, when they are known.
     field_names: Vec<String>,
-    /// `None` when the layout isn't known and only the size is.
     fields: Option<Vec<Kind>>,
 }
 
@@ -188,10 +169,8 @@ fn parse(text: &str) -> Vec<Def> {
         .collect()
 }
 
-/// The packets the inspector knows.
 pub struct Table {
     defs: Vec<Def>,
-    /// Where it came from, for the tooltip.
     pub source: String,
 }
 
@@ -202,7 +181,6 @@ impl Table {
             .find(|def| def.sent == sent && def.opcode == opcode)
     }
 
-    /// The packets that have a name, as (sent, opcode, name).
     pub fn named(&self) -> impl Iterator<Item = (bool, u16, &str)> {
         self.defs
             .iter()
@@ -210,7 +188,6 @@ impl Table {
             .map(|d| (d.sent, d.opcode, d.name.as_str()))
     }
 
-    /// The packets called `name` (in any case), as (sent, opcode).
     pub fn by_name<'a>(&'a self, name: &'a str) -> impl Iterator<Item = (bool, u16)> + 'a {
         self.defs
             .iter()
@@ -218,10 +195,8 @@ impl Table {
             .map(|d| (d.sent, d.opcode))
     }
 
-    /// What the agent read from the running client; a packet keeps its shipped name only while the opcodes still match or its size and layout identify it.
     pub fn from_client(layouts: &[injector::PacketLayout]) -> Self {
         let shipped = shipped();
-        // the sizes of all the packets are the closest thing to a build number the client gives
         let received: Vec<&Def> = shipped.defs.iter().filter(|d| !d.sent).collect();
         let same_protocol = received.len() == layouts.len()
             && layouts.iter().all(|l| {
@@ -250,7 +225,6 @@ impl Table {
             .iter()
             .zip(&parsed)
             .map(|(layout, fields)| {
-                // a layout the client's code doesn't give (strings, loops) can't contradict the shipped one
                 let fits = |d: &Def| match (&d.fields, fields) {
                     (Some(a), Some(b)) => {
                         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_wire(y))
@@ -278,7 +252,6 @@ impl Table {
                     let only = matches
                         .next()
                         .filter(|_| matches.next().is_none() && here == 1)?;
-                    // the shipped table must not have another packet with this shape, named or not
                     (shipped
                         .defs
                         .iter()
@@ -297,7 +270,6 @@ impl Table {
                         .or(named)
                         .map(|d| d.touches.clone())
                         .unwrap_or_default(),
-                    // the names belong to the layout, so they come along with the name only
                     field_names: named.map(|d| d.field_names.clone()).unwrap_or_default(),
                     fields: fields.clone(),
                 }
@@ -318,7 +290,6 @@ impl Table {
     }
 }
 
-/// The table that was generated from the Java client.
 pub fn shipped() -> &'static Table {
     static TABLE_ONCE: OnceLock<Table> = OnceLock::new();
     TABLE_ONCE.get_or_init(|| Table {
@@ -327,7 +298,6 @@ pub fn shipped() -> &'static Table {
     })
 }
 
-/// The build the shipped table was generated for.
 pub fn build() -> &'static str {
     TABLE
         .lines()
@@ -335,16 +305,12 @@ pub fn build() -> &'static str {
         .unwrap_or("unknown")
 }
 
-/// A packet read through its `Def`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Decoded {
-    /// Each field read, as its name (its wire kind when it has none) and value.
     pub fields: Vec<(String, String)>,
-    /// Something the reader should know: the payload doesn't fit the layout, or only its start was kept.
     pub note: Option<String>,
 }
 
-/// Reads `bytes` as `def`. `length` is the packet's real payload length, which can be more than the bytes the log kept.
 pub fn decode(def: &Def, bytes: &[u8], length: u32) -> Decoded {
     let mut fields = Vec::new();
     let mut note = None;
@@ -416,15 +382,14 @@ fn label(kind: &Kind) -> String {
                 Transform::Neg => ", negated",
                 Transform::Sub => ", 128 minus",
             };
+            let sign = if *signed { "i" } else { "u" };
             let width = shifts.len() * 8;
-            if shifts.len() == 1 {
-                format!("{}{width}{transform}", if *signed { "i" } else { "u" })
+            let order = if shifts.len() == 1 {
+                String::new()
             } else {
-                format!(
-                    "{}{width} {order}{transform}",
-                    if *signed { "i" } else { "u" }
-                )
-            }
+                format!(" {order}")
+            };
+            format!("{sign}{width}{order}{transform}")
         }
         Kind::Bool => "bool".into(),
         Kind::Str | Kind::Str0 => "string".into(),
@@ -434,7 +399,6 @@ fn label(kind: &Kind) -> String {
     }
 }
 
-/// The text of one field at the start of `bytes` and the bytes it took.
 fn read(kind: &Kind, bytes: &[u8]) -> Option<(String, usize)> {
     match kind {
         Kind::Int {
@@ -498,7 +462,6 @@ fn read(kind: &Kind, bytes: &[u8]) -> Option<(String, usize)> {
             }
             None
         }
-        // not decoded; what's left stays in the hex dump
         Kind::Ignored => Some(("(the client never reads it)".into(), bytes.len())),
     }
 }
@@ -530,7 +493,6 @@ mod tests {
             ("TICK", 0, true)
         );
         assert!(shipped().lookup(true, 2).is_none());
-        // every line of the table parsed (a kind that doesn't parse drops its whole line)
         assert_eq!(
             shipped().defs.len(),
             TABLE
@@ -584,7 +546,6 @@ mod tests {
 
     #[test]
     fn varp_large_reads_its_id_and_value() {
-        // id 0x0102 little endian with +128 on the low byte; the value's bytes in the order 2.3.0.1
         let varp = def(6, "u16leadd,i32:2.3.0.1");
         assert_eq!(
             values(&varp, &[0x82, 0x01, 0x00, 0x00, 0x01, 0x00]),
@@ -633,7 +594,6 @@ mod tests {
                 .unwrap()
                 .contains("expects 0 bytes")
         );
-        // a variable size packet with bytes left over
         assert!(
             decode(&def(-1, "u8"), &[1, 2], 2)
                 .note
@@ -657,7 +617,6 @@ mod tests {
         }
     }
 
-    /// The shipped table's own sizes as a client with the same protocol reports them, with `changes` applied to its layouts.
     fn same_protocol(changes: &[injector::PacketLayout]) -> Vec<injector::PacketLayout> {
         let mut all: Vec<injector::PacketLayout> = shipped()
             .defs
@@ -678,14 +637,12 @@ mod tests {
 
     #[test]
     fn a_table_from_the_client_keeps_names_while_the_protocol_is_the_same() {
-        // opcode 2 is TICK in the shipped table, with no fields and no bytes
         let table = Table::from_client(&same_protocol(&[
             layout(2, 0, Some(&[])),
             layout(3, 2, Some(&["u16be"])),
         ]));
         assert_eq!(table.lookup(false, 2).unwrap().name, "TICK");
         assert_eq!(table.lookup(false, 3).unwrap().name, "UPDATE_RUNENERGY");
-        // fields are decoded from what the client said
         assert_eq!(
             decode(table.lookup(false, 3).unwrap(), &[1, 2], 2).fields,
             [("energy".to_string(), "258".to_string())]
@@ -696,7 +653,6 @@ mod tests {
 
     #[test]
     fn names_survive_a_layout_the_client_cant_read_and_signedness() {
-        // IF_SETTEXT (-2, i32be then a string) is a layout the agent can't read; VARP_LARGE's int is signed in the shipped table
         let table = Table::from_client(&same_protocol(&[
             layout(40, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
             layout(7, 6, Some(&["u32be", "i16leadd"])),
@@ -704,9 +660,7 @@ mod tests {
         assert_eq!(table.lookup(false, 11).unwrap().name, "IF_SETTEXT");
         assert_eq!(table.lookup(false, 40).unwrap().name, "VARP_LARGE");
         assert_eq!(table.lookup(false, 7).unwrap().name, "IF_SETANIM");
-        // the shipped layout isn't used to decode what the client didn't give
         assert!(!table.lookup(false, 11).unwrap().has_fields());
-        // but a layout that really differs is another packet
         assert_eq!(
             Table::from_client(&same_protocol(&[layout(40, 6, Some(&["u16be", "i32be"]))]))
                 .lookup(false, 40)
@@ -718,15 +672,12 @@ mod tests {
 
     #[test]
     fn names_by_opcode_need_the_same_sizes_for_every_packet() {
-        // one size different anywhere: the opcodes were reshuffled, so TICK (no fields, nothing to tell it by) is not kept at 2
         let mut moved = same_protocol(&[]);
         moved.iter_mut().find(|l| l.opcode == 9).unwrap().size = 77;
         let table = Table::from_client(&moved);
         assert_eq!(table.lookup(false, 2).unwrap().name, "");
         assert_eq!(table.lookup(false, 11).unwrap().name, "");
-        // and the client packets, which can't be checked, are dropped
         assert!(table.lookup(true, 75).is_none());
-        // a different number of packets is a different protocol as well
         assert_eq!(
             Table::from_client(&same_protocol(&[])[..150])
                 .lookup(false, 2)
@@ -738,20 +689,17 @@ mod tests {
 
     #[test]
     fn a_name_follows_its_packet_when_an_update_moves_the_opcode() {
-        // VARP_LARGE (u16leadd, i32:2.3.0.1, 6 bytes) is the only packet of that shape in the shipped table
         let table = Table::from_client(&[
             layout(90, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
             layout(91, 6, Some(&["u16be", "i32be"])),
         ]);
         assert_eq!(table.lookup(false, 90).unwrap().name, "VARP_LARGE");
         assert_eq!(table.lookup(false, 91).unwrap().name, "");
-        // the same shape twice in the client's packets is not told apart
         let twice = Table::from_client(&[
             layout(90, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
             layout(91, 6, Some(&["u16leadd", "i32:2.3.0.1"])),
         ]);
         assert_eq!(twice.lookup(false, 90).unwrap().name, "");
-        // a packet without bytes has no shape to follow
         assert_eq!(
             Table::from_client(&[layout(7, 0, Some(&[]))])
                 .lookup(false, 7)
@@ -770,7 +718,6 @@ mod tests {
             Some(("NO_TIMEOUT", 0))
         );
         let table = Table::from_client(&same_protocol(&[]));
-        // a received 75 is another packet; the sent one is still there
         assert_eq!(table.lookup(false, 75).unwrap().name, "");
         assert_eq!(table.lookup(true, 75).unwrap().name, "NO_TIMEOUT");
         assert!(

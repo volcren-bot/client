@@ -1,14 +1,9 @@
-/// Where the loader talks to: compiled in from `src/loader/config.json`, overridable at run time by the `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SITE_URL` environment variables.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// The webapp, which serves `/api/launcher/*`.
     pub api_url: String,
-    /// GoTrue, for sign-in and token refresh.
     pub supabase_url: String,
-    /// The public anon key.
     pub anon_key: String,
-    /// The website, for "Add funds". Optional: the button is hidden without it.
     pub site_url: String,
 }
 
@@ -32,7 +27,6 @@ impl Config {
         }
     }
 
-    /// Names of the settings that are empty, so the UI can say what is missing instead of failing on a blank URL.
     pub fn missing(&self) -> Vec<&'static str> {
         [
             ("API_URL", &self.api_url),

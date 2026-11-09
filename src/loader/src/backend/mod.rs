@@ -4,28 +4,13 @@ use injector::Client;
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
-mod native;
-#[cfg(windows)]
-pub use native::{
-    Location, connection, console, draw, enum_def, game_val_names, input, item_changes,
-    item_container, item_containers, item_doses, item_icons, item_names, item_params,
-    item_stackable, load, npcs, packet_layouts, packets, players, scan, scene_tiles_next_frame,
-    script_command, script_runs, set_cursor, set_display_name, shutdown, sprites, state, unload,
-    varbit, varbits_of, varc, varc_changes, varp, varps, widget, widget_tree,
-};
-
+#[path = "native.rs"]
+mod imp;
 #[cfg(not(windows))]
-mod wine;
-#[cfg(not(windows))]
-pub use wine::{
-    Location, connection, console, draw, enum_def, game_val_names, input, item_changes,
-    item_container, item_containers, item_doses, item_icons, item_names, item_params,
-    item_stackable, load, npcs, packet_layouts, packets, players, scan, scene_tiles_next_frame,
-    script_command, script_runs, set_cursor, set_display_name, shutdown, sprites, state, unload,
-    varbit, varbits_of, varc, varc_changes, varp, varps, widget, widget_tree,
-};
+#[path = "wine.rs"]
+mod imp;
+pub use imp::*;
 
-/// How many lines an output tab may keep: each new line lays out all of them again, which costs about 6 ms and 13 MB per thousand.
 pub const LOG_LINES: std::ops::RangeInclusive<usize> = 2000..=10_000;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -33,15 +18,10 @@ pub const LOG_LINES: std::ops::RangeInclusive<usize> = 2000..=10_000;
 pub struct Settings {
     pub dll: String,
     pub helper: String,
-    /// Your own lib folder: local script files read `require("../lib/...")` from it instead of the downloaded lib.
     pub lib_dir: String,
-    /// The breaks and sleeps every script takes, sent to the script when it starts and when this changes.
     pub antiban: injector::antiban::Config,
-    /// The types of transport the user turned off, sent to the script when it starts and when this changes.
     pub transports: injector::transports::Settings,
-    /// Whether a bug report carries the OS, Wine, CPU, memory and GPU besides the versions.
     pub include_system_info: bool,
-    /// How many lines each output tab keeps, within `LOG_LINES`.
     pub log_lines: usize,
 }
 
@@ -63,9 +43,7 @@ impl Default for Settings {
     }
 }
 
-/// Finds `name` next to the loader (an installed release), then in the build output next to it (`target/x86_64-pc-windows-gnu/...`).
 fn detect(exe_dir: &Path, name: &str) -> String {
-    // The loader sits in target/<profile>, so prefer the agent and injector built with the same profile.
     let profile = exe_dir.file_name().map(PathBuf::from).unwrap_or_default();
     [
         exe_dir.to_path_buf(),
@@ -82,7 +60,6 @@ fn detect(exe_dir: &Path, name: &str) -> String {
 }
 
 impl Settings {
-    /// An install always uses its own files, so a path saved by an older install can't pair them with another version. A dev build keeps a saved path while its file exists. `log_lines` is brought into `LOG_LINES`.
     pub fn fill_missing(&mut self, dev: bool) {
         self.resolve_paths(Self::default(), dev);
         self.log_lines = self.log_lines.clamp(*LOG_LINES.start(), *LOG_LINES.end());
@@ -163,7 +140,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("agent.dll"), b"").unwrap();
         std::fs::write(dir.join("injector.exe"), b"").unwrap();
-        // No `target/` anywhere near it.
         assert!(detect(&dir, "agent.dll").ends_with("agent.dll"));
         assert!(detect(&dir, "injector.exe").ends_with("injector.exe"));
         assert_eq!(detect(&dir, "missing.dll"), "");

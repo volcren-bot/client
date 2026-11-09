@@ -1,9 +1,7 @@
-//! Scores and bug reports: the Feedback page over the last day's sessions and the Feedback tab of a running store script, what a report carries, and the run records kept sealed on disk so an earlier run can still be reported with its log.
-
 use std::{
     collections::HashMap,
     path::PathBuf,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 
 use eframe::egui;
@@ -14,26 +12,20 @@ use serde_json::{Map, Value, json};
 
 use crate::api::models::{RecentSession, Report};
 
-/// How long a run's record is kept: the server takes reports on sessions of the last 24 hours.
 pub const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
-/// The most of a log a report carries, from its end; the API refuses more.
 pub const MAX_LOG_BYTES: usize = 256 * 1024;
 pub const MAX_DESCRIPTION_CHARS: usize = 2000;
-/// How long the session list is trusted before the page asks the server again.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(60);
-/// What an account or display name becomes in a log or snapshot.
 const REDACTED: &str = "[account]";
 const INVENTORY: i32 = 93;
 const EQUIPMENT: i32 = 94;
 
-/// The versions every report carries, so the log can be read against the code that wrote it.
 pub struct Versions {
     pub agent: Option<String>,
     pub lib: Option<String>,
     pub gpu: Option<String>,
 }
 
-/// The `diagnostics` of a report: the versions, and the system info when `system` is on.
 pub fn diagnostics(versions: &Versions, system: bool) -> Value {
     let mut map = Map::new();
     map.insert("loader".into(), json!(crate::update::VERSION));
@@ -46,15 +38,12 @@ pub fn diagnostics(versions: &Versions, system: bool) -> Value {
         json!(if cfg!(windows) { "native" } else { "wine" }),
     );
     if system {
-        for (key, value) in system_info() {
-            map.insert(key, value);
-        }
+        map.extend(system_info());
         map.insert("gpu".into(), json!(versions.gpu));
     }
     Value::Object(map)
 }
 
-/// OS, kernel, Wine, CPU and memory, each left out when it can't be read.
 pub fn system_info() -> Map<String, Value> {
     let mut map = Map::new();
     map.insert("os".into(), json!(os_name()));
@@ -75,8 +64,7 @@ pub fn system_info() -> Map<String, Value> {
 }
 
 fn os_name() -> String {
-    #[cfg(target_os = "linux")]
-    {
+    if cfg!(target_os = "linux") {
         let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
         let pretty = release
             .lines()
@@ -92,19 +80,16 @@ fn os_name() -> String {
             None => "Linux".to_owned(),
         };
     }
-    #[cfg(windows)]
+    if cfg!(windows)
+        && let Some(version) = command_output("cmd", &["/c", "ver"])
     {
-        if let Some(version) = command_output("cmd", &["/c", "ver"]) {
-            return version;
-        }
+        return version;
     }
-    #[allow(unreachable_code)]
     std::env::consts::OS.to_owned()
 }
 
 fn cpu_model() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
+    if cfg!(target_os = "linux") {
         let info = std::fs::read_to_string("/proc/cpuinfo").ok()?;
         return info
             .lines()
@@ -112,13 +97,11 @@ fn cpu_model() -> Option<String> {
             .and_then(|line| line.split_once(':'))
             .map(|(_, model)| model.trim().to_owned());
     }
-    #[allow(unreachable_code)]
     std::env::var("PROCESSOR_IDENTIFIER").ok()
 }
 
 fn memory_gb() -> Option<f64> {
-    #[cfg(target_os = "linux")]
-    {
+    if cfg!(target_os = "linux") {
         let info = std::fs::read_to_string("/proc/meminfo").ok()?;
         let kb: f64 = info
             .lines()
@@ -129,7 +112,6 @@ fn memory_gb() -> Option<f64> {
             .ok()?;
         return Some((kb / 1024.0 / 1024.0 * 10.0).round() / 10.0);
     }
-    #[allow(unreachable_code)]
     None
 }
 
@@ -140,7 +122,6 @@ fn wine_version() -> Option<String> {
     command_output("wine", &["--version"])
 }
 
-/// The first line a quick command prints, or nothing when it isn't there or fails.
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new(program)
         .args(args)
@@ -157,7 +138,6 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The names a client shows for its account: the login name and the display name, when it is logged in.
 pub fn names_of(state: &GameState) -> Vec<String> {
     [&state.account_name, &state.player_name]
         .into_iter()
@@ -167,15 +147,15 @@ pub fn names_of(state: &GameState) -> Vec<String> {
         .collect()
 }
 
-/// `text` with every account name taken out, however it is spelled: case, and spaces, underscores or hyphens between its parts, don't matter.
 pub fn scrub(text: &str, names: &[String]) -> String {
     let mut keys: Vec<Vec<char>> = names
         .iter()
         .map(|name| normal(name))
         .filter(|key| key.len() >= 2)
         .collect();
-    keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
+    keys.sort();
     keys.dedup();
+    keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
     if keys.is_empty() {
         return text.to_owned();
     }
@@ -197,7 +177,6 @@ pub fn scrub(text: &str, names: &[String]) -> String {
     out
 }
 
-/// A name as it is compared: lowercase, with every run of spaces, underscores and hyphens as one space.
 fn normal(name: &str) -> Vec<char> {
     let mut key = Vec::new();
     for c in name.trim().chars() {
@@ -216,7 +195,6 @@ fn is_separator(c: char) -> bool {
     c == ' ' || c == '_' || c == '-' || c == '\u{a0}'
 }
 
-/// How many chars of `text` from `at` spell `key`, if they do.
 fn matches_at(text: &[char], at: usize, key: &[char]) -> Option<usize> {
     let mut i = at;
     for &k in key {
@@ -239,7 +217,6 @@ fn matches_at(text: &[char], at: usize, key: &[char]) -> Option<usize> {
     Some(i - at)
 }
 
-/// The game state a report carries: the client's state without the account names, plus the inventory and worn items.
 pub fn snapshot(state: &GameState, containers: &[(i32, Vec<Item>)]) -> Value {
     let mut state = state.clone();
     state.account_name = None;
@@ -262,11 +239,10 @@ pub fn snapshot(state: &GameState, containers: &[(i32, Vec<Item>)]) -> Value {
     };
     map.insert("inventory".into(), json!(items(INVENTORY)));
     map.insert("equipment".into(), json!(items(EQUIPMENT)));
-    map.insert("taken_at".into(), json!(now_secs()));
+    map.insert("taken_at".into(), json!(crate::paths::unix_secs()));
     Value::Object(map)
 }
 
-/// The client's state and containers for a report, adding the names it shows to `names` so they can be scrubbed.
 pub fn read_snapshot(
     target: &Target,
     settings: &Settings,
@@ -278,13 +254,6 @@ pub fn read_snapshot(
     Some(snapshot(&state, &containers))
 }
 
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// The log's last lines, as many whole lines as fit in `max_bytes`.
 pub fn tail(lines: &[String], max_bytes: usize) -> String {
     let mut kept = Vec::new();
     let mut size = 0;
@@ -300,49 +269,42 @@ pub fn tail(lines: &[String], max_bytes: usize) -> String {
     kept.join("\n")
 }
 
-/// A store run that ended, kept so it can still be reported with its log and the state it ended in. Both are already scrubbed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Record {
     pub session_id: String,
     pub title: String,
     pub log: String,
     pub snapshot: Option<Value>,
-    /// Unix seconds.
     pub ended_at: u64,
 }
 
 fn runs_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "volcren", "Volcren")
-        .map(|dirs| dirs.data_dir().join("runs"))
+    crate::paths::project_dirs().map(|dirs| dirs.data_dir().join("runs"))
 }
 
-/// A session id is a UUID; anything else never names a file.
 fn record_path(dir: &std::path::Path, session_id: &str) -> Option<PathBuf> {
     crate::session::safe_id(session_id).map(|id| dir.join(format!("{id}.bin")))
 }
 
-/// Seals the record under the accounts key and writes it to the data folder, dropping records older than `KEEP`.
 pub fn store_record(record: &Record) -> Result<(), String> {
     let dir = runs_dir().ok_or("no data folder on this system")?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     prune_in(&dir);
     let path = record_path(&dir, &record.session_id).ok_or("malformed session id")?;
-    let key = crate::accounts::key(true)?.ok_or("the system keyring isn't available")?;
+    let key = crate::accounts::create_key()?;
     let plain = serde_json::to_vec(record).map_err(|e| e.to_string())?;
     let sealed = crate::accounts::seal(&key, &plain)?;
-    std::fs::write(&path, sealed).map_err(|e| e.to_string())
+    crate::accounts::write_sealed(&path, &sealed)
 }
 
-/// The record of a session, if it was kept and still opens.
 pub fn load_record(session_id: &str) -> Option<Record> {
     let path = record_path(&runs_dir()?, session_id)?;
     let sealed = std::fs::read(path).ok()?;
-    let key = crate::accounts::key(false).ok()??;
+    let key = crate::accounts::existing_key().ok()??;
     let plain = crate::accounts::open(&key, &sealed)?;
     serde_json::from_slice(&plain).ok()
 }
 
-/// Deletes the records older than `KEEP`.
 pub fn prune() {
     if let Some(dir) = runs_dir() {
         prune_in(&dir);
@@ -367,18 +329,15 @@ fn prune_in(dir: &std::path::Path) {
     }
 }
 
-/// What the user typed for a session, and what the server said back.
 #[derive(Default)]
 pub struct Draft {
     pub description: String,
-    /// A score sent and not answered yet.
     pub pending_score: Option<u8>,
     pub sending: bool,
     pub open: bool,
     pub message: Option<Result<String, String>>,
 }
 
-/// The Feedback page: the sessions of the last 24 hours, newest first, each with its draft.
 #[derive(Default)]
 pub struct Page {
     pub sessions: Vec<RecentSession>,
@@ -401,7 +360,6 @@ pub enum Action {
 }
 
 impl Page {
-    /// Whether the list should be asked for: never fetched, or stale, and no fetch is under way.
     pub fn stale(&self, now: Instant) -> bool {
         !self.loading
             && self
@@ -428,7 +386,6 @@ impl Page {
         self.drafts.entry(session_id.to_owned()).or_default()
     }
 
-    /// The answer to a score: the list shows it on every session of that script.
     pub fn scored(&mut self, session_id: &str, result: Result<u8, String>) {
         let script = self
             .sessions
@@ -470,7 +427,6 @@ impl Page {
         }
     }
 
-    /// The whole page: a refresh row, then a card per session.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -497,8 +453,7 @@ impl Page {
                 .weak(),
             );
         }
-        let sessions = self.sessions.clone();
-        for session in &sessions {
+        for session in &self.sessions {
             let draft = self.drafts.entry(session.session_id.clone()).or_default();
             ui.add_space(6.0);
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -518,7 +473,6 @@ impl Page {
     }
 }
 
-/// `started 2026-11-04 21:10 UTC, running` or `…, ended 21:45 UTC`.
 fn when(session: &RecentSession, running: bool) -> String {
     let started = short_time(&session.started_at);
     match (&session.ended_at, running) {
@@ -528,7 +482,6 @@ fn when(session: &RecentSession, running: bool) -> String {
     }
 }
 
-/// `2026-11-04T21:10:33.123+00:00` as `2026-11-04 21:10`.
 pub fn short_time(iso: &str) -> String {
     let mut text: String = iso.chars().take(16).collect();
     if let Some(t) = text.find('T') {
@@ -537,7 +490,6 @@ pub fn short_time(iso: &str) -> String {
     text
 }
 
-/// The score row and the report form of one session.
 pub fn session_ui(
     ui: &mut egui::Ui,
     session: &RecentSession,
@@ -608,7 +560,7 @@ pub fn session_ui(
     }
     match &draft.message {
         Some(Ok(text)) => {
-            ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(158, 206, 106)));
+            ui.label(egui::RichText::new(text).color(crate::theme::GREEN));
         }
         Some(Err(text)) => {
             ui.colored_label(ui.visuals().error_fg_color, text);
@@ -618,7 +570,6 @@ pub fn session_ui(
     actions
 }
 
-/// Builds the report a session is sent as. `log` is the raw log, `names` what to take out of it.
 pub fn report(
     description: String,
     log: &[String],

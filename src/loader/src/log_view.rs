@@ -1,5 +1,3 @@
-//! A Development inspector's log and the rows of it its filter shows, kept up to date as rows come and go so a repaint doesn't filter the whole log again.
-
 use std::{
     cell::{Ref, RefCell},
     collections::VecDeque,
@@ -7,7 +5,6 @@ use std::{
     time::Instant,
 };
 
-/// Which client's log an inspector reads, whether a read is under way, and when the next may start.
 #[derive(Default)]
 pub struct Poller {
     pid: Option<u32>,
@@ -16,14 +13,12 @@ pub struct Poller {
 }
 
 impl Poller {
-    /// Whether a read of `pid`'s log should start now; `enabled` is the inspector's own switch.
     pub fn due(&self, enabled: bool, pid: u32, now: Instant) -> bool {
         enabled
             && (!self.reading || self.pid != Some(pid))
             && self.next_poll.is_none_or(|at| now >= at)
     }
 
-    /// Marks a read of `pid`'s log started. True when it is another client than last time: what was kept starts over.
     pub fn start(&mut self, pid: u32) -> bool {
         let other = self.pid != Some(pid);
         self.pid = Some(pid);
@@ -31,23 +26,19 @@ impl Poller {
         other
     }
 
-    /// Marks the read over, the next allowed from `next_poll`. False when the answer is for a client that was left.
     pub fn finish(&mut self, pid: u32, next_poll: Option<Instant>) -> bool {
         self.reading = false;
         self.next_poll = next_poll;
         self.pid == Some(pid)
     }
 
-    /// When the next read may start, if one is waiting for that.
     pub fn next_poll(&self) -> Option<Instant> {
         self.next_poll
     }
 }
 
-/// Rows numbered from the first ever pushed, so the numbers stay put as the oldest go.
 pub struct Log<T> {
     rows: VecDeque<T>,
-    // the number of the front row
     first: u64,
 }
 
@@ -69,7 +60,6 @@ impl<T> Log<T> {
         self.rows.iter()
     }
 
-    /// For changes that leave what a filter sees alone.
     pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut T> {
         self.rows.iter_mut()
     }
@@ -83,15 +73,12 @@ impl<T> Log<T> {
         self.rows.clear();
     }
 
-    /// Clears the log when a page starting at `first` is not newer than its newest row (`behind(newest, first)`):
-    /// the client has a new agent with a new log, so what was kept is stale.
     pub fn restart_if_behind<F>(&mut self, first: &F, behind: impl Fn(&T, &F) -> bool) {
         if self.rows.back().is_some_and(|last| behind(last, first)) {
             self.clear();
         }
     }
 
-    /// Drops the oldest rows until at most `keep` are left.
     pub fn keep(&mut self, keep: usize) {
         while self.rows.len() > keep {
             self.rows.pop_front();
@@ -114,14 +101,12 @@ impl<T> Extend<T> for Log<T> {
     }
 }
 
-/// The numbers of the rows a filter shows, for the filter `key` it last ran with.
 pub struct Filtered<K> {
     cache: RefCell<Cache<K>>,
 }
 
 struct Cache<K> {
     key: Option<K>,
-    // the number of the first row not looked at yet
     seen: u64,
     shown: VecDeque<u64>,
 }
@@ -139,7 +124,6 @@ impl<K> Default for Filtered<K> {
 }
 
 impl<K: PartialEq> Filtered<K> {
-    /// The rows of `log` that `shows`, filtering only the rows new since the last call unless `key` changed.
     pub fn view<'a, T>(
         &'a self,
         log: &'a Log<T>,
@@ -147,7 +131,6 @@ impl<K: PartialEq> Filtered<K> {
         shows: impl Fn(&T) -> bool,
     ) -> View<'a, T, K> {
         let mut cache = self.cache.borrow_mut();
-        // a log that ends before what was seen is another log: filter it all
         let from = if cache.key.as_ref() == Some(&key) && cache.seen <= log.end() {
             while cache
                 .shown
@@ -176,7 +159,6 @@ impl<K: PartialEq> Filtered<K> {
     }
 }
 
-/// The shown rows, oldest first.
 pub struct View<'a, T, K> {
     log: &'a Log<T>,
     shown: Ref<'a, Cache<K>>,
@@ -247,7 +229,6 @@ mod tests {
         assert!(poller.due(true, 32, now));
         assert!(poller.start(32));
         assert!(!poller.due(true, 32, now));
-        // a read of another client does not wait for this one
         assert!(poller.due(true, 44, now));
         assert!(poller.finish(32, Some(later)));
         assert!(!poller.due(true, 32, now));
@@ -273,7 +254,6 @@ mod tests {
     fn filters_only_new_rows_until_the_key_changes() {
         let mut log = Log::default();
         let filtered = Filtered::default();
-        // shows the odd or the even rows, counting the rows it looks at
         let looked = Cell::new(0);
         let parity = |odd: bool| {
             let looked = &looked;

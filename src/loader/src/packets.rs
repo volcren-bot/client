@@ -1,5 +1,3 @@
-//! The packet monitor on the Development page: what the client's packet log returned, kept and filtered for display.
-
 use std::time::{Duration, Instant};
 
 use injector::{Packet, PacketPage};
@@ -9,12 +7,9 @@ use crate::{
     packet_defs::{self, Table},
 };
 
-/// Packets kept for display; the oldest go first.
 pub const KEEP: usize = 5000;
-/// How long after a read finished the next one starts.
 pub const POLL_EVERY: Duration = Duration::from_millis(250);
 
-/// A packet to show or hide: an opcode in one direction (what a name stands for), or typed as a number, in both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Key {
     sent: Option<bool>,
@@ -27,10 +22,8 @@ impl Key {
     }
 }
 
-/// The word that stands for every packet without a name.
 pub const UNKNOWN: &str = "UNKNOWN";
 
-/// Packets to show or hide, from text like `40, VARP_LARGE` (only these) or `!40 !PLAYER_INFO` (all but these): opcodes or names.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Filter {
     only: Vec<Key>,
@@ -45,7 +38,6 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 }
 
 impl Filter {
-    /// Names are looked up in `table`; a word that is neither a number nor a known name is ignored.
     pub fn parse(text: &str, table: &Table) -> Self {
         let mut filter = Self::default();
         for word in words(text) {
@@ -68,7 +60,6 @@ impl Filter {
         filter
     }
 
-    /// `named` is whether the table has a name for the packet.
     pub fn allows(&self, sent: bool, opcode: u16, named: bool) -> bool {
         let wanted = (self.only.is_empty() && !self.only_unknown)
             || self.only.iter().any(|k| k.matches(sent, opcode))
@@ -79,7 +70,6 @@ impl Filter {
     }
 }
 
-/// What the filter text does with a named packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameState {
     Off,
@@ -88,7 +78,6 @@ pub enum NameState {
 }
 
 impl NameState {
-    /// The next state when the name is clicked: off, show only, hide, off.
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::Only,
@@ -98,7 +87,6 @@ impl NameState {
     }
 }
 
-/// What `text` does with `name`.
 pub fn name_state(text: &str, name: &str) -> NameState {
     for word in words(text) {
         match word.strip_prefix('!') {
@@ -110,7 +98,6 @@ pub fn name_state(text: &str, name: &str) -> NameState {
     NameState::Off
 }
 
-/// `text` with `name` in `state`: its word replaced, added at the end or taken out, the rest as it was.
 pub fn with_name(text: &str, name: &str, state: NameState) -> String {
     let mut kept: Vec<String> = words(text)
         .filter(|w| !w.trim_start_matches('!').eq_ignore_ascii_case(name))
@@ -124,7 +111,6 @@ pub fn with_name(text: &str, name: &str, state: NameState) -> String {
     kept.join(", ")
 }
 
-/// How many of the filter text's words are names the table knows.
 pub fn named_words(text: &str, table: &Table) -> usize {
     words(text)
         .map(|w| w.trim_start_matches('!'))
@@ -140,24 +126,16 @@ pub struct Monitor {
     pub received: bool,
     pub sent: bool,
     pub filter: String,
-    /// The search box of the names menu.
     pub name_search: String,
-    /// Packets lost to the log's ring overwriting them before the loader read them, since the last clear.
     pub dropped: u64,
     pub error: Option<String>,
-    /// The packet picked in the list (its sequence number), shown in full in the detail pane.
     pub selected: Option<u64>,
-    /// Keep the list scrolled to the newest packet.
     pub follow: bool,
-    /// What the client's agent published about its packets, when it has; the shipped table until then.
     layouts: Option<Table>,
-    /// The client the layouts were asked of, and when to ask again after an answer without any.
     layouts_pid: Option<u32>,
     layouts_retry_at: Option<Instant>,
     packets: Log<Packet>,
-    /// The rows `visible` shows, for the direction boxes and filter text they were picked with.
     shown: Filtered<(bool, bool, String, bool)>,
-    /// The client the packets are from, and the sequence number to ask it for next.
     poller: Poller,
     next: u64,
 }
@@ -186,21 +164,18 @@ impl Default for Monitor {
 }
 
 impl Monitor {
-    /// The packets the inspector can name and decode: what the client's agent published, else the shipped table.
     pub fn table(&self) -> &Table {
         self.layouts
             .as_ref()
             .unwrap_or_else(|| packet_defs::shipped())
     }
 
-    /// Whether `pid`'s layouts should be asked for now.
     pub fn wants_layouts(&self, pid: u32, now: Instant) -> bool {
         self.capture
             && self.layouts.is_none()
             && (self.layouts_pid != Some(pid) || self.layouts_retry_at.is_some_and(|at| now >= at))
     }
 
-    /// Marks the layouts asked for.
     pub fn start_layouts(&mut self, pid: u32) {
         if self.layouts_pid != Some(pid) {
             self.layouts = None;
@@ -209,7 +184,6 @@ impl Monitor {
         self.layouts_retry_at = Some(Instant::now() + Duration::from_secs(5));
     }
 
-    /// An answer for `pid`; one that holds nothing (the agent hasn't published, or can't) is asked again later.
     pub fn finish_layouts(
         &mut self,
         pid: u32,
@@ -234,12 +208,10 @@ impl Monitor {
         self.dropped = 0;
     }
 
-    /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
         self.poller.due(self.capture, pid, now)
     }
 
-    /// Marks a read started and says which sequence number to ask for. Another client than last time starts from its oldest packet.
     pub fn start(&mut self, pid: u32) -> u64 {
         if self.poller.start(pid) {
             self.next = 0;
@@ -258,7 +230,6 @@ impl Monitor {
                 self.error = None;
                 self.next = page.next;
                 self.dropped += page.dropped;
-                // sequence numbers going backwards mean the client has a new agent with a new log
                 if let Some(first) = page.packets.first() {
                     self.packets
                         .restart_if_behind(first, |last, first| first.sequence <= last.sequence);
@@ -270,11 +241,9 @@ impl Monitor {
         }
     }
 
-    /// The kept packets that pass the direction boxes and the opcode filter, oldest first.
     pub fn visible(&self) -> View<'_, Packet, (bool, bool, String, bool)> {
         let filter = Filter::parse(&self.filter, self.table());
         let (sent, received) = (self.sent, self.received);
-        // what a name stands for changes when the client's own table arrives
         let table = self.table();
         self.shown.view(
             &self.packets,
@@ -289,7 +258,6 @@ impl Monitor {
     }
 }
 
-/// The selected packet, if it is still kept.
 impl Monitor {
     pub fn selected_packet(&self) -> Option<&Packet> {
         let sequence = self.selected?;
@@ -297,7 +265,6 @@ impl Monitor {
     }
 }
 
-/// The payload bytes the log kept.
 pub fn payload_bytes(packet: &Packet) -> Vec<u8> {
     packet
         .payload
@@ -307,7 +274,6 @@ pub fn payload_bytes(packet: &Packet) -> Vec<u8> {
         .collect()
 }
 
-/// The payload as `offset  16 hex bytes  ascii` lines, like a hex editor.
 pub fn hex_dump(bytes: &[u8]) -> Vec<String> {
     bytes
         .chunks(16)
@@ -329,7 +295,6 @@ pub fn hex_dump(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-/// The first bytes read as the client's big endian numbers, for spotting ids, coordinates and flags by eye.
 pub fn leading_values(bytes: &[u8]) -> Vec<(&'static str, String)> {
     let mut values = Vec::new();
     if let Some(&b) = bytes.first() {
@@ -347,7 +312,6 @@ pub fn leading_values(bytes: &[u8]) -> Vec<(&'static str, String)> {
     values
 }
 
-/// The payload hex in bytes separated by spaces, with an ellipsis when the log kept only the start of it.
 pub fn payload_text(packet: &Packet) -> String {
     let mut text = String::with_capacity(packet.payload.len() * 3 / 2 + 1);
     for (i, pair) in packet.payload.as_bytes().chunks(2).enumerate() {
@@ -402,7 +366,6 @@ mod tests {
                 && !hide.allows(false, 2, true)
                 && hide.allows(false, 3, true)
         );
-        // text that isn't a number or a name is ignored rather than hiding everything
         assert!(parse("abc").allows(false, 40, true));
         assert!(!parse("40 !40").allows(false, 40, true));
     }
@@ -410,7 +373,6 @@ mod tests {
     #[test]
     fn names_filter_one_direction_in_any_case() {
         let table = packet_defs::shipped();
-        // TICK is received opcode 2; NO_TIMEOUT is sent opcode 75, and a received 75 is another packet
         let tick = Filter::parse("tick", table);
         assert!(
             tick.allows(false, 2, true)
@@ -419,7 +381,6 @@ mod tests {
         );
         let hide = Filter::parse("!NO_TIMEOUT", table);
         assert!(!hide.allows(true, 75, true) && hide.allows(false, 75, true));
-        // names and numbers mix
         let mixed = Filter::parse("VARP_LARGE, 3", table);
         assert!(
             mixed.allows(false, 40, true)
@@ -435,7 +396,6 @@ mod tests {
         assert!(only.allows(false, 9, false) && !only.allows(false, 40, true));
         let hidden = Filter::parse("!unknown", table);
         assert!(!hidden.allows(false, 9, false) && hidden.allows(false, 40, true));
-        // with a name beside it: both
         let both = Filter::parse("UNKNOWN, TICK", table);
         assert!(
             both.allows(false, 9, false)
@@ -502,7 +462,6 @@ mod tests {
         assert_eq!((monitor.kept(), monitor.dropped), (1, 3));
         assert_eq!(monitor.start(44), 0);
         assert_eq!((monitor.kept(), monitor.dropped), (0, 0));
-        // an answer for the client that was left is not mixed in
         monitor.finish(32, now, Ok(page(vec![packet(8, false, 40, "", 0)], 0)));
         assert_eq!(monitor.kept(), 0);
     }
@@ -583,7 +542,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [40]
         );
-        // a name does the same
         monitor.filter = "!TICK".into();
         assert_eq!(
             monitor

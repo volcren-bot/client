@@ -2,19 +2,13 @@ use std::fmt;
 
 use super::models::credits_label;
 
-/// What a launcher API call can fail with. The UI maps these to messages; `Unauthorized` is the only one that means "refresh the token and retry".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     Unauthorized,
-    /// The refresh token was rejected (banned, deleted, revoked): the stored session is gone and the user must sign in again.
     SignedOut(String),
     Forbidden(String),
-    InsufficientCredits {
-        required: Option<i64>,
-    },
-    Conflict(String),
+    InsufficientCredits { required: Option<i64> },
     NotFound(String),
-    /// The server can't be reached, or answered something that isn't the contract.
     Network(String),
     Server(String),
 }
@@ -33,9 +27,7 @@ impl fmt::Display for ApiError {
                 credits_label(*required as f64)
             ),
             Self::InsufficientCredits { required: None } => write!(f, "Not enough CREDIT."),
-            Self::Conflict(message) | Self::NotFound(message) | Self::Server(message) => {
-                write!(f, "{message}")
-            }
+            Self::NotFound(message) | Self::Server(message) => write!(f, "{message}"),
             Self::Network(message) => write!(f, "Can't reach Volcren: {message}"),
         }
     }
@@ -43,7 +35,6 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
-/// The body of every launcher API error: `{ error }`, plus `required` on a 402.
 #[derive(serde::Deserialize, Default)]
 pub struct ErrorBody {
     #[serde(default)]
@@ -66,7 +57,6 @@ impl ApiError {
             },
             403 => Self::Forbidden(message),
             404 => Self::NotFound(message),
-            409 => Self::Conflict(message),
             _ => Self::Server(message),
         }
     }
@@ -98,7 +88,7 @@ mod tests {
         );
         assert_eq!(
             ApiError::from_status(409, body(r#"{"error":"no live revision"}"#)),
-            ApiError::Conflict("no live revision".into())
+            ApiError::Server("no live revision".into())
         );
         assert_eq!(
             ApiError::from_status(500, body("{}")),

@@ -1,5 +1,3 @@
-//! A tiny HTTP server for tests: answers with the test's handler and records every request.
-
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
@@ -62,7 +60,6 @@ pub struct FakeServer {
 }
 
 impl FakeServer {
-    /// Starts listening on a free local port. The handler gets the server's own base URL, so it can put links to itself in answers.
     pub fn start(handler: impl Fn(&str, &Request) -> Reply + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -82,7 +79,6 @@ impl FakeServer {
         self.log.lock().unwrap().clone()
     }
 
-    /// How many requests had this method and a path starting with `prefix`.
     pub fn count(&self, method: &str, prefix: &str) -> usize {
         self.requests()
             .iter()

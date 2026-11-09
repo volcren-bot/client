@@ -54,12 +54,10 @@ enum Event {
         read: Read,
         result: Result<Option<Vec<i32>>, String>,
     },
-    /// A read for a run's XP tracker, taken while its script runs.
     XpState {
         run: u64,
         result: Result<GameState, String>,
     },
-    /// The account name of the selected client, for the Accounts page.
     AccountName(Result<Option<String>, String>),
     Name {
         pid: u32,
@@ -70,54 +68,41 @@ enum Event {
         pid: u32,
         result: Result<usize, String>,
     },
-    /// A read of the packet log for the packet monitor.
     Packets {
         pid: u32,
         result: Result<injector::PacketPage, String>,
     },
-    /// What the agent read about the client's packets, for the packet monitor.
     PacketLayouts {
         pid: u32,
         result: Result<Option<Vec<injector::PacketLayout>>, String>,
     },
-    /// The script names the Script Inspector's Load names button downloaded.
     ScriptNames(Result<crate::script_names::Names, String>),
-    /// A read of the script log for the script inspector.
     ScriptRuns {
         pid: u32,
         result: Result<crate::script_log::Poll, String>,
     },
-    /// A read of the varps for the var inspector.
     Vars {
         pid: u32,
         result: Result<crate::vars::Poll, String>,
     },
-    /// A read of the item containers for the inventory inspector.
     Inventory {
         pid: u32,
         result: Result<crate::inventory::Poll, String>,
     },
-    /// Item icons a client drew for the icon store.
     Icons {
         pictures: Vec<(crate::icons::Key, Option<injector::Image>)>,
-        /// Why the read stopped part way, when it did.
         error: Option<String>,
     },
-    /// What the selected client holds, for a layout editor's "Read from client".
     LayoutRead {
-        /// The run whose editor asked.
         run: u64,
         kind: crate::layouts::Kind,
         result: Result<crate::layouts::Read, String>,
     },
-    /// The names and stackability of a script's required layout items, from a client.
     ItemsKnown(Result<Vec<(i32, String, bool)>, String>),
-    /// A read of the open interfaces for the widget inspector.
     Widgets {
         pid: u32,
         result: Result<crate::widgets::Poll, String>,
     },
-    /// Where the client's mouse is, for the widget inspector's "Follow mouse".
     WidgetMouse {
         pid: u32,
         result: Result<Option<(i32, i32)>, String>,
@@ -134,16 +119,13 @@ enum Event {
     StoreStarted {
         pid: u32,
         script: Box<StoreScript>,
-        /// The ended run this start takes the place of, closed once it succeeds.
         replaces: Option<u64>,
         result: Result<Prepared, String>,
     },
-    /// What a start from the Scripts page would cost.
     RunQuoted {
         start: Box<PendingStart>,
         result: Result<(Me, Quote), ApiError>,
     },
-    /// What a restart of this run would cost; `None` when its script is no longer listed.
     RestartQuoted {
         run: u64,
         result: Result<Option<(Me, StoreScript, Quote)>, ApiError>,
@@ -160,11 +142,9 @@ enum Event {
     SessionEnded(Result<Ended, ApiError>),
     Update(Result<Option<update::Available>, update::CheckError>),
     UpdatePrepared {
-        /// The download it is the answer of: a skipped one's is dropped.
         progress: Arc<update::Progress>,
         result: Result<update::Prepared, String>,
     },
-    /// The sessions of the last 24 hours, for the Feedback page.
     RecentSessions(Result<Vec<RecentSession>, ApiError>),
     Scored {
         session_id: String,
@@ -174,38 +154,28 @@ enum Event {
         session_id: String,
         result: Result<(), String>,
     },
-    /// Whether the store run that just ended was kept for bug reports.
     RunKept(Result<(), String>),
 }
 
-/// The session billing a store script.
 struct StoreRun {
     session_id: String,
     script_id: String,
-    /// Which script list holds it, for a restart.
     community: bool,
-    /// Disconnects when the thread keeping the session has ended it.
     closed: std::sync::mpsc::Receiver<()>,
-    /// The lib the script runs against, named in bug reports.
     lib_version: String,
-    /// Credits per minute, fixed for the session.
     price: i64,
-    /// The session's place among the account's open sessions and the extra-session fee (credits per month) it accrues there, as the server last said.
     rank: i64,
     fee: i64,
     fee_charged: i64,
 }
 
 impl StoreRun {
-    /// What the session costs an hour right now: its price plus its share of the fee.
     fn rate_per_hour(&self, minutes_per_month: i64) -> f64 {
         crate::api::models::per_hour(self.price)
             + crate::api::models::fee_per_hour(self.fee, minutes_per_month)
     }
 }
 
-/// A script that is running, or ran until it is closed: its process, the client it runs on, the session billing it, and everything its page shows.
-/// Where an offered update is, from the banner's button to the loader closing.
 enum UpdateState {
     Offered,
     Downloading(Arc<update::Progress>),
@@ -226,14 +196,10 @@ struct Run {
     id: u64,
     title: String,
     script: Script,
-    /// The client it was started on.
     target: Option<Target>,
-    /// The store session billing it; none for a run from the editor.
     store: Option<StoreRun>,
     form: Option<crate::form::Form>,
-    /// What the script was last given from `form`; `None` while it still waits for its settings, and after submit the button becomes Update.
     form_sent: Option<serde_json::Value>,
-    /// The break and sleep config the script has.
     antiban_sent: injector::antiban::Config,
     log: Log,
     xp: crate::xp::XpTracker,
@@ -242,11 +208,9 @@ struct Run {
     started: std::time::Instant,
     ended: Option<std::time::Instant>,
     tools_tab: ToolsTab,
-    /// The account names the client showed, taken out of what a bug report sends.
     names: Vec<String>,
     xp_next: std::time::Instant,
     xp_reading: bool,
-    /// The layout tabs of this run's page: each run edits its own script's layouts.
     editors: crate::layouts::Editors,
 }
 
@@ -287,14 +251,12 @@ impl Run {
         self.script.is_running()
     }
 
-    /// How long the script has run, frozen once it ended.
     fn run_time(&self) -> Duration {
         self.ended
             .unwrap_or_else(std::time::Instant::now)
             .saturating_duration_since(self.started)
     }
 
-    /// The client it runs on, while its agent is loaded.
     fn loaded_target(&self) -> Option<Target> {
         self.target.clone().filter(|t| t.client.loaded.is_some())
     }
@@ -311,7 +273,13 @@ impl Run {
         self.log.push(true, text.into());
     }
 
-    /// One word for the sessions list and the page header.
+    fn report(&mut self, result: Result<(), String>, done: &str) {
+        match result {
+            Ok(()) => self.info(done),
+            Err(error) => self.error(error),
+        }
+    }
+
     fn status(&self) -> &'static str {
         if !self.is_running() {
             "ended"
@@ -327,7 +295,6 @@ impl Run {
     }
 }
 
-/// The Restart button of an ended store run, greyed out with the reason; true when clicked.
 fn restart_button(ui: &mut egui::Ui, refusal: Option<&str>) -> bool {
     let button = ui
         .add_enabled(refusal.is_none(), egui::Button::new("Restart"))
@@ -338,24 +305,93 @@ fn restart_button(ui: &mut egui::Ui, refusal: Option<&str>) -> bool {
     }
 }
 
-/// A store script on its way to starting, through whatever the user must accept first.
+fn decision_window(
+    ctx: &egui::Context,
+    title: &str,
+    width: f32,
+    confirm: &str,
+    body: impl FnOnce(&mut egui::Ui),
+) -> Option<bool> {
+    let mut decision = None;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(width);
+            body(ui);
+            ui.horizontal(|ui| {
+                if ui.button(confirm).clicked() {
+                    decision = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+    decision
+}
+
+fn width_button(ui: &mut egui::Ui, enabled: bool, label: &str, width: f32) -> egui::Response {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(label).min_size(egui::vec2(width, 0.0)),
+    )
+}
+
+fn client_caption(ui: &mut egui::Ui, target: Option<&Target>) {
+    match target {
+        Some(target) => {
+            ui.weak(format!("Client {}.", target.client.pid));
+        }
+        None => {
+            ui.label("Select a client with agent loaded in the Clients tab.");
+        }
+    }
+}
+
+fn divider(ui: &mut egui::Ui) {
+    let (line, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(
+        line,
+        0.0,
+        ui.visuals().widgets.noninteractive.bg_stroke.color,
+    );
+}
+
+fn fit_row(ui: &mut egui::Ui, fits: bool, add: impl FnOnce(&mut egui::Ui)) {
+    if fits {
+        ui.horizontal(add);
+    } else {
+        ui.vertical(add);
+    }
+}
+
+fn start_dir(path: &str) -> Option<&std::path::Path> {
+    std::path::Path::new(path).parent().filter(|d| d.is_dir())
+}
+
+fn pause_label(paused: bool) -> &'static str {
+    if paused { "Resume" } else { "Pause" }
+}
+
+const PAUSE_HINT: &str =
+    "Suspends the script's process, so it takes effect immediately, even in a tight loop.";
+
+const SCRIPT_FILTER: &[&str] = &["luau", "lua"];
+
 struct PendingStart {
     script: StoreScript,
     target: Target,
-    /// The ended run it takes the place of.
     replaces: Option<u64>,
 }
 
-/// A start waiting for the user to accept what it will cost.
 struct StartPrompt {
     start: PendingStart,
-    /// Credits per minute.
     price: i64,
-    /// The extra-session fee, credits per month; 0 when it isn't an extra session.
     fee: i64,
-    /// Which session at once this would be.
     nth: i64,
-    /// The old session's price, when a restart changes it.
     old_price: Option<i64>,
 }
 
@@ -363,9 +399,7 @@ struct StartPrompt {
 enum Tab {
     Clients,
     Store,
-    /// The list of runs, with a page per run nested under it in the sidebar.
     Sessions,
-    /// The page of `active_run`.
     Run,
     Scripts,
     Development,
@@ -375,7 +409,6 @@ enum Tab {
     Settings,
 }
 
-/// The tabs inside the Development page.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DevTab {
     Tools,
@@ -387,7 +420,6 @@ impl DevTab {
         [(DevTab::Tools, "Tools"), (DevTab::Inspectors, "Inspectors")];
 }
 
-/// The tabs inside the Inspectors tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InspectorTab {
     Widget,
@@ -407,7 +439,6 @@ impl InspectorTab {
     ];
 }
 
-/// A script's title as a sidebar row: lowercase like the other pages, cut to fit.
 fn sidebar_name(title: &str) -> String {
     const MAX: usize = 16;
     let name = title.to_lowercase();
@@ -417,7 +448,6 @@ fn sidebar_name(title: &str) -> String {
     name.chars().take(MAX - 1).chain(['\u{2026}']).collect()
 }
 
-/// The page tree, after the website's neo-tree, with a `(id, name, ended)` row per run under Sessions. Returns the page a click picked.
 fn sidebar_tree(
     ui: &mut egui::Ui,
     tab: Tab,
@@ -438,7 +468,6 @@ fn sidebar_tree(
         (Tab::Feedback, "\u{f075}", "feedback"),
         (Tab::Settings, "\u{f013}", "settings"),
     ];
-    // a run page is reached through its row under Sessions, so the Sessions row itself only matches the list
     let mut current = if tab == Tab::Run {
         (Tab::Run, active_run)
     } else {
@@ -470,22 +499,15 @@ fn sidebar_tree(
     (current != before).then_some(current)
 }
 
-/// Window width from which the sidebar is always shown.
 const SIDEBAR_MIN_WINDOW: f32 = 760.0;
 const SIDEBAR_WIDTH: f32 = 190.0;
-/// Window width below which the account controls drop under the wordmark.
 const HEADER_COMPACT_WINDOW: f32 = 640.0;
-/// Below this the account controls stack vertically.
 const HEADER_STACK_WINDOW: f32 = 400.0;
-/// Below this the logo and wordmark stack vertically.
 const HEADER_TINY_WINDOW: f32 = 200.0;
-/// Width of the strip that toggles the sidebar on narrow windows.
 const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
-/// Widths of the client list's prefix and status columns when there is room; longer status text wraps.
 const CLIENT_PREFIX_WIDTH: f32 = 130.0;
 const CLIENT_STATUS_WIDTH: f32 = 220.0;
 
-/// The width every editor button gets: that of the widest label.
 fn uniform_button_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let text = ui.fonts_mut(|fonts| {
@@ -502,7 +524,6 @@ fn uniform_button_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
     text + 2.0 * ui.spacing().button_padding.x
 }
 
-/// A row of widgets centered horizontally, using the previous frame's width for the offset (it settles after one repaint).
 fn centered_row(
     ui: &mut egui::Ui,
     id: &str,
@@ -528,7 +549,6 @@ fn centered_row(
     }
 }
 
-/// One cell of the client list: a column of a set width whose content wraps within it.
 fn client_cell<R>(
     ui: &mut egui::Ui,
     width: f32,
@@ -605,7 +625,6 @@ fn cursor_style_label(style: CursorStyle) -> &'static str {
     }
 }
 
-// The scene layer each checkbox draws (see `injector::scene_tiles`), by index in `DEV_TOGGLES`; unported ones have none.
 const DEV_LAYERS: [Option<&str>; DEV_TOGGLES.len()] = [
     Some("players"),
     Some("npcs"),
@@ -631,12 +650,9 @@ const DEV_LAYERS: [Option<&str>; DEV_TOGGLES.len()] = [
     Some("tile-flags"),
     Some("world-entities"),
 ];
-// How long the scene tiles may keep failing before the worker gives up and reports why.
 const TILES_GIVE_UP: Duration = Duration::from_secs(10);
-// The pause after a failed paint: the frame it waited for is spent, so the next try wouldn't wait for one.
 const TILES_RETRY: Duration = Duration::from_millis(50);
 
-// Paints scene tiles on its own thread once per presented frame; dropping it stops and clears.
 struct TilesWorker {
     pid: u32,
     layers: Arc<Mutex<Vec<String>>>,
@@ -653,18 +669,15 @@ impl TilesWorker {
         layers: Vec<String>,
     ) -> Self {
         let pid = target.client.pid;
-        let worker = Self {
+        let mut worker = Self {
             pid,
             layers: Arc::new(Mutex::new(layers)),
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
         };
         let (layers, stop, ctx) = (worker.layers.clone(), worker.stop.clone(), ctx.clone());
-        let mut worker = worker;
         worker.thread = Some(thread::spawn(move || {
-            // the frame last painted after; the first paint waits for any frame
             let mut frame = 0;
-            // since when the paints have been failing
             let mut failing: Option<Instant> = None;
             while !stop.load(Ordering::Relaxed) {
                 let current = layers.lock().map(|l| l.clone()).unwrap_or_default();
@@ -678,9 +691,7 @@ impl TilesWorker {
                         frame = painted;
                         failing = None;
                     }
-                    // no frame came (minimized, loading): look again once it's clear the worker isn't stopping
                     Ok(None) => {}
-                    // A scene change, hop or logout fails the paints: clear the boxes at once and resume when possible.
                     Err(error) => {
                         let since = *failing.get_or_insert_with(|| {
                             let _ = backend::draw(&target, &settings, &Overlay::Clear);
@@ -698,13 +709,11 @@ impl TilesWorker {
                     }
                 }
             }
-            // Take the boxes off the client once nothing can paint them again.
             let _ = backend::draw(&target, &settings, &Overlay::Clear);
         }));
         worker
     }
 
-    /// Stops painting and waits until the boxes are off the client; the loader is about to exit, which would cut the clear short.
     fn finish(mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -722,14 +731,11 @@ impl Drop for TilesWorker {
 const SCRIPT_KEY: &str = "script";
 const LAST_SCRIPT_KEY: &str = "last_script";
 const FORMS_KEY: &str = "forms";
-/// Every script's equipment and inventory layouts, by form title.
 const LAYOUTS_KEY: &str = "layouts";
 const CURSOR_KEY: &str = "cursor";
 const CONFIRMED_KEY: &str = "community_confirmed";
-/// The hosts the user added to the HTTP whitelist (the built-in ones are not stored).
 const HTTP_WHITELIST_KEY: &str = "http_whitelist";
 
-/// How often the XP tracker reads the client while a script runs.
 const XP_READ_EVERY: Duration = Duration::from_secs(5);
 
 const EXAMPLE_SCRIPT: &str = r#"local GameState = require("game_state")
@@ -761,7 +767,6 @@ print("total xp: ", total_xp)
 print("hp: ", hp)
 "#;
 
-/// The script editor's find bar (Ctrl+F) and replace row (Ctrl+R).
 #[derive(Default)]
 struct Find {
     open: bool,
@@ -769,15 +774,11 @@ struct Find {
     query: String,
     replacement: String,
     case_sensitive: bool,
-    /// Index into the matches of the query, for the one that is current.
     current: usize,
-    /// Scroll the editor to the current match on this frame.
     jump: bool,
-    /// Put the cursor in the find field on this frame.
     focus: bool,
 }
 
-/// Byte offsets of every non-overlapping match of `query` in `text`.
 fn find_matches(text: &str, query: &str, case_sensitive: bool) -> Vec<usize> {
     if query.is_empty() {
         return Vec::new();
@@ -785,7 +786,6 @@ fn find_matches(text: &str, query: &str, case_sensitive: bool) -> Vec<usize> {
     if case_sensitive {
         text.match_indices(query).map(|(at, _)| at).collect()
     } else {
-        // ASCII lowercasing keeps byte offsets, so the matches still index into `text`.
         let lower = text.to_ascii_lowercase();
         lower
             .match_indices(&query.to_ascii_lowercase())
@@ -799,7 +799,6 @@ fn find_matches(text: &str, query: &str, case_sensitive: bool) -> Vec<usize> {
 struct ScriptFile {
     path: String,
     text: String,
-    /// What the file held on disk when the editor last synced with it (open, save, startup).
     disk: Option<String>,
 }
 
@@ -842,9 +841,11 @@ fn load_default_script() -> Option<ScriptFile> {
     })
 }
 
+const ACTIVE_PRAYERS: usize = 83;
+
 const KNOWN_VARPS: [(&str, usize); 11] = [
     ("Attack style", varp::ATTACK_STYLE),
-    ("Active prayers", 83),
+    ("Active prayers", ACTIVE_PRAYERS),
     ("Quest points", varp::QUEST_POINTS),
     ("Poison", varp::POISON),
     ("Run", varp::RUN),
@@ -856,7 +857,6 @@ const KNOWN_VARPS: [(&str, usize); 11] = [
     ("Last home teleport", 892),
 ];
 
-/// A Development inspector's log as a table: a fixed header, resizable columns, and rows drawn only while visible.
 struct LogTable<'a> {
     id: &'a str,
     follow: bool,
@@ -873,46 +873,35 @@ impl LogTable<'_> {
         rows: usize,
         row: impl FnMut(egui_extras::TableRow<'_, '_>),
     ) {
-        // text that can be selected takes the clicks a clickable row wants
         ui.scope(|ui| {
             ui.style_mut().interaction.selectable_labels = !self.clickable;
-            self.table(ui, columns, rows, row);
+            let mut table = egui_extras::TableBuilder::new(ui)
+                .id_salt(self.id)
+                .striped(true)
+                .resizable(true)
+                .stick_to_bottom(self.follow)
+                .auto_shrink([false, false])
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+            if let Some(height) = self.max_height {
+                table = table.max_scroll_height(height);
+            }
+            if self.clickable {
+                table = table.sense(egui::Sense::click());
+            }
+            let titles: Vec<&str> = columns.iter().map(|(title, _)| *title).collect();
+            for (_, column) in columns {
+                table = table.column(column);
+            }
+            table
+                .header(self.row_height, |mut header| {
+                    for title in titles {
+                        header.col(|ui| {
+                            ui.strong(title);
+                        });
+                    }
+                })
+                .body(|body| body.rows(self.row_height, rows, row));
         });
-    }
-
-    fn table(
-        &self,
-        ui: &mut egui::Ui,
-        columns: Vec<(&str, egui_extras::Column)>,
-        rows: usize,
-        row: impl FnMut(egui_extras::TableRow<'_, '_>),
-    ) {
-        let mut table = egui_extras::TableBuilder::new(ui)
-            .id_salt(self.id)
-            .striped(true)
-            .resizable(true)
-            .stick_to_bottom(self.follow)
-            .auto_shrink([false, false])
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-        if let Some(height) = self.max_height {
-            table = table.max_scroll_height(height);
-        }
-        if self.clickable {
-            table = table.sense(egui::Sense::click());
-        }
-        let titles: Vec<&str> = columns.iter().map(|(title, _)| *title).collect();
-        for (_, column) in columns {
-            table = table.column(column);
-        }
-        table
-            .header(self.row_height, |mut header| {
-                for title in titles {
-                    header.col(|ui| {
-                        ui.strong(title);
-                    });
-                }
-            })
-            .body(|body| body.rows(self.row_height, rows, row));
     }
 }
 
@@ -922,7 +911,6 @@ fn narrow(width: f32) -> egui_extras::Column {
         .clip(true)
 }
 
-/// The Names menu of the packet monitor: every known packet name, searchable, each click cycling it through show only, hide and off.
 fn packet_names_menu(ui: &mut egui::Ui, monitor: &mut crate::packets::Monitor) {
     use crate::packets::{NameState, UNKNOWN, name_state, with_name};
 
@@ -949,6 +937,7 @@ fn packet_names_menu(ui: &mut egui::Ui, monitor: &mut crate::packets::Monitor) {
             ui.separator();
 
             let search = monitor.name_search.trim().to_ascii_lowercase();
+            let unknown_matches = UNKNOWN.to_ascii_lowercase().contains(&search);
             let mut rows: Vec<(bool, u16, String)> = monitor
                 .table()
                 .named()
@@ -994,7 +983,7 @@ fn packet_names_menu(ui: &mut egui::Ui, monitor: &mut crate::packets::Monitor) {
                     clicked = Some((name.to_owned(), state.next()));
                 }
             };
-            if UNKNOWN.to_ascii_lowercase().contains(&search) {
+            if unknown_matches {
                 row(ui, UNKNOWN, "no name".to_owned());
                 ui.separator();
             }
@@ -1002,7 +991,7 @@ fn packet_names_menu(ui: &mut egui::Ui, monitor: &mut crate::packets::Monitor) {
                 .max_height(320.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    if rows.is_empty() && !UNKNOWN.to_ascii_lowercase().contains(&search) {
+                    if rows.is_empty() && !unknown_matches {
                         ui.weak("No name matches.");
                     }
                     for (sent, opcode, name) in &rows {
@@ -1050,7 +1039,7 @@ fn describe_varp(id: usize, value: i32) -> Option<String> {
         varp::POISON if value >= 1_000_000 => "envenomed".into(),
         varp::POISON if value > 0 => "poisoned".into(),
         varp::POISON => "healthy".into(),
-        83 => format!("bits {value:#b}"),
+        ACTIVE_PRAYERS => format!("bits {value:#b}"),
         _ => return None,
     })
 }
@@ -1069,7 +1058,12 @@ enum Read {
     VarpChanges,
 }
 
-/// How a log line is colored.
+impl Read {
+    fn is_varp(self) -> bool {
+        matches!(self, Read::Varp(_) | Read::KnownVarps | Read::VarpChanges)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tone {
     Normal,
@@ -1080,20 +1074,17 @@ enum Tone {
 struct LogLine {
     tone: Tone,
     text: String,
-    /// Index into `Log::tags` of the line's leading `[tag]`.
     tag: Option<usize>,
 }
 
-/// One log tab's output; `view` and `text` hold only lines the tag filter lets through and are rebuilt only when it changes.
 struct Log {
     lines: Vec<LogLine>,
     tags: Vec<String>,
+    tag_index: std::collections::HashMap<String, usize>,
     filter: Option<usize>,
     view: Vec<usize>,
     text: String,
-    /// Bumped whenever `view` changes, so the laid out output is only rebuilt then.
     revision: u64,
-    /// The lines kept (`Settings::log_lines`); older ones are dropped, since the whole output is laid out again whenever a line is added.
     keep: usize,
 }
 
@@ -1102,6 +1093,7 @@ impl Log {
         Self {
             lines: Vec::new(),
             tags: Vec::new(),
+            tag_index: std::collections::HashMap::new(),
             filter: None,
             view: Vec::new(),
             text: String::new(),
@@ -1123,21 +1115,19 @@ impl Log {
     }
 
     fn push_tone(&mut self, tone: Tone, text: String) {
-        let tag =
-            line_tag(&text).map(
-                |name| match self.tags.iter().position(|known| known == name) {
-                    Some(index) => index,
-                    None => {
-                        self.tags.push(name.to_owned());
-                        self.tags.len() - 1
-                    }
-                },
-            );
+        let tag = line_tag(&text).map(|name| match self.tag_index.get(name) {
+            Some(&index) => index,
+            None => {
+                let index = self.tags.len();
+                self.tags.push(name.to_owned());
+                self.tag_index.insert(name.to_owned(), index);
+                index
+            }
+        });
         if self.filter.is_none() || self.filter == tag {
             self.show(self.lines.len(), &text);
         }
         self.lines.push(LogLine { tone, text, tag });
-        // dropped a quarter at a time, so the view is rebuilt once every few hundred lines rather than on each
         if self.lines.len() > self.keep + self.keep / 4 {
             self.lines.drain(..self.lines.len() - self.keep);
             self.rebuild();
@@ -1153,7 +1143,6 @@ impl Log {
         self.revision += 1;
     }
 
-    /// Every line kept, oldest first, for a bug report.
     fn texts(&self) -> Vec<String> {
         self.lines.iter().map(|line| line.text.clone()).collect()
     }
@@ -1179,7 +1168,6 @@ impl Log {
         self.lines = lines;
     }
 
-    /// The shown lines in their colors: one section per run of lines of the same color.
     fn layout_job(
         &self,
         font: egui::FontId,
@@ -1214,7 +1202,6 @@ impl Log {
                 run = None;
             }
             run.get_or_insert((start, line.tone));
-            // each line but the last is followed by the newline that joins it to the next
             start += line.text.len() + usize::from(i + 1 < self.view.len());
         }
         if let Some((from, was)) = run {
@@ -1224,7 +1211,6 @@ impl Log {
     }
 
     fn clear(&mut self) {
-        // the revision keeps counting, so a job laid out before the clear can't pass for the new output
         *self = Self {
             revision: self.revision + 1,
             ..Self::new(self.keep)
@@ -1236,21 +1222,16 @@ impl Log {
     }
 }
 
-/// The `tag` of a line that starts with `[tag]`.
 fn line_tag(text: &str) -> Option<&str> {
     let rest = text.strip_prefix('[')?;
     let end = rest.find(']')?;
     (end > 0 && end <= 32 && !rest[..end].contains('[')).then(|| &rest[..end])
 }
 
-/// The fastest a dragged selection scrolls the output, in points a second.
 const SELECTION_SCROLL_MAX: f32 = 2400.0;
-/// How far past the output's edge a dragged selection reaches `SELECTION_SCROLL_MAX`, when the window has that much room.
 const SELECTION_SCROLL_RAMP: f32 = 200.0;
 
-/// While a text selection is dragged above or below the scroll area, scrolls that way (`selection_scroll_speed`).
 fn scroll_selection_past_edge(ui: &egui::Ui, text: &egui::Response) {
-    // egui's TextEdit scrolls to its cursor only when keys move it, never during a drag
     let Some(pointer) = ui
         .input(|i| i.pointer.interact_pos())
         .filter(|_| text.dragged())
@@ -1269,7 +1250,6 @@ fn scroll_selection_past_edge(ui: &egui::Ui, text: &egui::Response) {
     }
 }
 
-/// Points a second to scroll down (negative: up) for a selection dragged to `pointer`: the share crossed of the room between the output's edge and the window's, since the output sits at the bottom with little room below.
 fn selection_scroll_speed(pointer: f32, visible: egui::Rangef, window: egui::Rangef) -> f32 {
     let past = pointer - pointer.clamp(visible.min, visible.max);
     let room = if past < 0.0 {
@@ -1281,7 +1261,6 @@ fn selection_scroll_speed(pointer: f32, visible: egui::Rangef, window: egui::Ran
     past.signum() * share * SELECTION_SCROLL_MAX
 }
 
-/// The tabs of the running script's page.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolsTab {
     Settings,
@@ -1290,11 +1269,9 @@ enum ToolsTab {
     Prayer,
     Xp,
     Breaks,
-    /// Score the running store script or report a bug on it.
     Feedback,
 }
 
-/// The sub tabs of the Breaks tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BreaksTab {
     Breaks,
@@ -1304,7 +1281,6 @@ enum BreaksTab {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LogTab {
     Loader,
-    /// A run's log, by its id.
     Run(u64),
 }
 
@@ -1320,29 +1296,21 @@ type LogJobKey = (
 pub struct LoaderApp {
     settings: Settings,
     tab: Tab,
-    /// The sidebar drawer is open (only used when the window is too narrow to show it permanently).
     sidebar_open: bool,
-    /// The shell of the Terminal page, started the first time it is opened and kept until the app closes.
     terminal: Option<crate::terminal::Terminal>,
     display_name: String,
     varp: usize,
     varps: Option<Vec<i32>>,
     script_file: ScriptFile,
-    /// The file the editor last opened or saved as, for the Open last button.
     last_script: Option<String>,
     find: Find,
     highlighter: Highlighter,
     fold: crate::fold::Folds,
-    /// Every script started and not closed yet, oldest first.
     runs: Vec<Run>,
-    /// The run whose page `Tab::Run` shows.
     active_run: Option<u64>,
     next_run: u64,
-    /// The client the Run buttons start scripts on, by `Target::key`.
     run_target: Option<String>,
-    /// A store script waiting for the extra-session fee to be accepted.
     start_prompt: Option<StartPrompt>,
-    /// The file's new contents, while asking whether to reload it before running.
     reload_prompt: Option<String>,
     remembered_forms: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>,
     dev_toggles: [bool; DEV_TOGGLES.len()],
@@ -1359,49 +1327,34 @@ pub struct LoaderApp {
     auth: Auth,
     store: Store,
     accounts: Arc<RwLock<crate::accounts::Accounts>>,
-    /// The hosts scripts may send HTTP requests to.
     http_whitelist: Arc<RwLock<crate::whitelist::Whitelist>>,
     whitelist_page: crate::whitelist::Page,
-    /// Community scripts the user agreed to run, by revision (persisted).
     confirmed: Confirmed,
-    /// A community script waiting for the user to accept the warning before it starts.
     warning: Option<PendingStart>,
-    /// A newer launcher release, until the user dismisses it.
     update: Option<update::Available>,
     update_state: UpdateState,
-    /// This loader's share of the lock that tells whether another loader is open.
     instance: update::Instance,
-    /// The client of the store script on its way (being quoted, started or downloaded), which is held for it.
     starting: Option<u32>,
     targets: Vec<Target>,
     dll_version: Option<String>,
     selected: Option<String>,
     busy: Option<&'static str>,
     log_tab: LogTab,
-    /// The page (and run) the output tab last followed, so switching pages switches the output but the output can still be changed on its own.
     followed_tab: (Tab, Option<u64>),
     loader_log: Log,
-    /// The output tab's layout job, for the tab and revision it was built from.
     log_job: Option<(LogJobKey, egui::text::LayoutJob)>,
     breaks_tab: BreaksTab,
-    /// The Feedback page's sessions and drafts.
     feedback: feedback::Page,
-    /// The renderer eframe draws with, for a bug report's system info.
     gpu: Option<String>,
-    /// Item icons drawn by a client, for the inspectors and the layout editors.
     icons: crate::icons::Icons,
-    /// Every script's saved equipment and inventory layouts, by form title.
     layouts: crate::layouts::AllLayouts,
-    /// The saved layouts couldn't be read (`layouts::load`): they are never saved over.
     layouts_unreadable: bool,
-    /// The names and stackability of the scripts' required layout items, and the ids being asked of a client.
     known_items: crate::layouts::Known,
     asking_items: Vec<i32>,
     tx: Sender<Event>,
     rx: Receiver<Event>,
 }
 
-/// The layout editors of the run `id`. Takes the list and not the app, so the caller can still borrow the saved layouts and the icons.
 fn editors_of(runs: &mut [Run], id: Option<u64>) -> Option<&mut crate::layouts::Editors> {
     runs.iter_mut()
         .find(|r| Some(r.id) == id)
@@ -1415,8 +1368,7 @@ impl LoaderApp {
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
         settings.fill_missing(update::is_dev_install());
-        let data_dir = directories::ProjectDirs::from("com", "volcren", "Volcren")
-            .map(|dirs| dirs.data_dir().to_path_buf());
+        let data_dir = crate::paths::project_dirs().map(|dirs| dirs.data_dir().to_path_buf());
         let (layouts, layouts_unreadable) =
             crate::layouts::load(cc.storage, LAYOUTS_KEY, data_dir.as_deref());
         crate::theme::apply(&cc.egui_ctx);
@@ -1523,6 +1475,18 @@ impl LoaderApp {
         app
     }
 
+    fn end_session_job(&self, ctx: &egui::Context, session_id: String) {
+        self.api_job(ctx, move |api| {
+            Event::SessionEnded(api.end_session(&session_id))
+        });
+    }
+
+    fn next_run_id(&mut self) -> u64 {
+        let id = self.next_run;
+        self.next_run += 1;
+        id
+    }
+
     fn api_job(&self, ctx: &egui::Context, job: impl FnOnce(Api) -> Event + Send + 'static) {
         let (tx, ctx, api) = (self.tx.clone(), ctx.clone(), self.api.clone());
         thread::spawn(move || {
@@ -1545,7 +1509,6 @@ impl LoaderApp {
         });
     }
 
-    /// Stops every script and ends the open store sessions. Waits at most 3 seconds for the server: what doesn't land, its sweep ends within 5 minutes.
     fn stop_all(&mut self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         for run in &mut self.runs {
@@ -1558,7 +1521,6 @@ impl LoaderApp {
     }
 
     fn sign_out(&mut self, why: Option<String>) {
-        // nothing keeps running behind the sign-in screen, and the sessions end while the token still works
         self.stop_all();
         self.api.sign_out();
         self.auth = Auth::SignedOut;
@@ -1588,7 +1550,6 @@ impl LoaderApp {
         });
     }
 
-    /// Why a store script can't start right now, apart from the script itself.
     fn run_block(&self, target: Option<&Target>) -> Option<String> {
         if self
             .auth
@@ -1608,7 +1569,6 @@ impl LoaderApp {
             .then(|| "Pick a client with the agent loaded that isn't running a script.".into())
     }
 
-    /// Whether a script can start on this client: loaded, usable, and not running one.
     fn client_free(&self, target: &Target) -> bool {
         target.client.loaded.is_some()
             && target.client.foreign_bot.is_none()
@@ -1616,7 +1576,6 @@ impl LoaderApp {
             && !self.client_in_use(target.client.pid)
     }
 
-    /// This client as last scanned, if a script can start on it.
     fn free_client(&self, pid: u32) -> Option<Target> {
         self.targets
             .iter()
@@ -1624,17 +1583,14 @@ impl LoaderApp {
             .cloned()
     }
 
-    /// The client an ended run ran on, if a script can still start there.
     fn restart_target(&self, run: &Run) -> Option<Target> {
         self.free_client(run.target.as_ref()?.client.pid)
     }
 
-    /// Why this ended run can't restart right now.
     fn restart_refusal(&self, run: &Run) -> Option<String> {
         if self.auth.me().is_none() {
             return Some("Sign in to run store scripts.".into());
         }
-        // a start on its way holds its client, so what isn't about the client is said first
         if let Some(why) = self.run_block(run.target.as_ref()) {
             return Some(why);
         }
@@ -1643,7 +1599,6 @@ impl LoaderApp {
             .then(|| "Its client is gone or busy. Start the script from the Scripts page.".into())
     }
 
-    /// Closes the ended run's session and asks the server what a new one would cost; the answer decides the rest (`Event::RestartQuoted`).
     fn restart_run(&mut self, ctx: &egui::Context, id: u64) {
         let Some(run) = self.runs.iter().find(|r| r.id == id) else {
             return;
@@ -1657,7 +1612,6 @@ impl LoaderApp {
             store.community,
         );
         self.starting = run.target.as_ref().map(|t| t.client.pid);
-        // what goes wrong shows in this run's log
         self.active_run = Some(id);
         self.log_tab = LogTab::Run(id);
         self.api_job(ctx, move |api| Event::RestartQuoted {
@@ -1666,7 +1620,6 @@ impl LoaderApp {
         });
     }
 
-    /// Starts the restart at this quote, through the pricing dialog when the cost isn't what the old session paid.
     fn restart_quoted(&mut self, ctx: &egui::Context, id: u64, script: StoreScript, quote: Quote) {
         let Some(run) = self.runs.iter().find(|r| r.id == id) else {
             return;
@@ -1684,7 +1637,6 @@ impl LoaderApp {
         self.start_at_quote(ctx, start, Some(old_price), quote);
     }
 
-    /// Asks the server what this start would cost; the answer decides the rest (`Event::RunQuoted`).
     fn quote_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
         self.starting = Some(start.target.client.pid);
         let id = start.script.id.clone();
@@ -1694,14 +1646,12 @@ impl LoaderApp {
         });
     }
 
-    /// Takes the account a quote came with, so the start is weighed against the balance of now.
     fn refresh_me(&mut self, me: Me) {
         if let Some(current) = self.auth.me_mut() {
             *current = me;
         }
     }
 
-    /// Goes on with a start at the server's quote: refused, through the pricing dialog, or straight on.
     fn start_at_quote(
         &mut self,
         ctx: &egui::Context,
@@ -1741,7 +1691,6 @@ impl LoaderApp {
         let pid = target.client.pid;
         self.starting = Some(pid);
         self.info(format!("Starting {}…", script.title));
-        // A community script only runs at the revision the user was warned about
         let warned = script.community.then_some(script.revision).flatten();
         self.api_job(ctx, move |api| {
             let result = session::prepare(&api, &script, warned);
@@ -1754,7 +1703,6 @@ impl LoaderApp {
         });
     }
 
-    /// The run whose page is open.
     fn run(&self) -> Option<&Run> {
         self.active_run
             .and_then(|id| self.runs.iter().find(|r| r.id == id))
@@ -1775,7 +1723,6 @@ impl LoaderApp {
             .find(|r| r.session_id() == Some(session_id))
     }
 
-    /// The store sessions this loader is running.
     fn store_runs(&self) -> impl Iterator<Item = &StoreRun> {
         self.runs
             .iter()
@@ -1783,7 +1730,6 @@ impl LoaderApp {
             .filter_map(|r| r.store.as_ref())
     }
 
-    /// Whether a client is taken: by a running script, or by a store script on its way to starting there (quoted, waiting on a dialog or downloading).
     fn client_in_use(&self, pid: u32) -> bool {
         let pending = [
             self.start_prompt.as_ref().map(|prompt| &prompt.start),
@@ -1800,7 +1746,6 @@ impl LoaderApp {
                 .any(|r| r.is_running() && r.target.as_ref().is_some_and(|t| t.client.pid == pid))
     }
 
-    /// Adds a run, opens its page and its log.
     fn add_run(&mut self, run: Run) {
         self.active_run = Some(run.id);
         self.log_tab = LogTab::Run(run.id);
@@ -1809,7 +1754,6 @@ impl LoaderApp {
         self.sidebar_open = false;
     }
 
-    /// While scripts run, reads each client's skills every few seconds for the XP trackers.
     fn drive_xp(&mut self, ctx: &egui::Context) {
         let now = std::time::Instant::now();
         let mut reads = Vec::new();
@@ -1817,7 +1761,6 @@ impl LoaderApp {
             if !run.is_running() {
                 continue;
             }
-            // the run time on screen ticks every second
             ctx.request_repaint_after(Duration::from_secs(1));
             let Some(target) = run.loaded_target() else {
                 continue;
@@ -1849,7 +1792,6 @@ impl LoaderApp {
         }
     }
 
-    /// Keeps a store run's session on a thread of its own, so it doesn't depend on the window drawing frames. Returns what disconnects once the session is ended.
     fn keep_session(
         &self,
         ctx: &egui::Context,
@@ -1905,7 +1847,6 @@ impl LoaderApp {
         match self.store.ui(ui, &me, block.as_deref()) {
             Some(store::Action::Refresh) => {
                 self.fetch_scripts(&ctx);
-                // a top-up on the website shows here
                 self.api_job(&ctx, |api| Event::Me(api.me()));
             }
             Some(store::Action::Run(script)) => {
@@ -1936,9 +1877,7 @@ impl LoaderApp {
         }
     }
 
-    /// Starts a store script, after the community warning when the script needs one.
     fn confirm_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
-        // Community scripts are not reviewed by staff: warn before the first run of each revision
         let script = &start.script;
         let confirmed = script
             .revision
@@ -1950,7 +1889,6 @@ impl LoaderApp {
         }
     }
 
-    /// The dialog before a start whose cost the user hasn't accepted: an extra session's fee, a restart's changed price, and what it comes to.
     fn start_prompt_ui(&mut self, ctx: &egui::Context) {
         let Some(prompt) = self.start_prompt.take() else {
             return;
@@ -1974,64 +1912,82 @@ impl LoaderApp {
         } else {
             "Extra session"
         };
-        let mut decision = None;
-        egui::Window::new(heading)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.set_max_width(440.0);
-                ui.label(egui::RichText::new(&prompt.start.script.title).strong());
-                ui.add_space(6.0);
-                if prompt.old_price.is_some() {
-                    ui.label("The price of this script changed since the session started.");
-                }
-                if extra {
-                    ui.label(format!(
+        let decision = decision_window(ctx, heading, 440.0, "Confirm", |ui| {
+            ui.label(egui::RichText::new(&prompt.start.script.title).strong());
+            ui.add_space(6.0);
+            if prompt.old_price.is_some() {
+                ui.label("The price of this script changed since the session started.");
+            }
+            if extra {
+                ui.label(format!(
                         "This would be your {nth} script running at once. Every script past the first adds a fee on top of its own price:"
                     ));
-                }
-                ui.add_space(4.0);
-                egui::Grid::new("start_cost").num_columns(2).spacing(egui::vec2(16.0, 4.0)).show(ui, |ui| {
+            }
+            ui.add_space(4.0);
+            egui::Grid::new("start_cost")
+                .num_columns(2)
+                .spacing(egui::vec2(16.0, 4.0))
+                .show(ui, |ui| {
                     if extra {
                         ui.label("extra fee");
                         ui.horizontal(|ui| {
-                            crate::theme::credits(ui, egui::RichText::new(credits_label(fee_hour)).strong(), "/h");
-                            crate::theme::credits(ui, egui::RichText::new(format!("{:.7}\u{a0}CREDIT", fee_minute / crate::api::models::CREDITS_PER_UNIT)).small(), "/min");
+                            crate::theme::credits(
+                                ui,
+                                egui::RichText::new(credits_label(fee_hour)).strong(),
+                                "/h",
+                            );
+                            crate::theme::credits(
+                                ui,
+                                egui::RichText::new(format!(
+                                    "{:.7}\u{a0}CREDIT",
+                                    fee_minute / crate::api::models::CREDITS_PER_UNIT
+                                ))
+                                .small(),
+                                "/min",
+                            );
                         });
                         ui.end_row();
                     }
                     if let Some(old_price) = prompt.old_price {
                         ui.label("old price");
-                        crate::theme::credits(ui, egui::RichText::new(credits_label(per_hour(old_price))), "/h");
+                        crate::theme::credits(
+                            ui,
+                            egui::RichText::new(credits_label(per_hour(old_price))),
+                            "/h",
+                        );
                         ui.end_row();
                     }
                     ui.label("script price");
-                    crate::theme::credits(ui, egui::RichText::new(credits_label(price_hour)).strong(), "/h");
+                    crate::theme::credits(
+                        ui,
+                        egui::RichText::new(credits_label(price_hour)).strong(),
+                        "/h",
+                    );
                     ui.end_row();
                     if extra {
                         ui.label("in total");
                         ui.horizontal(|ui| {
-                            crate::theme::credits(ui, egui::RichText::new(credits_label(total_hour)).strong(), "/h");
-                            crate::theme::credits(ui, egui::RichText::new(credits_label(total_hour * 24.0 * 30.0)).small(), " per 30 days");
+                            crate::theme::credits(
+                                ui,
+                                egui::RichText::new(credits_label(total_hour)).strong(),
+                                "/h",
+                            );
+                            crate::theme::credits(
+                                ui,
+                                egui::RichText::new(credits_label(total_hour * 24.0 * 30.0))
+                                    .small(),
+                                " per 30 days",
+                            );
                         });
                         ui.end_row();
                     }
                 });
-                if extra {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("The fee follows the order the scripts started in: when an older one stops, this one moves up and the oldest runs without a fee.").weak());
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Confirm").clicked() {
-                        decision = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        decision = Some(false);
-                    }
-                });
-            });
+            if extra {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("The fee follows the order the scripts started in: when an older one stops, this one moves up and the oldest runs without a fee.").weak());
+            }
+            ui.add_space(8.0);
+        });
         match decision {
             Some(true) => self.confirm_store_script(ctx, prompt.start),
             Some(false) => {}
@@ -2039,38 +1995,28 @@ impl LoaderApp {
         }
     }
 
-    /// The warning shown before a community script runs. Accepting it is remembered for that revision of that script.
     fn warning_ui(&mut self, ctx: &egui::Context) {
         let Some(start) = self.warning.take() else {
             return;
         };
         let script = &start.script;
-        let mut decision = None;
-        egui::Window::new("Community script")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                ui.set_max_width(420.0);
-                ui.label(egui::RichText::new(&script.title).strong());
-                ui.label(format!("by {}", script.author));
-                ui.add_space(6.0);
-                ui.label(
+        let decision = decision_window(ctx, "Community script", 420.0, "Run anyway", |ui| {
+            ui.label(egui::RichText::new(&script.title).strong());
+            ui.label(format!("by {}", script.author));
+            ui.add_space(6.0);
+            ui.label(
                     "This is a community script. It was written by a community member and has not been reviewed by the Volcren team. \
                      It runs on your computer and controls your game client, so only run scripts from people you trust.",
                 );
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("You won't be asked again until a new revision of this script comes out.").weak());
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Run anyway").clicked() {
-                        decision = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        decision = Some(false);
-                    }
-                });
-            });
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "You won't be asked again until a new revision of this script comes out.",
+                )
+                .weak(),
+            );
+            ui.add_space(6.0);
+        });
         match decision {
             Some(true) => {
                 if let Some(revision) = script.revision {
@@ -2083,7 +2029,6 @@ impl LoaderApp {
         }
     }
 
-    /// The Feedback page: the sessions of the last 24 hours, to score their scripts or report bugs on them.
     fn feedback_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.heading("Feedback");
@@ -2103,7 +2048,6 @@ impl LoaderApp {
         self.apply_feedback_actions(&ctx, actions);
     }
 
-    /// The Feedback tab of a running store script: the same controls, for this run only.
     fn run_feedback_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let Some(session_id) = self.run().and_then(|r| r.session_id().map(str::to_owned)) else {
@@ -2163,7 +2107,6 @@ impl LoaderApp {
         }
     }
 
-    /// The versions a bug report names: the agent in the client the script runs on (or the loader's own copy), the running store script's lib, and the GPU.
     fn versions(&self, run: Option<&Run>) -> feedback::Versions {
         feedback::Versions {
             agent: run
@@ -2177,14 +2120,13 @@ impl LoaderApp {
         }
     }
 
-    /// Sends a bug report: the running script's log and the client's state now, or the record kept when an earlier run ended.
     fn send_report(&mut self, ctx: &egui::Context, session_id: String, description: String) {
         let run = self
             .runs
             .iter()
             .find(|r| r.session_id() == Some(session_id.as_str()));
-        let diagnostics =
-            feedback::diagnostics(&self.versions(run), self.settings.include_system_info);
+        let versions = self.versions(run);
+        let include_system = self.settings.include_system_info;
         let (tx, ctx, api, settings) = (
             self.tx.clone(),
             ctx.clone(),
@@ -2195,6 +2137,7 @@ impl LoaderApp {
             .filter(|r| r.is_running())
             .map(|r| (r.log.texts(), r.names.clone(), r.loaded_target()));
         thread::spawn(move || {
+            let diagnostics = feedback::diagnostics(&versions, include_system);
             let report = match live {
                 Some((log, mut names, target)) => {
                     let snapshot = target
@@ -2223,7 +2166,6 @@ impl LoaderApp {
         });
     }
 
-    /// Keeps the store run that is ending, sealed on disk, so it can still be reported from the Feedback page for 24 hours.
     fn keep_run_record(&mut self, ctx: &egui::Context, index: usize) {
         let run = &self.runs[index];
         let Some(session_id) = run.session_id().map(str::to_owned) else {
@@ -2241,13 +2183,12 @@ impl LoaderApp {
                 title,
                 log,
                 snapshot,
-                ended_at: feedback::now_secs(),
+                ended_at: crate::paths::unix_secs(),
             };
             Event::RunKept(feedback::store_record(&record))
         });
     }
 
-    /// The sidebar's page tree. Picking a page closes the drawer on narrow windows.
     fn sidebar_ui(&mut self, ui: &mut egui::Ui) {
         let rows: Vec<(u64, String, bool)> = self
             .runs
@@ -2263,7 +2204,6 @@ impl LoaderApp {
         }
     }
 
-    /// A run, a start on its way or a dialog about one, which an update mustn't close.
     fn start_in_progress(&self) -> bool {
         self.runs.iter().any(|run| run.ended.is_none())
             || self.starting.is_some()
@@ -2276,7 +2216,6 @@ impl LoaderApp {
         self.update_state = UpdateState::Failed(error);
     }
 
-    /// Whether the update can replace the install's files: no other loader is open to run from them.
     fn can_update(&mut self) -> bool {
         let alone = self.instance.alone();
         if !alone {
@@ -2302,9 +2241,7 @@ impl LoaderApp {
         });
     }
 
-    /// Installs a prepared update and closes, which saves the settings and stops what the loader runs.
     fn apply_update(&mut self, ctx: &egui::Context, prepared: &update::Prepared) {
-        // a loader opened during the download counts too
         if !self.can_update() {
             return;
         }
@@ -2317,7 +2254,6 @@ impl LoaderApp {
         }
     }
 
-    /// Takes the whole window while an update installs, so nothing can start and then be closed under the user.
     fn updating_ui(&mut self, ui: &mut egui::Ui) {
         let status = match &self.update_state {
             UpdateState::Downloading(progress) => progress_text(progress),
@@ -2374,9 +2310,7 @@ impl LoaderApp {
         };
         let mut clicked = false;
         let mut dismissed = false;
-        // Added before the log panel so it takes the very bottom of the window.
         egui::Panel::bottom("update").show(ui, |ui| {
-            // Each button is as tall as a text line, in a slightly smaller font, and as wide as the longest label.
             let row = ui.text_style_height(&egui::TextStyle::Body);
             let font = egui::FontId::monospace(12.0);
             let width = ui
@@ -2432,22 +2366,10 @@ impl LoaderApp {
         }
     }
 
-    /// `stacked`: the buttons sit one above the other, so they all take the width of the widest.
     fn account_ui(&mut self, ui: &mut egui::Ui, stacked: bool) {
         let ctx = ui.ctx().clone();
         let button_size = if stacked {
-            let font = egui::TextStyle::Button.resolve(ui.style());
-            let width = ["Sign out", "Add funds"]
-                .iter()
-                .map(|label| {
-                    ui.painter()
-                        .layout_no_wrap((*label).into(), font.clone(), egui::Color32::WHITE)
-                        .size()
-                        .x
-                })
-                .fold(0.0, f32::max)
-                + 2.0 * ui.spacing().button_padding.x;
-            egui::vec2(width, 0.0)
+            egui::vec2(uniform_button_width(ui, &["Sign out", "Add funds"]), 0.0)
         } else {
             egui::Vec2::ZERO
         };
@@ -2500,7 +2422,6 @@ impl LoaderApp {
         }
     }
 
-    /// Shown instead of the app until the account is signed in: the loader doesn't start without a Discord login.
     fn login_gate_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.vertical_centered(|ui| {
@@ -2546,19 +2467,19 @@ impl LoaderApp {
         self.loader_log.push(true, text.into());
     }
 
-    /// Writes to the open run's log, or the loader's when no run page is open.
-    fn script_info(&mut self, text: impl Into<String>) {
+    fn script_log(&mut self, error: bool, text: impl Into<String>) {
         match self.run_mut() {
-            Some(run) => run.log.push(false, text.into()),
-            None => self.loader_log.push(false, text.into()),
+            Some(run) => run.log.push(error, text.into()),
+            None => self.loader_log.push(error, text.into()),
         }
     }
 
+    fn script_info(&mut self, text: impl Into<String>) {
+        self.script_log(false, text);
+    }
+
     fn script_error(&mut self, text: impl Into<String>) {
-        match self.run_mut() {
-            Some(run) => run.log.push(true, text.into()),
-            None => self.loader_log.push(true, text.into()),
-        }
+        self.script_log(true, text);
     }
 
     fn spawn(
@@ -2571,7 +2492,6 @@ impl LoaderApp {
         self.background(ctx, job);
     }
 
-    // Like `spawn`, but leaves the busy label alone.
     fn background(
         &self,
         ctx: &egui::Context,
@@ -2584,7 +2504,6 @@ impl LoaderApp {
         });
     }
 
-    // Keeps the scene tiles on while a layer checkbox is checked, refreshing as actors move; layers share one overlay.
     fn tiles_ui(&mut self, ctx: &egui::Context) {
         let mut layers: Vec<String> = DEV_LAYERS
             .iter()
@@ -2592,7 +2511,6 @@ impl LoaderApp {
             .filter(|(_, on)| **on)
             .filter_map(|(layer, _)| layer.map(str::to_owned))
             .collect();
-        // the widget inspector's selection is boxed on the client while its tab is showing
         if self.widget_inspector_showing() {
             layers.extend(self.widgets.highlight_layers());
         }
@@ -2600,7 +2518,6 @@ impl LoaderApp {
         let target = if layers.is_empty() { None } else { target };
 
         let Some(target) = target else {
-            // Switched off or another client selected: dropping the worker takes the boxes off.
             self.tiles = None;
             return;
         };
@@ -2629,7 +2546,6 @@ impl LoaderApp {
         }
     }
 
-    // Reads the selected client's packet log while the monitor is capturing, a page at a time.
     fn poll_packets(&mut self, ctx: &egui::Context) {
         if !self.packets.capture {
             return;
@@ -2638,7 +2554,6 @@ impl LoaderApp {
             return;
         };
         let now = Instant::now();
-        // look again when the next read is due, even if nothing else repaints
         ctx.request_repaint_after(crate::packets::POLL_EVERY);
         if self.packets.wants_layouts(target.client.pid, now) {
             self.packets.start_layouts(target.client.pid);
@@ -2658,7 +2573,6 @@ impl LoaderApp {
         });
     }
 
-    // Reads the selected client's varps while the var inspector is enabled; the job also looks up the varbits of varps that changed.
     fn poll_vars(&mut self, ctx: &egui::Context) {
         if !self.vars.enabled {
             return;
@@ -2678,15 +2592,18 @@ impl LoaderApp {
             varc_since,
         } = self.vars.start(pid);
         self.background(ctx, move |settings| {
+            let tick_count = || {
+                backend::state(&target, &settings)
+                    .ok()
+                    .and_then(|state| state.tick_count)
+            };
             let read = || -> Result<crate::vars::Poll, String> {
                 let varps = backend::varps(&target, &settings)?;
                 let (mut tick, mut varbits) = (None, Vec::new());
                 if let (Some(varps), Some(previous)) = (&varps, &previous) {
                     let changed = crate::vars::Inspector::unknown(previous, varps, &known);
                     if previous != varps {
-                        tick = backend::state(&target, &settings)
-                            .ok()
-                            .and_then(|state| state.tick_count);
+                        tick = tick_count();
                     }
                     for varp in changed {
                         varbits.push((varp, backend::varbits_of(&target, &settings, varp)?));
@@ -2703,11 +2620,8 @@ impl LoaderApp {
                             Some(error),
                         ),
                     };
-                // the game tick the changes are shown under, read when there is something to show
                 if tick.is_none() && !varcs.changes.is_empty() {
-                    tick = backend::state(&target, &settings)
-                        .ok()
-                        .and_then(|state| state.tick_count);
+                    tick = tick_count();
                 }
                 Ok(crate::vars::Poll {
                     varps,
@@ -2724,7 +2638,6 @@ impl LoaderApp {
         });
     }
 
-    // The widget inspector's "Follow mouse": looks at where the client's mouse is every so often and selects the widget there.
     fn poll_widget_mouse(&mut self, ctx: &egui::Context) {
         if !self.widgets.follow_mouse || !self.widget_inspector_showing() {
             return;
@@ -2747,7 +2660,6 @@ impl LoaderApp {
         });
     }
 
-    // Reads every open interface of the selected client for the widget inspector, and the names of the groups it has not named yet.
     fn refresh_widgets(&mut self, ctx: &egui::Context, target: Target) {
         let pid = target.client.pid;
         self.widgets.start(pid);
@@ -2787,7 +2699,6 @@ impl LoaderApp {
         });
     }
 
-    // The Widget Inspector tab of the Development page: the open interfaces as a tree and the fields of the selected widget.
     fn widgets_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
@@ -2802,11 +2713,7 @@ impl LoaderApp {
             ui.checkbox(&mut self.widgets.follow_mouse, "Follow mouse")
                 .on_hover_text("Selects the widget under the client's mouse, looking about ten times a second. Move the mouse over the client and the tree follows; untick it to keep the selection.");
         });
-        match &target {
-            Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
-            None => ui.label("Select a client with agent loaded in the Clients tab."),
-        };
-        // the first look at the tab reads the interfaces without being asked
+        client_caption(ui, target.as_ref());
         if let Some(target) = target
             && !self.widgets.has_read()
             && !self.widgets.reading()
@@ -2846,7 +2753,6 @@ impl LoaderApp {
         inspector.selected = picked;
     }
 
-    // Reads the selected client's script log while the script inspector is enabled.
     fn poll_script_log(&mut self, ctx: &egui::Context) {
         if !self.script_inspector.enabled {
             return;
@@ -2863,19 +2769,13 @@ impl LoaderApp {
             target.client.pid,
             self.script_inspector.start(target.client.pid),
         );
-        self.background(ctx, move |settings| {
-            let read = || -> Result<crate::script_log::Poll, String> {
-                let page = backend::script_runs(&target, &settings, since)?;
-                Ok(crate::script_log::Poll { page })
-            };
-            Event::ScriptRuns {
-                pid,
-                result: read(),
-            }
+        self.background(ctx, move |settings| Event::ScriptRuns {
+            pid,
+            result: backend::script_runs(&target, &settings, since)
+                .map(|page| crate::script_log::Poll { page }),
         });
     }
 
-    // Reads the selected client's item containers while the inventory inspector is enabled; the job also looks up the names it hasn't got.
     fn poll_inventory(&mut self, ctx: &egui::Context) {
         if !self.inventory.enabled {
             return;
@@ -2898,7 +2798,6 @@ impl LoaderApp {
         } = self.inventory.start(pid);
         self.background(ctx, move |settings| {
             let read = || -> Result<crate::inventory::Poll, String> {
-                // the first read marks the place in the log, then reads the containers: a change in between is applied twice, harmlessly
                 let (page, baseline) = match since {
                     Some(since) => (
                         backend::item_changes(
@@ -2988,7 +2887,6 @@ impl LoaderApp {
         });
     }
 
-    // The Inventory Inspector tab of the Development page: snapshots of the client's item containers while Enable is on.
     fn inventory_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
         let inspector = &mut self.inventory;
@@ -3006,10 +2904,7 @@ impl LoaderApp {
                 inspector.clear();
             }
         });
-        match &target {
-            Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
-            None => ui.label("Select a client with agent loaded in the Clients tab."),
-        };
+        client_caption(ui, target.as_ref());
         if let Some(error) = inspector.error.iter().chain(&icons.error).next() {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -3054,7 +2949,6 @@ impl LoaderApp {
         inspector.selected = picked;
     }
 
-    /// Asks the selected client to draw the icons the UI showed without one, a batch at a time.
     fn poll_icons(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         if let Some(wait) = self.icons.retry_in(now) {
@@ -3069,7 +2963,6 @@ impl LoaderApp {
         let batch = self.icons.start();
         self.background(ctx, move |settings| {
             let mut pictures = Vec::new();
-            // the items a failed sprite read comes after are kept, so the client doesn't draw them again
             let mut read = || -> Result<(), String> {
                 if !batch.items.is_empty() {
                     let images = backend::item_icons(&target, &settings, &batch.items)?;
@@ -3098,7 +2991,6 @@ impl LoaderApp {
         });
     }
 
-    // The Script Inspector tab of the Development page: a log of the scripts the client runs for events while Enable is on.
     fn script_log_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
         let mut load_names = false;
@@ -3120,10 +3012,7 @@ impl LoaderApp {
                 inspector.clear();
             }
         });
-        match &target {
-            Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
-            None => ui.label("Select a client with agent loaded in the Clients tab."),
-        };
+        client_caption(ui, target.as_ref());
         if let Some(error) = &inspector.names_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
@@ -3175,7 +3064,6 @@ impl LoaderApp {
             |mut row| {
                 let index = row.index();
                 let entry = &visible[index];
-                // the tick is shown on the first run of each tick
                 let first = index == 0 || visible[index - 1].run.tick != entry.run.tick;
                 row.col(|ui| {
                     if first {
@@ -3212,7 +3100,6 @@ impl LoaderApp {
         }
     }
 
-    // The Var Inspector tab of the Development page: a log of the varps and varbits that change while Enable is on.
     fn vars_ui(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Varps")
             .default_open(false)
@@ -3231,10 +3118,7 @@ impl LoaderApp {
                 inspector.clear();
             }
         });
-        match &target {
-            Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
-            None => ui.label("Select a client with agent loaded in the Clients tab."),
-        };
+        client_caption(ui, target.as_ref());
         let visible = inspector.visible();
         ui.weak(format!(
             "{} shown of {} kept. Client variables are listed as their index.",
@@ -3277,7 +3161,6 @@ impl LoaderApp {
             |mut row| {
                 let index = row.index();
                 let entry = &visible[index];
-                // the tick is shown on the first change of each tick
                 let first = index == 0 || visible[index - 1].tick != entry.tick;
                 let kind = match entry.kind {
                     crate::vars::Kind::Varbit => "Varbit",
@@ -3311,21 +3194,20 @@ impl LoaderApp {
     fn packets_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
         let monitor = &mut self.packets;
-        {
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut monitor.capture, "Enable");
-                ui.checkbox(&mut monitor.received, "Received");
-                ui.checkbox(&mut monitor.sent, "Sent");
-                ui.checkbox(&mut monitor.follow, "Follow");
-                if ui
-                    .button("Clear")
-                    .on_hover_text("Forget the packets read so far.")
-                    .clicked()
-                {
-                    monitor.clear();
-                }
-            });
-            ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut monitor.capture, "Enable");
+            ui.checkbox(&mut monitor.received, "Received");
+            ui.checkbox(&mut monitor.sent, "Sent");
+            ui.checkbox(&mut monitor.follow, "Follow");
+            if ui
+                .button("Clear")
+                .on_hover_text("Forget the packets read so far.")
+                .clicked()
+            {
+                monitor.clear();
+            }
+        });
+        ui.horizontal(|ui| {
                 ui.label("Filter");
                 let menu_width = 170.0;
                 ui.add(egui::TextEdit::singleline(&mut monitor.filter).desired_width((ui.available_width() - menu_width).max(120.0)).hint_text("40, VARP_LARGE or !PLAYER_INFO"))
@@ -3335,154 +3217,148 @@ impl LoaderApp {
                     monitor.filter.clear();
                 }
             });
-            match &target {
-                Some(target) => ui.weak(format!("Client {}.", target.client.pid)),
-                None => ui.label("Select a client with agent loaded in the Clients tab."),
-            };
-            let visible = monitor.visible();
-            let table = monitor.table();
-            ui.weak(format!(
-                "{} shown of {} kept{}",
-                visible.len(),
-                monitor.kept(),
-                if monitor.dropped > 0 {
-                    format!(", {} missed", monitor.dropped)
-                } else {
-                    String::new()
-                }
-            ));
-            if let Some(error) = &monitor.error {
-                ui.colored_label(ui.visuals().error_fg_color, error);
+        client_caption(ui, target.as_ref());
+        let visible = monitor.visible();
+        let table = monitor.table();
+        ui.weak(format!(
+            "{} shown of {} kept{}",
+            visible.len(),
+            monitor.kept(),
+            if monitor.dropped > 0 {
+                format!(", {} missed", monitor.dropped)
+            } else {
+                String::new()
             }
-            ui.separator();
+        ));
+        if let Some(error) = &monitor.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+        ui.separator();
 
-            let font = egui::TextStyle::Monospace.resolve(ui.style());
-            let row_height =
-                ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
-            let sent_color = ui.visuals().hyperlink_color;
-            let detail_height = 150.0;
-            let mut picked = None;
-            let height = (ui.available_height() - detail_height - 12.0).max(row_height * 4.0);
-            let log = LogTable {
-                id: "packets",
-                follow: monitor.follow,
-                row_height,
-                max_height: Some(height),
-                clickable: true,
-            };
-            let selected = monitor.selected;
-            log.show(
-                ui,
-                vec![
-                    ("Time", narrow(70.0)),
-                    ("", narrow(24.0)),
-                    ("Opcode", narrow(56.0)),
-                    ("Length", narrow(50.0)),
-                    ("Name", narrow(120.0)),
-                    ("Fields", narrow(240.0)),
-                    (
-                        "Hex",
-                        egui_extras::Column::remainder().at_least(80.0).clip(true),
-                    ),
-                ],
-                visible.len(),
-                |mut row| {
-                    let packet = &visible[row.index()];
-                    let def = table.lookup(packet.sent, packet.opcode);
-                    let colored = |text: String| {
-                        let text = mono(text);
-                        if packet.sent {
-                            text.color(sent_color)
-                        } else {
-                            text
-                        }
-                    };
-                    row.set_selected(selected == Some(packet.sequence));
-                    row.col(|ui| {
-                        ui.label(colored(format!("{:.3}", packet.time_ms as f64 / 1000.0)));
-                    });
-                    row.col(|ui| {
-                        ui.label(colored(if packet.sent { "→" } else { "←" }.into()));
-                    });
-                    row.col(|ui| {
-                        ui.label(colored(packet.opcode.to_string()));
-                    });
-                    row.col(|ui| {
-                        ui.label(colored(packet.length.to_string()));
-                    });
-                    row.col(|ui| {
-                        ui.label(colored(def.map_or(String::new(), |def| def.name.clone())));
-                    });
-                    row.col(|ui| {
-                        let fields = def.map(|def| {
-                            crate::packet_defs::decode(
-                                def,
-                                &crate::packets::payload_bytes(packet),
-                                packet.length,
-                            )
-                            .fields
-                            .into_iter()
-                            .map(|(_, value)| value)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                        });
-                        ui.label(colored(fields.unwrap_or_default()));
-                    });
-                    row.col(|ui| {
-                        ui.label(colored(crate::packets::payload_text(packet)));
-                    });
-                    if row.response().clicked() {
-                        picked = Some(packet.sequence);
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let row_height =
+            ui.fonts_mut(|fonts| fonts.row_height(&font)) + ui.spacing().item_spacing.y;
+        let sent_color = ui.visuals().hyperlink_color;
+        let detail_height = 150.0;
+        let mut picked = None;
+        let height = (ui.available_height() - detail_height - 12.0).max(row_height * 4.0);
+        let log = LogTable {
+            id: "packets",
+            follow: monitor.follow,
+            row_height,
+            max_height: Some(height),
+            clickable: true,
+        };
+        let selected = monitor.selected;
+        log.show(
+            ui,
+            vec![
+                ("Time", narrow(70.0)),
+                ("", narrow(24.0)),
+                ("Opcode", narrow(56.0)),
+                ("Length", narrow(50.0)),
+                ("Name", narrow(120.0)),
+                ("Fields", narrow(240.0)),
+                (
+                    "Hex",
+                    egui_extras::Column::remainder().at_least(80.0).clip(true),
+                ),
+            ],
+            visible.len(),
+            |mut row| {
+                let packet = &visible[row.index()];
+                let def = table.lookup(packet.sent, packet.opcode);
+                let colored = |text: String| {
+                    let text = mono(text);
+                    if packet.sent {
+                        text.color(sent_color)
+                    } else {
+                        text
                     }
-                },
-            );
-            drop(visible);
-            if picked.is_some() {
-                monitor.selected = picked;
-                // looking at a packet while the list keeps scrolling is no use
-                monitor.follow = false;
-            }
-
-            ui.separator();
-            match monitor.selected_packet() {
-                None => {
-                    ui.weak("Select a packet to see it in full.");
-                }
-                Some(packet) => {
-                    let bytes = crate::packets::payload_bytes(packet);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            egui::RichText::new(if packet.sent { "Sent" } else { "Received" })
-                                .strong(),
-                        );
-                        ui.label(format!(
-                            "opcode {}, {} bytes, at {:.3}s",
-                            packet.opcode,
+                };
+                row.set_selected(selected == Some(packet.sequence));
+                row.col(|ui| {
+                    ui.label(colored(format!("{:.3}", packet.time_ms as f64 / 1000.0)));
+                });
+                row.col(|ui| {
+                    ui.label(colored(if packet.sent { "→" } else { "←" }.into()));
+                });
+                row.col(|ui| {
+                    ui.label(colored(packet.opcode.to_string()));
+                });
+                row.col(|ui| {
+                    ui.label(colored(packet.length.to_string()));
+                });
+                row.col(|ui| {
+                    ui.label(colored(def.map_or(String::new(), |def| def.name.clone())));
+                });
+                row.col(|ui| {
+                    let fields = def.map(|def| {
+                        crate::packet_defs::decode(
+                            def,
+                            &crate::packets::payload_bytes(packet),
                             packet.length,
-                            packet.time_ms as f64 / 1000.0
-                        ));
-                        if (bytes.len() as u32) < packet.length {
-                            ui.weak(format!("(first {} kept)", bytes.len()));
-                        }
-                        if ui.small_button("Copy hex").clicked() {
-                            ui.ctx().copy_text(crate::packets::payload_text(packet));
-                        }
+                        )
+                        .fields
+                        .into_iter()
+                        .map(|(_, value)| value)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                     });
-                    let values = crate::packets::leading_values(&bytes);
-                    if !values.is_empty() {
-                        ui.weak(
-                            values
-                                .iter()
-                                .map(|(kind, value)| format!("{kind} {value}"))
-                                .collect::<Vec<_>>()
-                                .join("  ·  ")
-                                + "  (big endian, from the start)",
-                        );
+                    ui.label(colored(fields.unwrap_or_default()));
+                });
+                row.col(|ui| {
+                    ui.label(colored(crate::packets::payload_text(packet)));
+                });
+                if row.response().clicked() {
+                    picked = Some(packet.sequence);
+                }
+            },
+        );
+        drop(visible);
+        if picked.is_some() {
+            monitor.selected = picked;
+            monitor.follow = false;
+        }
+
+        ui.separator();
+        match monitor.selected_packet() {
+            None => {
+                ui.weak("Select a packet to see it in full.");
+            }
+            Some(packet) => {
+                let bytes = crate::packets::payload_bytes(packet);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(if packet.sent { "Sent" } else { "Received" }).strong(),
+                    );
+                    ui.label(format!(
+                        "opcode {}, {} bytes, at {:.3}s",
+                        packet.opcode,
+                        packet.length,
+                        packet.time_ms as f64 / 1000.0
+                    ));
+                    if (bytes.len() as u32) < packet.length {
+                        ui.weak(format!("(first {} kept)", bytes.len()));
                     }
-                    let def = monitor.table().lookup(packet.sent, packet.opcode);
-                    let decoded =
-                        def.map(|def| crate::packet_defs::decode(def, &bytes, packet.length));
-                    egui::ScrollArea::vertical().id_salt("packet_detail").auto_shrink([false, false]).show(ui, |ui| {
+                    if ui.small_button("Copy hex").clicked() {
+                        ui.ctx().copy_text(crate::packets::payload_text(packet));
+                    }
+                });
+                let values = crate::packets::leading_values(&bytes);
+                if !values.is_empty() {
+                    ui.weak(
+                        values
+                            .iter()
+                            .map(|(kind, value)| format!("{kind} {value}"))
+                            .collect::<Vec<_>>()
+                            .join("  ·  ")
+                            + "  (big endian, from the start)",
+                    );
+                }
+                let def = monitor.table().lookup(packet.sent, packet.opcode);
+                let decoded = def.map(|def| crate::packet_defs::decode(def, &bytes, packet.length));
+                egui::ScrollArea::vertical().id_salt("packet_detail").auto_shrink([false, false]).show(ui, |ui| {
                         if let (Some(def), Some(decoded)) = (def, &decoded) {
                             let fields: Vec<String> = decoded.fields.iter().map(|(label, value)| format!("{label} = {value}")).collect();
                             let title = if def.name.is_empty() { format!("opcode {}", def.opcode) } else { def.name.clone() };
@@ -3502,7 +3378,6 @@ impl LoaderApp {
                             ui.label(egui::RichText::new(line).font(font.clone()));
                         }
                     });
-                }
             }
         }
     }
@@ -3557,7 +3432,7 @@ impl LoaderApp {
 
     fn read_state(&mut self, ctx: &egui::Context, target: Target, read: Read) {
         let pid = target.client.pid;
-        if matches!(read, Read::Varp(_) | Read::KnownVarps | Read::VarpChanges) {
+        if read.is_varp() {
             self.spawn(ctx, "Reading…", move |settings| Event::Varps {
                 pid,
                 read,
@@ -3574,7 +3449,6 @@ impl LoaderApp {
 
     fn accounts_ui(&mut self, ui: &mut egui::Ui) {
         let target = self.selected_target().filter(|t| t.client.loaded.is_some());
-        // not in the `if let`, which would hold the lock through its body
         let action = crate::script::write(&self.accounts).ui(ui, target.is_some());
         if let Some(crate::accounts::Action::ReadClientName) = action
             && let Some(target) = target
@@ -3599,7 +3473,6 @@ impl LoaderApp {
 
     fn handle_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.rx.try_recv() {
-            // Tiles and the XP tracker's reads run in the background, so they must not clear another job's busy label.
             if !matches!(
                 event,
                 Event::Tiles { .. }
@@ -3624,7 +3497,6 @@ impl LoaderApp {
                     for error in scan.errors {
                         self.error(error);
                     }
-                    // a client another bot controls, or a 32-bit one, can't be used: select the first that can be
                     let usable = |t: &&Target| t.client.foreign_bot.is_none() && t.client.is_64bit;
                     if !self.targets.iter().filter(usable).any(|t| Some(t.key()) == self.selected) {
                         self.selected = self.targets.iter().find(usable).map(Target::key);
@@ -3679,7 +3551,6 @@ impl LoaderApp {
                 Event::Update(result) => match result {
                     Ok(available) => {
                         let failed = matches!(self.update_state, UpdateState::Failed(_));
-                        // another open loader runs from the files an update replaces
                         let busy = self.start_in_progress() || !self.instance.alone();
                         let automatic = available
                             .as_ref()
@@ -3690,7 +3561,6 @@ impl LoaderApp {
                             self.start_update(ctx, release);
                         }
                     }
-                    // Offline or no release published yet: not worth an error line.
                     Err(update::CheckError::Unavailable(error)) => {
                         self.info(format!("Couldn't check for updates: {error}"));
                     }
@@ -3699,7 +3569,6 @@ impl LoaderApp {
                     }
                 },
                 Event::UpdatePrepared { progress, result } => {
-                    // a skipped download's answer no longer matters, also once another has started
                     let current = matches!(&self.update_state, UpdateState::Downloading(now) if Arc::ptr_eq(now, &progress));
                     match result {
                         Ok(prepared) if current => self.apply_update(ctx, &prepared),
@@ -3759,7 +3628,6 @@ impl LoaderApp {
                         }
                         Err(error) => {
                             self.script_error(format!("Couldn't start {}: {error}", script.title));
-                            // The list may be stale (a new revision, a grant that was revoked)
                             self.fetch_scripts(ctx);
                         }
                     }
@@ -3774,7 +3642,6 @@ impl LoaderApp {
                         Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
                         Err(error) => {
                             self.script_error(format!("Couldn't start {}: {error}", start.script.title));
-                            // The list may be stale (a script that went away)
                             self.fetch_scripts(ctx);
                         }
                     }
@@ -3813,7 +3680,6 @@ impl LoaderApp {
                 Event::SessionEnded(result) => match result {
                     Ok(ended) => {
                         self.script_info(format!("Session ended, {} charged for the last minutes.", crate::api::models::credits_label(ended.charged as f64)));
-                        // signing out ends the sessions first, and this answer can arrive after it
                         if self.auth.me().is_some() {
                             self.api_job(ctx, |api| Event::Me(api.me()));
                         }
@@ -3853,7 +3719,6 @@ impl LoaderApp {
                                 }
                             }
                         }
-                        // a failed or empty read (logged out, client closing) is skipped; the baseline stays
                         let skills = result.ok().and_then(|state| state.skills).filter(|skills| skills.iter().any(|s| s.xp > 0));
                         if let Some(skills) = skills.filter(|_| run.is_running()) {
                             let skills = skills
@@ -3883,7 +3748,6 @@ impl LoaderApp {
                 Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
                 Event::Icons { pictures, error } => self.icons.finish(ctx, Instant::now(), pictures, error),
                 Event::LayoutRead { run, kind, result } => {
-                    // a run closed meanwhile has no editor left to fill
                     if let Some(editors) = editors_of(&mut self.runs, Some(run)) {
                         match kind {
                             crate::layouts::Kind::Equipment => editors
@@ -3898,7 +3762,6 @@ impl LoaderApp {
                         }
                     }
                 }
-                // a failed read keeps its ids asked, so it isn't repeated every frame; they show by id until the loader restarts
                 Event::ItemsKnown(result) => match result {
                     Ok(items) => {
                         self.asking_items.clear();
@@ -4066,12 +3929,8 @@ impl LoaderApp {
                         .enumerate()
                         .filter(|&(id, value)| previous.get(id) != Some(value))
                         .map(|(id, value)| {
-                            let name = KNOWN_VARPS
-                                .iter()
-                                .find(|&&(_, known)| known == id)
-                                .map(|&(name, _)| name);
                             let before = previous.get(id).map_or("none".to_owned(), i32::to_string);
-                            format!("  {} (was {before})", varp_text(name, id, *value))
+                            format!("  {} (was {before})", varp_text(None, id, *value))
                         })
                         .collect();
                     match changes.len() {
@@ -4103,11 +3962,9 @@ impl LoaderApp {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        // Fields take what is left after the label and the Browse button, down to a usable minimum.
         let field = (ui.available_width() - 190.0).clamp(120.0, 760.0);
         let mut log_lines_changed = false;
         egui::ScrollArea::both().id_salt("settings_page").auto_shrink([false, false]).show(ui, |ui| {
-        // A grid cell not in the last column can't grow past its previous frame's width, which kept the fields tiny; `max_col_width` lifts that.
         egui::Grid::new("settings").num_columns(3).max_col_width(field).show(ui, |ui| {
             ui.label("agent DLL");
             ui.add(egui::TextEdit::singleline(&mut self.settings.dll).desired_width(field));
@@ -4136,7 +3993,6 @@ impl LoaderApp {
             log_lines_changed = ui.add(egui::DragValue::new(&mut self.settings.log_lines).range(backend::LOG_LINES).speed(50.0)).changed();
             ui.end_row();
         });
-        // The entries are saved with the rest of the settings (`save`).
         self.whitelist_page
             .ui(ui, &mut crate::script::write(&self.http_whitelist));
         self.transport_settings_ui(ui);
@@ -4254,21 +4110,7 @@ impl LoaderApp {
                     .size()
                     .x
             };
-            // every control button is as wide as the widest label, so the columns line up
-            let button_width = ["Reload", "Unload", "Console"]
-                .iter()
-                .map(|label| {
-                    ui.painter()
-                        .layout_no_wrap(
-                            (*label).into(),
-                            egui::TextStyle::Button.resolve(ui.style()),
-                            egui::Color32::WHITE,
-                        )
-                        .size()
-                        .x
-                })
-                .fold(0.0, f32::max)
-                + 2.0 * ui.spacing().button_padding.x;
+            let button_width = uniform_button_width(ui, &["Reload", "Unload", "Console"]);
             let button_size = egui::vec2(button_width, 0.0);
             let pid_width = self
                 .targets
@@ -4281,7 +4123,6 @@ impl LoaderApp {
                 .map(|t| measure(ui, &t.client.title))
                 .fold(measure(ui, "Title"), f32::max);
             let row_controls_width = 3.0 * button_width + 2.0 * spacing.x;
-            // The columns keep their order; when the window is too narrow the text columns shrink and their text wraps.
             let mut flex = vec![("Title", title_width)];
             if show_prefix {
                 flex.push(("Prefix", CLIENT_PREFIX_WIDTH));
@@ -4290,7 +4131,6 @@ impl LoaderApp {
             let columns = flex.len() + 2;
             let natural: f32 = flex.iter().map(|(_, w)| w).sum();
             let other = pid_width + gap * (columns - 1) as f32 + 16.0;
-            // First the three buttons stack vertically to make room, then the text columns shrink and wrap.
             let stack_controls = ui.available_width() - other - row_controls_width < natural;
             let controls_width = if stack_controls {
                 button_width
@@ -4330,9 +4170,7 @@ impl LoaderApp {
                         let enabled = client.foreign_bot.is_none();
                         let is_selected = self.selected.as_ref() == Some(&target.key());
                         let active = is_selected && enabled;
-                        // the highlight is painted behind the cells once the row's size is known
                         let background = ui.painter().add(egui::Shape::Noop);
-                        // the client the loader controls is green and bold
                         let text_color = if active {
                             crate::theme::GREEN
                         } else if !enabled {
@@ -4381,7 +4219,6 @@ impl LoaderApp {
                         let can_unload = self.busy.is_none() && enabled && loaded;
                         let prefix = target.location.label().unwrap_or_default();
 
-                        // Each cell is measured first so every one can be vertically centered in the (tallest cell's) row height.
                         let painter = ui.painter().clone();
                         let normal = egui::TextStyle::Body.resolve(ui.style());
                         let font = if active { bold.clone() } else { normal.clone() };
@@ -4400,7 +4237,6 @@ impl LoaderApp {
                             font.clone(),
                             text_color,
                         );
-                        // The prefix never takes more lines than the tallest of the other columns; the rest is cut with an ellipsis.
                         let prefix_galley = show_prefix.then(|| {
                             let lines = title_galley.rows.len().max(status_galley.rows.len()).max(1);
                             let mut job = egui::text::LayoutJob::simple(
@@ -4604,7 +4440,6 @@ impl LoaderApp {
             }
         });
     }
-    /// Moves the client selection with the up and down arrows, unless a text field has the keyboard.
     fn step_selected_client(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -4771,7 +4606,6 @@ impl LoaderApp {
                             spec,
                             self.remembered_forms.get(&title),
                         ));
-                        // the script waits for its settings: show its page
                         self.active_run = Some(run.id);
                         self.tab = Tab::Run;
                         run.editors = Default::default();
@@ -4796,7 +4630,6 @@ impl LoaderApp {
         }
     }
 
-    /// Takes an ended run off the list, with its log.
     fn close_run(&mut self, id: u64) {
         self.runs.retain(|r| r.id != id || r.is_running());
         if self.active_run == Some(id) && self.run().is_none() {
@@ -4805,12 +4638,17 @@ impl LoaderApp {
                 self.tab = Tab::Sessions;
             }
         }
-        if self.log_tab == LogTab::Run(id) && self.run_index(id).is_none() {
+        self.repair_log_tab();
+    }
+
+    fn repair_log_tab(&mut self) {
+        if let LogTab::Run(id) = self.log_tab
+            && self.run_index(id).is_none()
+        {
             self.log_tab = LogTab::Loader;
         }
     }
 
-    /// The Sessions page: every run, with what it costs and its controls.
     fn sessions_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Sessions");
         if self.runs.is_empty() {
@@ -4905,11 +4743,7 @@ impl LoaderApp {
                             if ui
                                 .add_enabled(
                                     running && !stopping,
-                                    egui::Button::new(if run.script.is_paused() {
-                                        "Resume"
-                                    } else {
-                                        "Pause"
-                                    }),
+                                    egui::Button::new(pause_label(run.script.is_paused())),
                                 )
                                 .clicked()
                             {
@@ -4959,7 +4793,6 @@ impl LoaderApp {
         }
     }
 
-    /// The dropdown of clients a script can start on: loaded, usable, and not running a script. Returns the pick.
     fn run_target_ui(&mut self, ui: &mut egui::Ui) -> Option<Target> {
         let free: Vec<Target> = self
             .targets
@@ -4986,10 +4819,16 @@ impl LoaderApp {
             }
         });
         ui.add_space(6.0);
-        free.into_iter().find(|t| Some(t.key()) == self.run_target)
+        self.run_target_client()
     }
 
-    /// Drops a form whose script is gone. The form itself is shown on the script's page (`running_ui`, or the editor's `scripts_ui` for a local run).
+    fn run_target_client(&self) -> Option<Target> {
+        self.targets
+            .iter()
+            .find(|t| Some(t.key()) == self.run_target && self.client_free(t))
+            .cloned()
+    }
+
     fn form_ui(&mut self) {
         for run in self.runs.iter_mut().filter(|r| !r.is_running()) {
             run.form = None;
@@ -4997,7 +4836,6 @@ impl LoaderApp {
         }
     }
 
-    /// Sends the script what the user did with its form and remembers the values; a submitted form stays on the page, a cancelled one is dropped.
     fn answer_form(&mut self, outcome: crate::form::Outcome) {
         let Some(id) = self.active_run else {
             return;
@@ -5028,7 +4866,6 @@ impl LoaderApp {
         }
     }
 
-    /// Pushes the form's current values to the running script, which reads them with `form_update()`.
     fn push_form_update(&mut self) {
         let layouts = self.script_layouts().clone();
         let Some(form) = self.run().and_then(|r| r.form.as_ref()) else {
@@ -5051,7 +4888,6 @@ impl LoaderApp {
         }
     }
 
-    /// The page of the running script, store or local: its controls, and its settings form while it is waiting for one.
     fn running_ui(&mut self, ui: &mut egui::Ui) {
         let Some(run) = self.run() else {
             return;
@@ -5062,28 +4898,20 @@ impl LoaderApp {
         let stopping = run.script.stop_requested();
         let is_store = run.store.is_some();
         let form_sent = run.form_sent.clone();
-        // the script is waiting for its settings: it hasn't started yet
         let waiting = run.form.is_some() && form_sent.is_none();
-        let changed_form = run.form.as_ref().and_then(|f| {
-            matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != form_sent.as_ref()).then_some(())
-        }).is_some();
+        let changed_form = run.form.as_ref().is_some_and(|f| {
+            matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != form_sent.as_ref())
+        });
         let submit_label = run
             .form
             .as_ref()
             .map_or("Start", |f| f.submit_label())
             .to_owned();
-        let has_equipment = run
-            .form
-            .as_ref()
-            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Equipment));
-        let has_inventory = run
-            .form
-            .as_ref()
-            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Inventory));
-        let has_prayer = run
-            .form
-            .as_ref()
-            .is_some_and(|f| f.has_layout(crate::layouts::Kind::Prayer));
+        let has =
+            |kind: crate::layouts::Kind| run.form.as_ref().is_some_and(|f| f.has_layout(kind));
+        let has_equipment = has(crate::layouts::Kind::Equipment);
+        let has_inventory = has(crate::layouts::Kind::Inventory);
+        let has_prayer = has(crate::layouts::Kind::Prayer);
         let mut tools_tab = run.tools_tab;
         let run_id = run.id;
         let restartable = !running && is_store;
@@ -5095,7 +4923,6 @@ impl LoaderApp {
         let layouts = self.script_layouts().clone();
         ui.horizontal_wrapped(|ui| {
             if form_sent.is_some() {
-                // the script has its settings: the same button sends it changes, once there are some
                 let changed = changed_form;
                 update = ui
                     .add_enabled(running && !stopping && changed, egui::Button::new("Update"))
@@ -5107,11 +4934,11 @@ impl LoaderApp {
                 outcome = form.submitted(&layouts, &self.known_items);
             }
             if ui
-                .add_enabled(running && !stopping && !waiting, egui::Button::new(if paused { "Resume" } else { "Pause" }))
+                .add_enabled(running && !stopping && !waiting, egui::Button::new(pause_label(paused)))
                 .on_hover_text(if is_store {
                     "Suspends the script's process. It is still billed while paused: stop it to stop billing."
                 } else {
-                    "Suspends the script's process, so it takes effect immediately, even in a tight loop."
+                    PAUSE_HINT
                 })
                 .clicked()
             {
@@ -5169,17 +4996,10 @@ impl LoaderApp {
         if let Some(run) = self.run_mut() {
             run.tools_tab = tools_tab;
         }
-        let (line, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter().rect_filled(
-            line,
-            0.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        );
+        divider(ui);
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.add_space(8.0);
         let can_read = self.layout_target().is_some();
-        // layouts are kept by the form's title, which is what the Settings picker reads them by
         let form_title = self
             .run()
             .and_then(|r| r.form.as_ref())
@@ -5254,7 +5074,6 @@ impl LoaderApp {
                         }
                     }
                     ToolsTab::Prayer => {
-                        // the Prayer level, from the XP tracker's reads while the script runs
                         let level = self
                             .run()
                             .and_then(|r| r.xp.rows().into_iter().find(|row| row.name == "Prayer"))
@@ -5295,7 +5114,6 @@ impl LoaderApp {
         }
     }
 
-    /// Asks the layout editors' client for the names and stackability of the script's required items; without one they show by id.
     fn describe_items(&mut self, ctx: &egui::Context, ids: Vec<i32>) {
         let Some(target) = self.layout_target() else {
             return;
@@ -5317,7 +5135,6 @@ impl LoaderApp {
         });
     }
 
-    /// The saved layouts of the script whose form is open; an empty set when no form is.
     fn script_layouts(&self) -> &crate::layouts::ScriptLayouts {
         static EMPTY: std::sync::LazyLock<crate::layouts::ScriptLayouts> =
             std::sync::LazyLock::new(Default::default);
@@ -5327,14 +5144,12 @@ impl LoaderApp {
             .unwrap_or(&EMPTY)
     }
 
-    /// The client a layout editor reads from: the open run's, or the one selected on the Client page.
     fn layout_target(&self) -> Option<Target> {
         self.run()
             .and_then(Run::loaded_target)
             .or_else(|| self.selected_target().filter(|t| t.client.loaded.is_some()))
     }
 
-    /// Reads the selected client's worn items, inventory (with the rune pouch's runes) or prayers (on, or with `quick` the quick selection) for the editor of `kind`.
     fn read_layout(&mut self, ctx: &egui::Context, kind: crate::layouts::Kind, quick: bool) {
         use crate::layouts::{self, Kind, Read};
         let Some(run) = self.active_run else {
@@ -5362,7 +5177,6 @@ impl LoaderApp {
                                 layouts::QUICK_SELECTED_VARBIT,
                             )?
                             .ok_or("the client has no quick prayer selection")?;
-                            // an upgrade shares its base's bit: the bit means the upgrade once it is unlocked
                             let selected: Vec<&layouts::PrayerInfo> = layouts::PRAYERS
                                 .iter()
                                 .filter(|p| mask >> p.quick_bit & 1 == 1)
@@ -5469,7 +5283,6 @@ impl LoaderApp {
                             },
                         );
                         Ok(Read::Equipment {
-                            // the combat tab offers autocast for staves and powered staves, by the weapon's category
                             autocast: backend::varbit(
                                 &target,
                                 &settings,
@@ -5557,7 +5370,6 @@ impl LoaderApp {
         });
     }
 
-    /// The run started from the editor, while it runs.
     fn editor_run_mut(&mut self) -> Option<&mut Run> {
         self.runs
             .iter_mut()
@@ -5565,11 +5377,8 @@ impl LoaderApp {
     }
 
     fn open_script(&mut self) {
-        let mut dialog = rfd::FileDialog::new().add_filter("Luau script", &["luau", "lua"]);
-        if let Some(dir) = std::path::Path::new(&self.script_file.path)
-            .parent()
-            .filter(|d| d.is_dir())
-        {
+        let mut dialog = rfd::FileDialog::new().add_filter("Luau script", SCRIPT_FILTER);
+        if let Some(dir) = start_dir(&self.script_file.path) {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
@@ -5584,7 +5393,6 @@ impl LoaderApp {
         self.open_path(std::path::Path::new(&path));
     }
 
-    /// Opens a file in the editor; one that can't be read is reported, and forgotten as the last file.
     fn open_path(&mut self, path: &std::path::Path) {
         match std::fs::read_to_string(path) {
             Ok(text) => {
@@ -5605,7 +5413,6 @@ impl LoaderApp {
         }
     }
 
-    /// The file's contents if they differ from what the editor last synced with.
     fn changed_on_disk(&self) -> Option<String> {
         let disk = std::fs::read_to_string(&self.script_file.path).ok()?;
         match &self.script_file.disk {
@@ -5614,7 +5421,6 @@ impl LoaderApp {
         }
     }
 
-    /// Starts the prepared script; false when it didn't, with the reason logged and the session ended.
     fn run_prepared(
         &mut self,
         ctx: &egui::Context,
@@ -5633,9 +5439,7 @@ impl LoaderApp {
             self.script_error(format!(
                 "The client {pid} is gone, so {title} wasn't started."
             ));
-            self.api_job(ctx, move |api| {
-                Event::SessionEnded(api.end_session(&session_id))
-            });
+            self.end_session_job(ctx, session_id);
             return false;
         };
         match Script::start_with(
@@ -5663,8 +5467,7 @@ impl LoaderApp {
                     fee: prepared.session.fee,
                     fee_charged: 0,
                 };
-                let id = self.next_run;
-                self.next_run += 1;
+                let id = self.next_run_id();
                 let mut run = Run::new(
                     id,
                     title.to_owned(),
@@ -5686,9 +5489,7 @@ impl LoaderApp {
             }
             Err(error) => {
                 self.script_error(format!("Couldn't start {title}: {error}"));
-                self.api_job(ctx, move |api| {
-                    Event::SessionEnded(api.end_session(&session_id))
-                });
+                self.end_session_job(ctx, session_id);
                 false
             }
         }
@@ -5697,7 +5498,6 @@ impl LoaderApp {
     fn run_script(&mut self, ctx: &egui::Context, target: Option<&Target>) {
         let name = self.script_file.name();
         let path = Some(std::path::Path::new(&self.script_file.path)).filter(|p| p.is_file());
-        // Developing: `require("../lib/...")` reads from your own lib folder when one is set.
         let lib = Some(std::path::PathBuf::from(self.settings.lib_dir.trim()))
             .filter(|l| path.is_some() && !l.as_os_str().is_empty());
         if let Some(lib) = lib.as_ref().filter(|l| !l.is_dir()) {
@@ -5713,8 +5513,7 @@ impl LoaderApp {
             &self.settings,
         ) {
             Ok(script) => {
-                let id = self.next_run;
-                self.next_run += 1;
+                let id = self.next_run_id();
                 let mut run = Run::new(
                     id,
                     name.clone(),
@@ -5775,12 +5574,7 @@ impl LoaderApp {
         if reload {
             self.script_file.text = disk;
         }
-        // the client picked under "Run on", if it is still free
-        let target = self
-            .targets
-            .iter()
-            .find(|t| Some(t.key()) == self.run_target && self.client_free(t))
-            .cloned();
+        let target = self.run_target_client();
         self.run_script(ctx, target.as_ref());
     }
 
@@ -5797,12 +5591,9 @@ impl LoaderApp {
 
     fn save_script_as(&mut self) {
         let mut dialog = rfd::FileDialog::new()
-            .add_filter("Luau script", &["luau", "lua"])
+            .add_filter("Luau script", SCRIPT_FILTER)
             .set_file_name(self.script_file.name());
-        if let Some(dir) = std::path::Path::new(&self.script_file.path)
-            .parent()
-            .filter(|d| d.is_dir())
-        {
+        if let Some(dir) = start_dir(&self.script_file.path) {
             dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.save_file() else {
@@ -5814,41 +5605,28 @@ impl LoaderApp {
     }
 
     fn file_buttons(&mut self, ui: &mut egui::Ui, running: bool, width: f32) {
-        if ui
-            .add_enabled(
-                !running,
-                egui::Button::new("Open…").min_size(egui::vec2(width, 0.0)),
-            )
-            .clicked()
-        {
+        if width_button(ui, !running, "Open…", width).clicked() {
             self.open_script();
         }
         let last = self.last_script.clone();
-        if ui
-            .add_enabled(
-                !running && last.is_some(),
-                egui::Button::new("Open last").min_size(egui::vec2(width, 0.0)),
-            )
+        if width_button(ui, !running && last.is_some(), "Open last", width)
             .on_hover_text(last.as_deref().unwrap_or("No file has been opened yet."))
             .on_disabled_hover_text("No file has been opened yet.")
             .clicked()
         {
             self.open_last_script();
         }
-        if ui
-            .add_enabled(
-                !running && !self.script_file.path.is_empty(),
-                egui::Button::new("Save").min_size(egui::vec2(width, 0.0)),
-            )
-            .clicked()
+        if width_button(
+            ui,
+            !running && !self.script_file.path.is_empty(),
+            "Save",
+            width,
+        )
+        .clicked()
         {
             self.save_script();
         }
-        if ui
-            .add_enabled(
-                !running,
-                egui::Button::new("Save as…").min_size(egui::vec2(width, 0.0)),
-            )
+        if width_button(ui, !running, "Save as…", width)
             .on_hover_text("Saves a copy of what's in the editor.")
             .clicked()
         {
@@ -5865,11 +5643,7 @@ impl LoaderApp {
         width: f32,
     ) {
         let can_run = !running && !self.script_file.text.trim().is_empty();
-        if ui
-            .add_enabled(
-                can_run,
-                egui::Button::new("Run").min_size(egui::vec2(width, 0.0)),
-            )
+        if width_button(ui, can_run, "Run", width)
             .on_hover_text("Runs what's in the editor, against the client selected above if any.")
             .clicked()
         {
@@ -5878,20 +5652,14 @@ impl LoaderApp {
                 None => self.run_script(ui.ctx(), target),
             }
         }
-        if ui
-            .add_enabled(running, egui::Button::new(if paused { "Resume" } else { "Pause" }).min_size(egui::vec2(width, 0.0)))
-            .on_hover_text("Suspends the script's process, so it takes effect immediately, even in a tight loop.")
+        if width_button(ui, running, pause_label(paused), width)
+            .on_hover_text(PAUSE_HINT)
             .clicked()
             && let Some(id) = self.editor_run_mut().map(|r| r.id)
         {
             self.toggle_pause_of(id);
         }
-        if ui
-            .add_enabled(
-                running,
-                egui::Button::new("Stop").min_size(egui::vec2(width, 0.0)),
-            )
-            .clicked()
+        if width_button(ui, running, "Stop", width).clicked()
             && let Some(run) = self.editor_run_mut()
         {
             run.script.stop();
@@ -5917,7 +5685,6 @@ impl LoaderApp {
 
         let target = self.run_target_ui(ui);
 
-        // Run controls on the left, file buttons on the right. Narrow windows stack the two groups first, then the buttons of a group.
         let button_width = uniform_button_width(
             ui,
             &[
@@ -5945,20 +5712,12 @@ impl LoaderApp {
             });
         } else {
             ui.vertical(|ui| {
-                if run_width <= available {
-                    ui.horizontal(|ui| {
-                        self.run_buttons(ui, running, paused, target.as_ref(), button_width)
-                    });
-                } else {
-                    ui.vertical(|ui| {
-                        self.run_buttons(ui, running, paused, target.as_ref(), button_width)
-                    });
-                }
-                if file_width <= available {
-                    ui.horizontal(|ui| self.file_buttons(ui, running, button_width));
-                } else {
-                    ui.vertical(|ui| self.file_buttons(ui, running, button_width));
-                }
+                fit_row(ui, run_width <= available, |ui| {
+                    self.run_buttons(ui, running, paused, target.as_ref(), button_width)
+                });
+                fit_row(ui, file_width <= available, |ui| {
+                    self.file_buttons(ui, running, button_width)
+                });
             });
         }
         let status = match (running, paused) {
@@ -5982,7 +5741,6 @@ impl LoaderApp {
         let font = egui::TextStyle::Monospace.resolve(ui.style());
         let (row_height, digit_width) =
             ui.fonts_mut(|fonts| (fonts.row_height(&font), fonts.glyph_width(&font, '0')));
-        // only scans the text when it changed since the last frame
         self.fold
             .sync(&self.script_file.path, &self.script_file.text);
         let lines = self.fold.line_count();
@@ -5998,7 +5756,6 @@ impl LoaderApp {
                 .reveal(self.script_file.text[..at].matches('\n').count());
         }
         let view = self.fold.view(&self.script_file.text);
-        // wide enough for the longest line (a tab counts as four columns) so the area scrolls sideways; the text fills what's left
         let text_width = (self.fold.longest_line() as f32 * digit_width + margin.sum().x + 8.0)
             .max(size.x - gutter_width - ui.spacing().item_spacing.x);
         let gutter_height = size
@@ -6007,7 +5764,6 @@ impl LoaderApp {
         let highlighter = &mut self.highlighter;
         let hidden = &view.hidden;
         let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, _wrap_width: f32| {
-            // never wrap: the gutter counts one row per line, and the area scrolls sideways instead
             let mut job = highlighter.layout(ui, text.as_str(), hidden);
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
@@ -6038,7 +5794,6 @@ impl LoaderApp {
                             row_top(row) + row_height / 2.0,
                         )
                     };
-                    // the row under the pointer: its number lights up, and so does the line in the text
                     let hover_row = response
                         .hover_pos()
                         .map(|pos| ((pos.y - gutter.top() - margin.topf()) / row_height).floor())
@@ -6087,7 +5842,6 @@ impl LoaderApp {
                         if row >= 0.0
                             && let Some(&line) = view.visible.get(row as usize)
                         {
-                            // the arrow folds; the number selects the line's text
                             if pos.x >= gutter.right() - arrow_width - margin.leftf()
                                 && self.fold.is_foldable(line)
                             {
@@ -6126,7 +5880,6 @@ impl LoaderApp {
                         self.fold
                             .follow_cursor(&self.script_file.text, range.primary.index.0);
                     }
-                    // the rows on screen, with one to spare either side
                     let on_screen = first.saturating_sub(1)..last + 1;
                     if self.find.open {
                         paint_matches(
@@ -6184,7 +5937,6 @@ impl LoaderApp {
             });
     }
 
-    /// The find bar; returns the matches in the text as it stands after the bar's own edits.
     fn find_ui(&mut self, ui: &mut egui::Ui) -> Vec<usize> {
         let matches = find_matches(
             &self.script_file.text,
@@ -6194,7 +5946,6 @@ impl LoaderApp {
         let count = matches.len();
         self.find.current = self.find.current.min(count.saturating_sub(1));
 
-        // `Some(true)` steps back, `Some(false)` steps forward.
         let mut step = None;
         let mut replace_current = false;
         let mut replace_all = false;
@@ -6311,7 +6062,6 @@ impl LoaderApp {
             let replacement = self.find.replacement.clone();
             let text = &mut self.script_file.text;
             text.replace_range(at..at + self.find.query.len(), &replacement);
-            // Land on the first match after the replacement, so repeated clicks walk through the rest.
             let after = at + replacement.len();
             let next = find_matches(text, &self.find.query, self.find.case_sensitive);
             self.find.current = next.iter().position(|&start| start >= after).unwrap_or(0);
@@ -6379,7 +6129,6 @@ impl LoaderApp {
         ui.add_space(12.0);
         ui.heading("Overlays");
         ui.add_space(4.0);
-        // The checkboxes are in fixed vertical groups, and the groups stack as the window narrows, down to a single one.
         let gap = 24.0;
         let font = egui::TextStyle::Body.resolve(ui.style());
         let widest = DEV_TOGGLES
@@ -6425,7 +6174,6 @@ impl LoaderApp {
         }
     }
 
-    /// How long the script has run: it keeps counting while the script does and stops where the script ended.
     fn xp_tracker_ui(&self, ui: &mut egui::Ui) {
         use crate::{
             counters::number,
@@ -6503,7 +6251,6 @@ impl LoaderApp {
         ui.vertical(|ui| {
             crate::breaks::header(ui);
             ui.add_space(4.0);
-            // the panel sits right under its tabs
             let spacing = ui.spacing().item_spacing.y;
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.horizontal(|ui| {
@@ -6542,7 +6289,6 @@ impl LoaderApp {
                 ui.weak("Used by the scripts you start. It is saved as you edit.");
                 return;
             }
-            // the schedule only exists while a script runs, counting down every second
             let Some(view) = self
                 .run()
                 .and_then(|r| r.breaks.view(std::time::Instant::now()))
@@ -6603,27 +6349,26 @@ impl LoaderApp {
                 ui.weak("Nothing is scheduled.");
             }
         });
-        let config = self.settings.antiban.clone();
-        if update && let Some(run) = self.run_mut() {
-            match run.script.push_antiban(&config) {
-                Ok(()) => {
-                    run.antiban_sent = config;
-                    run.info("Breaks updated.");
+        if update {
+            let config = self.settings.antiban.clone();
+            if let Some(run) = self.run_mut() {
+                match run.script.push_antiban(&config) {
+                    Ok(()) => {
+                        run.antiban_sent = config;
+                        run.info("Breaks updated.");
+                    }
+                    Err(error) => run.error(error),
                 }
-                Err(error) => run.error(error),
             }
         }
         if let Some((kind, index)) = skip
             && let Some(run) = self.run_mut()
         {
-            match run.script.skip_next(kind, index) {
-                Ok(()) => run.info(format!("Skipping the next {kind}.")),
-                Err(error) => run.error(error),
-            }
+            let result = run.script.skip_next(kind, index);
+            run.report(result, &format!("Skipping the next {kind}."));
         }
     }
 
-    /// The tag filter and the Copy all / Clear buttons above the output (the filter only for the script's); meant to run inside a horizontal row.
     fn log_ref(&self, tab: LogTab) -> &Log {
         match tab {
             LogTab::Run(id) => self
@@ -6635,7 +6380,6 @@ impl LoaderApp {
         }
     }
 
-    /// The log a log tab shows.
     fn log_of(&mut self, tab: LogTab) -> &mut Log {
         match tab {
             LogTab::Run(id) => match self.runs.iter_mut().find(|r| r.id == id) {
@@ -6661,15 +6405,15 @@ impl LoaderApp {
                 });
             log.set_filter(filter);
         }
-        // the buttons sit at the right edge; when the row is too narrow they wrap onto the next line after the filter
         let narrow = ui.available_width() < 150.0;
         let layout = if narrow {
             egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)
         } else {
             egui::Layout::right_to_left(egui::Align::Center)
         };
+        let tab = self.log_tab;
+        let mut save = false;
         ui.with_layout(layout, |ui| {
-            let tab = self.log_tab;
             let log = self.log_of(tab);
             if ui
                 .add_enabled(!log.is_empty(), egui::Button::new("Clear"))
@@ -6685,7 +6429,30 @@ impl LoaderApp {
             {
                 ui.ctx().copy_text(log.text.clone());
             }
+            save = ui
+                .add_enabled(!log.is_empty(), egui::Button::new("Save"))
+                .on_hover_text("Saves the shown output of the open tab to a text file.")
+                .clicked();
         });
+        if save {
+            self.save_log(tab);
+        }
+    }
+
+    fn save_log(&mut self, tab: LogTab) {
+        let text = self.log_of(tab).text.clone();
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Text", &["txt"])
+            .set_file_name("output.txt")
+            .save_file()
+        else {
+            return;
+        };
+        let shown = path.display().to_string();
+        match std::fs::write(&path, text) {
+            Ok(()) => self.info(format!("Saved output to {shown}.")),
+            Err(error) => self.error(format!("Cannot save output to {shown}: {error}")),
+        }
     }
 
     fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
@@ -6698,14 +6465,7 @@ impl LoaderApp {
                 crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Run(*id), title);
             }
         });
-        // the line under the tabs, across the whole width, so they read as tabs rather than buttons
-        let (line, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter().rect_filled(
-            line,
-            0.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        );
+        divider(ui);
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal_wrapped(|ui| self.log_controls_ui(ui));
         self.log_ui(ui);
@@ -6717,7 +6477,6 @@ impl LoaderApp {
         let normal = ui.visuals().text_color();
         let error = ui.visuals().error_fg_color;
         let warning = ui.visuals().warn_fg_color;
-        // the job is only rebuilt when the shown lines change; egui's own cache then skips the layout too
         let key = (
             tab,
             self.log_ref(tab).revision,
@@ -6734,12 +6493,11 @@ impl LoaderApp {
             let job = self.log_ref(tab).layout_job(font, normal, warning, error);
             self.log_job = Some((key, job));
         }
-        let cached_job = self.log_job.as_ref().map(|(_, job)| job.clone());
+        let cached_job = self.log_job.as_ref().map(|(_, job)| job);
         let log = self.log_ref(tab);
-        // One text widget for the whole output, so Ctrl+A and Ctrl+C cover every line.
         let text = log.text.as_str();
         let mut layouter = |ui: &egui::Ui, _: &dyn egui::TextBuffer, wrap_width: f32| {
-            let mut job = cached_job.clone().unwrap_or_default();
+            let mut job = cached_job.cloned().unwrap_or_default();
             job.wrap.max_width = wrap_width;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         };
@@ -6763,7 +6521,6 @@ impl LoaderApp {
                 else {
                     return;
                 };
-                // Rows of one galley map to text lines (a row that ends with a newline closes one); an entry can span several.
                 let entry_of_line: Vec<usize> = log
                     .view
                     .iter()
@@ -6788,7 +6545,6 @@ impl LoaderApp {
                 let Some(entry) = hovered.and_then(|line| entry_of_line.get(line).copied()) else {
                     return;
                 };
-                // A wrapped line spans several rows: highlight them all, keep the button on the first.
                 let mut index = 0;
                 let mut first = None;
                 let mut span = egui::Rect::NOTHING;
@@ -6830,7 +6586,6 @@ impl LoaderApp {
     }
 }
 
-/// A fold arrow: pointing right when folded, down when open.
 fn paint_arrow(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -6858,7 +6613,6 @@ fn paint_arrow(
     ));
 }
 
-/// The char range of `line` (0-based) without its line break.
 fn line_char_range(text: &str, line: usize) -> (usize, usize) {
     let mut start = 0;
     for (i, content) in text.split('\n').enumerate() {
@@ -6871,7 +6625,6 @@ fn line_char_range(text: &str, line: usize) -> (usize, usize) {
     (start, start)
 }
 
-/// Walks forward through a text, turning increasing byte offsets into char indices and line numbers in one pass.
 struct TextWalk<'a> {
     text: &'a str,
     byte: usize,
@@ -6889,7 +6642,6 @@ impl<'a> TextWalk<'a> {
         }
     }
 
-    /// The char index and line of byte `to`. An offset behind the walk, or not in the text (it was edited this frame), stays where the walk is.
     fn advance(&mut self, to: usize) -> (usize, usize) {
         if let Some(part) = self.text.get(self.byte..to) {
             self.char += part.chars().count();
@@ -6900,7 +6652,6 @@ impl<'a> TextWalk<'a> {
     }
 }
 
-/// Paints the find matches on the editor rows `on_screen` (indices into `visible`), and scrolls to the current one when asked.
 fn paint_matches(
     ui: &egui::Ui,
     output: &egui::text_edit::TextEditOutput,
@@ -6916,7 +6667,6 @@ fn paint_matches(
     for (i, &at) in matches.iter().enumerate() {
         let (first_char, line) = walk.advance(at);
         let current = i == find.current;
-        // laying out a match's place costs a pass over the galley's rows, so only the ones that can be seen get one
         let shown = visible
             .binary_search(&line)
             .is_ok_and(|row| on_screen.contains(&row));
@@ -6932,7 +6682,6 @@ fn paint_matches(
         let end = output
             .galley
             .pos_from_cursor(egui::text::CCursor::new(first_char + query_chars));
-        // A match split across wrapped rows is skipped rather than drawn wrong.
         if (start.top() - end.top()).abs() > 1.0 {
             continue;
         }
@@ -6969,10 +6718,7 @@ fn varp_text(name: Option<&str>, id: usize, value: i32) -> String {
 
 fn pick_file(path: &mut String, name: &str, extension: &str) {
     let mut dialog = rfd::FileDialog::new().add_filter(name, &[extension]);
-    if let Some(dir) = std::path::Path::new(path.as_str())
-        .parent()
-        .filter(|d| d.is_dir())
-    {
+    if let Some(dir) = start_dir(path.as_str()) {
         dialog = dialog.set_directory(dir);
     }
     if let Some(picked) = dialog.pick_file() {
@@ -7015,7 +6761,6 @@ impl eframe::App for LoaderApp {
 
         let window = ctx.content_rect();
         let narrow = window.width() < SIDEBAR_MIN_WINDOW;
-        // As the window shrinks the header reflows: the account controls drop under the wordmark, then stack, then the logo and wordmark stack.
         let wrap_account = window.width() < HEADER_COMPACT_WINDOW;
         let stack_account = window.width() < HEADER_STACK_WINDOW;
         let stack_brand = window.width() < HEADER_TINY_WINDOW;
@@ -7024,7 +6769,6 @@ impl eframe::App for LoaderApp {
             let brand = |ui: &mut egui::Ui| {
                 let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg"))
                     .fit_to_exact_size(egui::vec2(32.0, 32.0));
-                // The sidebar drawer's toggle on narrow windows is this logo, so it always stays.
                 ui.add(logo);
                 ui.label(
                     egui::RichText::new("VOLCREN")
@@ -7081,7 +6825,6 @@ impl eframe::App for LoaderApp {
             ui.add_space(6.0);
         });
         self.update_banner_ui(&ctx, ui);
-        // The log scales with the window: a short window can't be eaten by it, a tall one gets a roomier default.
         let log_max = (window.height() * 0.5).max(60.0);
         egui::Panel::bottom("log")
             .resizable(true)
@@ -7105,7 +6848,6 @@ impl eframe::App for LoaderApp {
                 .frame(crate::theme::sidebar_frame())
                 .show(ui, |ui| self.sidebar_ui(ui));
         } else {
-            // Below the breakpoint the sidebar is a sliding drawer with a skinny handle that stays visible when closed.
             let area = ui.available_rect_before_wrap();
             egui::Panel::left("sidebar_handle_space")
                 .resizable(false)
@@ -7119,7 +6861,6 @@ impl eframe::App for LoaderApp {
                 egui::emath::easing::cubic_out,
             );
             let width = SIDEBAR_WIDTH.min(area.width() * 0.85);
-            // Closed by a click outside, Esc or the handle; the drawer sits above the backdrop so clicks on it aren't taken.
             if slide > 0.0 {
                 let backdrop = egui::Area::new("sidebar_backdrop".into())
                     .order(egui::Order::Foreground)
@@ -7139,7 +6880,6 @@ impl eframe::App for LoaderApp {
             }
             egui::Area::new("sidebar_drawer".into())
                 .order(egui::Order::Tooltip)
-                // Closed, it sits left of the window so only the handle shows; areas are otherwise kept on screen.
                 .constrain(false)
                 .fixed_pos(egui::pos2(area.min.x - width * (1.0 - slide), area.min.y))
                 .show(&ctx, |ui| {
@@ -7148,7 +6888,6 @@ impl eframe::App for LoaderApp {
                         crate::theme::sidebar_frame().show(ui, |ui| {
                             ui.set_width(width - f32::from(crate::theme::SIDEBAR_INSET));
                             ui.set_min_height(area.height() - 12.0);
-                            // The frame inherits the row's horizontal layout; the page tree stacks top to bottom.
                             ui.vertical(|ui| self.sidebar_ui(ui));
                         });
                         ui.allocate_ui(egui::vec2(SIDEBAR_HANDLE_WIDTH, area.height()), |ui| {
@@ -7159,7 +6898,6 @@ impl eframe::App for LoaderApp {
                     });
                 });
         }
-        // The tab's page is a panel with room around it.
         let frame = egui::Frame::central_panel(ui.style())
             .inner_margin((window.width() * 0.02).clamp(8.0, 16.0));
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -7173,15 +6911,10 @@ impl eframe::App for LoaderApp {
                 });
                 ui.separator();
             }
-            // a run page without its run (closed) goes back to the list
             if self.tab == Tab::Run && self.run().is_none() {
                 self.tab = Tab::Sessions;
             }
-            if let LogTab::Run(id) = self.log_tab
-                && self.run_index(id).is_none()
-            {
-                self.log_tab = LogTab::Loader;
-            }
+            self.repair_log_tab();
             let followed = (self.tab, self.active_run);
             if followed != self.followed_tab {
                 self.followed_tab = followed;
@@ -7204,7 +6937,6 @@ impl eframe::App for LoaderApp {
                 Tab::Feedback => self.feedback_ui(ui),
                 Tab::Settings => self.settings_ui(ui),
             }
-            // a restart can ask from any page that shows its button, and stays open across pages
             let ctx = ui.ctx().clone();
             self.start_prompt_ui(&ctx);
             self.warning_ui(&ctx);
@@ -7235,13 +6967,11 @@ impl eframe::App for LoaderApp {
         if let Some(terminal) = &mut self.terminal {
             terminal.close();
         }
-        // Closing must not wait on the network for long
         self.stop_all();
         backend::shutdown();
     }
 }
 
-// What changed in a container since the snapshot before it, then every slot, as RuneLite's inventory delta panel shows them.
 fn inventory_items_ui(
     ui: &mut egui::Ui,
     inspector: &crate::inventory::Inspector,
@@ -7281,7 +7011,6 @@ fn inventory_items_ui(
         }
     }
     ui.strong("Items in Container:");
-    // the inventory is 4 slots wide; other containers fill the width
     let columns = if snapshot.items.len() == 28 {
         4
     } else {
@@ -7310,7 +7039,6 @@ fn inventory_items_ui(
         });
 }
 
-// One node of the widget tree and, when it is open, its children. Hidden widgets are left out when the inspector hides them.
 fn widget_node_ui(
     ui: &mut egui::Ui,
     inspector: &crate::widgets::Inspector,
@@ -7368,7 +7096,6 @@ fn widget_node_ui(
 mod tests {
     use super::*;
 
-    /// One frame of the page tree with these events, and the page it reports picked.
     fn sidebar_frame(
         ctx: &egui::Context,
         events: Vec<egui::Event>,
@@ -7482,7 +7209,10 @@ mod tests {
         let window = egui::Rangef::new(0.0, 600.0);
         let speed = |y| selection_scroll_speed(y, visible, window);
         assert_eq!(speed(400.0), 0.0);
-        assert_eq!(speed(300.0 - SELECTION_SCROLL_RAMP / 2.0), -SELECTION_SCROLL_MAX / 2.0);
+        assert_eq!(
+            speed(300.0 - SELECTION_SCROLL_RAMP / 2.0),
+            -SELECTION_SCROLL_MAX / 2.0
+        );
         assert_eq!(speed(595.0), SELECTION_SCROLL_MAX / 2.0);
         assert_eq!(speed(0.0), -SELECTION_SCROLL_MAX);
         assert_eq!(speed(600.0), SELECTION_SCROLL_MAX);
@@ -7590,7 +7320,6 @@ mod tests {
         let mut walk = TextWalk::new(text);
         assert_eq!(walk.advance(3), (2, 1));
         assert_eq!(walk.advance(7), (6, 2));
-        // behind the walk, or past the end of a text edited this frame: it stays put
         assert_eq!(walk.advance(1), (6, 2));
         assert_eq!(walk.advance(99), (6, 2));
     }

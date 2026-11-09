@@ -6,16 +6,12 @@ use serde_json::{Map, Value, json};
 
 use crate::layouts::{self, Kind, Known, Rules, ScriptLayouts};
 
-/// Narrower than this (in points), a two column form stacks its columns.
 const STACK_BELOW: f32 = 420.0;
 
-/// The gap (in points) between the fields of a form.
 const FIELD_GAP: f32 = 10.0;
 
-/// The gap (in points) between the fields of a row, unless the form's `row_gap` sets one.
 const ROW_GAP: f32 = 24.0;
 
-/// A dropdown's label sits above it and ends with a colon.
 fn with_colon(label: &str) -> String {
     if label.ends_with(':') {
         label.to_owned()
@@ -28,13 +24,10 @@ pub enum FieldValue {
     Check(bool),
     Number(f64),
     Text(String),
-    /// A list's rows: id, label, ticked.
     List(Vec<(String, String, bool)>),
-    /// The name of the chosen equipment or inventory layout, if any.
     Layout(Option<String>),
 }
 
-/// The layout kind of a field, for the `equipment` and `inventory` kinds.
 fn layout_kind(field: &Value) -> Option<Kind> {
     match spec_form::kind(field) {
         "equipment" => Some(Kind::Equipment),
@@ -44,7 +37,6 @@ fn layout_kind(field: &Value) -> Option<Kind> {
     }
 }
 
-/// A form's rules for each layout kind, in `Kind` order.
 struct KindRules([Rules; 3]);
 
 impl KindRules {
@@ -85,7 +77,6 @@ fn collect_one(value: &FieldValue) -> Value {
     }
 }
 
-/// The values by id, a layout field as its layout's name.
 fn collect(values: &HashMap<String, FieldValue>) -> Map<String, Value> {
     values
         .iter()
@@ -278,24 +269,20 @@ impl Form {
         }
     }
 
-    /// What the form's fields of the layout `kind` ask of its layouts: the required items and locked prayers of all of them.
     pub fn rules(&self, kind: Kind) -> &Rules {
         self.rules.of(kind)
     }
 
-    /// Whether the form has a field of the layout `kind`, so its editor tab is shown.
     pub fn has_layout(&self, kind: Kind) -> bool {
         spec_form::fields(&self.spec)
             .iter()
             .any(|field| layout_kind(field) == Some(kind))
     }
 
-    /// The values to remember for the next run: a layout field as its layout's name.
     pub fn remembered(&self) -> Map<String, Value> {
         collect(&self.values)
     }
 
-    /// The label of the button that submits the form.
     pub fn submit_label(&self) -> &str {
         self.spec
             .get("submit")
@@ -303,7 +290,6 @@ impl Form {
             .unwrap_or("Start")
     }
 
-    /// What the form would send the script if submitted now: a layout field as the chosen layout's contents, null for none.
     pub fn submitted(&self, layouts: &ScriptLayouts, known: &Known) -> Outcome {
         let mut values = collect(&self.values);
         let rules = &self.rules;
@@ -319,7 +305,6 @@ impl Form {
         Outcome::Submitted(Value::Object(values))
     }
 
-    /// The form's fields in `ui` for a page hosting its own buttons; with `columns = true` the checks go on the right unless narrower than `STACK_BELOW`.
     pub fn show_inline(&mut self, ui: &mut egui::Ui, layouts: &ScriptLayouts) {
         ui.spacing_mut().item_spacing.y = FIELD_GAP;
         let rules = &self.rules;
@@ -350,7 +335,6 @@ impl Form {
         });
     }
 
-    /// The fields one under another, except that the shown fields next to each other with the same `row` share a line (`show_row`).
     fn show_fields(
         ui: &mut egui::Ui,
         fields: &[&Value],
@@ -381,7 +365,6 @@ impl Form {
         }
     }
 
-    /// A row's fields left to right, each as wide as it needs and `gap` apart, or one under another while the width the row took when last drawn that way doesn't fit.
     fn show_row(
         ui: &mut egui::Ui,
         line: &[&Value],
@@ -401,7 +384,6 @@ impl Form {
             return;
         }
         let row = ui.horizontal_top(|ui| {
-            // text keeps its width, so the row's measured width is what it needs
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
             ui.spacing_mut().item_spacing.x = gap;
             for field in line {
@@ -414,7 +396,6 @@ impl Form {
         ui.data_mut(|d| d.insert_temp(id, row.response.rect.width()));
     }
 
-    /// Whether all the field's `visible_when` rules hold for the values now; a field that is hidden still keeps its value and is still sent.
     fn visible(field: &Value, values: &HashMap<String, FieldValue>) -> bool {
         spec_form::visible_rules(field)
             .into_iter()

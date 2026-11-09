@@ -1,5 +1,3 @@
-//! Running a store script: start a session, download the live revision into memory, and keep the session billed with heartbeats.
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -16,20 +14,15 @@ use crate::api::{
 use crate::libs;
 use crate::script::Process;
 
-/// The server ends a session after 5 minutes without a heartbeat, so the script is stopped before that.
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(4 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// How soon a kept session notices its script has exited.
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
 
-/// The cache folder: each revision is `<script id>_<revision>` in it, with the shared `lib` beside them.
 pub fn cache_root() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "volcren", "Volcren")
-        .map(|dirs| dirs.cache_dir().to_path_buf())
+    crate::paths::project_dirs().map(|dirs| dirs.cache_dir().to_path_buf())
 }
 
-/// A file name from the server, accepted only if it can't leave the revision's folder.
 pub fn safe_file_name(name: &str) -> Option<&str> {
     let bad = name.is_empty()
         || name.len() > 255
@@ -39,7 +32,6 @@ pub fn safe_file_name(name: &str) -> Option<&str> {
     (!bad).then_some(name)
 }
 
-/// Script ids are UUIDs; anything else would be a path component we shouldn't trust.
 pub fn safe_id(id: &str) -> Option<&str> {
     (!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
         .then_some(id)
@@ -49,7 +41,6 @@ pub fn revision_dir(root: &Path, script_id: &str, revision: i64) -> PathBuf {
     root.join(format!("{script_id}_{revision:09}"))
 }
 
-/// Removes every cached revision of a script except `keep`.
 pub fn prune_old(root: &Path, script_id: &str, keep: i64) {
     let keep = format!("{script_id}_{keep:09}");
     let prefix = format!("{script_id}_");
@@ -64,7 +55,6 @@ pub fn prune_old(root: &Path, script_id: &str, keep: i64) {
     }
 }
 
-/// Opens a file the webapp encrypted (`nonce || ciphertext || tag`, AES-256-GCM) authenticated with its place, `volcren:<script id>/<revision>/<name>`.
 pub fn decrypt_file(
     key_hex: &str,
     script_id: &str,
@@ -74,13 +64,8 @@ pub fn decrypt_file(
 ) -> Result<Vec<u8>, String> {
     use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
     let failed = || format!("Couldn't decrypt {name}.");
-    let key = (key_hex.len() == 64)
-        .then(|| {
-            (0..32)
-                .map(|i| u8::from_str_radix(&key_hex[2 * i..2 * i + 2], 16).ok())
-                .collect::<Option<Vec<u8>>>()
-        })
-        .flatten()
+    let key = hex_decode(key_hex)
+        .filter(|key| key.len() == 32)
         .ok_or("The server sent a key that can't be used.")?;
     let key = LessSafeKey::new(
         UnboundKey::new(&AES_256_GCM, &key)
@@ -101,49 +86,51 @@ pub fn decrypt_file(
     Ok(buffer)
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
+pub fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn hex_decode(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect()
 }
 
-/// A revision that is ready to run.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex_encode(&Sha256::digest(bytes))
+}
+
 pub struct Prepared {
     pub session: StartedSession,
     pub entry: PathBuf,
     pub source: String,
-    /// The script's other files by name. They are only ever in memory, and go to the injector over its stdin.
     pub modules: Vec<(String, String)>,
-    /// Something the user should know before the script runs, such as an outdated loader.
     pub warning: Option<String>,
-    /// The lib the script runs against, for bug reports.
     pub lib_version: String,
 }
 
-/// Starts a session and makes its files available, ending the session if that fails; a community script runs only if its revision is `warned`.
 pub fn prepare(api: &Api, script: &StoreScript, warned: Option<i64>) -> Result<Prepared, String> {
     let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
     prepare_warned(api, script, &root, warned)
 }
 
-/// What starting the script would cost, with the account as the server has it now: the balance the loader holds goes stale on a top-up.
 pub fn quote(api: &Api, script_id: &str) -> Result<(Me, Quote), ApiError> {
     let me = api.me()?;
     Ok((me, api.quote(script_id)?))
 }
 
-/// Ends a run's old session, so it isn't counted, and asks what a new one would cost. `None` when the script is no longer listed for the account.
 pub fn restart_quote(
     api: &Api,
     old_session: &str,
     script_id: &str,
     community: bool,
 ) -> Result<Option<(Me, StoreScript, Quote)>, ApiError> {
-    // repeating the end is safe, and it covers one still on its way or one that failed
     let _ = api.end_session(old_session);
     let me = api.me()?;
-    // only testers may ask for the community list; everyone else's community scripts are in the default one
     let Some(script) = api
         .scripts("", "", community && me.can_browse_community())?
         .into_iter()
@@ -155,7 +142,6 @@ pub fn restart_quote(
     Ok(Some((me, script, quote)))
 }
 
-/// Why a start can't go ahead at this quote.
 pub fn start_block(script: &StoreScript, quote: &Quote, credits: i64) -> Option<String> {
     if credits < quote.required {
         return Some(format!(
@@ -172,18 +158,10 @@ pub fn start_block(script: &StoreScript, quote: &Quote, credits: i64) -> Option<
         .then(|| "This script has no live revision.".into())
 }
 
-/// Whether the user must see the pricing first: a restart's price differs from the old session's, or the new one pays the extra-session fee.
 pub fn asks_first(old_price: Option<i64>, quote: &Quote) -> bool {
     old_price.is_some_and(|old| old != quote.price) || quote.fee > 0
 }
 
-/// `prepare_warned` for a script that needs no warning, with the cache folder given so tests don't touch the real one.
-#[cfg(test)]
-pub fn prepare_in(api: &Api, script: &StoreScript, root: &Path) -> Result<Prepared, String> {
-    prepare_warned(api, script, root, None)
-}
-
-/// `prepare` with the cache folder given.
 pub fn prepare_warned(
     api: &Api,
     script: &StoreScript,
@@ -191,7 +169,6 @@ pub fn prepare_warned(
     warned: Option<i64>,
 ) -> Result<Prepared, String> {
     let id = safe_id(&script.id).ok_or("The server sent a script id that can't be used.")?;
-    // Before the session starts, so downloading the lib is never billed.
     let lib = libs::ensure(api, root)?;
     let session = api.start_session(id).map_err(|e| e.to_string())?;
     if script.community && warned != Some(session.revision) {
@@ -220,6 +197,24 @@ pub fn prepare_warned(
     }
 }
 
+pub fn get_ok(
+    agent: &ureq::Agent,
+    url: &str,
+    what: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let response = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("Couldn't download {what}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Couldn't download {what}: the server answered {}.",
+            response.status()
+        ));
+    }
+    Ok(response)
+}
+
 fn fetch(
     api: &Api,
     id: &str,
@@ -228,17 +223,7 @@ fn fetch(
     name: &str,
     sha256: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let mut response = api
-        .agent()
-        .get(url)
-        .call()
-        .map_err(|e| format!("Couldn't download {name}: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Couldn't download {name}: the server answered {}.",
-            response.status()
-        ));
-    }
+    let mut response = get_ok(api.agent(), url, name)?;
     let bytes = response
         .body_mut()
         .with_config()
@@ -258,10 +243,8 @@ fn fetch(
     }
 }
 
-// The entry path, its source, and the other modules as (name, source).
 type Downloaded = (PathBuf, String, Vec<(String, String)>);
 
-/// A script's files, kept in memory (an earlier cached copy is removed); the entry path points into an empty folder.
 fn download_to_memory(
     api: &Api,
     root: &Path,
@@ -293,7 +276,6 @@ fn download_to_memory(
     let mut modules = Vec::new();
     for (file, name) in session.files.iter().zip(&names) {
         let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
-        // The script can only require Luau; anything else it ships has nothing to run it.
         if *name != entry_name && !name.ends_with(".luau") && !name.ends_with(".lua") {
             continue;
         }
@@ -314,29 +296,19 @@ fn download_to_memory(
     ))
 }
 
-/// What the app should do after a heartbeat answer.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     Continue,
-    /// Stop the script and say why. `sign_out` is set when the account itself is gone.
-    Stop {
-        reason: String,
-        sign_out: bool,
-    },
+    Stop { reason: String, sign_out: bool },
 }
 
-/// What `keep` tells the app, which may not draw a frame for a long time.
 #[derive(Debug)]
 pub enum Kept {
-    /// The server's answer to a heartbeat.
     Beat(Heartbeat),
-    /// The script was killed for this reason. `sign_out` is set when the account itself is gone.
     Stop { reason: String, sign_out: bool },
-    /// The script exited, and this is how ending the session went. Always the last event.
     Ended(Result<Ended, ApiError>),
 }
 
-/// Keeps the session of a running script until the script exits, then ends it: heartbeats with the script's stats, and killing the script when the server or a lost connection says to. Blocks, so give it a thread: none of this may depend on the UI drawing frames, which stop while the window is hidden.
 pub fn keep(
     api: &Api,
     session_id: &str,
@@ -367,7 +339,6 @@ pub fn keep(
     report(Kept::Ended(api.end_session(session_id)));
 }
 
-/// The heartbeat timer of one running store script. It owns no clock: callers pass `now`, so tests can drive it.
 pub struct Beat {
     interval: Duration,
     next_due: Instant,
@@ -393,12 +364,10 @@ impl Beat {
         now >= self.next_due
     }
 
-    /// Stats the script reported since the last heartbeat.
     pub fn report(&mut self, experience: i64, gold: i64, custom: &[i64]) {
         self.pending.add(experience, gold, custom);
     }
 
-    /// Starts a heartbeat and returns what to send: the pending stats with the minutes since the last one, measured here.
     pub fn take(&mut self, now: Instant) -> Option<Stats> {
         let mut stats = std::mem::take(&mut self.pending);
         stats.minutes = now.saturating_duration_since(self.last_taken).as_secs_f64() / 60.0;
@@ -423,11 +392,7 @@ impl Beat {
                 reason: end_reason_message(beat.reason.as_deref()).into(),
                 sign_out: false,
             },
-            Err(ApiError::SignedOut(why)) => Verdict::Stop {
-                reason: format!("Signed out: {why}"),
-                sign_out: true,
-            },
-            Err(error @ ApiError::Forbidden(_)) => Verdict::Stop {
+            Err(error @ (ApiError::SignedOut(_) | ApiError::Forbidden(_))) => Verdict::Stop {
                 reason: error.to_string(),
                 sign_out: true,
             },
@@ -436,7 +401,6 @@ impl Beat {
                 sign_out: false,
             },
             Err(error) => {
-                // Not delivered, so the stats go into the next attempt.
                 if let Some(sent) = sent {
                     self.pending.add(sent.experience, sent.gold, &sent.custom);
                 }
@@ -600,7 +564,6 @@ mod tests {
         assert_eq!(beat.on_result(now, sent, network()), Verdict::Continue);
         assert_eq!(beat.next_due - now, Duration::from_secs(10));
 
-        // The undelivered stats are sent again.
         now += Duration::from_secs(10);
         let resent = beat.take(now).unwrap();
         assert_eq!(resent.experience, 50);
@@ -610,7 +573,6 @@ mod tests {
         );
         assert_eq!(beat.next_due - now, Duration::from_secs(20));
 
-        // Backoff is capped, and after 4 minutes without a success the script is stopped.
         let mut verdict = Verdict::Continue;
         while verdict == Verdict::Continue {
             now += Duration::from_secs(30);
@@ -651,7 +613,6 @@ mod decrypt_tests {
 
     const SCRIPT: &str = "10000000-0000-0000-0000-000000000001";
     const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    /// Made by the webapp's `encryptFile` (src/lib/encryption.ts) for revision 7, `main.luau`, "print('hi')".
     const SEALED: &str =
         "e215109cbac11277ceb0ba7977032371b4effbe804668d0342d0f5393ed8dda6488e183c1d10c4";
 

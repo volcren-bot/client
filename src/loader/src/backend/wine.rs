@@ -20,12 +20,10 @@ use super::{Scan, Settings, Target};
 const CLIENT_EXES: &[&str] = &["osclient.exe", "osrswindows.exe"];
 const HELPER_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Which of a prefix's helpers a request goes to; each kind of wait gets its own lane so others don't queue behind it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Lane {
     Main,
     Frames,
-    /// Requests that wait for the client to log something (item changes).
     Events,
 }
 
@@ -117,12 +115,9 @@ fn ensure_connection(
         .lock()
         .map_err(|_| "injector connection registry lock poisoned.".to_string())?;
     let key = (location.prefix.clone(), lane);
-    let alive = registry.get(&key).is_some_and(|server| {
-        server
-            .lock()
-            .map(|mut server| server.alive())
-            .unwrap_or(false)
-    });
+    let alive = registry
+        .get(&key)
+        .is_some_and(|server| server.lock().is_ok_and(|mut server| server.alive()));
     if !alive {
         registry.insert(
             key.clone(),
@@ -209,7 +204,6 @@ pub fn load(target: &Target, settings: &Settings, cursor: &Cursor) -> Result<Loa
     let helper = helper(settings)?;
     let dll = windows_path(&target.location.prefix, Path::new(&settings.dll))?;
     let pid = target.client.pid.to_string();
-    // `cursor <pid> <style> <r> <g> <b> <size>`: the same arguments follow the dll here.
     let cursor = cursor.args(target.client.pid);
     let mut args = vec!["load", pid.as_str(), dll.as_str()];
     args.extend(cursor[2..].iter().map(String::as_str));
@@ -217,21 +211,11 @@ pub fn load(target: &Target, settings: &Settings, cursor: &Cursor) -> Result<Loa
 }
 
 pub fn unload(target: &Target, settings: &Settings) -> Result<(), String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["unload", &target.client.pid.to_string()],
-    )
+    call(target, settings, "unload", &[])
 }
 
 pub fn console(target: &Target, settings: &Settings) -> Result<(), String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["console", &target.client.pid.to_string()],
-    )
+    call(target, settings, "console", &[])
 }
 
 pub fn input(target: &Target, settings: &Settings, input: &Input) -> Result<(), String> {
@@ -265,21 +249,11 @@ pub fn set_cursor(target: &Target, settings: &Settings, cursor: &Cursor) -> Resu
 }
 
 pub fn connection(target: &Target, settings: &Settings) -> Result<Option<Connection>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["status", &target.client.pid.to_string()],
-    )
+    call(target, settings, "status", &[])
 }
 
 pub fn state(target: &Target, settings: &Settings) -> Result<GameState, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["state", &target.client.pid.to_string()],
-    )
+    call(target, settings, "state", &[])
 }
 
 pub fn set_display_name(
@@ -287,30 +261,15 @@ pub fn set_display_name(
     settings: &Settings,
     name: &str,
 ) -> Result<DisplayName, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["name", &target.client.pid.to_string(), name],
-    )
+    call(target, settings, "name", &[name])
 }
 
 pub fn varps(target: &Target, settings: &Settings) -> Result<Option<Vec<i32>>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["varps", &target.client.pid.to_string()],
-    )
+    call(target, settings, "varps", &[])
 }
 
 pub fn varbit(target: &Target, settings: &Settings, id: i32) -> Result<Option<i32>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["varbit", &target.client.pid.to_string(), &id.to_string()],
-    )
+    call(target, settings, "varbit", &[&id.to_string()])
 }
 
 pub fn enum_def(
@@ -318,21 +277,11 @@ pub fn enum_def(
     settings: &Settings,
     id: i32,
 ) -> Result<Option<injector::config::EnumDef>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["enum", &target.client.pid.to_string(), &id.to_string()],
-    )
+    call(target, settings, "enum", &[&id.to_string()])
 }
 
 pub fn varp(target: &Target, settings: &Settings, id: usize) -> Result<Option<i32>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["varp", &target.client.pid.to_string(), &id.to_string()],
-    )
+    call(target, settings, "varp", &[&id.to_string()])
 }
 
 pub fn varbits_of(
@@ -340,16 +289,7 @@ pub fn varbits_of(
     settings: &Settings,
     varp: u16,
 ) -> Result<Vec<(i32, injector::config::VarbitDef, Option<String>)>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &[
-            "varbits-of",
-            &target.client.pid.to_string(),
-            &varp.to_string(),
-        ],
-    )
+    call(target, settings, "varbits-of", &[&varp.to_string()])
 }
 
 pub fn widget(
@@ -358,13 +298,12 @@ pub fn widget(
     group: u16,
     child: u16,
 ) -> Result<Option<Widget>, String> {
-    let helper = helper(settings)?;
-    let (pid, group, child) = (
-        target.client.pid.to_string(),
-        group.to_string(),
-        child.to_string(),
-    );
-    run(&target.location, &helper, &["widget", &pid, &group, &child])
+    call(
+        target,
+        settings,
+        "widget",
+        &[&group.to_string(), &child.to_string()],
+    )
 }
 
 pub fn item_container(
@@ -372,33 +311,18 @@ pub fn item_container(
     settings: &Settings,
     id: i32,
 ) -> Result<Option<Vec<Item>>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["container", &target.client.pid.to_string(), &id.to_string()],
-    )
+    call(target, settings, "container", &[&id.to_string()])
 }
 
 pub fn item_containers(
     target: &Target,
     settings: &Settings,
 ) -> Result<Vec<(i32, Vec<Item>)>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["containers", &target.client.pid.to_string()],
-    )
+    call(target, settings, "containers", &[])
 }
 
 pub fn widget_tree(target: &Target, settings: &Settings) -> Result<injector::WidgetTree, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["widget-tree", &target.client.pid.to_string()],
-    )
+    call(target, settings, "widget-tree", &[])
 }
 
 pub fn game_val_names(
@@ -407,26 +331,22 @@ pub fn game_val_names(
     kind: u32,
     ids: &[i32],
 ) -> Result<Vec<Option<String>>, String> {
-    let helper = helper(settings)?;
-    let (pid, kind) = (target.client.pid.to_string(), kind.to_string());
-    let mut args = vec!["game-vals", pid.as_str(), kind.as_str()];
-    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
-    args.extend(ids.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let kind = kind.to_string();
+    let ids = id_strings(ids);
+    let rest: Vec<&str> = std::iter::once(kind.as_str())
+        .chain(ids.iter().map(String::as_str))
+        .collect();
+    call(target, settings, "game-vals", &rest)
 }
 
-/// For each item, its dose or charge family `(number, id)`, or `None` when its name ends in no number.
 pub fn item_doses(
     target: &Target,
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<injector::config::DoseFamily>>, String> {
-    let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["item-doses", pid.as_str()];
-    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
-    args.extend(ids.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let ids = id_strings(ids);
+    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
+    call(target, settings, "item-doses", &rest)
 }
 
 pub fn item_stackable(
@@ -434,12 +354,9 @@ pub fn item_stackable(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<bool>>, String> {
-    let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["item-stackable", pid.as_str()];
-    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
-    args.extend(ids.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let ids = id_strings(ids);
+    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
+    call(target, settings, "item-stackable", &rest)
 }
 
 pub fn item_icons(
@@ -447,9 +364,6 @@ pub fn item_icons(
     settings: &Settings,
     icons: &[injector::ItemIconRequest],
 ) -> Result<Vec<Option<injector::Image>>, String> {
-    let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["item-icons", pid.as_str()];
     let icons: Vec<String> = icons
         .iter()
         .map(|icon| {
@@ -461,8 +375,8 @@ pub fn item_icons(
             )
         })
         .collect();
-    args.extend(icons.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let rest: Vec<&str> = icons.iter().map(String::as_str).collect();
+    call(target, settings, "item-icons", &rest)
 }
 
 pub fn sprites(
@@ -470,15 +384,11 @@ pub fn sprites(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<injector::Image>>, String> {
-    let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["sprites", pid.as_str()];
-    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
-    args.extend(ids.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let ids = id_strings(ids);
+    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
+    call(target, settings, "sprites", &rest)
 }
 
-/// With nothing new it blocks up to `wait`, so it goes to its own helper.
 pub fn item_changes(
     target: &Target,
     settings: &Settings,
@@ -504,12 +414,9 @@ pub fn item_params(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<std::collections::BTreeMap<u32, injector::config::Value>>>, String> {
-    let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["item-params", pid.as_str()];
-    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
-    args.extend(ids.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let ids = id_strings(ids);
+    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
+    call(target, settings, "item-params", &rest)
 }
 
 pub fn item_names(
@@ -517,21 +424,13 @@ pub fn item_names(
     settings: &Settings,
     ids: &[i32],
 ) -> Result<Vec<Option<String>>, String> {
-    let helper = helper(settings)?;
-    let pid = target.client.pid.to_string();
-    let mut args = vec!["item-names", pid.as_str()];
-    let ids: Vec<String> = ids.iter().map(i32::to_string).collect();
-    args.extend(ids.iter().map(String::as_str));
-    run(&target.location, &helper, &args)
+    let ids = id_strings(ids);
+    let rest: Vec<&str> = ids.iter().map(String::as_str).collect();
+    call(target, settings, "item-names", &rest)
 }
 
 pub fn varc(target: &Target, settings: &Settings, id: i32) -> Result<Option<i32>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["varc", &target.client.pid.to_string(), &id.to_string()],
-    )
+    call(target, settings, "varc", &[&id.to_string()])
 }
 
 pub fn scene_tiles_next_frame(
@@ -548,46 +447,22 @@ pub fn scene_tiles_next_frame(
 }
 
 pub fn npcs(target: &Target, settings: &Settings) -> Result<Vec<Npc>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["npcs", &target.client.pid.to_string()],
-    )
+    call(target, settings, "npcs", &[])
 }
 
 pub fn players(target: &Target, settings: &Settings) -> Result<Vec<Player>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["players", &target.client.pid.to_string()],
-    )
+    call(target, settings, "players", &[])
 }
 
 pub fn packets(target: &Target, settings: &Settings, since: u64) -> Result<PacketPage, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &[
-            "packets",
-            &target.client.pid.to_string(),
-            &since.to_string(),
-        ],
-    )
+    call(target, settings, "packets", &[&since.to_string()])
 }
 
 pub fn packet_layouts(
     target: &Target,
     settings: &Settings,
 ) -> Result<Option<Vec<injector::PacketLayout>>, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &["packet-layouts", &target.client.pid.to_string()],
-    )
+    call(target, settings, "packet-layouts", &[])
 }
 
 pub fn script_runs(
@@ -595,16 +470,7 @@ pub fn script_runs(
     settings: &Settings,
     since: u64,
 ) -> Result<injector::ScriptPage, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &[
-            "scripts",
-            &target.client.pid.to_string(),
-            &since.to_string(),
-        ],
-    )
+    call(target, settings, "scripts", &[&since.to_string()])
 }
 
 pub fn varc_changes(
@@ -612,19 +478,9 @@ pub fn varc_changes(
     settings: &Settings,
     since: u64,
 ) -> Result<injector::VarcPage, String> {
-    let helper = helper(settings)?;
-    run(
-        &target.location,
-        &helper,
-        &[
-            "varc-changes",
-            &target.client.pid.to_string(),
-            &since.to_string(),
-        ],
-    )
+    call(target, settings, "varc-changes", &[&since.to_string()])
 }
 
-/// `lib` is only for scripts run from a local file: store scripts get the downloaded lib beside them.
 pub fn script_command(
     target: Option<&Target>,
     settings: &Settings,
@@ -644,7 +500,6 @@ pub fn script_command(
     };
     let mut command = wine_command(&target.location, &helper(settings)?);
     command.arg("run");
-    // Under Wine the injector needs the script's Windows path; a script outside every drive just can't require from disk.
     if let Some(path) = script.and_then(|s| windows_path(&target.location.prefix, s).ok()) {
         command.args(["--script", &path]);
         if let Some(lib) = lib.and_then(|l| windows_path(&target.location.prefix, l).ok()) {
@@ -725,7 +580,6 @@ fn find_locations() -> Vec<Location> {
             continue;
         }
 
-        // Bundled Wines (AppImages) keep the launcher in `bin/` while the process runs from `lib/wine/<arch>-unix/`.
         let wine = vars
             .get("WINE")
             .map(PathBuf::from)
@@ -745,8 +599,13 @@ fn find_locations() -> Vec<Location> {
             .into_iter()
             .filter(|(k, _)| {
                 k.starts_with("WINE")
-                    // Per-process state of the running client (an inherited socket fd, the preloader's address range).
-                    && !["WINELOADERNOEXEC", "WINEDEBUG", "WINESERVERSOCKET", "WINEPRELOADRESERVE"].contains(&k.as_str())
+                    && ![
+                        "WINELOADERNOEXEC",
+                        "WINEDEBUG",
+                        "WINESERVERSOCKET",
+                        "WINEPRELOADRESERVE",
+                    ]
+                    .contains(&k.as_str())
             })
             .collect();
 
@@ -756,7 +615,6 @@ fn find_locations() -> Vec<Location> {
 }
 
 fn windows_path(prefix: &Path, path: &Path) -> Result<String, String> {
-    // A premium script's entry file doesn't exist (it only lives in memory), so its folder stands in for it.
     let path = match path.canonicalize() {
         Ok(path) => path,
         Err(error) => match (path.parent().map(Path::canonicalize), path.file_name()) {
@@ -801,6 +659,23 @@ fn windows_path(prefix: &Path, path: &Path) -> Result<String, String> {
         .to_string_lossy()
         .replace('/', "\\");
     Ok(format!("{letter}:\\{rest}"))
+}
+
+fn call<T: DeserializeOwned>(
+    target: &Target,
+    settings: &Settings,
+    verb: &str,
+    rest: &[&str],
+) -> Result<T, String> {
+    let helper = helper(settings)?;
+    let pid = target.client.pid.to_string();
+    let mut args = vec![verb, pid.as_str()];
+    args.extend_from_slice(rest);
+    run(&target.location, &helper, &args)
+}
+
+fn id_strings(ids: &[i32]) -> Vec<String> {
+    ids.iter().map(i32::to_string).collect()
 }
 
 fn run<T: DeserializeOwned>(

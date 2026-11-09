@@ -1,25 +1,19 @@
-//! The names of the client's scripts for the Script Inspector, downloaded on demand from RuneLite's `cs2-scripts` repository.
-
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::time::Duration;
 
 const URL: &str = "https://codeload.github.com/runelite/cs2-scripts/zip/refs/heads/master";
-/// The repository is about 10 MB zipped.
 const MAX_DOWNLOAD: u64 = 128 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(120);
-/// How much of a file is read to find its id: the first line is `// 1234`, or a decompiler error naming the script.
 const HEAD: u64 = 256;
 
 #[derive(Default)]
 pub struct Names {
     by_id: HashMap<i32, String>,
     by_name: HashMap<String, Vec<i32>>,
-    /// Which commit the names are from, for the tooltip.
     pub source: String,
 }
 
-/// `name` from `[clientscript,name].cs2` or `[proc,name].cs2`; scripts the decompiler couldn't name (`script4730`) have none.
 fn script_name(file: &str) -> Option<&str> {
     let name = file
         .strip_suffix(".cs2")?
@@ -32,7 +26,6 @@ fn script_name(file: &str) -> Option<&str> {
     (matches!(kind, "clientscript" | "proc") && !name.is_empty() && !unnamed).then_some(name)
 }
 
-/// The script id in the first line of a file: `// 6697`, or an error from the decompiler like `... in script 5474 not implemented`.
 fn script_id(head: &str) -> Option<i32> {
     let line = head.lines().next()?.trim();
     let digits = line
@@ -45,14 +38,13 @@ fn script_id(head: &str) -> Option<i32> {
 }
 
 impl Names {
-    /// Names from (file name, start of the file) pairs; files that aren't named scripts, or whose id can't be read, are left out.
-    fn from_files<'a>(files: impl Iterator<Item = (&'a str, String)>, source: String) -> Self {
+    fn from_files<'a>(files: impl Iterator<Item = (&'a str, &'a str)>, source: String) -> Self {
         let mut names = Self {
             source,
             ..Self::default()
         };
         for (file, head) in files {
-            let (Some(name), Some(id)) = (script_name(file), script_id(&head)) else {
+            let (Some(name), Some(id)) = (script_name(file), script_id(head)) else {
                 continue;
             };
             names.by_id.insert(id, name.to_owned());
@@ -65,7 +57,6 @@ impl Names {
         names
     }
 
-    /// Names from the repository's zip: the commit it is of is in the archive's comment.
     pub fn from_zip(zip: &[u8]) -> Result<Self, String> {
         let mut archive = zip::ZipArchive::new(Cursor::new(zip))
             .map_err(|e| format!("the download isn't a zip: {e}"))?;
@@ -94,7 +85,7 @@ impl Names {
         let names = Self::from_files(
             files
                 .iter()
-                .map(|(file, head)| (file.as_str(), head.clone())),
+                .map(|(file, head)| (file.as_str(), head.as_str())),
             source,
         );
         if names.is_empty() {
@@ -103,13 +94,8 @@ impl Names {
         Ok(names)
     }
 
-    /// Downloads the names; slow (the whole repository), so not on the UI thread.
     pub fn download() -> Result<Self, String> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            .user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION")))
-            .build()
-            .into();
+        let agent: ureq::Agent = crate::http::user_agent_builder(TIMEOUT).build().into();
         let mut response = agent
             .get(URL)
             .call()
@@ -131,12 +117,10 @@ impl Names {
         self.by_id.is_empty()
     }
 
-    /// The name of script `id`, if known.
     pub fn name(&self, id: i32) -> Option<&str> {
         self.by_id.get(&id).map(String::as_str)
     }
 
-    /// The ids named `name`, in any case; a client script and a proc can share a name.
     pub fn ids(&self, name: &str) -> &[i32] {
         self.by_name
             .get(&name.to_ascii_lowercase())
@@ -153,7 +137,7 @@ pub fn names_for_test(pairs: &[(i32, &str)]) -> Names {
     Names::from_files(
         files
             .iter()
-            .map(|(file, head)| (file.as_str(), head.clone())),
+            .map(|(file, head)| (file.as_str(), head.as_str())),
         "test".into(),
     )
 }
@@ -246,7 +230,6 @@ mod tests {
         assert!(Names::from_zip(b"not a zip").is_err());
     }
 
-    /// Needs the network: `cargo test -p loader -- --ignored downloads_the_real_repository`.
     #[test]
     #[ignore]
     fn downloads_the_real_repository() {

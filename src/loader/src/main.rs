@@ -23,6 +23,7 @@ mod log_view;
 mod logo;
 mod packet_defs;
 mod packets;
+mod paths;
 mod script;
 mod script_log;
 mod script_names;
@@ -45,14 +46,12 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let instance = update::Instance::hold();
-    // another open loader may be in the middle of its own update
     if instance.alone() {
         update::cleanup();
     }
     transports::start();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // Keeps the saved settings, which eframe stores under the app id (the old window title).
             .with_app_id("Loader")
             .with_inner_size([900.0, 640.0])
             .with_min_inner_size([520.0, 300.0]),

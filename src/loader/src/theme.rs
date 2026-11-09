@@ -1,6 +1,5 @@
 use eframe::egui::{self, Color32, CornerRadius, Stroke, vec2};
 
-/// Fira Code Nerd Font Mono (SIL OFL, see `assets/FiraCode-LICENSE.txt`) ahead of egui's monospace font, which covers the rest.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -27,28 +26,24 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// The bold weight of Fira Code, used for the app title.
 pub fn bold_family() -> egui::FontFamily {
     egui::FontFamily::Name("fira_code_bold".into())
 }
 
-/// Tokyonight (night), the webapp's default colorscheme.
 const BG_DARK: Color32 = Color32::from_rgb(0x16, 0x16, 0x1e);
 const BG: Color32 = Color32::from_rgb(0x1a, 0x1b, 0x26);
 const BG_FLOAT: Color32 = Color32::from_rgb(0x1f, 0x23, 0x35);
 const BG_HL: Color32 = Color32::from_rgb(0x29, 0x2e, 0x42);
 const BORDER: Color32 = Color32::from_rgb(0x3b, 0x42, 0x61);
-const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
+pub const FG: Color32 = Color32::from_rgb(0xc0, 0xca, 0xf5);
 const FG_DARK: Color32 = Color32::from_rgb(0xa9, 0xb1, 0xd6);
 pub const COMMENT: Color32 = Color32::from_rgb(0x56, 0x5f, 0x89);
 pub const BLUE: Color32 = Color32::from_rgb(0x7a, 0xa2, 0xf7);
 const SEL: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
 pub const GREEN: Color32 = Color32::from_rgb(0x9e, 0xce, 0x6a);
 pub const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xaf, 0x68);
-const PURPLE: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
+pub const PURPLE: Color32 = Color32::from_rgb(0xbb, 0x9a, 0xf7);
 pub const RED: Color32 = Color32::from_rgb(0xf7, 0x76, 0x8e);
-/// An amount of credits as users see it (`api::models::credits_label`, "12.50 CREDIT"), then `suffix` ("/h", or " per 30 days")
-/// right after it, smaller and weak.
 pub fn credits(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::Response {
     let style = ui.style().clone();
     let size = ui.ctx().fonts_mut(|fonts| text.font_height(fonts, &style));
@@ -62,7 +57,6 @@ pub fn credits(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::R
     .response
 }
 
-/// A row nested under a sidebar item, drawn with the tree's vertical bar before its own branch.
 pub fn sidebar_child<T: PartialEq>(
     ui: &mut egui::Ui,
     current: &mut T,
@@ -72,56 +66,91 @@ pub fn sidebar_child<T: PartialEq>(
     last: bool,
 ) -> egui::Response {
     let selected = *current == value;
+    let (rect, response) = select_row(ui, selected, || *current = value);
+    let text = if dim && !selected {
+        COMMENT
+    } else {
+        row_text_color(selected, response.hovered())
+    };
+    sidebar_row(
+        ui,
+        rect,
+        selected || response.hovered(),
+        text,
+        |job, font| {
+            for (s, color) in [
+                ("│  ", COMMENT),
+                (if last { "└─ " } else { "├─ " }, COMMENT),
+                (name, text),
+            ] {
+                job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
+            }
+        },
+    );
+    response
+}
+
+fn select_row(
+    ui: &mut egui::Ui,
+    selected: bool,
+    select: impl FnOnce(),
+) -> (egui::Rect, egui::Response) {
     let (rect, mut response) = ui.allocate_exact_size(
         vec2(ui.available_width(), ui.spacing().interact_size.y),
         egui::Sense::click(),
     );
     if response.clicked() && !selected {
-        *current = value;
+        select();
         response.mark_changed();
     }
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if ui.is_rect_visible(rect) {
-        let text = if selected {
-            BLUE
-        } else if dim {
-            COMMENT
-        } else if response.hovered() {
-            FG
-        } else {
-            FG_DARK
-        };
-        if selected || response.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
-        }
-        let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
-        let mut job = egui::text::LayoutJob {
-            wrap: egui::text::TextWrapping {
-                max_width: rect.width() - 16.0,
-                max_rows: 1,
-                break_anywhere: true,
-                overflow_character: Some('\u{2026}'),
-            },
-            ..Default::default()
-        };
-        for (s, color) in [
-            ("│  ", COMMENT),
-            (if last { "└─ " } else { "├─ " }, COMMENT),
-            (name, text),
-        ] {
-            job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
-        }
-        let galley = ui.painter().layout_job(job);
-        ui.painter().galley(
-            egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            text,
-        );
-    }
-    response
+    (
+        rect,
+        response.on_hover_cursor(egui::CursorIcon::PointingHand),
+    )
 }
 
-/// A flat, square, all-monospace look after the webapp's Neovim/LazyVim layer, always dark.
+fn row_text_color(selected: bool, hovered: bool) -> Color32 {
+    if selected {
+        BLUE
+    } else if hovered {
+        FG
+    } else {
+        FG_DARK
+    }
+}
+
+fn sidebar_row(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    highlighted: bool,
+    text: Color32,
+    append: impl FnOnce(&mut egui::text::LayoutJob, &egui::FontId),
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    if highlighted {
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
+    }
+    let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
+    let mut job = egui::text::LayoutJob {
+        wrap: egui::text::TextWrapping {
+            max_width: rect.width() - 16.0,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('\u{2026}'),
+        },
+        ..Default::default()
+    };
+    append(&mut job, &font);
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        text,
+    );
+}
+
 pub fn apply(ctx: &egui::Context) {
     install_fonts(ctx);
     ctx.set_theme(egui::ThemePreference::Dark);
@@ -181,21 +210,22 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
-/// The content under a row of nested tabs, with room around it.
-pub fn tab_content<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::new().inner_margin(12.0).show(ui, add).inner
-}
-
-/// A bordered panel directly under a row of tabs, with room inside it.
-pub fn tab_panel<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+fn tab_frame<R>(ui: &mut egui::Ui, stroke: Stroke, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, BORDER))
+        .stroke(stroke)
         .inner_margin(12.0)
         .show(ui, add)
         .inner
 }
 
-/// A bufferline tab: the open one sits on a lifted background with a blue top bar, the others are dim text.
+pub fn tab_content<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    tab_frame(ui, Stroke::NONE, add)
+}
+
+pub fn tab_panel<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    tab_frame(ui, Stroke::new(1.0, BORDER), add)
+}
+
 pub fn tab_value<T: PartialEq>(
     ui: &mut egui::Ui,
     current: &mut T,
@@ -238,7 +268,6 @@ pub fn tab_value<T: PartialEq>(
     response
 }
 
-/// The webapp's neo-tree header: a bold, spaced, uppercase purple label.
 pub fn sidebar_header(ui: &mut egui::Ui, label: &str) {
     ui.add_space(4.0);
     ui.label(
@@ -249,9 +278,7 @@ pub fn sidebar_header(ui: &mut egui::Ui, label: &str) {
     ui.add_space(2.0);
 }
 
-/// The tree's root row (not clickable): `icon name/` in yellow.
 pub fn sidebar_root(ui: &mut egui::Ui, icon: &str, name: &str) {
-    // Not selectable, so hovering it keeps the normal pointer instead of the text cursor.
     ui.add(
         egui::Label::new(
             egui::RichText::new(format!("{icon} {name}/"))
@@ -262,7 +289,6 @@ pub fn sidebar_root(ui: &mut egui::Ui, icon: &str, name: &str) {
     );
 }
 
-/// A neo-tree row: dim guide, icon and `name/`; the open one is lifted and blue, hover brightens it.
 pub fn sidebar_item<T: PartialEq>(
     ui: &mut egui::Ui,
     current: &mut T,
@@ -272,62 +298,32 @@ pub fn sidebar_item<T: PartialEq>(
     last: bool,
 ) -> egui::Response {
     let selected = *current == value;
-    let (rect, mut response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), ui.spacing().interact_size.y),
-        egui::Sense::click(),
+    let (rect, response) = select_row(ui, selected, || *current = value);
+    let text = row_text_color(selected, response.hovered());
+    sidebar_row(
+        ui,
+        rect,
+        selected || response.hovered(),
+        text,
+        |job, font| {
+            for (s, color) in [
+                (if last { "└─ " } else { "├─ " }, COMMENT),
+                (icon, text),
+                (" ", text),
+                (name, text),
+                ("/", text),
+            ] {
+                job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
+            }
+        },
     );
-    if response.clicked() && !selected {
-        *current = value;
-        response.mark_changed();
-    }
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if ui.is_rect_visible(rect) {
-        let text = if selected {
-            BLUE
-        } else if response.hovered() {
-            FG
-        } else {
-            FG_DARK
-        };
-        if selected || response.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::ZERO, BG_HL);
-        }
-        let font = egui::FontId::monospace(SIDEBAR_FONT_SIZE);
-        let mut job = egui::text::LayoutJob {
-            wrap: egui::text::TextWrapping {
-                max_width: rect.width() - 16.0,
-                max_rows: 1,
-                break_anywhere: true,
-                overflow_character: Some('\u{2026}'),
-            },
-            ..Default::default()
-        };
-        for (s, color) in [
-            (if last { "└─ " } else { "├─ " }, COMMENT),
-            (icon, text),
-            (" ", text),
-            (name, text),
-            ("/", text),
-        ] {
-            job.append(s, 0.0, egui::TextFormat::simple(font.clone(), color));
-        }
-        let galley = ui.painter().layout_job(job);
-        ui.painter().galley(
-            egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            text,
-        );
-    }
     response
 }
 
-/// Text size of the sidebar's list rows.
 const SIDEBAR_FONT_SIZE: f32 = 15.0;
 
-/// Space left of the sidebar's list.
 pub const SIDEBAR_INSET: i8 = 8;
 
-/// The sidebar's own surface: darker than the page with a single line on its right edge.
 pub fn sidebar_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(BG_DARK)
@@ -340,7 +336,6 @@ pub fn sidebar_frame() -> egui::Frame {
         })
 }
 
-/// The narrow-window sidebar toggle: a skinny strip with a chevron pointing right (closed, `open` 0) to left (open, `open` 1).
 pub fn sidebar_handle(ui: &mut egui::Ui, open: f32) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);

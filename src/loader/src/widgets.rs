@@ -1,5 +1,3 @@
-//! The Widget Inspector: the open interfaces as a tree, the selected widget's fields and its bounds drawn on the client.
-
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -7,29 +5,20 @@ use std::{
 
 use injector::{TreeWidget, WidgetDetail, WidgetTree};
 
-/// The game value kind that names interfaces (`ipc::state::game_val::INTERFACE`, which the loader does not link); the id is the group.
 pub const INTERFACE_GAME_VAL: u32 = 14;
-/// How often "Follow mouse" looks at where the client's mouse is.
 pub const FOLLOW_EVERY: Duration = Duration::from_millis(100);
-/// RuneLite's colour for the selected widget (cyan).
 pub const SELECTED_COLOR: &str = "00ffff";
 
-/// One read of the client: the tree, and the names of the interface groups it hasn't named yet.
 pub struct Poll {
     pub tree: WidgetTree,
     pub names: Vec<(i32, String)>,
 }
 
-/// How a node hangs in the tree: RuneLite's letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// a top of the root interface
     Root,
-    /// a child a script made (dynamic)
     Dynamic,
-    /// a component of an interface
     Static,
-    /// the top of an interface opened inside a component
     Nested,
 }
 
@@ -51,7 +40,6 @@ pub struct Node {
     pub children: Vec<usize>,
 }
 
-/// The widgets of one read, linked up.
 #[derive(Default)]
 pub struct Built {
     pub nodes: Vec<Node>,
@@ -59,7 +47,6 @@ pub struct Built {
 }
 
 impl Built {
-    /// Links the widgets: dynamic children, then static children, then nested interfaces, under each node.
     pub fn new(tree: &WidgetTree) -> Self {
         let mut nodes: Vec<Node> = Vec::with_capacity(tree.widgets.len());
         let mut by_id: HashMap<i32, usize> = HashMap::new();
@@ -86,7 +73,6 @@ impl Built {
             .map(|sub| (sub.group, sub.parent))
             .collect();
         let mut roots = Vec::new();
-        // (parent node, order within it, child): sorted afterwards, so a node's children come out dynamic, static, nested
         let mut links: Vec<(usize, u8, usize)> = Vec::new();
         for (
             index,
@@ -126,14 +112,12 @@ impl Built {
         Self { nodes, roots }
     }
 
-    /// The node for a widget, by component id and index (a dynamic child has its own index under its owner's id).
     pub fn find(&self, id: i32, index: i32) -> Option<usize> {
         self.nodes
             .iter()
             .position(|node| node.widget.id == id && node.widget.index == index)
     }
 
-    /// The indices from a root down to `target`, for opening the tree to it.
     pub fn path_to(&self, target: usize) -> Vec<usize> {
         let mut parent_of = HashMap::new();
         for (index, node) in self.nodes.iter().enumerate() {
@@ -149,7 +133,6 @@ impl Built {
         path
     }
 
-    /// The most specific widget under a canvas point: the smallest shown area, the later in tree order on a tie.
     pub fn under(&self, x: i32, y: i32, hide_hidden: bool) -> Option<usize> {
         let mut found: Option<(i64, usize)> = None;
         let mut stack: Vec<usize> = self.roots.iter().rev().copied().collect();
@@ -182,7 +165,6 @@ fn kind_order(kind: Kind) -> u8 {
     }
 }
 
-/// RuneLite's names for the widget types.
 pub fn type_name(kind: i32) -> &'static str {
     match kind {
         0 => "LAYER",
@@ -203,9 +185,7 @@ pub struct Inspector {
     pub hide_hidden: bool,
     pub follow_mouse: bool,
     pub error: Option<String>,
-    /// The widget picked in the tree: its component id and index.
     pub selected: Option<(i32, i32)>,
-    /// Open the tree to the selection on the next frame (a pick made outside the tree).
     pub reveal: bool,
     built: Built,
     read: bool,
@@ -228,12 +208,10 @@ impl Inspector {
         &self.built
     }
 
-    /// Whether a read has been made (the tree is empty before one).
     pub fn has_read(&self) -> bool {
         self.read
     }
 
-    /// Whether the inspector is showing client `pid`.
     pub fn has_pid(&self, pid: u32) -> bool {
         self.pid == Some(pid)
     }
@@ -242,12 +220,10 @@ impl Inspector {
         self.reading
     }
 
-    /// The interface groups the loader has the name of.
     pub fn known_groups(&self) -> Vec<i32> {
         self.names.keys().copied().collect()
     }
 
-    /// `149.0 inventory` or just `149.0`; `[n]` after it for a child with an index.
     pub fn identifier(&self, widget: &injector::Widget) -> String {
         let mut text = format!("{}.{}", widget.group, widget.child);
         if widget.index != -1 {
@@ -281,7 +257,6 @@ impl Inspector {
                 self.names.extend(names);
                 self.built = Built::new(&tree);
                 self.read = true;
-                // the selection stays if the widget is still there
                 if self
                     .selected
                     .is_some_and(|(id, index)| self.built.find(id, index).is_none())
@@ -300,7 +275,6 @@ impl Inspector {
             .map(|node| &self.built.nodes[node])
     }
 
-    /// Selects the widget under the client's mouse, when "Follow mouse" is on and it is time to look.
     pub fn follow_due(&mut self, now: Instant) -> bool {
         if !self.follow_mouse
             || !self.read
@@ -314,12 +288,10 @@ impl Inspector {
         true
     }
 
-    /// The read of the mouse that `follow_due` asked for is over.
     pub fn mouse_done(&mut self) {
         self.mouse_busy = false;
     }
 
-    /// Picks the widget under a canvas point.
     pub fn pick_at(&mut self, x: i32, y: i32) {
         if let Some(index) = self.built.under(x, y, self.hide_hidden) {
             let widget = &self.built.nodes[index].widget;
@@ -331,7 +303,6 @@ impl Inspector {
         }
     }
 
-    /// The nodes to open so the selection shows.
     pub fn open_path(&self) -> HashSet<usize> {
         let Some((id, index)) = self.selected else {
             return HashSet::new();
@@ -342,7 +313,6 @@ impl Inspector {
             .unwrap_or_default()
     }
 
-    /// The layer that draws the selected widget's bounds on the client (see `injector::scene_tiles`).
     pub fn highlight_layers(&self) -> Vec<String> {
         self.selected_node()
             .filter(|node| node.widget.width > 0 && node.widget.height > 0)
@@ -356,7 +326,6 @@ impl Inspector {
             .collect()
     }
 
-    /// The fields of a widget the loader can read, as (name, value) rows: RuneLite's, in its order, for those the agent reads.
     pub fn fields(&self, node: &Node) -> Vec<(&'static str, String)> {
         let (w, d) = (&node.widget, &node.detail);
         let color = |value: i32| {
@@ -507,11 +476,9 @@ mod tests {
     fn links_dynamic_then_static_then_nested() {
         let built = Built::new(&tree());
         assert_eq!(built.roots, [0]);
-        // 161.0 has the static 161.2, which has the nested interface 149 as its one child
         assert_eq!(built.nodes[0].children, [1]);
         assert_eq!(built.nodes[1].children, [2]);
         assert_eq!(built.nodes[2].kind, Kind::Nested);
-        // under 149.0 the dynamic child comes before the static one
         assert_eq!(built.nodes[2].children, [4, 3]);
         assert_eq!(built.nodes[4].kind, Kind::Dynamic);
         assert_eq!(built.nodes[3].kind, Kind::Static);
@@ -530,7 +497,6 @@ mod tests {
     #[test]
     fn picks_the_smallest_widget_under_a_point() {
         let built = Built::new(&tree());
-        // inside the dynamic child (40, 40, 5, 5), which is inside the static one
         assert_eq!(built.under(41, 41, true), Some(4));
         assert_eq!(built.under(31, 31, true), Some(3));
         assert_eq!(built.under(100, 100, true), Some(2));
@@ -579,7 +545,6 @@ mod tests {
             }),
         );
         assert_eq!(inspector.selected, Some((149 << 16 | 1, -1)));
-        // a widget that went away is no longer selected
         let mut gone = tree();
         gone.widgets.remove(3);
         inspector.start(1);

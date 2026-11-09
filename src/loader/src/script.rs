@@ -3,7 +3,7 @@ use std::{
     path::Path,
     process::{Child, ChildStdin, ExitStatus, Stdio},
     sync::{
-        Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
+        Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, channel},
     },
@@ -19,16 +19,17 @@ use crate::api::Stats;
 use crate::whitelist::Whitelist;
 
 pub fn read<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.read().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub fn write<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What a running script is answered from, on the thread reading its output: a script blocks until it gets an answer, and the UI draws no frames while the window is hidden.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 #[derive(Clone)]
 pub struct Host {
     pub ctx: egui::Context,
@@ -37,7 +38,6 @@ pub struct Host {
 }
 
 impl Host {
-    /// The reply to a line that asks for a saved PIN or lamp skill, and what it was for.
     fn lookup(&self, line: &str) -> Option<(String, &'static str)> {
         if let Some(hash) = line.strip_prefix(injector::form::PIN_REQUEST_PREFIX) {
             let answer = read(&self.accounts).pin_for(hash.trim());
@@ -50,15 +50,12 @@ impl Host {
 }
 
 fn reply(stdin: &Mutex<ChildStdin>, line: &str, what: &str) -> Result<(), String> {
-    let mut stdin = stdin
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut stdin = lock(stdin);
     writeln!(stdin, "{line}")
         .and_then(|()| stdin.flush())
         .map_err(|e| format!("Couldn't answer the script's {what}: {e}"))
 }
 
-/// Makes a script's `http_request` on a thread of its own if its host is whitelisted, and sends the response (or why there is none) back.
 fn answer_http(stdin: Arc<Mutex<ChildStdin>>, payload: &str, whitelist: Whitelist) {
     let request = injector::http::parse_request(payload);
     thread::spawn(move || {
@@ -69,12 +66,9 @@ fn answer_http(stdin: Arc<Mutex<ChildStdin>>, payload: &str, whitelist: Whitelis
 
 pub enum ScriptEvent {
     Output(String),
-    /// A line from `report_warning`, shown in the warning color.
     Warning(String),
     Form(serde_json::Value),
-    /// The breaks and sleeps from `report_breaks`.
     Breaks(injector::form::BreakPlan),
-    /// What the script counts, from `report_counters`.
     Counters(Vec<injector::form::Counter>),
     Finished {
         result: Result<(), String>,
@@ -82,7 +76,6 @@ pub enum ScriptEvent {
     },
 }
 
-/// A script's process and its `report_stats` gains, for a thread that can't wait for the UI's next frame.
 #[derive(Clone)]
 pub struct Process {
     child: Arc<Mutex<Child>>,
@@ -99,10 +92,8 @@ impl Process {
         }
     }
 
-    fn child(&self) -> std::sync::MutexGuard<'_, Child> {
-        self.child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn child(&self) -> MutexGuard<'_, Child> {
+        lock(&self.child)
     }
 
     fn id(&self) -> u32 {
@@ -126,20 +117,13 @@ impl Process {
         self.status().is_some()
     }
 
-    /// The gains the script reported since the last call.
     pub fn take_stats(&self) -> Stats {
-        std::mem::take(
-            &mut *self
-                .stats
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        std::mem::take(&mut *lock(&self.stats))
     }
 }
 
 pub struct Script {
     process: Process,
-    /// Shared with the threads that answer HTTP requests, which write their reply when the response is in.
     stdin: Arc<Mutex<ChildStdin>>,
     output: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
@@ -150,7 +134,6 @@ pub struct Script {
 }
 
 impl Script {
-    /// `lib` is your own lib folder, for a script run from a local file.
     pub fn start(
         host: &Host,
         source: &str,
@@ -162,7 +145,6 @@ impl Script {
         Self::start_with(host, source, &[], path, lib, target, settings)
     }
 
-    /// `modules` are the script's other files by name, sent to the injector to keep in memory, beside `path`.
     pub fn start_with(
         host: &Host,
         source: &str,
@@ -203,8 +185,8 @@ impl Script {
             let json = serde_json::to_string(
                 &modules
                     .iter()
-                    .cloned()
-                    .collect::<std::collections::HashMap<_, _>>(),
+                    .map(|(name, source)| (name.as_str(), source.as_str()))
+                    .collect::<std::collections::HashMap<&str, &str>>(),
             )
             .expect("strings serialize");
             format!("{}{}\n{json}", injector::form::MODULES_PREFIX, json.len())
@@ -216,7 +198,6 @@ impl Script {
             .and_then(|()| stdin.write_all(source.as_bytes()))
             .and_then(|()| stdin.flush())
         {
-            // The injector quit before reading the script (bad arguments, an old build): say why instead of "broken pipe".
             drop(stdin);
             let _ = child.wait();
             let mut said = String::new();
@@ -247,15 +228,11 @@ impl Script {
                 }
                 let line = String::from_utf8_lossy(&entry).into_owned();
                 entry.clear();
-                // A bad report goes on as a line, for `poll` to say so
                 if let Some((experience, gold, custom)) = line
                     .strip_prefix(injector::form::STATS_PREFIX)
                     .and_then(injector::form::parse_stats)
                 {
-                    stats
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .add(experience, gold, &custom);
+                    lock(&stats).add(experience, gold, &custom);
                     continue;
                 }
                 if let Some(payload) = line.strip_prefix(injector::http::REQUEST_PREFIX) {
@@ -315,17 +292,14 @@ impl Script {
         self.reply(&reply.to_string(), "form")
     }
 
-    /// Pushes new settings to the running script, which picks them up with `form_update()`.
     pub fn push_update(&mut self, values: &serde_json::Value) -> Result<(), String> {
         self.reply(&injector::form::update_line(values), "settings update")
     }
 
-    /// Sends the running script a new break and sleep config, which it plans from at its next `do_antiban`.
     pub fn push_antiban(&mut self, config: &injector::antiban::Config) -> Result<(), String> {
         self.reply(&injector::antiban::line(config), "breaks update")
     }
 
-    /// Sends the running script which types of transport are off, which it plans by from its next walk.
     pub fn push_transport_settings(
         &mut self,
         settings: &injector::transports::Settings,
@@ -336,7 +310,6 @@ impl Script {
         )
     }
 
-    /// Asks the script to skip the next occurrence of break (or sleep) number `index` of the config, counting from 0.
     pub fn skip_next(&mut self, kind: &str, index: u32) -> Result<(), String> {
         self.reply(&injector::antiban::skip_line(kind, index), "skip")
     }
@@ -631,7 +604,6 @@ mod tests {
         assert!(script.process().take_stats().is_empty());
     }
 
-    /// A server for session `s1`: a heartbeat answers `alive`, ending the session charges 60.
     fn session_server(alive: bool) -> crate::fake_api::FakeServer {
         crate::fake_api::FakeServer::start(move |_, request| {
             if request.path.ends_with("/end") {
@@ -645,7 +617,6 @@ mod tests {
         })
     }
 
-    /// Keeps session `s1` of the script on a thread, as the app does, heartbeating every 50 ms. Nothing here ever polls the script, as with a window that draws no frames.
     fn keep_on_a_thread(
         fake: &crate::fake_api::FakeServer,
         script: &Script,
@@ -784,7 +755,6 @@ mod tests {
         assert_eq!(end.map(|(_, stopped)| stopped), Some(true));
     }
 
-    /// A server on 127.0.0.1 that answers each connection by path: `/hi` with a body, `/hop` with a redirect to `localhost`.
     fn serve() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -825,7 +795,6 @@ mod tests {
              print(http_request({{ url = 'http://127.0.0.1:{port}/', headers = {{ Host = 'evil.com' }} }}))"
             ),
         );
-        // Nothing polls until the script is done: it gets its answers without the UI.
         let start = Instant::now();
         while !script.process().exited() {
             assert!(

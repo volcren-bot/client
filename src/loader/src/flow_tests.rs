@@ -1,5 +1,3 @@
-//! The whole run-a-store-script flow (lib install, start, download, heartbeat, end) against a fake server.
-
 use std::{
     fs,
     io::{Cursor, Write},
@@ -12,10 +10,7 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 use crate::{
     api::{Api, ApiError, Config, Stats, StoreScript, models::Quote},
     fake_api::{FakeServer, Reply, Request},
-    session::{
-        asks_first, prepare_in, prepare_warned, restart_quote, revision_dir, sha256_hex,
-        start_block,
-    },
+    session::{asks_first, prepare_warned, restart_quote, revision_dir, sha256_hex, start_block},
 };
 
 const SCRIPT_ID: &str = "7d081fdd-59de-4a4e-9c29-b2f92d9bc697";
@@ -24,31 +19,22 @@ const LIB_VERSION: &str = "2026.10.26-abc1234";
 const MAIN: &str = "print('main')";
 const UTIL: &str = "return 1";
 
-/// What the fake server does, so each test can break one thing.
 #[derive(Clone, Copy)]
 struct Server {
     revision: i64,
     start_status: u16,
-    /// The status of the script files.
     file_status: u16,
-    /// Serve a wrong checksum for the files.
     wrong_checksum: bool,
     entry: &'static str,
-    /// 404 for the lib index, as before the first lib release.
     no_lib: bool,
-    /// Credits per minute of the started session.
     price: i64,
-    /// Serve the files encrypted, and the key with the session.
     encrypted: bool,
-    /// The account's role: below tester the community list is refused.
     role: &'static str,
-    /// The account's balance.
     credits: i64,
 }
 
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
-/// What the webapp stores: nonce || ciphertext || tag, bound to the file's place.
 fn seal(revision: i64, name: &str, plain: &str) -> Vec<u8> {
     use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
     let key: Vec<u8> = (0..32).collect();
@@ -169,7 +155,6 @@ impl Server {
                 json!({ "error": "Not enough credits.", "required": 300 }),
             ),
             ("POST", "/launcher/sessions") => {
-                // the checksum is of the file as stored, so of the ciphertext when encrypted
                 let checksum = |name: &str, text: &str| {
                     if self.wrong_checksum {
                         "0".repeat(64)
@@ -270,13 +255,12 @@ fn a_store_script_runs_from_start_to_end() {
     let api = api(&fake);
     let root = cache("full");
 
-    let prepared = prepare_in(&api, &script(), &root).expect("prepare");
+    let prepared = prepare_warned(&api, &script(), &root, None).expect("prepare");
     assert_eq!(prepared.source, MAIN);
     assert_eq!(prepared.warning, None);
     assert_eq!(prepared.session.session_id, "s1");
     let dir = revision_dir(&root, SCRIPT_ID, 4);
     assert_eq!(prepared.entry, dir.join("main.luau"));
-    // A script is never written to disk: its other files are handed over in memory.
     assert_eq!(
         prepared.modules,
         vec![("util.luau".to_owned(), UTIL.to_owned())]
@@ -286,7 +270,6 @@ fn a_store_script_runs_from_start_to_end() {
         0,
         "the revision folder is empty"
     );
-    // The lib sits beside the revision folders, which is where `require("../lib/...")` looks.
     assert_eq!(
         fs::read_to_string(root.join("lib/main/game_state.luau")).unwrap(),
         "return 1"
@@ -370,7 +353,7 @@ fn encrypted_files_are_opened_with_the_session_key() {
         ..Server::healthy()
     }
     .start();
-    let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
+    let prepared = prepare_warned(&api(&fake), &script(), &root, None).expect("prepare");
     assert_eq!(prepared.source, MAIN);
     assert_eq!(
         prepared.modules,
@@ -394,8 +377,8 @@ fn every_start_downloads_the_files_again_but_reuses_the_lib() {
     .start();
     let api = api(&fake);
     let root = cache("reuse");
-    prepare_in(&api, &free_script(), &root).unwrap();
-    prepare_in(&api, &free_script(), &root).unwrap();
+    prepare_warned(&api, &free_script(), &root, None).unwrap();
+    prepare_warned(&api, &free_script(), &root, None).unwrap();
     assert_eq!(fake.count("GET", "/files/main.luau"), 2);
     assert_eq!(
         fake.count("GET", "/storage/v1/object/public/client/lib/index.json"),
@@ -416,7 +399,6 @@ fn every_start_downloads_the_files_again_but_reuses_the_lib() {
 #[test]
 fn a_new_revision_removes_the_old_one_from_the_cache() {
     let root = cache("revisions");
-    // a copy left on disk by an earlier loader
     let old = revision_dir(&root, SCRIPT_ID, 4);
     fs::create_dir_all(&old).unwrap();
     fs::write(old.join("main.luau"), MAIN).unwrap();
@@ -426,7 +408,7 @@ fn a_new_revision_removes_the_old_one_from_the_cache() {
         ..Server::healthy()
     }
     .start();
-    prepare_in(&api(&new), &free_script(), &root).unwrap();
+    prepare_warned(&api(&new), &free_script(), &root, None).unwrap();
     assert!(!old.exists());
     assert_eq!(
         fs::read_dir(revision_dir(&root, SCRIPT_ID, 5))
@@ -445,7 +427,7 @@ fn a_failed_download_ends_the_session_so_nothing_is_billed() {
     }
     .start();
     let root = cache("download-fails");
-    let error = prepare_in(&api(&fake), &script(), &root)
+    let error = prepare_warned(&api(&fake), &script(), &root, None)
         .err()
         .expect("fails");
     assert!(error.contains("Couldn't download"), "{error}");
@@ -462,7 +444,7 @@ fn the_entry_file_comes_from_the_server_and_needs_no_particular_name() {
     .start();
     let root = cache("entry");
 
-    let prepared = prepare_in(&api(&fake), &script(), &root).expect("prepare");
+    let prepared = prepare_warned(&api(&fake), &script(), &root, None).expect("prepare");
     assert_eq!(prepared.source, UTIL);
     assert_eq!(
         prepared.entry,
@@ -478,7 +460,7 @@ fn an_entry_that_is_not_one_of_the_files_is_rejected_and_the_session_ended() {
     }
     .start();
 
-    let error = prepare_in(&api(&fake), &script(), &cache("bad_entry"))
+    let error = prepare_warned(&api(&fake), &script(), &cache("bad_entry"), None)
         .err()
         .expect("must fail");
     assert!(error.contains("gone.luau"), "{error}");
@@ -493,7 +475,7 @@ fn a_file_with_the_wrong_checksum_is_rejected_and_the_session_ended() {
     }
     .start();
     let root = cache("checksum");
-    let error = prepare_in(&api(&fake), &script(), &root)
+    let error = prepare_warned(&api(&fake), &script(), &root, None)
         .err()
         .expect("fails");
     assert!(error.contains("checksum"), "{error}");
@@ -509,10 +491,9 @@ fn too_few_credits_downloads_nothing_and_ends_nothing() {
     }
     .start();
     let root = cache("credits");
-    let error = prepare_in(&api(&fake), &script(), &root)
+    let error = prepare_warned(&api(&fake), &script(), &root, None)
         .err()
         .expect("fails");
-    // 300 credits, as the user sees them
     assert!(error.contains("0.03\u{a0}CREDIT needed"), "{error}");
     assert_eq!(fake.count("GET", "/files/"), 0);
     assert_eq!(
@@ -531,7 +512,7 @@ fn without_any_lib_the_start_fails_before_a_session_exists() {
     }
     .start();
     let root = cache("no-lib");
-    let error = prepare_in(&api(&fake), &script(), &root)
+    let error = prepare_warned(&api(&fake), &script(), &root, None)
         .err()
         .expect("fails");
     assert!(error.contains("script library"), "{error}");
@@ -546,13 +527,13 @@ fn without_any_lib_the_start_fails_before_a_session_exists() {
 #[test]
 fn an_old_cached_lib_is_used_when_the_index_cannot_be_read() {
     let root = cache("offline");
-    prepare_in(&api(&Server::healthy().start()), &script(), &root).unwrap();
+    prepare_warned(&api(&Server::healthy().start()), &script(), &root, None).unwrap();
     let fake = Server {
         no_lib: true,
         ..Server::healthy()
     }
     .start();
-    prepare_in(&api(&fake), &script(), &root).expect("the cached lib is enough");
+    prepare_warned(&api(&fake), &script(), &root, None).expect("the cached lib is enough");
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -588,7 +569,7 @@ fn a_code_the_server_refuses_says_why() {
     let api = api(&fake);
     assert_eq!(
         api.redeem(&code('b')).unwrap_err(),
-        ApiError::Conflict("This share code has already been used.".into())
+        ApiError::Server("This share code has already been used.".into())
     );
     assert_eq!(
         api.redeem(&code('c')).unwrap_err().to_string(),
@@ -619,7 +600,6 @@ fn a_granted_script_can_be_removed_from_the_account() {
         .find(|r| r.method == "DELETE")
         .unwrap();
     assert_eq!(sent.header("authorization"), Some("Bearer token-1"));
-    // The server says no for a script that isn't granted
     assert!(matches!(
         api.remove_grant(SCRIPT_ID),
         Err(ApiError::NotFound(_))
@@ -675,13 +655,11 @@ fn a_community_script_runs_only_at_the_revision_the_user_was_warned_about() {
     let root = cache("warned");
     let fake = Server::healthy().start();
 
-    // Warned about revision 4, and revision 4 is what the server starts
     let prepared = prepare_warned(&api(&fake), &community_script(), &root, Some(4)).expect("runs");
     assert_eq!(prepared.session.revision, 4);
     assert_eq!(fake.count("POST", "/launcher/sessions/s1/end"), 0);
     let _ = fs::remove_dir_all(&root);
 
-    // A new revision went live after the warning: nothing runs, the session is ended and nothing is downloaded
     let fake = Server {
         revision: 5,
         ..Server::healthy()
@@ -736,7 +714,6 @@ fn a_restart_of_a_script_no_longer_listed_finds_nothing() {
 
 #[test]
 fn a_restart_of_a_community_script_asks_for_the_list_the_account_may_read() {
-    // below tester the community list is refused, and the script is in the default one
     let fake = Server::healthy().start();
     let (_, script, _) = restart_quote(&api(&fake), "s1", COMMUNITY_ID, true)
         .expect("quote")
@@ -816,7 +793,6 @@ fn a_start_is_refused_without_the_balance_or_the_access() {
 
 #[test]
 fn an_exempt_account_starts_a_priced_script_on_no_balance() {
-    // listed at 30 a minute, but an author, a grantee or a tester is quoted 0
     assert_eq!(script().price, 30);
     let exempt = quote(0, 0, 0);
     assert_eq!(start_block(&script(), &exempt, 0), None);

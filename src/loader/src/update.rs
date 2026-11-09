@@ -1,5 +1,3 @@
-//! Self-update from the signed manifest in the public `client` bucket. See docs/releases.md.
-
 use std::{
     env, fs,
     io::{Read, Write},
@@ -11,7 +9,10 @@ use std::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::api::Api;
+use crate::{
+    api::Api,
+    session::{get_ok, hex_encode},
+};
 
 #[cfg(any(windows, test))]
 #[path = "update/msi_command.rs"]
@@ -31,7 +32,6 @@ pub use platform::{Prepared, apply, cleanup, prepare};
 
 pub const VERSION: &str = env!("VOLCREN_VERSION");
 
-/// The minisign public keys updates may be signed with: the one in use, then the next.
 const PUBLIC_KEYS: [&str; 2] = [
     "RWRprhgKfFuJPJZH0HUjxskMWPFr0zz6oCoTjMXP/8f3cGbD6ff3WKhe",
     "RWSClklMB6socMrdLgZuncW84XWwIJq1ZZS9tyXgoOhqjOde/GzqCdob",
@@ -46,7 +46,6 @@ pub const FAILED_ARG: &str = "--update-failed";
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Release {
     pub version: String,
-    /// The commit's Unix time, which orders releases.
     pub build: u64,
     #[serde(default)]
     pub files: Files,
@@ -60,12 +59,10 @@ pub struct Files {
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct File {
-    /// Path inside the `client` bucket.
     pub path: String,
     pub sha256: String,
 }
 
-/// The one object the workflow signs and uploads, so a signature can never pair with another manifest.
 #[derive(Deserialize)]
 struct Signed {
     manifest: String,
@@ -74,19 +71,14 @@ struct Signed {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckError {
-    /// Offline, or nothing published yet.
     Unavailable(String),
     BadSignature,
 }
 
-/// What this copy of the loader can do about an update.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
-    /// A cargo build: the banner only informs.
     Dev,
-    /// It can't replace itself, so the banner offers the download.
     Manual,
-    /// `admin`: Windows asks an administrator to approve the install.
     Auto { admin: bool },
 }
 
@@ -96,7 +88,6 @@ pub struct Available {
     pub kind: Kind,
 }
 
-/// A download's progress, written by the worker and read by the banner, and the banner's word to the worker that it was skipped.
 #[derive(Default)]
 pub struct Progress {
     pub done: AtomicU64,
@@ -107,7 +98,6 @@ pub struct Progress {
 const CANCELLED: &str = "The update was skipped.";
 
 impl Progress {
-    /// Stops the download at its next chunk; nothing it downloaded is kept.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
     }
@@ -121,14 +111,11 @@ impl Progress {
     }
 }
 
-/// Held by every loader while it is open. An update replaces the files other open loaders run from, so it only installs for the only one.
 pub struct Instance(Option<fs::File>);
 
 impl Instance {
-    /// Takes this loader's share of the lock in the data folder. With no data folder there is nothing to hold, and the loader counts as the only one.
     pub fn hold() -> Self {
-        let path = directories::ProjectDirs::from("com", "volcren", "Volcren")
-            .map(|dirs| dirs.data_dir().join("loader.lock"));
+        let path = crate::paths::project_dirs().map(|dirs| dirs.data_dir().join("loader.lock"));
         path.map_or(Self(None), |path| Self::at(&path))
     }
 
@@ -150,10 +137,8 @@ impl Instance {
         Self(file)
     }
 
-    /// Whether no other loader is open.
     pub fn alone(&self) -> bool {
         let Some(file) = &self.0 else { return true };
-        // a share of the lock can't be traded up in place: let go, try for all of it, and take the share back
         let _ = file.unlock();
         let alone = file.try_lock().is_ok();
         let _ = file.unlock();
@@ -169,11 +154,26 @@ pub fn bucket_url(api: &Api, path: &str) -> String {
     )
 }
 
+fn own_exe() -> Result<PathBuf, String> {
+    env::current_exe().map_err(|e| format!("Can't find the loader's own path: {e}"))
+}
+
+fn own_folder(exe: &Path) -> Result<PathBuf, String> {
+    exe.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "The loader's own path has no folder.".into())
+}
+
+fn release_file(release: &Release) -> Result<&File, String> {
+    release
+        .file()
+        .ok_or_else(|| "This release has no build for this system.".into())
+}
+
 fn current_build() -> u64 {
     env!("VOLCREN_BUILD").parse().unwrap_or(0)
 }
 
-/// A build with no commit time, such as one outside git, never prompts.
 pub fn is_newer(latest: u64, current: u64) -> bool {
     current != 0 && latest > current
 }
@@ -183,7 +183,6 @@ fn under_target(exe: &Path) -> bool {
         .any(|dir| dir.file_name().is_some_and(|name| name == "target"))
 }
 
-/// Whether this loader runs from a cargo `target/` folder. Installs never do.
 pub fn is_dev_install() -> bool {
     env::current_exe().is_ok_and(|exe| under_target(&exe))
 }
@@ -196,12 +195,10 @@ pub fn kind() -> Kind {
     }
 }
 
-/// Whether an update installs with no click. Never over a running script, and not right after a failed or declined try, which would repeat on every restart.
 pub fn installs_by_itself(kind: Kind, failed: bool, busy: bool) -> bool {
     matches!(kind, Kind::Auto { .. }) && !failed && !busy
 }
 
-/// What the finished update's installer reported, passed by the process that ran it.
 pub fn failure_from_args() -> Option<String> {
     let mut args = env::args().skip(1);
     args.find(|arg| arg == FAILED_ARG)?;
@@ -209,7 +206,6 @@ pub fn failure_from_args() -> Option<String> {
 }
 
 impl Release {
-    /// The file for this platform.
     pub fn file(&self) -> Option<&File> {
         if cfg!(windows) {
             self.files.windows.as_ref()
@@ -223,7 +219,6 @@ impl Release {
     }
 }
 
-/// Checks the signature over the manifest's exact bytes, then parses them.
 fn verify(body: &[u8], keys: &[&str]) -> Result<Release, CheckError> {
     let signed: Signed = serde_json::from_slice(body).map_err(|_| CheckError::BadSignature)?;
     let signature = minisign_verify::Signature::decode(&signed.signature)
@@ -244,14 +239,13 @@ fn check_with(api: &Api, keys: &[&str], build: u64) -> Result<Option<Release>, C
     if api.config().supabase_url.is_empty() {
         return Ok(None);
     }
-    let unavailable = |e: String| CheckError::Unavailable(e);
     let mut response = api
         .agent()
         .get(&bucket_url(api, SIGNED_MANIFEST))
         .call()
-        .map_err(|e| unavailable(e.to_string()))?;
+        .map_err(|e| CheckError::Unavailable(e.to_string()))?;
     if !response.status().is_success() {
-        return Err(unavailable(format!(
+        return Err(CheckError::Unavailable(format!(
             "the server answered {}",
             response.status()
         )));
@@ -261,12 +255,11 @@ fn check_with(api: &Api, keys: &[&str], build: u64) -> Result<Option<Release>, C
         .with_config()
         .limit(MAX_MANIFEST_BYTES)
         .read_to_vec()
-        .map_err(|e| unavailable(e.to_string()))?;
+        .map_err(|e| CheckError::Unavailable(e.to_string()))?;
     let release = verify(&body, keys)?;
     Ok(is_newer(release.build, build).then_some(release))
 }
 
-/// The newest release if it is newer than this build, `None` if this build is current.
 pub fn check(api: &Api) -> Result<Option<Available>, CheckError> {
     let release = check_with(api, &PUBLIC_KEYS, current_build())?;
     Ok(release.map(|release| Available {
@@ -275,7 +268,6 @@ pub fn check(api: &Api) -> Result<Option<Available>, CheckError> {
     }))
 }
 
-/// The last part of a bucket path, only if it is a plain file name.
 fn package_name(path: &str) -> Result<&str, String> {
     let name = path.rsplit('/').next().unwrap_or_default();
     let plain = path
@@ -289,10 +281,8 @@ fn package_name(path: &str) -> Result<&str, String> {
     }
 }
 
-/// Numbers the downloads of this process, so a skipped one that is still stopping and the next never write the same file.
 static DOWNLOADS: AtomicU64 = AtomicU64::new(0);
 
-/// Streams a package to `dir`, returning its path once its size and sha256 match the signed manifest.
 fn download(
     api: &Api,
     file: &File,
@@ -308,9 +298,9 @@ fn download(
         DOWNLOADS.fetch_add(1, Ordering::Relaxed)
     ));
     let result = fetch(api, file, &partial, progress, repaint).and_then(|()| progress.check());
-    if result.is_err() {
+    if let Err(error) = result {
         let _ = fs::remove_file(&partial);
-        return result.map(|()| PathBuf::new());
+        return Err(error);
     }
     let path = dir.join(name);
     fs::rename(&partial, &path).map_err(|e| format!("Couldn't save the update: {e}"))?;
@@ -324,25 +314,15 @@ fn fetch(
     progress: &Progress,
     repaint: &dyn Fn(),
 ) -> Result<(), String> {
-    // Api's agent limits a whole request to seconds, which a package download can't meet.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_recv_response(Some(Duration::from_secs(60)))
         .timeout_recv_body(Some(Duration::from_secs(30 * 60)))
-        .user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION")))
+        .user_agent(crate::paths::USER_AGENT)
         .build()
         .into();
-    let mut response = agent
-        .get(&bucket_url(api, &file.path))
-        .call()
-        .map_err(|e| format!("Couldn't download the update: {e}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "Couldn't download the update: the server answered {}.",
-            response.status()
-        ));
-    }
+    let mut response = get_ok(&agent, &bucket_url(api, &file.path), "the update")?;
     let body = response.body_mut();
     let total = body.content_length().unwrap_or(0);
     if total > MAX_PACKAGE_BYTES {
@@ -372,11 +352,7 @@ fn fetch(
             repaint();
         }
     }
-    let digest: String = hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let digest = hex_encode(&hash.finalize());
     if digest.eq_ignore_ascii_case(&file.sha256) {
         Ok(())
     } else {
@@ -473,7 +449,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Signed by rsign with the first embedded key the way the release workflow does. Its build of 0 can never be offered.
     #[test]
     fn the_embedded_keys_accept_what_the_release_tool_signs() {
         let release = verify(include_bytes!("update/signed_fixture.json"), &PUBLIC_KEYS).unwrap();

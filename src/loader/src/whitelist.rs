@@ -1,28 +1,19 @@
-//! The HTTP whitelist: hosts a script's `http_request` may reach (`example.com` exact, `*.example.com` subdomains), edited under Settings.
-
 use eframe::egui;
 use injector::http;
 
 use crate::api::Config;
 
-/// Height of a list row.
 const ROW_HEIGHT: f32 = 28.0;
-/// Width of the list's last column, which holds the Delete button.
 const ACTIONS_WIDTH: f32 = 90.0;
-/// Width of the dialog's text box; the dialog fits around it.
 const INPUT_WIDTH: f32 = 300.0;
-/// How many entries the user can add.
 const MAX_USER_ENTRIES: usize = 200;
 
-/// What scripts may reach. Cheap to clone, so a request thread can carry the list as it was when the script asked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Whitelist {
-    /// The Volcren hosts: shown in the list, never removable.
     builtin: Vec<String>,
     user: Vec<String>,
 }
 
-/// The host a whitelist entry stands for, lowercase, from a host, `*.host` or a URL: `https://Example.com:8080/a` is `example.com`.
 pub fn normalize(input: &str) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -73,7 +64,6 @@ fn matches(entry: &str, host: &str) -> bool {
 }
 
 impl Whitelist {
-    /// `user` is what was saved; the built-in hosts are the ones in `config`.
     pub fn new(user: Vec<String>, config: &Config) -> Self {
         let mut builtin = Vec::new();
         for url in [&config.api_url, &config.supabase_url, &config.site_url] {
@@ -93,7 +83,6 @@ impl Whitelist {
         }
     }
 
-    /// Whether a script may reach this host (lowercase, no trailing dot).
     pub fn allows(&self, host: &str) -> bool {
         self.builtin
             .iter()
@@ -105,7 +94,6 @@ impl Whitelist {
         &self.user
     }
 
-    /// Adds what the user typed; `Err` is why not.
     pub fn add(&mut self, input: &str) -> Result<(), String> {
         let entry = normalize(input)?;
         if self.builtin.contains(&entry) || self.user.contains(&entry) {
@@ -120,25 +108,21 @@ impl Whitelist {
         Ok(())
     }
 
-    /// Removes one of the user's entries, never a built-in one.
     pub fn remove(&mut self, entry: &str) {
         self.user.retain(|have| have != entry);
     }
 
-    /// Answers one script request; the request itself is made here, so call it from a thread.
     pub fn perform(&self, request: &http::Request) -> Result<http::Response, String> {
         crate::http::perform(self, request)
     }
 }
 
-/// The Add dialog's text and why the last Save was refused.
 #[derive(Default)]
 struct Draft {
     input: String,
     error: Option<String>,
 }
 
-/// The Settings section: the list, its Add dialog and the entry whose Delete is waiting for a second click.
 #[derive(Default)]
 pub struct Page {
     draft: Option<Draft>,
@@ -187,7 +171,6 @@ impl Page {
                 body.rows(ROW_HEIGHT, rows.len(), |mut row| {
                     let (host, builtin) = rows[row.index()];
                     row.col(|ui| {
-                        // Too long a host is cut with an ellipsis; hovering shows all of it.
                         ui.add(egui::Label::new(host).truncate())
                             .on_hover_text(host);
                     });
@@ -223,11 +206,9 @@ impl Page {
         egui::Window::new("Add URL")
             .id(egui::Id::new("http-whitelist-dialog"))
             .collapsible(false)
-            // Fit the content every frame: eframe remembers a window's size between runs, which would keep an old width.
             .auto_sized()
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                // Without a cap the wrapping text and the button row would stretch the window across the screen.
                 ui.set_max_width(INPUT_WIDTH);
                 ui.label("A host or URL scripts may send requests to. Use *.example.com for every subdomain.");
                 let response = ui.add(egui::TextEdit::singleline(&mut draft.input).hint_text("e.g. api.example.com").desired_width(INPUT_WIDTH));
@@ -238,7 +219,6 @@ impl Page {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.add_space(6.0);
-                // A fixed height: a bare right-to-left layout would claim all the height left on screen.
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
                     egui::Layout::right_to_left(egui::Align::Center),

@@ -1,5 +1,3 @@
-//! The Linux update: unpack the release archive beside the install, then rename its files in.
-
 use std::{
     env, fs,
     fs::OpenOptions,
@@ -12,14 +10,13 @@ use std::{
 
 use flate2::read::GzDecoder;
 
-use super::{Kind, Progress, Release, download};
+use super::{Kind, Progress, Release, download, own_exe, own_folder, release_file};
 use crate::api::Api;
 
 const WORK_DIR: &str = ".update";
 const STAGE_DIR: &str = "stage";
 const BACKUP_DIR: &str = "backup";
 const ARCHIVE_ROOT: &str = "volcren/";
-/// Every file of a release, and whether it is run directly.
 const FILES: [(&str, bool); 4] = [
     ("loader", true),
     ("injector", true),
@@ -29,7 +26,6 @@ const FILES: [(&str, bool); 4] = [
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 static RELAUNCH: Mutex<Option<PathBuf>> = Mutex::new(None);
-/// Held while a download unpacks into the stage folder.
 static STAGE: Mutex<()> = Mutex::new(());
 
 pub struct Prepared {
@@ -50,34 +46,23 @@ pub fn kind(exe: &Path) -> Kind {
     }
 }
 
-/// Removes what an earlier update left beside the install.
 pub fn cleanup() {
-    if let Some(install) = env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-    {
+    if let Ok(install) = own_exe().and_then(|exe| own_folder(&exe)) {
         let _ = fs::remove_dir_all(install.join(WORK_DIR));
     }
 }
 
-/// Downloads and unpacks the release. Nothing in the install changes.
 pub fn prepare(
     api: &Api,
     release: &Release,
     progress: &Progress,
     repaint: &dyn Fn(),
 ) -> Result<Prepared, String> {
-    let exe = env::current_exe().map_err(|e| format!("Can't find the loader's own path: {e}"))?;
-    let install = exe
-        .parent()
-        .ok_or("The loader's own path has no folder.")?
-        .to_path_buf();
-    let file = release
-        .file()
-        .ok_or("This release has no build for this system.")?;
+    let exe = own_exe()?;
+    let install = own_folder(&exe)?;
+    let file = release_file(release)?;
     let work = install.join(WORK_DIR);
     let archive = download(api, file, &work, progress, repaint)?;
-    // one unpack at a time: a skipped download may still be in its own
     let _stage = STAGE.lock().unwrap_or_else(|e| e.into_inner());
     progress.check()?;
     let stage = work.join(STAGE_DIR);
@@ -86,14 +71,12 @@ pub fn prepare(
     Ok(Prepared { install, exe })
 }
 
-/// Swaps the files in and arranges the new loader's start. On an error the old files are back in place.
 pub fn apply(prepared: &Prepared) -> Result<(), String> {
     swap(&prepared.install)?;
     *RELAUNCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(prepared.exe.clone());
     Ok(())
 }
 
-/// Starts the new loader once this one has saved its settings and closed.
 pub fn relaunch_after_exit() {
     let exe = RELAUNCH.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(exe) = exe
@@ -146,7 +129,6 @@ fn unpack(archive: &Path, stage: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Each rename is atomic and a running binary keeps its old file. A hard link keeps the old file for undoing.
 fn swap(install: &Path) -> Result<(), String> {
     let work = install.join(WORK_DIR);
     let (stage, backup) = (work.join(STAGE_DIR), work.join(BACKUP_DIR));
@@ -311,7 +293,6 @@ mod tests {
         let install = fake_install("rollback");
         let stage = install.join(WORK_DIR).join(STAGE_DIR);
         fs::create_dir_all(&stage).unwrap();
-        // agent.dll, the last file, is missing, so its rename fails after the others moved.
         for (file, _) in &FILES[..3] {
             fs::write(stage.join(file), format!("new {file}")).unwrap();
         }
@@ -324,7 +305,6 @@ mod tests {
         }
     }
 
-    /// Download, verify, unpack, swap and relaunch, against a local bucket and a stub loader.
     #[test]
     fn the_whole_update_on_a_scratch_install() {
         let install = fake_install("flow");
@@ -382,7 +362,6 @@ mod tests {
         fs::set_permissions(&install, fs::Permissions::from_mode(0o555)).unwrap();
         let result = kind(&install.join("loader"));
         fs::set_permissions(&install, fs::Permissions::from_mode(0o755)).unwrap();
-        // Root ignores the mode, so this only says something for a normal user.
         if unsafe { libc::geteuid() } != 0 {
             assert_eq!(result, Kind::Manual);
         }

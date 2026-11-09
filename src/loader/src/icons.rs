@@ -1,5 +1,3 @@
-//! Pictures from the client, fetched from a loaded client once and kept on disk: item icons as the inventory draws them, and sprites of the cache (prayer and spell icons).
-
 use std::{
     collections::{BTreeSet, HashMap},
     io::{Read, Write},
@@ -10,24 +8,17 @@ use std::{
 use eframe::egui;
 use injector::{Image, ItemIconRequest};
 
-/// The icons file in the data folder: a header, then one record per picture, only ever appended to.
 const FILE_NAME: &str = "icons.bin";
 const MAGIC: &[u8; 4] = b"VICN";
-/// Version 1 held item icons only; its files are ignored and the icons drawn again.
 const VERSION: u8 = 2;
 const RECORD_ITEM: u8 = 0;
 const RECORD_SPRITE: u8 = 1;
-/// Pictures asked of the client in one request.
 pub const BATCH: usize = 64;
-/// How long after a failed read the next one waits, so a client that can't answer isn't asked every frame.
 pub const RETRY_AFTER: Duration = Duration::from_secs(5);
 
-/// What a picture is of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
-    /// An item at a quantity, the number drawn on it or not.
     Item(ItemIconRequest),
-    /// A sprite of the cache, by id.
     Sprite(i32),
 }
 
@@ -41,13 +32,11 @@ impl Key {
     }
 }
 
-/// What's known about a picture: the client drew it, or it couldn't.
 enum Entry {
     Texture(egui::TextureHandle),
     Missing,
 }
 
-/// The pictures a client is asked for in one go.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Batch {
     pub items: Vec<ItemIconRequest>,
@@ -57,19 +46,15 @@ pub struct Batch {
 #[derive(Default)]
 pub struct Icons {
     known: HashMap<Key, Entry>,
-    /// Pictures the UI asked for that no client has drawn yet.
     wanted: BTreeSet<Key>,
-    /// Pictures a client is drawing now.
     in_flight: Vec<Key>,
-    /// When to ask again after a read that failed.
     retry_at: Option<Instant>,
     loaded_file: bool,
     pub error: Option<String>,
 }
 
 fn path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "volcren", "Volcren")
-        .map(|dirs| dirs.data_dir().join(FILE_NAME))
+    crate::paths::project_dirs().map(|dirs| dirs.data_dir().join(FILE_NAME))
 }
 
 fn texture(
@@ -95,7 +80,6 @@ fn texture(
     )
 }
 
-/// The records of the icons file, each `(key, width, height, rgba)`; a file that doesn't parse is ignored.
 fn parse(bytes: &[u8]) -> Vec<(Key, u32, u32, Vec<u8>)> {
     let mut records = Vec::new();
     if bytes.len() < 5 || &bytes[..4] != MAGIC || bytes[4] != VERSION {
@@ -120,7 +104,7 @@ fn parse(bytes: &[u8]) -> Vec<(Key, u32, u32, Vec<u8>)> {
             u32::from(u16_at(at + header)),
             u32::from(u16_at(at + header + 2)),
         );
-        let len = (width * height * 4) as usize;
+        let len = width as usize * height as usize * 4;
         let start = at + header + 4;
         let Some(rgba) = bytes.get(start..start + len) else {
             break;
@@ -152,7 +136,6 @@ fn record(key: Key, width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
 }
 
 impl Icons {
-    /// Reads the pictures kept on disk, once.
     fn load_file(&mut self, ctx: &egui::Context) {
         if self.loaded_file {
             return;
@@ -178,7 +161,6 @@ impl Icons {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            // a file of an older version is started over
             let header = std::fs::File::open(&path).ok().and_then(|mut file| {
                 let mut header = [0u8; 5];
                 file.read_exact(&mut header).ok().map(|()| header)
@@ -204,7 +186,6 @@ impl Icons {
         }
     }
 
-    /// The picture's texture, or none while it hasn't been drawn (it is asked of the next client read) or when the client couldn't draw it.
     pub fn texture(&mut self, ctx: &egui::Context, key: Key) -> Option<&egui::TextureHandle> {
         self.load_file(ctx);
         if !self.known.contains_key(&key) && !self.in_flight.contains(&key) {
@@ -216,20 +197,17 @@ impl Icons {
         }
     }
 
-    /// Whether some pictures are waiting for a client to draw them, none are being drawn, and a failed read's wait is over.
     pub fn due(&self, now: Instant) -> bool {
         !self.wanted.is_empty()
             && self.in_flight.is_empty()
             && self.retry_at.is_none_or(|at| now >= at)
     }
 
-    /// How long until a failed read is tried again, when pictures wait for that.
     pub fn retry_in(&self, now: Instant) -> Option<Duration> {
         let at = self.retry_at.filter(|_| !self.wanted.is_empty())?;
         Some(at.saturating_duration_since(now))
     }
 
-    /// Takes the next batch of pictures to ask a client for. The rest are forgotten: the UI asks again for those it still shows.
     pub fn start(&mut self) -> Batch {
         let keys: Vec<Key> = self.wanted.iter().take(BATCH).copied().collect();
         self.wanted.clear();
@@ -244,7 +222,6 @@ impl Icons {
         batch
     }
 
-    /// Keeps what the client drew. A picture it couldn't draw stays missing until the loader restarts. With `error`, the read failed part way: what came is kept, and the rest is asked for again after `RETRY_AFTER` if the UI still shows it.
     pub fn finish(
         &mut self,
         ctx: &egui::Context,
@@ -280,10 +257,9 @@ impl Icons {
     }
 }
 
-/// The size an item icon is drawn at: the client's own pixels, one point each.
 pub const SLOT_SIZE: egui::Vec2 = egui::vec2(36.0, 32.0);
+pub const SLOT_CELL: egui::Vec2 = egui::vec2(SLOT_SIZE.x + 8.0, SLOT_SIZE.y + 8.0);
 
-/// Draws an item's icon, or its name while there is none, in a slot the size of the client's.
 pub fn slot(
     ui: &mut egui::Ui,
     texture: Option<&egui::TextureHandle>,
@@ -335,7 +311,6 @@ mod tests {
         assert_eq!(records[0], (item, 2, 2, rgba.clone()));
         assert_eq!(records[1].0, sprite);
         assert!(matches!(records[2].0, Key::Item(i) if !i.show_count));
-        // a record cut short (a write that didn't finish) is dropped, the ones before it kept
         assert_eq!(parse(&file[..file.len() - 3]).len(), 2);
         assert!(parse(b"nope").is_empty());
         let mut old = MAGIC.to_vec();
@@ -368,12 +343,10 @@ mod tests {
         icons.wanted.insert(sprite);
         let now = Instant::now();
         icons.start();
-        // the items came, the sprites failed
         icons.finish(&ctx, now, vec![(item, None)], Some("no answer".into()));
         assert!(icons.known.contains_key(&item));
         assert!(!icons.known.contains_key(&sprite), "it is asked for again");
 
-        // the UI still shows the sprite: it waits for the retry
         icons.texture(&ctx, sprite);
         assert!(!icons.due(now));
         assert_eq!(icons.retry_in(now), Some(RETRY_AFTER));

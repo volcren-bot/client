@@ -1,5 +1,3 @@
-//! The launcher's blocking connection to Volcren: sign-in (PKCE), token refresh and `/api/launcher/*`; run it on a background thread.
-
 pub mod auth;
 pub mod client;
 pub mod config;

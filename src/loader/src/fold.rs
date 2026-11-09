@@ -6,7 +6,6 @@ use std::{
 
 use crate::highlight::{Kind, tokenize};
 
-/// Every foldable region as `(first line, last line)`, 0-based: blocks up to their `end`/`until` and tables up to `}`; one per line (the longest).
 pub fn ranges(source: &str) -> Vec<(usize, usize)> {
     #[derive(PartialEq)]
     enum Open {
@@ -16,7 +15,6 @@ pub fn ranges(source: &str) -> Vec<(usize, usize)> {
     let mut found: Vec<(usize, usize)> = Vec::new();
     let mut stack: Vec<(Open, usize)> = Vec::new();
     let mut line = 0;
-    // the `do` of a `for` or `while` belongs to that loop, not to a block of its own
     let mut loop_do = false;
     for (range, kind) in tokenize(source) {
         let Some(text) = source.get(range) else {
@@ -64,32 +62,24 @@ pub fn ranges(source: &str) -> Vec<(usize, usize)> {
     found
 }
 
-/// What the editor shows of the text with the current folds.
 pub struct View {
-    /// The lines that are on screen, in order.
     pub visible: Vec<usize>,
-    /// The bytes that stay in the text but take no room: from the end of each folded header to the end of the fold's last line.
     pub hidden: Vec<Range<usize>>,
-    /// Each folded header on screen, with the byte where its text ends.
     pub headers: Vec<(usize, usize)>,
 }
 
-/// The editor's folds. The text never changes: folded lines are laid out at no height, so cursors and offsets stay valid.
 #[derive(Default)]
 pub struct Folds {
     path: String,
     seen: Option<(u64, usize)>,
     ranges: Vec<(usize, usize)>,
-    /// Byte offset of every newline in the text, and the widest line in columns (a tab counted as four).
     newlines: Vec<usize>,
     longest: usize,
     folded: BTreeSet<usize>,
-    /// Where the cursor was (a char index) after the last frame, and the line it is on.
     cursor: (usize, usize),
 }
 
 impl Folds {
-    /// Brings the folds up to date with the text: they move with lines added or removed at the cursor, and go when their line stops being a fold.
     pub fn sync(&mut self, path: &str, text: &str) {
         if self.path != path {
             self.path = path.into();
@@ -138,12 +128,10 @@ impl Folds {
             .retain(|at| starts.binary_search_by_key(at, |&(start, _)| start).is_ok());
     }
 
-    /// The number of lines in the text of the last `sync`.
     pub fn line_count(&self) -> usize {
         self.newlines.len() + 1
     }
 
-    /// The widest line of the text of the last `sync`, in columns.
     pub fn longest_line(&self) -> usize {
         self.longest
     }
@@ -169,7 +157,6 @@ impl Folds {
         }
     }
 
-    /// Opens every fold that hides `line`.
     pub fn reveal(&mut self, line: usize) {
         let ranges = &self.ranges;
         self.folded.retain(|&start| {
@@ -180,7 +167,6 @@ impl Folds {
         });
     }
 
-    /// Notes where the cursor (a char index) is after a frame, and opens the fold it moved into.
     pub fn follow_cursor(&mut self, text: &str, index: usize) {
         if index == self.cursor.0 {
             return;
@@ -190,7 +176,6 @@ impl Folds {
         self.reveal(line);
     }
 
-    /// `text` is the one of the last `sync`.
     pub fn view(&self, text: &str) -> View {
         let (lines, newlines) = (self.line_count(), &self.newlines);
         let mut view = View {
@@ -261,7 +246,6 @@ mod tests {
         let mut folds = Folds::default();
         folds.sync("a", "x = 1\nfunction f()\n  x()\nend");
         folds.toggle(1);
-        // a line added above moves the fold down; the cursor sits on the new line
         folds.follow_cursor("x = 1\nfunction f()\n  x()\nend", 0);
         folds.cursor = (6, 1);
         folds.sync("a", "x = 1\ny = 2\nfunction f()\n  x()\nend");

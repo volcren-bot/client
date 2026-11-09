@@ -1,5 +1,3 @@
-//! The Script Inspector on the Development page: the scripts the client ran for events, kept and filtered for display.
-
 use std::time::{Duration, Instant};
 
 use injector::{ScriptPage, ScriptRun};
@@ -7,26 +5,20 @@ use injector::{ScriptPage, ScriptRun};
 use crate::log_view::{Filtered, Log, Poller, View};
 use crate::script_names::Names;
 
-/// Runs kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
-/// How long after a read finished the next one starts.
 pub const POLL_EVERY: Duration = Duration::from_millis(250);
-/// Scripts an idle logged in client runs every frame (seen on build a2636a01); logging them would fill the list in seconds.
 pub const DEFAULT_BLACKLIST: &str = "6697, 4730";
 
-/// One read of the client: the log entries since the last one.
 pub struct Poll {
     pub page: ScriptPage,
 }
 
-/// A script that ran: its start entry (with the game tick it started in) and how long it took, once its end has been read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub run: ScriptRun,
     pub duration_us: Option<u64>,
 }
 
-/// `850 µs` or `1.25 ms`.
 pub fn duration_text(micros: u64) -> String {
     if micros < 1000 {
         format!("{micros} µs")
@@ -35,13 +27,11 @@ pub fn duration_text(micros: u64) -> String {
     }
 }
 
-/// Event types whose script is found by trigger (components, menus): argument 0 is not the script id.
 pub fn is_trigger(event_type: i32) -> bool {
     matches!(event_type, 10..=17 | 0x12 | 0x55 | 0x56)
 }
 
 impl Row {
-    /// The script's id, for an event that carries one.
     pub fn script_id(&self) -> Option<i32> {
         if is_trigger(self.run.event_type) {
             return None;
@@ -49,7 +39,6 @@ impl Row {
         self.run.args.first()?.parse().ok()
     }
 
-    /// The row's text on one line, like `npc_name_timer (6697) (1, 2)` or `Trigger 12 (…)`, with nested runs indented.
     #[cfg(test)]
     pub fn text(&self, names: &Names) -> String {
         let (name, args, took) = (self.name(names), self.args_text(), self.took());
@@ -66,7 +55,6 @@ impl Row {
         }
     }
 
-    /// `npc_name_timer (6697)`, `Script 123` for one without a (loaded) name, or `Trigger 7` for an event whose script id isn't known.
     pub fn name(&self, names: &Names) -> String {
         match self.script_id() {
             Some(id) => match names.name(id) {
@@ -77,7 +65,6 @@ impl Row {
         }
     }
 
-    /// The arguments after the script id, with how many more were left out.
     pub fn args_text(&self) -> String {
         let rest = if self.script_id().is_some() {
             &self.run.args[1..]
@@ -95,13 +82,11 @@ impl Row {
         args
     }
 
-    /// How long the run took, once its end was read.
     pub fn took(&self) -> String {
         self.duration_us.map_or(String::new(), duration_text)
     }
 }
 
-/// Scripts to leave out of the list, from text like `6697, npc_name_timer`: ids, or script names once they are loaded (see `script_names`).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Blacklist(Vec<i32>);
 
@@ -130,18 +115,13 @@ pub struct Inspector {
     pub follow: bool,
     pub triggers: bool,
     pub blacklist: String,
-    /// The script names, once Load names has fetched them.
     pub names: Names,
-    /// Load names is downloading.
     pub loading_names: bool,
     pub names_error: Option<String>,
-    /// Runs lost to the log's ring overwriting them before the loader read them, since the last clear.
     pub dropped: u64,
     pub error: Option<String>,
     rows: Log<Row>,
-    /// The rows `visible` shows, for the trigger box they were picked with.
     shown: Filtered<bool>,
-    /// The client the rows are from, and the sequence number to ask it for next.
     poller: Poller,
     next: u64,
 }
@@ -171,7 +151,6 @@ impl Inspector {
         self.rows.len()
     }
 
-    /// The result of the download Load names started.
     pub fn finish_names(&mut self, result: Result<Names, String>) {
         self.loading_names = false;
         match result {
@@ -188,12 +167,10 @@ impl Inspector {
         self.dropped = 0;
     }
 
-    /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
         self.poller.due(self.enabled, pid, now)
     }
 
-    /// Marks a read started and says which sequence number to ask for. Another client than last time starts from its oldest run.
     pub fn start(&mut self, pid: u32) -> u64 {
         if self.poller.start(pid) {
             self.next = 0;
@@ -211,13 +188,11 @@ impl Inspector {
                 self.error = None;
                 self.next = page.next;
                 self.dropped += page.dropped;
-                // sequence numbers going backwards mean the client has a new agent with a new log
                 if let Some(first) = page.runs.first() {
                     self.rows.restart_if_behind(first, |last, first| {
                         first.sequence <= last.run.sequence
                     });
                 }
-                // the blacklist applies as runs arrive, so the scripts it names never push the others out of the list
                 let blacklist = Blacklist::parse(&self.blacklist, &self.names);
                 for run in page.runs {
                     if run.end {
@@ -238,7 +213,6 @@ impl Inspector {
         }
     }
 
-    /// An end entry belongs to the latest unended row of its depth, unless a lower-depth row follows: then its start was left out.
     fn finish_run(&mut self, end: &ScriptRun) {
         for row in self.rows.iter_mut().rev() {
             if row.run.depth < end.depth {
@@ -256,7 +230,6 @@ impl Inspector {
         }
     }
 
-    /// The kept rows that pass the trigger box, oldest first.
     pub fn visible(&self) -> View<'_, Row, bool> {
         let triggers = self.triggers;
         self.shown.view(&self.rows, triggers, |row| {
@@ -286,7 +259,7 @@ mod tests {
         run(sequence, 76, 0, &[&id.to_string()], 1)
     }
 
-    fn poll(runs: Vec<ScriptRun>, dropped: u64, _tick: Option<i32>) -> Result<Poll, String> {
+    fn poll(runs: Vec<ScriptRun>, dropped: u64) -> Result<Poll, String> {
         Ok(Poll {
             page: ScriptPage {
                 next: runs.last().map_or(0, |r| r.sequence + 1),
@@ -310,7 +283,6 @@ mod tests {
     #[test]
     fn rows_name_the_script_and_show_its_other_arguments() {
         let (names, none) = (names(), Names::default());
-        // without loaded names every script is its id
         assert_eq!(row(script(0, 6697)).text(&none), "Script 6697");
         assert_eq!(row(script(0, 6697)).text(&names), "npc_name_timer (6697)");
         assert_eq!(row(script(0, 4730)).text(&names), "Script 4730");
@@ -318,7 +290,6 @@ mod tests {
             row(run(0, 76, 0, &["4730", "-1", "\"…\""], 3)).text(&names),
             "Script 4730 (-1, \"…\")"
         );
-        // nested runs are indented, and arguments the log didn't keep are counted
         assert_eq!(
             row(run(0, 76, 2, &["4730", "5"], 11)).text(&names),
             "    Script 4730 (5, … +9)"
@@ -343,13 +314,10 @@ mod tests {
         let list = Blacklist::parse("6697, 4730 abc", &Names::default());
         assert!(list.hides(&row(script(0, 6697))) && list.hides(&row(script(0, 4730))));
         assert!(!list.hides(&row(script(0, 1))));
-        // a trigger event's first argument is not a script id
         assert!(!list.hides(&row(run(0, 12, 0, &["6697"], 1))));
         assert!(!Blacklist::parse("", &Names::default()).hides(&row(script(0, 6697))));
-        // a script's name stands for its id, in any case
         let list = Blacklist::parse("Npc_Name_Timer", &names());
         assert!(list.hides(&row(script(0, 6697))) && !list.hides(&row(script(0, 4730))));
-        // until the names are loaded a name hides nothing
         assert!(
             !Blacklist::parse("Npc_Name_Timer", &Names::default()).hides(&row(script(0, 6697)))
         );
@@ -366,11 +334,7 @@ mod tests {
         inspector.finish(
             32,
             now,
-            poll(
-                vec![script(0, 6697), script(1, 2), script(2, 4730)],
-                0,
-                None,
-            ),
+            poll(vec![script(0, 6697), script(1, 2), script(2, 4730)], 0),
         );
         assert_eq!(
             inspector
@@ -382,7 +346,7 @@ mod tests {
         );
         inspector.blacklist.clear();
         inspector.start(32);
-        inspector.finish(32, now, poll(vec![script(3, 6697)], 0, None));
+        inspector.finish(32, now, poll(vec![script(3, 6697)], 0));
         assert_eq!(inspector.kept(), 2);
     }
 
@@ -397,7 +361,7 @@ mod tests {
         inspector.finish(
             32,
             now,
-            poll(vec![script(0, 1), run(1, 12, 0, &["5"], 1)], 0, None),
+            poll(vec![script(0, 1), run(1, 12, 0, &["5"], 1)], 0),
         );
         assert_eq!(inspector.visible().len(), 2);
         inspector.triggers = false;
@@ -420,12 +384,11 @@ mod tests {
         };
         inspector.start(32);
         let start = run(0, 76, 0, &["12"], 1);
-        inspector.finish(32, now, poll(vec![start.clone()], 0, None));
+        inspector.finish(32, now, poll(vec![start.clone()], 0));
         assert_eq!(inspector.visible()[0].duration_us, None);
         assert_eq!(inspector.visible()[0].text(&Names::default()), "Script 12");
-        // the end can arrive in a later read
         inspector.start(32);
-        inspector.finish(32, now, poll(vec![ended(start, 1, 1250)], 0, None));
+        inspector.finish(32, now, poll(vec![ended(start, 1, 1250)], 0));
         assert_eq!(inspector.visible()[0].duration_us, Some(1250));
         assert_eq!(
             inspector.visible()[0].text(&Names::default()),
@@ -461,10 +424,8 @@ mod tests {
                     ended(parent, 5, 900),
                 ],
                 0,
-                None,
             ),
         );
-        // times are in microseconds since the start of the log: starts at 0, 10 and 30
         assert_eq!(
             inspector
                 .visible()
@@ -485,7 +446,6 @@ mod tests {
         inspector.start(32);
         let kept = run(0, 76, 0, &["12"], 1);
         let hidden = run(1, 76, 1, &["6697"], 1);
-        // the hidden child ends inside the kept parent; the parent's own end still lands on the parent
         inspector.finish(
             32,
             now,
@@ -497,7 +457,6 @@ mod tests {
                     ended(kept, 3, 70),
                 ],
                 0,
-                None,
             ),
         );
         assert_eq!(inspector.visible().len(), 1);
@@ -515,7 +474,7 @@ mod tests {
         inspector.finish(
             32,
             now,
-            poll(vec![ended(run(0, 76, 0, &["12"], 1), 1, 50)], 0, None),
+            poll(vec![ended(run(0, 76, 0, &["12"], 1), 1, 50)], 0),
         );
         assert_eq!(inspector.kept(), 0);
     }

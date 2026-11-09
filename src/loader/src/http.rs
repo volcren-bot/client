@@ -1,5 +1,3 @@
-//! Makes the HTTP requests of scripts (`http_request`), checking every URL and every redirect hop against the whitelist.
-
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
@@ -11,7 +9,6 @@ use ureq::http::{self, Uri};
 use crate::whitelist::Whitelist;
 
 const MAX_REDIRECTS: usize = 5;
-/// A script can't set these: the HTTP client owns them.
 const FORBIDDEN_HEADERS: [&str; 7] = [
     "host",
     "content-length",
@@ -21,21 +18,24 @@ const FORBIDDEN_HEADERS: [&str; 7] = [
     "te",
     "trailer",
 ];
-/// Not sent to another host than the request began at.
 const PRIVATE_HEADERS: [&str; 3] = ["authorization", "cookie", "proxy-authorization"];
 
-/// An agent that follows no redirects and gives the response of any status; each hop gets what is left of the timeout.
 fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
+    user_agent_builder(timeout)
         .http_status_as_error(false)
         .max_redirects(0)
-        .timeout_global(Some(timeout))
-        .user_agent(concat!("volcren-loader/", env!("VOLCREN_VERSION")))
         .build()
         .into()
 }
 
-/// The host of an `http` or `https` URL, lowercase and without a trailing dot, if the URL is one.
+pub fn user_agent_builder(
+    timeout: Duration,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .user_agent(crate::paths::USER_AGENT)
+}
+
 pub fn host_of(uri: &Uri) -> Result<String, String> {
     if !matches!(uri.scheme_str(), Some("http" | "https")) {
         return Err(format!("{uri} isn't an http or https URL"));
@@ -55,7 +55,6 @@ fn check(allowed: &Whitelist, uri: &Uri) -> Result<(), String> {
     }
 }
 
-/// Where a redirect from `from` goes, `location` being absolute or relative.
 fn resolve(from: &Uri, location: &str) -> Result<Uri, String> {
     let bad = |why: &dyn std::fmt::Display| format!("bad redirect to \"{location}\": {why}");
     let target: Uri = location.parse().map_err(|e| bad(&e))?;
@@ -89,7 +88,6 @@ fn run(
     .map_err(|e| e.to_string())
 }
 
-/// Makes the request if its host, and the host of every redirect, is on the whitelist.
 pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, String> {
     request.validate()?;
     let started = Instant::now();
@@ -136,12 +134,8 @@ pub fn perform(allowed: &Whitelist, request: &Request) -> Result<Response, Strin
             .get(http::header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        if let (true, Some(location)) = (
-            (301..=308).contains(&status) && status != 304 && status != 305 && status != 306,
-            location,
-        ) {
+        if let Some(location) = location.filter(|_| matches!(status, 301..=303 | 307 | 308)) {
             uri = resolve(&uri, &location)?;
-            // As browsers do: these turn the request into a GET without its body; 307 and 308 repeat it as it was.
             if matches!(status, 301..=303) && method != "GET" && method != "HEAD" {
                 method = "GET".into();
                 body = None;

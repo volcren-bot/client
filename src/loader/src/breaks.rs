@@ -3,19 +3,15 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use injector::form::BreakPlan;
 
-/// The breaks and sleeps a script last reported, counted down here between reports.
 #[derive(Default)]
 pub struct BreaksTracker {
     plan: Option<(BreakPlan, Instant)>,
 }
 
-/// One scheduled break or sleep, as of a moment.
 pub struct BreakRow {
     pub remaining: Duration,
     pub length: Duration,
-    /// Seconds since local midnight, for a sleep.
     pub at: Option<u32>,
-    /// Its position in the config, which skipping it names it by.
     pub index: u32,
 }
 
@@ -39,7 +35,6 @@ impl BreaksTracker {
         self.plan = Some((plan, at));
     }
 
-    /// The schedule as of `at`, soonest first. While something is being taken the antiban clock is paused, so the rest stand still.
     pub fn view(&self, at: Instant) -> Option<BreaksView> {
         let (plan, received) = self.plan.as_ref()?;
         let passed = at.saturating_duration_since(*received);
@@ -75,7 +70,6 @@ impl BreaksTracker {
 const MINUTE_MS: f64 = 60_000.0;
 const HOUR_MS: f64 = 3_600_000.0;
 
-/// A number that can be left on Auto, in the units of `scale` (milliseconds per shown unit, or 0.01 for percents).
 fn auto_number(
     ui: &mut egui::Ui,
     value: &mut Option<f64>,
@@ -95,15 +89,10 @@ fn auto_number(
             *value = if auto { None } else { Some(manual) };
             changed = true;
         }
-        if let Some(v) = value {
-            let mut shown = *v / scale;
-            if ui
-                .add(egui::DragValue::new(&mut shown).range(range).suffix(suffix))
-                .changed()
-            {
-                *v = shown * scale;
-                changed = true;
-            }
+        if let Some(v) = value
+            && number(ui, v, scale, range, suffix)
+        {
+            changed = true;
         }
     });
     changed
@@ -130,13 +119,11 @@ const ROW_HEIGHT: f32 = 28.0;
 const ACTIONS_WIDTH: f32 = 70.0;
 const VISIBLE_ROWS: usize = 5;
 
-/// What breaks and sleeps are, above the editors.
 pub fn header(ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.label("Breaks are short pauses taken every so often; sleeps are long ones at night.");
 }
 
-/// The section's own switch. Returns whether anything changed.
 fn section_bar(ui: &mut egui::Ui, enabled: &mut bool, what: &str) -> bool {
     let changed = ui
         .checkbox(enabled, "Enabled")
@@ -146,23 +133,24 @@ fn section_bar(ui: &mut egui::Ui, enabled: &mut bool, what: &str) -> bool {
     changed
 }
 
-/// The Add button on the left and the Reset on the right, with room from the list above. Returns (add, reset).
+fn reset_button(ui: &mut egui::Ui, what: &str) -> bool {
+    ui.button("Reset")
+        .on_hover_text(format!("Put the {what} back to the defaults"))
+        .clicked()
+}
+
 fn footer(ui: &mut egui::Ui, add: &str, what: &str) -> (bool, bool) {
     ui.add_space(8.0);
     let mut result = (false, false);
     ui.horizontal(|ui| {
         result.0 = ui.button(add).clicked();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            result.1 = ui
-                .button("Reset")
-                .on_hover_text(format!("Put the {what} back to the defaults"))
-                .clicked();
+            result.1 = reset_button(ui, what);
         });
     });
     result
 }
 
-/// A striped list with `heads` for columns and a last one for the buttons.
 fn list(
     ui: &mut egui::Ui,
     id: &str,
@@ -170,7 +158,6 @@ fn list(
     rows: usize,
     mut row: impl FnMut(&mut egui_extras::TableRow, usize),
 ) {
-    // Up to `VISIBLE_ROWS` rows show, the rest scroll; the list always takes that much room so the panel keeps its height.
     let body = VISIBLE_ROWS as f32 * (ROW_HEIGHT + ui.spacing().item_spacing.y);
     egui_extras::TableBuilder::new(ui)
         .id_salt(id)
@@ -200,7 +187,6 @@ fn list(
         });
 }
 
-/// The editor of the breaks. Returns whether anything changed.
 pub fn breaks_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) -> bool {
     use injector::antiban::{Break, Config};
     let mut changed = section_bar(ui, &mut config.breaks_enabled, "breaks");
@@ -254,7 +240,6 @@ pub fn breaks_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) 
     changed
 }
 
-/// The editor of the sleep: there is only ever one, so its fields are edited in place. Returns whether anything changed.
 pub fn sleeps_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) -> bool {
     use injector::antiban::{Config, Sleep};
     let mut changed = section_bar(ui, &mut config.sleeps_enabled, "sleeps");
@@ -300,11 +285,7 @@ pub fn sleeps_editor(ui: &mut egui::Ui, config: &mut injector::antiban::Config) 
                 ui.end_row();
             });
         ui.add_space(8.0);
-        if ui
-            .button("Reset")
-            .on_hover_text("Put the sleeps back to the defaults")
-            .clicked()
-        {
+        if reset_button(ui, "sleeps") {
             config.sleeps = Config::default().sleeps;
             changed = true;
         }

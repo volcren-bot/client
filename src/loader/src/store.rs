@@ -1,5 +1,3 @@
-//! The Scripts tab: the scripts the account can see, and what it takes to run each.
-
 use std::collections::BTreeMap;
 
 use eframe::egui;
@@ -10,10 +8,8 @@ use crate::api::{
     models::{credits_label, normalize_share_code, per_hour},
 };
 
-/// How many community scripts the loader remembers warning about. Old entries are only a missed "don't ask again".
 const MAX_CONFIRMED: usize = 500;
 
-/// The community scripts the user chose to run and the revision confirmed; a new revision warns again. Stored per machine.
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Confirmed(BTreeMap<String, i64>);
 
@@ -32,7 +28,6 @@ impl Confirmed {
         self.0.insert(script_id.to_owned(), revision);
     }
 
-    /// For a script that left the account: it would be warned about again if it ever came back.
     pub fn forget(&mut self, script_id: &str) {
         self.0.remove(script_id);
     }
@@ -46,26 +41,20 @@ pub struct Store {
     pub error: Option<String>,
     pub search: String,
     pub category: String,
-    /// Testers and above: list every community script instead of the default list.
     pub community: bool,
-    /// The share code being typed, and what happened to the last one (`true` when it worked).
     pub code: String,
     pub redeeming: bool,
     pub redeem_result: Option<(bool, String)>,
-    /// The script whose "remove from my account" is waiting for a second click.
     pub removing: Option<String>,
 }
 
-/// What the user asked for in the list this frame.
 pub enum Action {
     Refresh,
     Run(Box<StoreScript>),
-    /// A share code that already passed `normalize_share_code`.
     Redeem(String),
     RemoveGrant(Box<StoreScript>),
 }
 
-/// The tag next to a script's title: where it comes from.
 pub fn origin_label(script: &StoreScript) -> &'static str {
     if script.community {
         "community"
@@ -74,7 +63,6 @@ pub fn origin_label(script: &StoreScript) -> &'static str {
     }
 }
 
-/// A script's price as the card shows it: "0.18 CREDIT" an hour and a minute, or nothing for a free one.
 pub fn price_texts(script: &StoreScript) -> Option<(String, String)> {
     (!script.is_free()).then(|| {
         (
@@ -84,7 +72,6 @@ pub fn price_texts(script: &StoreScript) -> Option<(String, String)> {
     })
 }
 
-/// The price on one row: the hourly rate in bold, the per-minute one small beside it.
 pub fn price_ui(ui: &mut egui::Ui, script: &StoreScript) {
     match price_texts(script) {
         Some((hour, minute)) => {
@@ -123,7 +110,6 @@ impl Store {
         })
     }
 
-    /// `run_block` is why Run is disabled for reasons outside the script (no client, a script already running).
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -192,7 +178,7 @@ impl Store {
             }
             if let Some((ok, message)) = &self.redeem_result {
                 let color = if *ok {
-                    egui::Color32::from_rgb(0x9e, 0xce, 0x6a)
+                    crate::theme::GREEN
                 } else {
                     ui.visuals().error_fg_color
                 };
@@ -221,13 +207,12 @@ impl Store {
                             ui.label(tag.color(egui::Color32::from_rgb(0xff, 0x9e, 0x64)))
                                 .on_hover_text("Written by a community member, not reviewed by staff. You're warned before it runs.");
                         } else {
-                            ui.label(tag.color(egui::Color32::from_rgb(0x7a, 0xa2, 0xf7))).on_hover_text("Written by a scripter.");
+                            ui.label(tag.color(crate::theme::BLUE)).on_hover_text("Written by a scripter.");
                         }
                         if script.granted {
-                            ui.label(egui::RichText::new("shared with you").small().color(egui::Color32::from_rgb(0x9e, 0xce, 0x6a)));
+                            ui.label(egui::RichText::new("shared with you").small().color(crate::theme::GREEN));
                         }
                     });
-                    // price, online count and Run get a row of their own so a narrow card wraps instead of overlapping
                     ui.horizontal_wrapped(|ui| {
                         let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.credits, me.min_balance_minutes));
                             let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
@@ -332,7 +317,6 @@ mod tests {
         let again: Confirmed =
             serde_json::from_str(&serde_json::to_string(&confirmed).unwrap()).unwrap();
         assert_eq!(again, confirmed);
-        // Confirming a script that is already remembered never evicts another one
         let before = confirmed.0.len();
         confirmed.confirm("script-0019", 2);
         assert_eq!(confirmed.0.len(), before);

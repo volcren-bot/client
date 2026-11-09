@@ -1,5 +1,3 @@
-//! An embedded terminal: a shell on a pseudo-terminal emulated by `alacritty_terminal`, living as long as the app.
-
 use std::{
     io::{Read, Write},
     sync::{
@@ -20,11 +18,9 @@ use alacritty_terminal::{
 use eframe::egui::{self, Color32};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-/// Lines of scrollback kept.
 const HISTORY: usize = 10_000;
 const FONT_SIZE: f32 = 14.0;
 
-/// Tokyonight (night) like the rest of the app: the 16 ANSI colors, then the default foreground and background.
 const ANSI: [[u8; 3]; 16] = [
     [0x15, 0x16, 0x1e],
     [0xf7, 0x76, 0x8e],
@@ -47,7 +43,6 @@ const FG: [u8; 3] = [0xc0, 0xca, 0xf5];
 const BG: [u8; 3] = [0x16, 0x16, 0x1e];
 const SELECTION: Color32 = Color32::from_rgb(0x2e, 0x3c, 0x64);
 
-/// The color at `index` in alacritty's table: 0-15 ANSI, 16-255 the xterm cube and grays, then foreground, background, cursor, dim and bright variants.
 fn default_rgb(index: usize) -> Rgb {
     let [r, g, b] = match index {
         0..=15 => ANSI[index],
@@ -76,7 +71,6 @@ fn color32(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.r, rgb.g, rgb.b)
 }
 
-/// A cell color as drawn; a color the program set with OSC 4/10/11 wins over the default table.
 fn resolve(color: Color, colors: &Colors) -> Color32 {
     let index = match color {
         Color::Spec(rgb) => return color32(rgb),
@@ -90,12 +84,10 @@ type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
 fn send(writer: &Writer, bytes: &[u8]) {
     if let Ok(mut writer) = writer.lock() {
-        // the shell may be gone already; the exit is noticed by the reader
         let _ = writer.write_all(bytes).and_then(|()| writer.flush());
     }
 }
 
-/// Answers what the emulator asks the host: replies for the program (cursor position, colors) and clipboard writes.
 #[derive(Clone)]
 struct Proxy {
     writer: Writer,
@@ -133,7 +125,6 @@ impl Dimensions for Size {
     }
 }
 
-/// A running shell: the emulated screen, the pty it talks through, and the child process.
 struct Session {
     term: Arc<Mutex<Term<Proxy>>>,
     writer: Writer,
@@ -236,9 +227,7 @@ impl Drop for Session {
 
 pub struct Terminal {
     session: Result<Session, String>,
-    /// A drag that started inside the terminal and is selecting text.
     selecting: bool,
-    /// Wheel movement not yet worth a whole line.
     scroll: f32,
     focus_pending: bool,
 }
@@ -257,7 +246,6 @@ impl Terminal {
         Session::spawn(ctx, &shell(), Size { cols: 80, rows: 24 })
     }
 
-    /// Kills the shell, e.g. when the app closes.
     pub fn close(&mut self) {
         self.session = Err("closed".to_owned());
     }
@@ -339,7 +327,6 @@ impl Terminal {
         let shift = ui.input(|i| i.modifiers.shift);
         let reporting = mode.intersects(TermMode::MOUSE_MODE) && !shift;
 
-        // Mouse: a program that asked for it gets the events, otherwise a drag selects and the wheel scrolls the history.
         if response.hovered() && !reporting {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
@@ -409,18 +396,15 @@ impl Terminal {
                         ));
                     }
                 } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-                    let up = if mode.contains(TermMode::APP_CURSOR) {
-                        b"\x1bOA"
+                    let arrow = if lines > 0 {
+                        egui::Key::ArrowUp
                     } else {
-                        b"\x1b[A"
+                        egui::Key::ArrowDown
                     };
-                    let down = if mode.contains(TermMode::APP_CURSOR) {
-                        b"\x1bOB"
-                    } else {
-                        b"\x1b[B"
-                    };
-                    for _ in 0..lines.unsigned_abs() {
-                        session.write(if lines > 0 { up } else { down });
+                    if let Some(bytes) = key_bytes(arrow, egui::Modifiers::NONE, mode) {
+                        for _ in 0..lines.unsigned_abs() {
+                            session.write(&bytes);
+                        }
                     }
                 } else if let Ok(mut term) = session.term.lock() {
                     term.scroll_display(Scroll::Delta(lines));
@@ -493,7 +477,7 @@ impl Terminal {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, rgb(BG));
         if let Ok(term) = session.term.lock() {
-            paint(&painter, &term, rect, (cell_w, cell_h), focused);
+            paint(&painter, &term, rect, (cell_w, cell_h), focused, &font);
         }
         if exited {
             let text = "[the shell exited: press Enter to start a new one]";
@@ -510,7 +494,6 @@ impl Terminal {
 
 use egui::Event as Event_;
 
-/// What typing does to the screen: back to the live view, selection gone, the bytes to the shell.
 fn type_into(session: &Session, bytes: &[u8]) {
     if let Ok(mut term) = session.term.lock() {
         term.scroll_display(Scroll::Bottom);
@@ -525,10 +508,10 @@ fn paint(
     rect: egui::Rect,
     (cell_w, cell_h): (f32, f32),
     focused: bool,
+    regular: &egui::FontId,
 ) {
     let content = term.renderable_content();
     let offset = content.display_offset as i32;
-    let regular = egui::FontId::new(FONT_SIZE, egui::FontFamily::Monospace);
     let bold = egui::FontId::new(FONT_SIZE, crate::theme::bold_family());
     let cursor = (content.mode.contains(TermMode::SHOW_CURSOR)
         && content.cursor.shape != CursorShape::Hidden
@@ -568,7 +551,6 @@ fn paint(
         let on_cursor = focused
             && cursor.is_some_and(|c| c.shape == CursorShape::Block && c.point == cell.point);
         if on_cursor {
-            // the cursor block takes the foreground color and the text the background's
             painter.rect_filled(area, 0.0, rgb(FG));
             fg = rgb(BG);
         } else if selected {
@@ -584,19 +566,19 @@ fn paint(
             };
             painter.text(area.min, egui::Align2::LEFT_TOP, cell.c, font, fg);
         }
-        if cell.flags.intersects(Flags::ALL_UNDERLINES) {
-            let y = area.bottom() - 1.5;
-            painter.line_segment(
-                [egui::pos2(area.left(), y), egui::pos2(area.right(), y)],
-                egui::Stroke::new(1.0, fg),
-            );
-        }
-        if cell.flags.contains(Flags::STRIKEOUT) {
-            let y = area.center().y;
-            painter.line_segment(
-                [egui::pos2(area.left(), y), egui::pos2(area.right(), y)],
-                egui::Stroke::new(1.0, fg),
-            );
+        for (drawn, y) in [
+            (
+                cell.flags.intersects(Flags::ALL_UNDERLINES),
+                area.bottom() - 1.5,
+            ),
+            (cell.flags.contains(Flags::STRIKEOUT), area.center().y),
+        ] {
+            if drawn {
+                painter.line_segment(
+                    [egui::pos2(area.left(), y), egui::pos2(area.right(), y)],
+                    egui::Stroke::new(1.0, fg),
+                );
+            }
         }
     }
 
@@ -645,17 +627,14 @@ fn shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_owned());
 }
 
-/// xterm's modifier parameter: 1 + shift + alt*2 + ctrl*4.
 fn modifier_param(m: egui::Modifiers) -> u8 {
     1 + u8::from(m.shift) + 2 * u8::from(m.alt) + 4 * u8::from(m.ctrl)
 }
 
-/// A key as the bytes a terminal sends. Printable keys come through `Event::Text` instead, so they are `None` here unless Ctrl changes them.
 fn key_bytes(key: egui::Key, m: egui::Modifiers, mode: TermMode) -> Option<Vec<u8>> {
     use egui::Key as K;
     let param = modifier_param(m);
     let plain = param == 1;
-    // CSI sequence with the modifier parameter when there is one: `ESC [ 1 ; m final` or `ESC [ n ; m ~`
     let csi = |number: Option<u8>, final_byte: char| -> Vec<u8> {
         match (number, plain) {
             (None, true) => format!("\x1b[{final_byte}"),
@@ -718,7 +697,6 @@ fn key_bytes(key: egui::Key, m: egui::Modifiers, mode: TermMode) -> Option<Vec<u
         K::F11 => csi(Some(23), '~'),
         K::F12 => csi(Some(24), '~'),
         K::Space if m.ctrl => b"\0".to_vec(),
-        // Ctrl+V pastes (the Paste event carries the text) and Ctrl+Shift+C copies, so neither reaches the program
         K::V if m.ctrl => return None,
         K::C if m.ctrl && m.shift => return None,
         _ if m.ctrl && !m.alt => {
@@ -738,7 +716,6 @@ fn key_bytes(key: egui::Key, m: egui::Modifiers, mode: TermMode) -> Option<Vec<u
     })
 }
 
-/// An xterm mouse report for the cell at `row`, `col`: SGR (`ESC [ < b ; x ; y M/m`) when the program asked for it, else the legacy encoding.
 fn mouse_report(
     mode: TermMode,
     button: u8,
@@ -757,7 +734,6 @@ fn mouse_report(
         )
         .into_bytes()
     } else {
-        // legacy reports have no room past column/row 223, and a release has no button
         let code = if release { 3 + (code & !3) } else { code };
         vec![
             0x1b,
@@ -818,7 +794,6 @@ mod tests {
             bytes(egui::Key::Enter, egui::Modifiers::SHIFT, TermMode::NONE).unwrap(),
             "\n"
         );
-        // printable keys arrive as text, and Ctrl+V is a paste
         assert!(bytes(egui::Key::A, egui::Modifiers::NONE, TermMode::NONE).is_none());
         assert!(bytes(egui::Key::V, egui::Modifiers::CTRL, TermMode::NONE).is_none());
     }
@@ -836,7 +811,6 @@ mod tests {
     #[test]
     fn color_table() {
         assert_eq!(default_rgb(1).r, 0xf7);
-        // the xterm cube: index 16 is black, 231 is white
         assert_eq!((default_rgb(16).r, default_rgb(231).r), (0, 255));
         assert_eq!(default_rgb(232).r, 8);
     }

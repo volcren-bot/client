@@ -1,5 +1,3 @@
-//! Equipment and inventory layouts: what a script's `equipment` and `inventory` form fields pick from, kept per script, edited on the running script's page and read from a client.
-
 use std::collections::HashMap;
 
 use eframe::egui;
@@ -8,10 +6,9 @@ use serde_json::{Value, json};
 
 use loader::backend::{self, Settings, Target};
 
-use crate::icons::{Icons, Key, SLOT_SIZE};
+use crate::icons::{Icons, Key, SLOT_CELL, SLOT_SIZE};
 use crate::theme;
 
-/// The worn items container's slots that exist, with their names, in the container's order, then the secondary ammo.
 pub const EQUIPMENT_SLOTS: [(usize, &str); 12] = [
     (0, "Head"),
     (1, "Cape"),
@@ -26,7 +23,6 @@ pub const EQUIPMENT_SLOTS: [(usize, &str); 12] = [
     (13, "Ammo"),
     (SECONDARY_AMMO_SLOT, "Secondary ammo"),
 ];
-/// Where each slot sits in the worn items tab: column and row of a 3 x 5 grid.
 const EQUIPMENT_CELLS: [(usize, usize, usize); 12] = [
     (0, 1, 0),
     (SECONDARY_AMMO_SLOT, 2, 0),
@@ -42,32 +38,25 @@ const EQUIPMENT_CELLS: [(usize, usize, usize); 12] = [
     (12, 2, 4),
 ];
 pub const EQUIPMENT_SIZE: usize = 15;
-/// Past the worn items container: a bolt pouch or Dizana's quiver gives this slot, and the lib ignores it without one.
 pub const SECONDARY_AMMO_SLOT: usize = 14;
 const SECONDARY_AMMO_HINT: &str =
     "Ignored unless the account has a bolt pouch in its inventory or Dizana's quiver.";
 const INVENTORY_CONTAINER: i32 = 93;
 const CAPE_SLOT: i32 = 1;
 const BOLT_POUCH: i32 = 9433;
-/// The bolt pouch's fourth stack is its extra ammo: its bolt (a number the enum maps to an item id) and amount.
 const POUCH_EXTRA_BOLT_VARBIT: i32 = 2476;
 const POUCH_EXTRA_AMOUNT_VARBIT: i32 = 2472;
 const POUCH_BOLTS_ENUM: i32 = 336;
-/// The item param that makes an item a quiver, and the client variables of what it holds.
 const QUIVER_PARAM: u32 = 1910;
 const QUIVER_AMMO_VARP: usize = 4142;
 const QUIVER_AMOUNT_VARP: usize = 4141;
 pub const INVENTORY_SIZE: usize = 28;
 pub const INVENTORY_COLUMNS: usize = 4;
-/// A rune pouch holds up to 4 kinds of rune (3 unless divine).
 pub const POUCH_SIZE: usize = 4;
-/// The varbits of the runes in the pouch and of their amounts, in slot order.
 pub const POUCH_RUNE_VARBITS: [i32; POUCH_SIZE] = [29, 1622, 1623, 14285];
 pub const POUCH_AMOUNT_VARBITS: [i32; POUCH_SIZE] = [1624, 1625, 1626, 14286];
-/// The enum that maps a pouch varbit's rune number to the rune's item id.
 pub const POUCH_RUNES_ENUM: i32 = 982;
 
-/// What a prayer boosts, for the ones that can't be on together: two prayers conflict when they share a flag.
 pub mod boost {
     pub const ATTACK: u8 = 1;
     pub const STRENGTH: u8 = 2;
@@ -75,12 +64,9 @@ pub mod boost {
     pub const RANGED: u8 = 8;
     pub const MAGIC: u8 = 16;
     pub const OVERHEAD: u8 = 32;
-    /// Chivalry, Piety, Rigour and Augury can't be used with any other stat prayer.
     pub const ALL_STATS: u8 = ATTACK | STRENGTH | DEFENCE | RANGED | MAGIC;
 }
 
-/// One prayer of the book: the key the lib's `Prayer.PRAYERS` uses, its level, the varbit that is 1 while it is on, its bit in the
-/// quick prayer selection (varbit `QUICK_SELECTED_VARBIT`), the sprite the prayer tab shows and what it conflicts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrayerInfo {
     pub key: &'static str,
@@ -90,7 +76,6 @@ pub struct PrayerInfo {
     pub quick_bit: u32,
     pub sprite: i32,
     pub boosts: u8,
-    /// For an upgrade (Deadeye, Mystic Vigour, Zeal): the key of the prayer whose slot and quick bit it takes once `unlock` is 1. Every one is shown, since which an account has can't be known without reading it.
     pub replaces: Option<&'static str>,
     pub unlock: Option<i32>,
 }
@@ -151,7 +136,6 @@ const MYSTIC_MIGHT: PrayerInfo = prayer(
 );
 const PIETY: PrayerInfo = prayer("piety", "Piety", 70, 4129, 26, 946, boost::ALL_STATS);
 
-/// The prayer book in the order the tab shows it (by level), `PRAYER_COLUMNS` to a row; the three upgrades sit at their own levels.
 pub const PRAYERS: [PrayerInfo; 32] = [
     prayer("thick_skin", "Thick Skin", 1, 4104, 0, 115, boost::DEFENCE),
     prayer(
@@ -291,14 +275,12 @@ pub const PRAYERS: [PrayerInfo; 32] = [
     upgrade(PIETY, "zeal", "Zeal", 84, 16577, 16578, 8595),
 ];
 pub const PRAYER_COLUMNS: usize = 5;
-/// The varbit whose bits (by `quick_bit`) are the quick prayer selection.
 pub const QUICK_SELECTED_VARBIT: i32 = 4102;
 
 pub fn prayer_info(key: &str) -> Option<&'static PrayerInfo> {
     PRAYERS.iter().find(|p| p.key == key)
 }
 
-/// The spellbooks with combat spells a weapon can autocast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Book {
     Standard,
@@ -324,8 +306,6 @@ impl Book {
     }
 }
 
-/// A spell a weapon can autocast: its slot in the game's autocast list (enum 1986, what varbit 276 holds), the key and name the
-/// lib's `Magic` module knows it by, its Magic level, the 24 px sprite the spellbook and the autocast picker draw it with, and its book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpellInfo {
     pub index: u32,
@@ -354,7 +334,6 @@ const fn spell(
     }
 }
 
-/// Every autocastable spell, from the client's autocast enum and each spell's params (name, level, sprite), in the game's order.
 pub const AUTOCAST_SPELLS: [SpellInfo; 48] = [
     spell(1, "wind_strike", "Wind Strike", 1, 15, Book::Standard),
     spell(2, "water_strike", "Water Strike", 5, 17, Book::Standard),
@@ -475,11 +454,9 @@ pub const AUTOCAST_SPELLS: [SpellInfo; 48] = [
     ),
     spell(58, "undead_grasp", "Undead Grasp", 79, 1269, Book::Arceuus),
 ];
-/// The weapon categories (varbit 357) whose combat tab offers autocast: staves, powered staves and the Tumeken's shadow kind.
 pub const AUTOCAST_WEAPON_CATEGORIES: [i32; 3] = [18, 21, 22];
 pub const WEAPON_CATEGORY_VARBIT: i32 = 357;
 
-/// The column a spell is listed in: its element or family (Wind, Smoke, Grasp), or Other for the standard book's god and utility spells.
 fn spell_column(info: &SpellInfo) -> &'static str {
     let first = info.name.split(' ').next().unwrap_or(info.name);
     match info.book {
@@ -493,8 +470,6 @@ pub fn spell_info(key: &str) -> Option<&'static SpellInfo> {
     AUTOCAST_SPELLS.iter().find(|s| s.key == key)
 }
 
-/// The doses or charges that count for an item whose name ends in a number (`Prayer potion(4)`): the numbers its family has, and the
-/// ones that count, in the order the bank takes them. A layout gives every item of one family the same setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Doses {
     pub all: Vec<u32>,
@@ -511,9 +486,6 @@ impl Doses {
     }
 }
 
-/// An item in a layout, with what the editor needs to show it without a client. A stack wants `min` to `max` of it (equal: exactly
-/// that many, both 0: any amount); an item that doesn't stack is one per slot. A `locked` item comes from the script's `required`
-/// list: `ids` are the other ids that count as it, and the user can move it but not remove or change it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StoredItem")]
 pub struct Item {
@@ -527,7 +499,6 @@ pub struct Item {
     pub ids: Vec<i32>,
 }
 
-/// An item as saved; a layout saved before ranges has the one `quantity`, which becomes both ends.
 #[derive(Deserialize)]
 struct StoredItem {
     id: i32,
@@ -564,7 +535,6 @@ impl From<StoredItem> for Item {
 }
 
 impl Item {
-    /// An item read from a client: a stack wants exactly what was read.
     pub fn read(id: i32, quantity: i32, name: String, stackable: bool) -> Self {
         let amount = if stackable { quantity } else { 1 };
         Item {
@@ -598,25 +568,20 @@ impl Item {
         })
     }
 
-    /// Whether the name is a rune pouch's (plain, looted or divine).
     pub fn is_rune_pouch(&self) -> bool {
         self.name.to_ascii_lowercase().contains("rune pouch")
     }
 
-    /// The family of a dose or charge item: its name without the number.
     fn dose_base(&self) -> Option<&str> {
         self.doses.as_ref()?;
         injector::config::dose_of(&self.name).map(|(base, _)| base)
     }
 
-    /// Whether `id` counts as this item.
     fn counts_as(&self, id: i32) -> bool {
         self.id == id || self.ids.contains(&id)
     }
 }
 
-/// Gives each item that doesn't stack and whose family (`families`, by id: the numbers it has) has more than one dose a dose setting
-/// that takes only its own dose.
 pub fn add_doses<'a>(
     items: impl IntoIterator<Item = &'a mut Item>,
     families: &HashMap<i32, Vec<u32>>,
@@ -638,17 +603,14 @@ pub fn add_doses<'a>(
     }
 }
 
-/// Item names and stackability by id, for the script's required items, which the loader learns from a client.
 pub type Known = HashMap<i32, (String, bool)>;
 
-/// What a script's layout fields ask of their layouts: items every equipment or inventory layout holds, and prayers it controls itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rules {
     pub required: Vec<injector::form::Required>,
     pub locked: Vec<String>,
 }
 
-/// The item a required entry puts in a layout, named once a client told the loader its name.
 fn required_item(rule: &injector::form::Required, known: &Known) -> Item {
     let id = rule.ids[0];
     let (name, stackable) = known
@@ -682,7 +644,6 @@ fn required_item(rule: &injector::form::Required, known: &Known) -> Item {
 }
 
 impl Rules {
-    /// The ids of the required items whose names the loader doesn't know yet.
     pub fn unknown(&self, known: &Known) -> Vec<i32> {
         self.required
             .iter()
@@ -691,8 +652,6 @@ impl Rules {
             .collect()
     }
 
-    /// Puts the required items in an inventory layout: one already there (locked, or the user's with one of its ids) stays where it is,
-    /// the rest go to their slot or the first free one, and a locked item no longer required becomes the user's. How many found no room.
     pub fn fit_inventory(&self, layout: &mut Inventory, known: &Known) -> usize {
         layout
             .slots
@@ -734,7 +693,6 @@ impl Rules {
                 None => missing += 1,
             }
         }
-        // the user's items of a required dose item's family take its doses, so the bank sees them as one item
         for i in 0..layout.slots.len() {
             let Some(item) = layout.slots[i].as_ref().filter(|item| !item.locked) else {
                 continue;
@@ -748,8 +706,6 @@ impl Rules {
         missing
     }
 
-    /// Puts the required items in their equipment slots, replacing what the layout had there; a locked item no longer required there
-    /// becomes the user's.
     pub fn fit_equipment(&self, layout: &mut Equipment, known: &Known) {
         for &(slot, _) in &EQUIPMENT_SLOTS {
             if let EquipmentSlot::Item(item) = layout.slot_mut(slot)
@@ -770,7 +726,6 @@ impl Rules {
         }
     }
 
-    /// Whether the script controls the prayer: it is locked, or can't be on with one that is.
     pub fn blocks(&self, key: &str) -> bool {
         let Some(info) = prayer_info(key) else {
             return false;
@@ -780,12 +735,10 @@ impl Rules {
         })
     }
 
-    /// Takes the prayers the script controls out of a prayer layout.
     pub fn fit_prayer(&self, layout: &mut Prayer) {
         layout.prayers.retain(|key| !self.blocks(key));
     }
 
-    /// The prayers the script controls, which the lib leaves alone: the locked ones and every one they can't be on with.
     fn blocked_prayers(&self) -> Vec<&'static str> {
         PRAYERS
             .iter()
@@ -795,7 +748,6 @@ impl Rules {
     }
 }
 
-/// What an equipment slot asks for: nothing worn there, anything, or one item.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EquipmentSlot {
@@ -809,10 +761,8 @@ pub enum EquipmentSlot {
 pub struct Equipment {
     pub name: String,
     pub slots: Vec<EquipmentSlot>,
-    /// The combat spell to autocast, or to cast by hand when the weapon can't autocast; a key of `AUTOCAST_SPELLS`.
     #[serde(default)]
     pub spell: Option<String>,
-    /// Whether the weapon read from the client could autocast (its combat tab offered it).
     #[serde(default)]
     pub autocast: bool,
 }
@@ -821,11 +771,9 @@ pub struct Equipment {
 pub struct Inventory {
     pub name: String,
     pub slots: Vec<Option<Item>>,
-    /// The runes in the rune pouch, when the inventory holds one.
     pub pouch: Option<Vec<Item>>,
 }
 
-/// A set of prayers, by key, that a script turns on or makes its quick prayers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prayer {
     pub name: String,
@@ -837,7 +785,6 @@ impl Prayer {
         self.prayers.iter().any(|k| k == key)
     }
 
-    /// Adds the prayer, taking out the ones it can't be on with, or takes it out when it is in.
     pub fn toggle(&mut self, key: &str) {
         if self.has(key) {
             self.prayers.retain(|k| k != key);
@@ -852,7 +799,6 @@ impl Prayer {
         self.sort();
     }
 
-    /// Keeps the book's order, which is how the script gets them.
     fn sort(&mut self) {
         self.prayers.sort_by_key(|k| {
             PRAYERS
@@ -863,7 +809,6 @@ impl Prayer {
     }
 }
 
-/// What a script's form fields can pick from, by kind.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptLayouts {
     pub equipment: Vec<Equipment>,
@@ -872,11 +817,8 @@ pub struct ScriptLayouts {
     pub prayer: Vec<Prayer>,
 }
 
-/// Every script's layouts, by the title of its form.
 pub type AllLayouts = HashMap<String, ScriptLayouts>;
 
-/// The saved layouts under `key`, and, when the saved text can't be read (layouts saved by a newer loader, or a broken file), the
-/// message to show: the text is copied to a file in `backup_dir`, and the caller must not save over it.
 pub fn load(
     storage: Option<&dyn eframe::Storage>,
     key: &str,
@@ -890,9 +832,7 @@ pub fn load(
     }
     let kept = backup_dir
         .map(|dir| {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
+            let secs = crate::paths::unix_secs();
             dir.join(format!("layouts-unreadable-{secs}.ron"))
         })
         .ok_or_else(|| "no data folder".to_owned())
@@ -919,7 +859,6 @@ pub trait Layout: Clone + Default + PartialEq {
     const KIND: Kind;
     fn name(&self) -> &str;
     fn set_name(&mut self, name: String);
-    /// What the script gets as the field's value.
     fn to_value(&self) -> Value;
 }
 
@@ -947,7 +886,6 @@ impl Kind {
         }
     }
 
-    /// The names of the saved layouts of this kind.
     pub fn names(self, layouts: &ScriptLayouts) -> Vec<&str> {
         match self {
             Kind::Equipment => layouts.equipment.iter().map(|l| l.name.as_str()).collect(),
@@ -956,8 +894,6 @@ impl Kind {
         }
     }
 
-    /// What the script gets for the layout called `name` with the script's rules applied, or null when there is none or it has no room
-    /// for the required items. A prayer layout also lists the prayers the script controls (`locked`), which the lib leaves alone.
     pub fn value_of(
         self,
         layouts: &ScriptLayouts,
@@ -990,7 +926,6 @@ impl Kind {
         .unwrap_or(Value::Null)
     }
 
-    /// Why the layout called `name` can't be picked: an inventory layout with no room for the script's required items.
     pub fn unusable(self, layouts: &ScriptLayouts, name: &str, rules: &Rules) -> Option<String> {
         if self != Kind::Inventory || rules.required.is_empty() {
             return None;
@@ -1071,7 +1006,6 @@ impl Layout for Prayer {
 }
 
 impl Equipment {
-    /// What a slot asks for; one a layout doesn't list is empty, but the secondary ammo is any, so a layout saved or made without it never clears it.
     fn slot(&self, slot: usize) -> &EquipmentSlot {
         self.slots
             .get(slot)
@@ -1098,7 +1032,6 @@ impl Inventory {
         &mut self.slots[slot]
     }
 
-    /// The doses of a required item of `item`'s family, which the user's items of that family follow.
     fn script_doses(&self, item: &Item) -> Option<Doses> {
         let (base, _) = injector::config::dose_of(&item.name)?;
         self.slots
@@ -1116,7 +1049,6 @@ impl Inventory {
     }
 }
 
-/// What a client read for the editor: the worn items, or the inventory with the pouch's runes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     Equipment {
@@ -1127,27 +1059,21 @@ pub enum Read {
         slots: Vec<Option<Item>>,
         pouch: Option<Vec<Item>>,
     },
-    /// The prayers on, or the quick prayer selection, by key.
     Prayers(Vec<String>),
 }
 
-/// The state of one editor tab: which saved layout is open (none: a new one) and the copy being edited.
 #[derive(Debug, Clone, Default)]
 pub struct Editor<L> {
     pub index: Option<usize>,
-    /// The name the open layout is saved under, which finds it again when the list changes under the editor.
     opened: Option<String>,
     pub draft: L,
     pub selected: Option<usize>,
-    /// The selected slot is in the rune pouch, not the inventory.
     pub selected_in_pouch: bool,
     pub reading: bool,
     pub error: Option<String>,
-    /// Why the draft can't be saved as it is, besides its name.
     pub invalid: Option<String>,
 }
 
-/// Both editor tabs of the running script's page.
 #[derive(Debug, Clone, Default)]
 pub struct Editors {
     pub equipment: Editor<Equipment>,
@@ -1155,18 +1081,14 @@ pub struct Editors {
     pub prayer: Editor<Prayer>,
 }
 
-/// What the editor's header asked the app to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
-    /// Read the layout from the selected client: the worn items, the inventory, or the prayers on.
     Read,
-    /// Read the quick prayer selection from the selected client.
     ReadQuick,
 }
 
 const NEW_LAYOUT: &str = "New layout";
 
-/// A name for a copy of the layout `name` that no saved layout has: "X copy", then "X copy 2" and up.
 fn copy_name<L: Layout>(saved: &[L], name: &str) -> String {
     let free = |candidate: &str| saved.iter().all(|l| l.name() != candidate);
     let first = format!("{name} copy");
@@ -1180,7 +1102,6 @@ fn copy_name<L: Layout>(saved: &[L], name: &str) -> String {
 }
 
 impl<L: Layout> Editor<L> {
-    /// Opens the saved layout at `index`, or a new one.
     fn open(&mut self, saved: &[L], index: Option<usize>) {
         self.index = index.filter(|&i| i < saved.len());
         self.opened = self.index.map(|i| saved[i].name().to_owned());
@@ -1201,12 +1122,10 @@ impl<L: Layout> Editor<L> {
         }
     }
 
-    /// Whether the draft differs from what is saved (a new layout always does).
     fn dirty(&self, saved: &[L]) -> bool {
         self.index.and_then(|i| saved.get(i)) != Some(&self.draft)
     }
 
-    /// Points `index` at the open layout in `saved`, which another run of the same script may have changed: a layout that moved is found by its name, and one that is gone leaves the draft as a new layout.
     fn follow(&mut self, saved: &[L]) {
         self.index = self
             .opened
@@ -1217,7 +1136,6 @@ impl<L: Layout> Editor<L> {
         }
     }
 
-    /// The layout dropdown, the name, Save, Duplicate and Remove.
     fn header(&mut self, ui: &mut egui::Ui, saved: &mut Vec<L>) {
         self.follow(saved);
         let mut open: Option<Option<usize>> = None;
@@ -1328,7 +1246,11 @@ impl<L: Layout> Editor<L> {
         }
     }
 
-    /// The column above a tab's grid: its hint, Read from client and what a failed read said.
+    fn begin_read(&mut self) {
+        self.reading = true;
+        self.error = None;
+    }
+
     fn read_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1361,8 +1283,7 @@ impl<L: Layout> Editor<L> {
                     );
                 }
                 if read.clicked() {
-                    self.reading = true;
-                    self.error = None;
+                    self.begin_read();
                     action = Some(Action::Read);
                 }
                 if quick_read
@@ -1374,8 +1295,7 @@ impl<L: Layout> Editor<L> {
                         .on_hover_text("Fills the layout with the client's quick prayer selection.")
                         .clicked()
                 {
-                    self.reading = true;
-                    self.error = None;
+                    self.begin_read();
                     action = Some(Action::ReadQuick);
                 }
             });
@@ -1387,7 +1307,6 @@ impl<L: Layout> Editor<L> {
     }
 }
 
-/// The width of a grid of `columns` cells.
 const fn grid_width(columns: usize, cell: f32, gap: f32) -> f32 {
     columns as f32 * cell + (columns - 1) as f32 * gap
 }
@@ -1397,15 +1316,12 @@ const PRAYER_GAP: f32 = 4.0;
 const PICKER_WIDTH: f32 = 100.0;
 const NAME_WIDTH: f32 = 160.0;
 
-/// The width every tab's header, hint and buttons share (the layout dropdown and the name box side by side); the grids centre in it.
 const COLUMN_WIDTH: f32 = PICKER_WIDTH + 8.0 + NAME_WIDTH;
 
-/// Runs `add` in a column of `COLUMN_WIDTH` centred in the tab.
 fn centered_column<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     centered_width(ui, COLUMN_WIDTH, add)
 }
 
-/// Runs `add` in a column of `width` centred in the tab.
 fn centered_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let pad = ((ui.available_width() - width) / 2.0 - ui.spacing().item_spacing.x).max(0.0);
     ui.horizontal_top(|ui| {
@@ -1419,7 +1335,6 @@ fn centered_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::
     .inner
 }
 
-/// Draws one slot: the item's icon, or what an empty slot means; selected slots get the accent border.
 fn slot_ui(
     ui: &mut egui::Ui,
     icons: &mut Icons,
@@ -1428,7 +1343,7 @@ fn slot_ui(
     selected: bool,
     sense: egui::Sense,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(SLOT_SIZE + egui::vec2(8.0, 8.0), sense);
+    let (rect, response) = ui.allocate_exact_size(SLOT_CELL, sense);
     if ui.is_rect_visible(rect) {
         let visuals = ui.style().interact(&response);
         let stroke = if selected {
@@ -1483,7 +1398,6 @@ fn slot_ui(
     response
 }
 
-/// What a stack's range asks for, for hovers and labels.
 fn range_text(item: &Item) -> String {
     match (item.min, item.max) {
         (0, 0) => "any amount".to_owned(),
@@ -1499,7 +1413,7 @@ fn doses_text(doses: &Doses) -> String {
 }
 
 fn item_hover(item: &Item) -> String {
-    let mut text = format!("{}  (id {})", item_label(item), item.id);
+    let mut text = item_title(item);
     if item.stackable {
         text = format!("{text}, {}", range_text(item));
     }
@@ -1512,7 +1426,6 @@ fn item_hover(item: &Item) -> String {
     text
 }
 
-/// The item's name, or its id until a client told the loader the name.
 fn item_label(item: &Item) -> String {
     if item.name.is_empty() {
         format!("Item {}", item.id)
@@ -1521,7 +1434,49 @@ fn item_label(item: &Item) -> String {
     }
 }
 
-/// A padlock in the top right corner of `rect`, on a dark backing so it reads over any icon.
+fn item_title(item: &Item) -> String {
+    format!("{}  (id {})", item_label(item), item.id)
+}
+
+fn slot_name(slot: usize) -> &'static str {
+    EQUIPMENT_SLOTS
+        .iter()
+        .find(|(s, _)| *s == slot)
+        .map_or("", |(_, name)| name)
+}
+
+fn paint_sprite(
+    ui: &mut egui::Ui,
+    icons: &mut Icons,
+    sprite: i32,
+    rect: egui::Rect,
+    padding: f32,
+    tint: egui::Color32,
+    name: &str,
+) {
+    match icons.texture(ui.ctx(), Key::Sprite(sprite)) {
+        Some(texture) => {
+            let size = texture
+                .size_vec2()
+                .min(rect.size() - egui::vec2(padding, padding));
+            egui::Image::from_texture(texture)
+                .tint(tint)
+                .paint_at(ui, egui::Rect::from_center_size(rect.center(), size));
+        }
+        None => {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                name.split(' ')
+                    .map(|w| w.chars().next().unwrap_or(' '))
+                    .collect::<String>(),
+                egui::TextStyle::Small.resolve(ui.style()),
+                ui.visuals().weak_text_color(),
+            );
+        }
+    }
+}
+
 fn paint_padlock(painter: &egui::Painter, rect: egui::Rect) {
     let size = (rect.width() * 0.32).clamp(9.0, 14.0);
     let body = egui::Rect::from_min_size(
@@ -1556,10 +1511,8 @@ fn paint_padlock(painter: &egui::Painter, rect: egui::Rect) {
     );
 }
 
-/// The selected item: its name, and what the user may set: a stack's range and the doses that count. A locked item only says the
-/// script requires it.
 fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool) -> Option<Doses> {
-    ui.label(format!("{}  (id {})", item_label(item), item.id));
+    ui.label(item_title(item));
     if item.locked {
         ui.colored_label(
             theme::BLUE,
@@ -1594,7 +1547,6 @@ fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool) -> Option<Dose
                     .range(0..=i32::MAX)
                     .speed(1.0),
             );
-            // the end the user didn't touch moves to keep min at most max; a max of 0 is "any", which takes min with it
             if min.changed() && item.min > item.max {
                 item.max = item.min;
             }
@@ -1643,7 +1595,6 @@ fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool) -> Option<Dose
     (*doses != before).then(|| doses.clone())
 }
 
-/// Gives every item of `base`'s family in the layout the dose setting one of them got.
 fn share_doses<'a>(items: impl IntoIterator<Item = &'a mut Item>, base: &str, doses: &Doses) {
     for item in items {
         if !item.locked && item.dose_base() == Some(base) {
@@ -1652,7 +1603,6 @@ fn share_doses<'a>(items: impl IntoIterator<Item = &'a mut Item>, base: &str, do
     }
 }
 
-/// The Equipment tab: the worn items grid as the game lays it out, read from a client, with each slot's meaning editable.
 pub fn equipment_ui(
     ui: &mut egui::Ui,
     editor: &mut Editor<Equipment>,
@@ -1666,7 +1616,7 @@ pub fn equipment_ui(
         rules.fit_equipment(layout, known);
     }
     rules.fit_equipment(&mut editor.draft, known);
-    let cell = SLOT_SIZE + egui::vec2(8.0, 8.0);
+    let cell = SLOT_CELL;
     let gap = 6.0;
     let width = grid_width(3, cell.x, gap);
     let margin = (COLUMN_WIDTH - width) / 2.0;
@@ -1701,10 +1651,7 @@ pub fn equipment_ui(
                             .max_rect(egui::Rect::from_min_size(min, cell))
                             .layout(egui::Layout::left_to_right(egui::Align::Min)),
                     );
-                    let name = EQUIPMENT_SLOTS
-                        .iter()
-                        .find(|(s, _)| *s == slot)
-                        .map_or("", |(_, name)| name);
+                    let name = slot_name(slot);
                     let (item, text, hover) = match editor.draft.slot(slot) {
                         EquipmentSlot::Item(item) => {
                             (Some(item), "", format!("{name}: {}", item_hover(item)))
@@ -1745,11 +1692,7 @@ pub fn equipment_ui(
             ui.add_space(6.0);
             ui.vertical_centered(|ui| {
                 if let Some(slot) = editor.selected {
-                    let name = EQUIPMENT_SLOTS
-                        .iter()
-                        .find(|(s, _)| *s == slot)
-                        .map_or("", |(_, name)| name);
-                    ui.strong(name);
+                    ui.strong(slot_name(slot));
                     if slot == SECONDARY_AMMO_SLOT {
                         ui.weak(SECONDARY_AMMO_HINT);
                     }
@@ -1793,9 +1736,6 @@ pub fn equipment_ui(
     action
 }
 
-/// The spell of an equipment layout: the autocast spell when the weapon read from the client offered autocast, else a spell the
-/// script casts by hand. A dropdown picks the spellbook (the picked spell's book to start with) and only that book's combat spells
-/// are shown, in the game's autocast order; a click picks or unpicks one.
 fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
     let width = COLUMN_WIDTH;
     ui.set_width(width);
@@ -1858,27 +1798,15 @@ fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
                         };
                         ui.painter()
                             .rect(rect, 3.0, fill, stroke, egui::StrokeKind::Inside);
-                        match icons.texture(ui.ctx(), Key::Sprite(info.sprite)) {
-                            Some(texture) => {
-                                let size = texture.size_vec2().min(cell - egui::vec2(4.0, 4.0));
-                                egui::Image::from_texture(texture).paint_at(
-                                    ui,
-                                    egui::Rect::from_center_size(rect.center(), size),
-                                );
-                            }
-                            None => {
-                                ui.painter().text(
-                                    rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    info.name
-                                        .split(' ')
-                                        .map(|w| w.chars().next().unwrap_or(' '))
-                                        .collect::<String>(),
-                                    egui::TextStyle::Small.resolve(ui.style()),
-                                    ui.visuals().weak_text_color(),
-                                );
-                            }
-                        }
+                        paint_sprite(
+                            ui,
+                            icons,
+                            info.sprite,
+                            rect,
+                            4.0,
+                            egui::Color32::WHITE,
+                            info.name,
+                        );
                     }
                     if response
                         .on_hover_text(format!("{} (level {})", info.name, info.level))
@@ -1908,7 +1836,6 @@ fn spell_ui(ui: &mut egui::Ui, draft: &mut Equipment, icons: &mut Icons) {
     };
 }
 
-/// Why an inventory layout without room for the script's required items can't be used.
 fn no_room(missing: usize) -> String {
     if missing == 1 {
         "No room for an item the script requires: free a slot.".to_owned()
@@ -1917,7 +1844,6 @@ fn no_room(missing: usize) -> String {
     }
 }
 
-/// The Inventory tab: the 4 x 7 grid with drag to move items, amounts of stackables, and the rune pouch's runes when there is one.
 pub fn inventory_ui(
     ui: &mut egui::Ui,
     editor: &mut Editor<Inventory>,
@@ -1933,7 +1859,7 @@ pub fn inventory_ui(
     let missing = rules.fit_inventory(&mut editor.draft, known);
     editor.invalid = (missing > 0).then(|| no_room(missing));
     let gap = 6.0;
-    let margin = (COLUMN_WIDTH - grid_width(INVENTORY_COLUMNS, SLOT_SIZE.x + 8.0, gap)) / 2.0;
+    let margin = (COLUMN_WIDTH - grid_width(INVENTORY_COLUMNS, SLOT_CELL.x, gap)) / 2.0;
     centered_column(ui, |ui| {
         editor.header(ui, saved);
         ui.add_space(6.0);
@@ -1973,9 +1899,7 @@ pub fn inventory_ui(
                                         egui::Area::new(egui::Id::new("inventory_layout_ghost"))
                                             .order(egui::Order::Tooltip)
                                             .interactable(false)
-                                            .fixed_pos(
-                                                pos - (SLOT_SIZE + egui::vec2(8.0, 8.0)) / 2.0,
-                                            )
+                                            .fixed_pos(pos - SLOT_CELL / 2.0)
                                             .show(ui.ctx(), |ui| {
                                                 slot_ui(
                                                     ui,
@@ -2022,7 +1946,7 @@ pub fn inventory_ui(
                 ui.strong("Rune pouch");
                 let runes = editor.draft.pouch.get_or_insert_with(Vec::new);
                 let spacing = ui.spacing().item_spacing.x;
-                let row = grid_width(POUCH_SIZE, SLOT_SIZE.x + 8.0, spacing);
+                let row = grid_width(POUCH_SIZE, SLOT_CELL.x, spacing);
                 ui.horizontal(|ui| {
                     ui.add_space(((COLUMN_WIDTH - row) / 2.0 - spacing).max(0.0));
                     for i in 0..POUCH_SIZE {
@@ -2080,8 +2004,10 @@ pub fn inventory_ui(
             }
         });
         if let Some((from, to)) = moved {
-            editor.draft.slot_mut(from);
-            editor.draft.slot_mut(to);
+            editor
+                .draft
+                .slots
+                .resize(editor.draft.slots.len().max(INVENTORY_SIZE), None);
             editor.draft.slots.swap(from, to);
             editor.selected = Some(to);
             editor.selected_in_pouch = false;
@@ -2090,8 +2016,6 @@ pub fn inventory_ui(
     })
 }
 
-/// The Prayer tab: the prayer book as the tab lays it out; clicking a prayer puts it in the layout and takes out the ones it can't be
-/// on with. A prayer above the client's Prayer level (when known) is dimmed but can still be picked.
 pub fn prayer_ui(
     ui: &mut egui::Ui,
     editor: &mut Editor<Prayer>,
@@ -2143,27 +2067,7 @@ pub fn prayer_ui(
                             } else {
                                 egui::Color32::WHITE
                             };
-                            match icons.texture(ui.ctx(), Key::Sprite(info.sprite)) {
-                                Some(texture) => {
-                                    let size = texture.size_vec2().min(cell - egui::vec2(6.0, 6.0));
-                                    egui::Image::from_texture(texture).tint(tint).paint_at(
-                                        ui,
-                                        egui::Rect::from_center_size(rect.center(), size),
-                                    );
-                                }
-                                None => {
-                                    ui.painter().text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        info.name
-                                            .split(' ')
-                                            .map(|w| w.chars().next().unwrap_or(' '))
-                                            .collect::<String>(),
-                                        egui::TextStyle::Small.resolve(ui.style()),
-                                        ui.visuals().weak_text_color(),
-                                    );
-                                }
-                            }
+                            paint_sprite(ui, icons, info.sprite, rect, 6.0, tint, info.name);
                             if blocked {
                                 paint_padlock(ui.painter(), rect);
                             }
@@ -2229,7 +2133,6 @@ pub fn prayer_ui(
 
 const CONTROLLED: &str = "The script controls this prayer: it can't be customised.";
 
-/// Puts what a client read into a prayer draft.
 pub fn apply_prayers(draft: &mut Prayer, read: Read) {
     if let Read::Prayers(keys) = read {
         draft.prayers = keys;
@@ -2237,7 +2140,6 @@ pub fn apply_prayers(draft: &mut Prayer, read: Read) {
     }
 }
 
-/// Puts what a client read into an equipment draft.
 pub fn apply_equipment(draft: &mut Equipment, read: Read) {
     if let Read::Equipment { slots, autocast } = read {
         draft.slots = slots;
@@ -2246,7 +2148,6 @@ pub fn apply_equipment(draft: &mut Equipment, read: Read) {
     }
 }
 
-/// The item a bolt pouch's enum maps a stack's number to.
 fn enum_item(def: &injector::config::EnumDef, key: i32) -> Option<i32> {
     def.entries
         .iter()
@@ -2257,7 +2158,6 @@ fn enum_item(def: &injector::config::EnumDef, key: i32) -> Option<i32> {
         })
 }
 
-/// What the secondary ammo slot holds: `None` when nothing gives the slot, else its item id and amount if any. A quiver worn or carried turns the pouch's slot off, as the client does.
 pub fn read_secondary_ammo(
     target: &Target,
     settings: &Settings,
@@ -2297,7 +2197,6 @@ pub fn read_secondary_ammo(
     ))
 }
 
-/// Puts what a client read into an inventory draft.
 pub fn apply_inventory(draft: &mut Inventory, read: Read) {
     if let Read::Inventory { slots, pouch } = read {
         let locked: Vec<(usize, Item)> = draft
@@ -2309,7 +2208,6 @@ pub fn apply_inventory(draft: &mut Inventory, read: Read) {
         draft.slots = slots;
         draft.slots.resize(INVENTORY_SIZE, None);
         draft.pouch = pouch;
-        // the script's items stay where the user put them unless the client holds them elsewhere
         for (at, item) in locked {
             let held = draft.slots.iter().flatten().any(|i| item.counts_as(i.id));
             if !held && draft.slots[at].is_none() {
@@ -2319,10 +2217,8 @@ pub fn apply_inventory(draft: &mut Inventory, read: Read) {
     }
 }
 
-/// Item names and stackability by id, as read from a client.
 pub type Described = (HashMap<i32, String>, HashMap<i32, bool>);
 
-/// The items of a container read from a client, with their names and stackability.
 pub fn items_of(
     container: &[injector::Item],
     names: &HashMap<i32, String>,
@@ -2343,8 +2239,6 @@ pub fn items_of(
         .collect()
 }
 
-/// A dropdown of the script's layouts of `kind` for the form's field, choosing by name; "None" picks nothing. An inventory layout with
-/// no room for the script's required items is listed but can't be picked.
 pub fn picker_ui(
     ui: &mut egui::Ui,
     kind: Kind,
@@ -2420,7 +2314,6 @@ mod tests {
         assert_eq!(read, saved);
         assert!(message.is_none());
 
-        // a value of a shape this loader doesn't read, as a newer loader might save
         let text = storage.0["layouts"].replace("prayers:[", "prayers:5,old:[");
         assert_ne!(text, storage.0["layouts"]);
         storage.0.insert("layouts".into(), text.clone());
@@ -2497,14 +2390,12 @@ mod tests {
         *layout.slot_mut(5) = Some(item(1, 1, false));
         *layout.slot_mut(9) = Some(item(139, 1, false));
         assert_eq!(rules.fit_inventory(&mut layout, &known), 0);
-        // the user's own copy (an accepted id) became the required item in its slot; the rune took the first free slot
         let potion = layout.slots[9].as_ref().unwrap();
         assert!(potion.locked);
         assert_eq!((potion.id, potion.ids.as_slice()), (2434, &[139][..]));
         assert_eq!(potion.name, "Prayer potion(4)");
         assert_eq!(layout.slots[0].as_ref().unwrap().id, 563);
         assert_eq!(layout.slots[0].as_ref().unwrap().name, "");
-        // moved by the user, it stays moved
         layout.slots.swap(9, 20);
         assert_eq!(rules.fit_inventory(&mut layout, &known), 0);
         assert!(layout.slots[20].as_ref().unwrap().locked);
@@ -2512,10 +2403,8 @@ mod tests {
         let value = layout.to_value();
         assert_eq!(value["slots"][2]["ids"], json!([2434, 139]));
         assert_eq!(value["slots"][2]["locked"], true);
-        // no longer required: the user's to keep or remove
         assert_eq!(Rules::default().fit_inventory(&mut layout, &known), 0);
         assert!(!layout.slots[20].as_ref().unwrap().locked);
-        // a full layout can't take them
         let mut full = Inventory {
             slots: (0..28).map(|i| Some(item(1000 + i, 1, false))).collect(),
             ..Default::default()
@@ -2629,7 +2518,6 @@ mod tests {
         assert_eq!(items[1].doses.as_ref().unwrap().accepted, [4, 3]);
         assert_eq!(items[3].doses.as_ref().unwrap().accepted, [4]);
         assert_eq!(items[0].to_value()["doses"], json!([4, 3]));
-        // a script's doses keep its order
         let required = required_item(
             &injector::form::Required {
                 doses: vec![3, 4],
@@ -2796,12 +2684,10 @@ mod tests {
         let mut editor: Editor<Equipment> = Editor::default();
         editor.open(&saved, Some(2));
 
-        // another run of the script removed a layout before it: the open one moved
         saved.remove(0);
         editor.follow(&saved);
         assert_eq!(editor.index, Some(1));
 
-        // and then the open one itself: the draft is a new layout, never another one's
         saved.remove(1);
         editor.follow(&saved);
         assert_eq!(editor.index, None);
@@ -2839,7 +2725,6 @@ mod tests {
                 "protect_from_melee"
             ]
         );
-        // another overhead replaces the overhead, piety replaces every stat prayer
         layout.toggle("smite");
         layout.toggle("piety");
         assert_eq!(layout.prayers, ["rapid_heal", "smite", "piety"]);
@@ -2854,7 +2739,6 @@ mod tests {
             .collect();
         bits.sort_unstable();
         assert_eq!(bits, (0..29).collect::<Vec<u32>>());
-        // an upgrade shares its base's bit and can't be in a layout with it
         assert_eq!(
             prayer_info("zeal").unwrap().quick_bit,
             prayer_info("piety").unwrap().quick_bit

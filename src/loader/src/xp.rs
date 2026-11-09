@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-/// One skill of a game state read: its real level and total experience.
 #[derive(Clone)]
 pub struct SkillXp {
     pub name: String,
@@ -8,12 +7,10 @@ pub struct SkillXp {
     pub xp: i64,
 }
 
-/// The experience a script has gained since its first `track_xp` snapshot.
 #[derive(Default)]
 pub struct XpTracker {
     first: Vec<SkillXp>,
     latest: Vec<SkillXp>,
-    /// The run time when `latest` was read; rates are worked out against it, so they hold still between reads.
     read_at: Duration,
 }
 
@@ -25,7 +22,6 @@ pub struct XpRow {
     pub to_level: Option<Duration>,
 }
 
-/// Experience needed for `level`, as in the game.
 pub fn xp_for_level(level: i64) -> i64 {
     let points: f64 = (1..level)
         .map(|l| (l as f64 + 300.0 * 2f64.powf(l as f64 / 7.0)).floor())
@@ -34,7 +30,6 @@ pub fn xp_for_level(level: i64) -> i64 {
 }
 
 impl XpTracker {
-    /// Whether no read of the skills has come in yet.
     pub fn is_empty(&self) -> bool {
         self.first.is_empty()
     }
@@ -43,7 +38,6 @@ impl XpTracker {
         if self.first.is_empty() {
             self.first = skills.clone();
         }
-        // a skill that shows up later started from its first appearance
         for skill in &skills {
             if !self.first.iter().any(|first| first.name == skill.name) {
                 self.first.push(skill.clone());
@@ -54,16 +48,9 @@ impl XpTracker {
     }
 
     pub fn total(&self) -> i64 {
-        self.latest
-            .iter()
-            .filter_map(|skill| {
-                Some(skill.xp - self.first.iter().find(|first| first.name == skill.name)?.xp)
-                    .filter(|&gained| gained > 0)
-            })
-            .sum()
+        self.rows().iter().map(|row| row.gained).sum()
     }
 
-    /// Skills that gained experience, biggest gain first, with rates over the run up to the last read.
     pub fn rows(&self) -> Vec<XpRow> {
         let hours = self.read_at.as_secs_f64() / 3600.0;
         let mut rows: Vec<XpRow> = self

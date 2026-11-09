@@ -1,5 +1,3 @@
-//! The Luau lib that store scripts `require("../lib/...")`: published to the `client` bucket and kept in the cache beside the script folders.
-
 use std::{
     fs,
     io::{Cursor, Read},
@@ -14,14 +12,12 @@ const VERSION_FILE: &str = ".version";
 const MAX_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_FILES: usize = 2000;
+const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024;
 
-/// One published lib, as listed in `lib/index.json` (newest first, the last few releases).
 #[derive(Debug, Deserialize, PartialEq)]
 struct Release {
     version: String,
-    /// The `HOST_API` the loader needs to run this lib.
     requires_host: u32,
-    /// Path inside the `client` bucket.
     path: String,
     sha256: String,
 }
@@ -31,7 +27,6 @@ struct Index {
     versions: Vec<Release>,
 }
 
-/// The lib to use: the newest the loader can run, and whether a newer one exists that it can't.
 fn choose(releases: &[Release], host_api: u32) -> Option<(&Release, bool)> {
     let position = releases
         .iter()
@@ -39,17 +34,14 @@ fn choose(releases: &[Release], host_api: u32) -> Option<(&Release, bool)> {
     Some((&releases[position], position > 0))
 }
 
-/// What `ensure` found.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Lib {
     pub version: String,
-    /// Set when a newer lib is published that needs a newer loader.
     pub warning: Option<String>,
 }
 
 const OUTDATED: &str = "A newer script library is available but needs a newer loader, so this script runs with an older one and may not work properly. Update the loader.";
 
-/// Makes sure `<root>/lib` is the newest published lib this loader can run; offline, a cached lib is used.
 pub fn ensure(api: &Api, root: &Path) -> Result<Lib, String> {
     let dir = root.join("lib");
     let installed = fs::read_to_string(dir.join(VERSION_FILE))
@@ -130,7 +122,6 @@ fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
         return Err("The script library didn't match its checksum, so it was discarded.".into());
     }
 
-    // Unpack beside the real folder and swap, so a failed or interrupted install never leaves half a lib.
     let staging = root.join("lib.new");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| format!("Couldn't create the cache folder: {e}"))?;
@@ -149,7 +140,6 @@ fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
     result.map_err(|e| format!("Couldn't install the script library: {e}"))
 }
 
-/// A zip entry name as a relative path, only if it can't leave the folder it is unpacked into.
 fn safe_entry(name: &str) -> Option<PathBuf> {
     if name.contains(['\\', '\0', ':']) {
         return None;
@@ -171,6 +161,7 @@ fn unpack(bytes: &[u8], into: &Path) -> Result<(), String> {
     if archive.len() > MAX_FILES {
         return Err("the archive has too many files".into());
     }
+    let mut unpacked = 0u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
         if entry.is_dir() {
@@ -187,6 +178,10 @@ fn unpack(bytes: &[u8], into: &Path) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         if contents.len() as u64 > MAX_FILE_BYTES {
             return Err(format!("{} is too large", relative.display()));
+        }
+        unpacked += contents.len() as u64;
+        if unpacked > MAX_UNPACKED_BYTES {
+            return Err("the archive is too large".into());
         }
         let target = into.join(&relative);
         if let Some(parent) = target.parent() {

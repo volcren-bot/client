@@ -1,6 +1,4 @@
-//! The Accounts tab: saved game accounts (a label, the name hash, the bank pin, the lamp skill), kept AES-256-GCM encrypted with a key in the OS keyring.
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use ring::{
@@ -12,20 +10,15 @@ use serde::{Deserialize, Serialize};
 const KEYRING_SERVICE: &str = "volcren-loader";
 const KEYRING_USER: &str = "accounts-key";
 const FILE_NAME: &str = "accounts.bin";
-/// Binds the ciphertext to this file format; bump with the format.
 const AAD: &[u8] = b"volcren-accounts-v1";
 const PIN_LEN: usize = 4;
-/// Leading characters of the hash shown in the list; the full hash is on hover.
 const HASH_SHOWN: usize = 12;
-/// Space around the page's content.
 const MARGIN: i8 = 16;
-/// Width of the dialog's text boxes; the dialog fits around them.
 const INPUT_WIDTH: f32 = 300.0;
-/// Height of a list row.
 const ROW_HEIGHT: f32 = 28.0;
-/// The least width of one of the list's text columns before the buttons stack to make room.
 const MIN_TEXT_WIDTH: f32 = 90.0;
-/// The skills a lamp can be spent on, as the lib's `Stats.Skill` names them.
+const ACCOUNT_REQUIRED: &str = "Enter the account name.";
+const PIN_INVALID: &str = "The bank pin is exactly 4 digits.";
 const LAMP_SKILLS: [&str; 24] = [
     "Agility",
     "Attack",
@@ -56,15 +49,12 @@ const LAMP_SKILLS: [&str; 24] = [
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     pub name: String,
-    /// `hash_name` of the account name.
     pub hash: String,
     pub pin: String,
-    /// What a random event's lamp is spent on, one of `LAMP_SKILLS`; empty keeps the lamp.
     #[serde(default)]
     pub lamp_skill: String,
 }
 
-/// SHA-256 of the account name as the client normalizes it, as lowercase hex, so "My Name" and the client's `my_name` hash the same.
 pub fn hash_name(account: &str) -> String {
     injector::bank_pin::hash_name(account)
 }
@@ -87,7 +77,6 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// `nonce || ciphertext || tag`, with a fresh random nonce.
 pub(crate) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
     let sealing = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, key).map_err(|e| e.to_string())?);
     let mut nonce = [0u8; NONCE_LEN];
@@ -138,19 +127,32 @@ fn decode(key: &[u8; 32], sealed: &[u8]) -> Result<Vec<Entry>, String> {
 }
 
 fn path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "volcren", "Volcren")
-        .map(|dirs| dirs.data_dir().join(FILE_NAME))
+    crate::paths::project_dirs().map(|dirs| dirs.data_dir().join(FILE_NAME))
 }
 
-/// The encryption key from the keyring; made and stored on first use.
-pub(crate) fn key(create: bool) -> Result<Option<[u8; 32]>, String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())?;
+fn keyring_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| e.to_string())
+}
+
+fn parse_key(text: &str) -> Result<[u8; 32], String> {
+    unhex(text)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| "the stored encryption key is malformed".to_owned())
+}
+
+pub(crate) fn existing_key() -> Result<Option<[u8; 32]>, String> {
+    match keyring_entry()?.get_password() {
+        Ok(text) => parse_key(&text).map(Some),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("the system keyring isn't available ({e})")),
+    }
+}
+
+pub(crate) fn create_key() -> Result<[u8; 32], String> {
+    let entry = keyring_entry()?;
     match entry.get_password() {
-        Ok(text) => unhex(&text)
-            .and_then(|bytes| bytes.try_into().ok())
-            .map(Some)
-            .ok_or_else(|| "the stored encryption key is malformed".to_owned()),
-        Err(keyring::Error::NoEntry) if create => {
+        Ok(text) => parse_key(&text),
+        Err(keyring::Error::NoEntry) => {
             let mut fresh = [0u8; 32];
             SystemRandom::new()
                 .fill(&mut fresh)
@@ -158,9 +160,8 @@ pub(crate) fn key(create: bool) -> Result<Option<[u8; 32]>, String> {
             entry
                 .set_password(&hex(&fresh))
                 .map_err(|e| e.to_string())?;
-            Ok(Some(fresh))
+            Ok(fresh)
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!("the system keyring isn't available ({e})")),
     }
 }
@@ -172,21 +173,23 @@ fn load() -> Result<Vec<Entry>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.to_string()),
     };
-    let key = key(false)?.ok_or("the encryption key is missing from the system keyring")?;
+    let key = existing_key()?.ok_or("the encryption key is missing from the system keyring")?;
     decode(&key, &sealed)
 }
 
 fn store(entries: &[Entry]) -> Result<(), String> {
     let path = path().ok_or("no data folder on this system")?;
-    let key = key(true)?.ok_or("no encryption key")?;
-    let sealed = encode(&key, entries)?;
+    let key = create_key()?;
+    write_sealed(&path, &encode(&key, entries)?)
+}
+
+pub(crate) fn write_sealed(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    // Write beside it and rename, so a crash never leaves half a file.
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, sealed).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -195,7 +198,6 @@ enum Field {
     Pin,
 }
 
-/// The list's data columns.
 #[derive(Clone, Copy)]
 enum Column {
     Name,
@@ -203,7 +205,6 @@ enum Column {
     Pin,
 }
 
-/// The cell being edited in place. `fresh` until its text box has been given focus once.
 struct Editing {
     index: usize,
     field: Field,
@@ -211,10 +212,29 @@ struct Editing {
     fresh: bool,
 }
 
-/// The add dialog, or (with `target`) the dialog that changes the account of one row.
+impl Editing {
+    fn start(index: usize, field: Field, text: String) -> Self {
+        Self {
+            index,
+            field,
+            text,
+            fresh: true,
+        }
+    }
+}
+
+impl Column {
+    fn field(self) -> Option<Field> {
+        match self {
+            Column::Name => Some(Field::Name),
+            Column::Hash => None,
+            Column::Pin => Some(Field::Pin),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Draft {
-    /// The row whose account is being changed; `None` when adding.
     target: Option<usize>,
     name: String,
     account: String,
@@ -222,38 +242,26 @@ struct Draft {
     error: Option<String>,
 }
 
-/// What the page asks the app to do.
 pub enum Action {
-    /// Read the account name of the selected client; answer with `Accounts::client_name`.
     ReadClientName,
 }
 
 #[derive(Default)]
 pub struct Accounts {
-    /// What is on disk.
     entries: Vec<Entry>,
-    /// `entries` with the edits not saved yet; a row is changed while it differs from its saved entry.
     working: Vec<Entry>,
-    /// Set when the file couldn't be read: saving is blocked so the unreadable file isn't overwritten.
     locked: Option<String>,
-    /// The last failure to save or an edit that was refused.
     error: Option<String>,
     draft: Option<Draft>,
     editing: Option<Editing>,
-    /// The entry whose delete button is waiting for a second click.
     deleting: Option<usize>,
-    /// A read of the client's account name is under way.
     reading: bool,
 }
 
 impl Accounts {
     pub fn load() -> Self {
         match load() {
-            Ok(entries) => Self {
-                working: entries.clone(),
-                entries,
-                ..Self::default()
-            },
+            Ok(entries) => Self::with_entries(entries),
             Err(why) => Self {
                 locked: Some(why),
                 ..Self::default()
@@ -261,7 +269,6 @@ impl Accounts {
         }
     }
 
-    #[cfg(test)]
     pub fn with_entries(entries: Vec<Entry>) -> Self {
         Self {
             working: entries.clone(),
@@ -270,25 +277,24 @@ impl Accounts {
         }
     }
 
-    /// The saved PIN of the account with this name hash, for `bank_pin_enter()`; `Err` while the file can't be read, and unsaved edits don't count.
-    pub fn pin_for(&self, hash: &str) -> Result<Option<String>, String> {
-        if let Some(why) = &self.locked {
-            return Err(format!("the saved accounts can't be read: {why}"));
+    fn saved(&self) -> Result<&[Entry], String> {
+        match &self.locked {
+            Some(why) => Err(format!("the saved accounts can't be read: {why}")),
+            None => Ok(&self.entries),
         }
+    }
+
+    pub fn pin_for(&self, hash: &str) -> Result<Option<String>, String> {
         Ok(self
-            .entries
+            .saved()?
             .iter()
             .find(|entry| entry.hash == hash)
             .map(|entry| entry.pin.clone()))
     }
 
-    /// The saved lamp skill of the account with this name hash, for `lamp_skill()`; `None` when it has none or there is no such account, `Err` while the file can't be read, and unsaved edits don't count.
     pub fn lamp_skill_for(&self, hash: &str) -> Result<Option<String>, String> {
-        if let Some(why) = &self.locked {
-            return Err(format!("the saved accounts can't be read: {why}"));
-        }
         Ok(self
-            .entries
+            .saved()?
             .iter()
             .find(|entry| entry.hash == hash && !entry.lamp_skill.is_empty())
             .map(|entry| entry.lamp_skill.clone()))
@@ -300,12 +306,11 @@ impl Accounts {
             .map(|why| format!("Couldn't save the accounts: {why}"));
     }
 
-    /// Saves the dialog: a new entry, or a new account for the row it targets (which stays unsaved until the row's Save).
     fn submit(&mut self, draft: &Draft) -> Result<(), String> {
         let (name, account) = (draft.name.trim(), draft.account.trim());
         if let Some(entry) = draft.target.and_then(|index| self.working.get_mut(index)) {
             if account.is_empty() {
-                return Err("Enter the account name.".into());
+                return Err(ACCOUNT_REQUIRED.into());
             }
             entry.hash = hash_name(account);
             return Ok(());
@@ -314,10 +319,10 @@ impl Accounts {
             return Err("Give the entry a name.".into());
         }
         if account.is_empty() {
-            return Err("Enter the account name.".into());
+            return Err(ACCOUNT_REQUIRED.into());
         }
         if !valid_pin(&draft.pin) {
-            return Err("The bank pin is exactly 4 digits.".into());
+            return Err(PIN_INVALID.into());
         }
         let entry = Entry {
             name: name.to_owned(),
@@ -331,7 +336,6 @@ impl Accounts {
         Ok(())
     }
 
-    /// Applies an in place edit to the row's unsaved copy; `Err` is why it was refused and nothing changed.
     fn apply(&mut self, edit: &Editing) -> Result<(), String> {
         let text = edit.text.trim();
         let Some(entry) = self.working.get_mut(edit.index) else {
@@ -341,25 +345,22 @@ impl Accounts {
             Field::Name if text.is_empty() => return Err("The name can't be empty.".into()),
             Field::Name => entry.name = text.to_owned(),
             Field::Pin if !valid_pin(text) => {
-                return Err("The bank pin is exactly 4 digits.".into());
+                return Err(PIN_INVALID.into());
             }
             Field::Pin => entry.pin = text.to_owned(),
         }
         Ok(())
     }
 
-    /// `client` is whether a client with the agent loaded is selected, which "Load account from client" needs.
     pub fn ui(&mut self, ui: &mut egui::Ui, client: bool) -> Option<Action> {
         self.page_ui(ui);
         self.dialog_ui(ui.ctx(), client)
     }
 
-    /// The answer to `Action::ReadClientName`: puts the name in the dialog.
     pub fn client_name(&mut self, result: Result<Option<String>, String>) {
         self.reading = false;
         let Some(draft) = &mut self.draft else { return };
         match result {
-            // The client's form is `my_name`; show it as it looks in the game.
             Ok(Some(name)) => {
                 draft.account = name.replace('_', " ");
                 draft.error = None;
@@ -380,7 +381,6 @@ impl Accounts {
             ui.label("Nothing is shown or saved so the file isn't overwritten. Fix the keyring, or delete accounts.bin in the Volcren data folder to start over.");
             return;
         }
-        // The dialog is modal in spirit: the page behind it is inert.
         ui.add_enabled_ui(self.draft.is_none(), |ui| {
             if ui.button("Add account").clicked() {
                 self.draft = Some(Draft::default());
@@ -416,7 +416,6 @@ impl Accounts {
             deleting,
             ..
         } = self;
-        // The buttons are as wide as the widest label so they line up, and stack when the window is too narrow for the text columns.
         let font = egui::TextStyle::Button.resolve(ui.style());
         let button_width = ["Save", "Delete", "Sure?"]
             .iter()
@@ -438,31 +437,18 @@ impl Accounts {
         } else {
             ROW_HEIGHT
         };
-        // The first four columns share what the buttons leave; the last one fits the buttons.
+        let text_column = || {
+            egui_extras::Column::remainder()
+                .at_least(MIN_TEXT_WIDTH)
+                .clip(true)
+        };
         egui_extras::TableBuilder::new(ui)
             .striped(true)
-            // Cells inherit the page's top down layout otherwise, which leaves the buttons at the top of their row.
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(
-                egui_extras::Column::remainder()
-                    .at_least(MIN_TEXT_WIDTH)
-                    .clip(true),
-            )
-            .column(
-                egui_extras::Column::remainder()
-                    .at_least(MIN_TEXT_WIDTH)
-                    .clip(true),
-            )
-            .column(
-                egui_extras::Column::remainder()
-                    .at_least(MIN_TEXT_WIDTH)
-                    .clip(true),
-            )
-            .column(
-                egui_extras::Column::remainder()
-                    .at_least(MIN_TEXT_WIDTH)
-                    .clip(true),
-            )
+            .column(text_column())
+            .column(text_column())
+            .column(text_column())
+            .column(text_column())
             .column(egui_extras::Column::exact(actions_width))
             .header(ROW_HEIGHT, |mut header| {
                 for head in ["Name", "Account hash", "Bank pin", "Lamp skill", ""] {
@@ -477,11 +463,7 @@ impl Accounts {
                     let entry = &working[index];
                     for column in [Column::Name, Column::Hash, Column::Pin] {
                         row.col(|ui| {
-                            let field = match column {
-                                Column::Name => Some(Field::Name),
-                                Column::Hash => None,
-                                Column::Pin => Some(Field::Pin),
-                            };
+                            let field = column.field();
                             if let Some(edit) = editing
                                 .as_mut()
                                 .filter(|e| e.index == index && Some(e.field) == field)
@@ -506,20 +488,18 @@ impl Accounts {
                                 match column {
                                     Column::Hash => change_account = Some(index),
                                     Column::Name => {
-                                        edit_start = Some(Editing {
+                                        edit_start = Some(Editing::start(
                                             index,
-                                            field: Field::Name,
-                                            text: entry.name.clone(),
-                                            fresh: true,
-                                        })
+                                            Field::Name,
+                                            entry.name.clone(),
+                                        ));
                                     }
                                     Column::Pin => {
-                                        edit_start = Some(Editing {
+                                        edit_start = Some(Editing::start(
                                             index,
-                                            field: Field::Pin,
-                                            text: entry.pin.clone(),
-                                            fresh: true,
-                                        })
+                                            Field::Pin,
+                                            entry.pin.clone(),
+                                        ));
                                     }
                                 }
                             }
@@ -638,7 +618,6 @@ impl Accounts {
         })
         .id(egui::Id::new(("accounts-dialog", changing)))
         .collapsible(false)
-        // Fit the content every frame: eframe remembers a window's size between runs, which would keep an old width.
         .auto_sized()
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
@@ -682,7 +661,6 @@ impl Accounts {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.add_space(6.0);
-            // As wide as the fields, so the dialog fits them. A bare `with_layout` would take all the height the window offers; give the row just one button's.
             let row = egui::vec2(fields, ui.spacing().interact_size.y);
             ui.allocate_ui_with_layout(
                 row,
@@ -733,7 +711,6 @@ impl Accounts {
     }
 }
 
-/// A list cell that can be clicked anywhere in its width, not just on its text.
 fn click_cell(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ui.available_height().max(ROW_HEIGHT)),
@@ -746,7 +723,6 @@ fn click_cell(ui: &mut egui::Ui, text: &str) -> egui::Response {
         ui.visuals().text_color()
     };
     let font = egui::TextStyle::Body.resolve(ui.style());
-    // Text that doesn't fit is cut with an ellipsis, vertically centered in the (maybe taller) row.
     let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, rect.width());
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
@@ -756,7 +732,6 @@ fn click_cell(ui: &mut egui::Ui, text: &str) -> egui::Response {
     response
 }
 
-/// The text box of the cell being edited, as wide as its column. `Some(Some(edit))` when it should be applied, `Some(None)` when cancelled.
 fn edit_cell(ui: &mut egui::Ui, edit: &mut Editing) -> Option<Option<Editing>> {
     let hint = match edit.field {
         Field::Name => "name",

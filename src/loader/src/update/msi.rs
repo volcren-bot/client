@@ -1,10 +1,11 @@
-//! The Windows update: Windows Installer replaces the files, run by a copy of the loader outside the install.
-
 use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
-    os::windows::{ffi::OsStrExt, process::CommandExt},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::{self, Command},
 };
@@ -17,6 +18,7 @@ use windows_sys::{
                 INSTALLPROPERTY_ASSIGNMENTTYPE, INSTALLPROPERTY_INSTALLLOCATION,
                 MsiEnumRelatedProductsW, MsiGetProductInfoW,
             },
+            SystemInformation::GetSystemDirectoryW,
             Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
         },
     },
@@ -26,10 +28,10 @@ use windows_sys::{
 use super::{
     FAILED_ARG, Kind, Progress, Release, download,
     msi_command::{Scope, command_line, failure},
+    own_exe, own_folder, release_file,
 };
 use crate::api::Api;
 
-/// `UpgradeCode` in installer/volcren.wxs.
 const UPGRADE_CODE: &str = "{DF7C7129-38EF-4E32-B9EE-F6FCFA75ED84}";
 const FINISH_ARG: &str = "--finish-update";
 const HELPER: &str = "finish-update.exe";
@@ -37,6 +39,7 @@ const LOG: &str = "install.log";
 const WAIT_FOR_EXIT_MS: u32 = 60_000;
 const PRODUCT_CODE_LEN: usize = 39;
 const PROPERTY_LEN: usize = 1024;
+const SYSTEM_FOLDER_LEN: usize = 512;
 
 pub struct Prepared {
     msi: PathBuf,
@@ -52,7 +55,6 @@ fn wide(text: &OsStr) -> Vec<u16> {
 fn product_property(product: &[u16], property: PCWSTR) -> Option<String> {
     let mut value = vec![0u16; PROPERTY_LEN];
     let mut len = value.len() as u32;
-    // SAFETY: `product` is null terminated and `len` is the length of `value`.
     let status =
         unsafe { MsiGetProductInfoW(product.as_ptr(), property, value.as_mut_ptr(), &mut len) };
     (status == ERROR_SUCCESS).then(|| String::from_utf16_lossy(&value[..len as usize]))
@@ -63,13 +65,11 @@ fn same_folder(a: &str, b: &str) -> bool {
         .eq_ignore_ascii_case(b.trim_end_matches('\\'))
 }
 
-/// How the installed product holding `folder` was installed. A PC can have one of each mode.
 fn installed_scope(folder: &Path) -> Option<Scope> {
     let folder = folder.to_str()?;
     let code = wide(OsStr::new(UPGRADE_CODE));
     (0..).find_map(|index| {
         let mut product = [0u16; PRODUCT_CODE_LEN];
-        // SAFETY: `code` is null terminated and `product` holds a product code and its null.
         let status =
             unsafe { MsiEnumRelatedProductsW(code.as_ptr(), 0, index, product.as_mut_ptr()) };
         if status != ERROR_SUCCESS {
@@ -98,11 +98,9 @@ pub fn kind(exe: &Path) -> Kind {
 }
 
 fn work_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "volcren", "Volcren")
-        .map(|dirs| dirs.data_dir().join("update"))
+    crate::paths::project_dirs().map(|dirs| dirs.data_dir().join("update"))
 }
 
-/// Removes what an earlier update left, except the installer's log, which a failure message points at.
 pub fn cleanup() {
     let Some(dir) = work_dir() else { return };
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -112,20 +110,17 @@ pub fn cleanup() {
     }
 }
 
-/// Downloads and checks the installer. Nothing in the install changes.
 pub fn prepare(
     api: &Api,
     release: &Release,
     progress: &Progress,
     repaint: &dyn Fn(),
 ) -> Result<Prepared, String> {
-    let exe = env::current_exe().map_err(|e| format!("Can't find the loader's own path: {e}"))?;
-    let folder = exe.parent().ok_or("The loader's own path has no folder.")?;
-    let scope = installed_scope(folder)
+    let exe = own_exe()?;
+    let folder = own_folder(&exe)?;
+    let scope = installed_scope(&folder)
         .ok_or("This copy of the loader wasn't installed with the installer.")?;
-    let file = release
-        .file()
-        .ok_or("This release has no build for this system.")?;
+    let file = release_file(release)?;
     let dir = work_dir().ok_or("Couldn't find the data folder.")?;
     let msi = download(api, file, &dir, progress, repaint)?;
     Ok(Prepared {
@@ -136,7 +131,6 @@ pub fn prepare(
     })
 }
 
-/// Starts the copy of this loader that installs the update once this one closes.
 pub fn apply(prepared: &Prepared) -> Result<(), String> {
     let helper = prepared.dir.join(HELPER);
     fs::copy(&prepared.exe, &helper).map_err(|e| format!("Couldn't start the update: {e}"))?;
@@ -152,8 +146,16 @@ pub fn apply(prepared: &Prepared) -> Result<(), String> {
         .map_err(|e| format!("Couldn't start the update: {e}"))
 }
 
+fn system_folder() -> PathBuf {
+    let mut buffer = vec![0u16; SYSTEM_FOLDER_LEN];
+    let len = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    if len == 0 || len >= buffer.len() {
+        return PathBuf::from(r"C:\Windows\System32");
+    }
+    PathBuf::from(OsString::from_wide(&buffer[..len]))
+}
+
 fn wait_for_exit(pid: u32) -> bool {
-    // SAFETY: the handle is checked and closed here, and a pid that's gone gives null.
     unsafe {
         let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
         if process.is_null() {
@@ -165,7 +167,6 @@ fn wait_for_exit(pid: u32) -> bool {
     }
 }
 
-/// With `--finish-update`, this process is the copy `apply` started: it installs, starts the loader and returns true.
 pub fn finish_if_asked() -> bool {
     let mut args = env::args_os().skip(1);
     if args.next().as_deref() != Some(OsStr::new(FINISH_ARG)) {
@@ -193,11 +194,7 @@ fn finish(msi: &OsStr, pid: &OsStr, exe: &Path, scope: &OsStr, log: &OsStr) {
     if !wait_for_exit(pid) {
         return;
     }
-    let system = env::var_os("SystemRoot").map_or_else(
-        || PathBuf::from(r"C:\Windows\System32"),
-        |root| PathBuf::from(root).join("System32"),
-    );
-    let status = Command::new(system.join("msiexec.exe"))
+    let status = Command::new(system_folder().join("msiexec.exe"))
         .raw_arg(command_line(msi, log, folder, scope))
         .status();
     let message = failure(status.ok().and_then(|status| status.code()), log);

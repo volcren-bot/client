@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// 10,000 credits are 1 EUR, and users see credits at 1 = 1 EUR.
 pub const CREDITS_PER_UNIT: f64 = 10_000.0;
 
-/// Credits as users see them: whole amounts bare, others with two to four decimals, "12", "12.50", "0.001".
 pub fn credits_text(credits: f64) -> String {
     let four = format!("{:.4}", credits / CREDITS_PER_UNIT);
     let (int, frac) = four.split_once('.').unwrap_or((&four, ""));
@@ -13,22 +11,18 @@ pub fn credits_text(credits: f64) -> String {
     }
 }
 
-/// An amount of credits with its unit, written like a currency code and never plural: "12.50 CREDIT".
 pub fn credits_label(credits: f64) -> String {
     format!("{}\u{a0}CREDIT", credits_text(credits))
 }
 
-/// An account balance: every decimal, "12.5000 CREDIT".
 pub fn balance_label(credits: f64) -> String {
     format!("{:.4}\u{a0}CREDIT", credits / CREDITS_PER_UNIT)
 }
 
-/// Credits an hour at a price in credits per minute.
 pub fn per_hour(credits_per_minute: i64) -> f64 {
     credits_per_minute as f64 * 60.0
 }
 
-/// Credits an hour of an extra-session fee quoted in credits per month of running.
 pub fn fee_per_hour(fee: i64, minutes_per_month: i64) -> f64 {
     fee as f64 * 60.0 / minutes_per_month.max(1) as f64
 }
@@ -37,14 +31,11 @@ fn default_minutes_per_month() -> i64 {
     30 * 24 * 60
 }
 
-/// The launcher API contract version this build speaks; `GET /me` reports the server's.
 pub const API_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Me {
     pub username: String,
-    #[serde(default)]
-    pub avatar_url: Option<String>,
     #[serde(default)]
     pub role: String,
     pub credits: i64,
@@ -65,7 +56,6 @@ pub struct StoreScript {
     pub categories: Vec<String>,
     #[serde(default)]
     pub stage: String,
-    /// Credits per minute; 0 is free.
     #[serde(default)]
     pub price: i64,
     #[serde(default)]
@@ -78,15 +68,12 @@ pub struct StoreScript {
     pub author: String,
     #[serde(default)]
     pub online: i64,
-    /// Written by someone below scripter: not reviewed by staff, and the user is warned before it runs.
     #[serde(default)]
     pub community: bool,
-    /// Came from a share code, so the account can remove it again.
     #[serde(default)]
     pub granted: bool,
 }
 
-/// The answer to a redeemed share code.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Redeemed {
     pub script_id: String,
@@ -100,7 +87,6 @@ pub struct Removed {
     pub removed: bool,
 }
 
-/// A share code is 64 hex digits; whitespace and case are forgiven, anything else is refused before asking the server.
 pub fn normalize_share_code(input: &str) -> Option<String> {
     let code = input.trim().to_ascii_lowercase();
     (code.len() == 64
@@ -111,7 +97,6 @@ pub fn normalize_share_code(input: &str) -> Option<String> {
 }
 
 impl Me {
-    /// Testers and above can list every community script (`GET /launcher/scripts?community=true`).
     pub fn can_browse_community(&self) -> bool {
         matches!(
             self.role.as_str(),
@@ -125,12 +110,10 @@ impl StoreScript {
         self.price == 0
     }
 
-    /// Why the Run button is disabled, or `None` when the script can start with `credits` in the account.
     pub fn blocked(&self, credits: i64, min_balance_minutes: i64) -> Option<String> {
         if self.revision.is_none() {
             return Some("This script has no live revision yet.".into());
         }
-        // `can_access` already weighs the balance and knows who pays nothing; a shortfall only explains a refusal
         if self.can_access {
             return None;
         }
@@ -160,16 +143,11 @@ pub struct SessionFile {
     pub sha256: Option<String>,
 }
 
-/// What a session of a script would cost the account if it started now.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Quote {
-    /// Credits per minute after the account's exemptions, unlike `StoreScript::price`.
     pub price: i64,
-    /// The sessions the account has open, so this would be the `rank + 1`th.
     pub rank: i64,
-    /// The extra-session fee at that rank, credits per month; 0 when none applies.
     pub fee: i64,
-    /// The balance needed to start.
     pub required: i64,
 }
 
@@ -178,22 +156,17 @@ pub struct StartedSession {
     pub session_id: String,
     pub revision: i64,
     pub price: i64,
-    /// The file to run; one of `files`.
     pub entry: String,
     pub files: Vec<SessionFile>,
-    /// The key the files were encrypted with, as 64 hex digits. `None` for a revision published before files were encrypted.
     #[serde(default)]
     pub key: Option<String>,
     pub heartbeat_seconds: u64,
-    /// How many sessions the account had open when this one started; 0 means it runs without a fee.
     #[serde(default)]
     pub rank: i64,
-    /// The extra-session fee this session accrues at that rank, credits per month.
     #[serde(default)]
     pub fee: i64,
 }
 
-/// Stats gained since the previous heartbeat. `minutes` is measured by the loader's session clock, never reported by the script.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Stats {
     pub experience: i64,
@@ -207,7 +180,6 @@ impl Stats {
         self.experience == 0 && self.gold == 0 && self.custom.iter().all(|&value| value == 0)
     }
 
-    /// Adds another report to this one, summing custom trackers position by position.
     pub fn add(&mut self, experience: i64, gold: i64, custom: &[i64]) {
         self.experience = self.experience.saturating_add(experience);
         self.gold = self.gold.saturating_add(gold);
@@ -223,12 +195,10 @@ impl Stats {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Heartbeat {
     pub alive: bool,
-    /// Why the session ended when `alive` is false: `insufficient_credits`, `timeout` or `stopped`.
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
     pub credits: Option<i64>,
-    /// The session's place among the account's open sessions now, and the fee it accrues there.
     #[serde(default)]
     pub rank: Option<i64>,
     #[serde(default)]
@@ -243,7 +213,6 @@ pub struct Ended {
     pub charged: i64,
 }
 
-/// A session of the last 24 hours, as `GET /launcher/sessions` lists them: what can be scored or reported.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RecentSession {
     pub session_id: String,
@@ -254,10 +223,8 @@ pub struct RecentSession {
     pub started_at: String,
     #[serde(default)]
     pub ended_at: Option<String>,
-    /// The account's score of the script, on any of its sessions.
     #[serde(default)]
     pub score: Option<u8>,
-    /// How many bug reports the account sent on this session.
     #[serde(default)]
     pub reports: u32,
 }
@@ -267,7 +234,6 @@ pub struct RecentSessions {
     pub sessions: Vec<RecentSession>,
 }
 
-/// A bug report, as `POST /launcher/sessions/:id/report` takes it. The log and snapshot have the account names taken out already.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Report {
     pub description: String,
@@ -288,7 +254,6 @@ pub struct Reported {
     pub report_id: String,
 }
 
-/// Why a session ended, as the UI says it.
 pub fn end_reason_message(reason: Option<&str>) -> &'static str {
     match reason {
         Some("insufficient_credits") => "Out of CREDIT: add funds to keep running.",
@@ -310,7 +275,6 @@ mod tests {
         .unwrap();
         assert_eq!(me.credits, 125_000);
         assert_eq!(credits_text(me.credits as f64), "12.50");
-        assert!(me.avatar_url.is_none());
         assert_eq!(me.minutes_per_month, 43_200);
     }
 
@@ -341,7 +305,6 @@ mod tests {
         assert!(!script.is_free());
         assert_eq!(credits_text(per_hour(script.price)), "0.18");
         assert_eq!(script.blocked(1000, 5), None);
-        // the server said it can run: an author, a grantee or a tester with no balance pays nothing
         assert_eq!(script.blocked(0, 5), None);
         let mut locked = script.clone();
         locked.can_access = false;
@@ -368,7 +331,6 @@ mod tests {
     fn only_testers_and_above_browse_community_scripts() {
         let me = |role: &str| Me {
             username: "x".into(),
-            avatar_url: None,
             role: role.into(),
             credits: 0,
             min_balance_minutes: 1,

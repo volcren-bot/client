@@ -1,5 +1,3 @@
-//! What the Windows update passes to `msiexec` and what its exit code means.
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scope {
     PerUser,
@@ -23,7 +21,6 @@ impl Scope {
     }
 }
 
-/// `msiexec` parses its own command line, so this is the raw text. Upgrades don't cross install modes, so the mode and folder are the existing install's.
 pub fn command_line(msi: &str, log: &str, folder: &str, scope: Scope) -> String {
     let all_users = match scope {
         Scope::PerUser => r#"ALLUSERS="""#,
@@ -35,13 +32,10 @@ pub fn command_line(msi: &str, log: &str, folder: &str, scope: Scope) -> String 
     )
 }
 
-/// What to tell the user about an exit code, if anything.
 pub fn failure(code: Option<i32>, log: &str) -> Option<String> {
     match code {
         Some(0) => None,
-        // A failure message also stops the next start repeating the prompt straight away.
         Some(1602) => Some("The update wasn't installed because an administrator didn't approve it.".into()),
-        // Another user's copy has the files open.
         Some(1641 | 3010) => Some("Restart Windows to finish the update.".into()),
         Some(1618) => {
             Some("Another installation was running, so the update didn't install. Try again when it's done.".into())

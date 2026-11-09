@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     sync::atomic::{AtomicBool, Ordering},
@@ -11,7 +12,6 @@ use sha2::{Digest, Sha256};
 
 use super::{config::Config, error::ApiError};
 
-/// The loopback address GoTrue is allowed to redirect to (`ADDITIONAL_REDIRECT_URLS`).
 pub const LOOPBACK_PORT: u16 = 5217;
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
@@ -39,20 +39,30 @@ impl Pkce {
     }
 }
 
-/// The tokens GoTrue hands out. Refresh tokens rotate, so every response carries the one to keep.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Tokens {
     pub access_token: String,
     pub refresh_token: String,
-    /// Seconds until the access token expires.
     pub expires_in: u64,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for Tokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
 pub struct Session {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: Instant,
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session").finish_non_exhaustive()
+    }
 }
 
 impl Session {
@@ -64,7 +74,6 @@ impl Session {
         }
     }
 
-    /// True shortly before the access token expires, so a request doesn't race the expiry.
     pub fn needs_refresh(&self) -> bool {
         self.expires_at.saturating_duration_since(Instant::now()) < Duration::from_secs(60)
     }
@@ -94,7 +103,6 @@ fn urlencode(text: &str) -> String {
         .collect()
 }
 
-/// Binds the loopback listener. Do this before opening the browser, so a busy port is reported first.
 pub fn bind() -> Result<TcpListener, String> {
     TcpListener::bind(("127.0.0.1", LOOPBACK_PORT)).map_err(|e| {
         format!("Port {LOOPBACK_PORT} is in use ({e}). Close whatever is using it, or a previous sign-in, and try again.")
@@ -107,7 +115,6 @@ pub enum Callback {
     Denied(String),
 }
 
-/// Reads the request target of the first line of an HTTP request and pulls `code` (or `error_description`) out of its query.
 pub fn parse_callback(request_line: &str) -> Option<Callback> {
     let target = request_line.split_whitespace().nth(1)?;
     let query = target.split_once('?')?.1;
@@ -158,7 +165,6 @@ fn respond(mut stream: TcpStream, status: &str, body: &str) {
     );
 }
 
-/// Waits for the browser to come back to the loopback address, until `timeout` or `cancel`.
 pub fn wait_for_callback(
     listener: &TcpListener,
     timeout: Duration,
@@ -193,7 +199,6 @@ pub fn wait_for_callback(
                         respond(stream, "200 OK", CLOSE_PAGE);
                         return Err(format!("Sign-in was refused: {reason}"));
                     }
-                    // Favicon and other stray requests.
                     None => respond(stream, "404 Not Found", ""),
                 }
             }
@@ -216,7 +221,6 @@ struct RefreshGrant<'a> {
     refresh_token: &'a str,
 }
 
-/// How a token request failed: the refresh token is dead (sign out and say why), or something transient.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TokenError {
     Rejected(String),
@@ -284,7 +288,6 @@ pub fn refresh(
     )
 }
 
-/// The refresh token lives in the OS keyring (Credential Manager / Secret Service), never in eframe's settings storage.
 pub struct TokenStore;
 
 impl TokenStore {

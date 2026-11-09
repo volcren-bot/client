@@ -1,5 +1,3 @@
-//! The Var Inspector on the Development page: watches the client's varps and logs what changes, as RuneLite's does.
-
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -9,25 +7,19 @@ use injector::{VarcPage, config::VarbitDef};
 
 use crate::log_view::{Filtered, Log, Poller, View};
 
-/// Entries kept for display; the oldest go first.
 pub const KEEP: usize = 10_000;
-/// How long after a read finished the next one starts.
 pub const POLL_EVERY: Duration = Duration::from_millis(200);
 
-/// The varbits stored in one varp: (id, definition, gameval name).
 pub type Varbits = Vec<(i32, VarbitDef, Option<String>)>;
 
-/// One read of the client: varps, game tick, varbits of changed varps and the varc changes since the last read.
 pub struct Poll {
     pub varps: Option<Vec<i32>>,
     pub tick: Option<i32>,
     pub varbits: Vec<(u16, Varbits)>,
     pub varcs: VarcPage,
-    /// why the varc log couldn't be read, when it couldn't (the varps are still good)
     pub varc_error: Option<String>,
 }
 
-/// What a read needs: the varps to compare with, the varps whose varbits are known and where to read the varc log from.
 pub struct Request {
     pub previous: Option<Vec<i32>>,
     pub known: Vec<u16>,
@@ -61,14 +53,10 @@ pub struct Inspector {
     pub error: Option<String>,
     pub varc_error: Option<String>,
     log: Log<Entry>,
-    /// The entries `visible` shows, for the type boxes they were picked with (varbit, varp, varc int, varc string).
     shown: Filtered<[bool; 4]>,
-    /// The client the log is from; another client starts over.
     poller: Poller,
     previous: Option<Vec<i32>>,
-    /// Where to read the varc log from; none until the first read, which only skips what happened before the inspector was enabled.
     varc_next: Option<u64>,
-    /// Varbits by varp, read from the cache once.
     known: HashMap<u16, Varbits>,
 }
 
@@ -93,7 +81,6 @@ impl Default for Inspector {
     }
 }
 
-/// Replaces the bits of `def` in `varp` with `value`.
 fn with_varbit(varp: i32, def: &VarbitDef, value: i32) -> i32 {
     let bits = (def.msb - def.lsb + 1) as u32;
     let mask = if bits >= 32 {
@@ -104,7 +91,6 @@ fn with_varbit(varp: i32, def: &VarbitDef, value: i32) -> i32 {
     ((varp as u32 & !(mask << def.lsb)) | ((value as u32 & mask) << def.lsb)) as i32
 }
 
-/// What changed from `old` to `new`: changed varps log their changed varbits, then themselves if bits remain unexplained.
 pub fn diff(
     old: &[i32],
     new: &[i32],
@@ -157,12 +143,10 @@ impl Inspector {
         self.log.clear();
     }
 
-    /// Whether a read of `pid` should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
         self.poller.due(self.enabled, pid, now)
     }
 
-    /// Marks a read started and says what the job needs: the varps to compare with and the varps whose varbits are known.
     pub fn start(&mut self, pid: u32) -> Request {
         if self.poller.start(pid) {
             self.previous = None;
@@ -176,7 +160,6 @@ impl Inspector {
         }
     }
 
-    /// The varps that differ and have no varbits read yet, for the job to look up.
     pub fn unknown(previous: &[i32], current: &[i32], known: &[u16]) -> Vec<u16> {
         previous
             .iter()
@@ -202,7 +185,7 @@ impl Inspector {
                 self.error = None;
                 self.known.extend(poll.varbits);
                 self.varc_error = poll.varc_error;
-                // the first read of the varc log is only a start: what it holds happened before the inspector was enabled
+                let quote = |text: &str| format!("\"{text}\"");
                 if self.varc_next.is_some() {
                     self.log
                         .extend(poll.varcs.changes.into_iter().map(|change| Entry {
@@ -214,21 +197,16 @@ impl Inspector {
                             },
                             name: change.index.to_string(),
                             old: change.old.map_or("?".into(), |old| {
-                                if change.string {
-                                    format!("\"{old}\"")
-                                } else {
-                                    old
-                                }
+                                if change.string { quote(&old) } else { old }
                             }),
                             new: if change.string {
-                                format!("\"{}\"", change.new)
+                                quote(&change.new)
                             } else {
                                 change.new
                             },
                         }));
                 }
                 self.varc_next = Some(poll.varcs.next);
-                // logged out: the next login's varps are a fresh start, not a change
                 if let Some(varps) = poll.varps {
                     if let Some(previous) = &self.previous {
                         let known = &self.known;
@@ -251,7 +229,6 @@ impl Inspector {
         }
     }
 
-    /// The kept entries that pass the type boxes, oldest first.
     pub fn visible(&self) -> View<'_, Entry, [bool; 4]> {
         let boxes = [self.varbits, self.varps, self.varc_ints, self.varc_strings];
         self.shown.view(&self.log, boxes, |e| match e.kind {
@@ -303,7 +280,6 @@ mod tests {
 
     #[test]
     fn bits_no_varbit_explains_log_the_varp() {
-        // bit 8 belongs to no varbit
         let found = diff(&[0, 0x03, 0], &[0, 0x103, 0], None, bits, name);
         assert_eq!(
             found,
@@ -369,7 +345,6 @@ mod tests {
         assert_eq!(inspector.start(32).previous, Some(vec![0, 0, 0]));
         inspector.finish(32, now, poll(Some(vec![0, 0, 1]), vec![]), name);
         assert_eq!(inspector.visible().len(), 1);
-        // the varbits looked up are remembered
         let known = inspector.start(32).known;
         assert!(known.is_empty());
         inspector.finish(
@@ -401,7 +376,6 @@ mod tests {
         assert_eq!(inspector.kept(), 1);
         assert_eq!(inspector.start(44).previous, None);
         assert_eq!(inspector.kept(), 0);
-        // an answer for the client that was left is not mixed in
         inspector.finish(32, now, poll(Some(vec![1]), vec![]), name);
         assert_eq!(inspector.kept(), 0);
     }
@@ -473,7 +447,6 @@ mod tests {
             ..Inspector::default()
         };
         assert_eq!(inspector.start(32).varc_since, 0);
-        // what the log held before the inspector was enabled is not a change
         inspector.finish(
             32,
             now,
@@ -547,7 +520,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Kind::VarcInt]
         );
-        // another client starts the varc log over too
         assert_eq!(inspector.start(44).varc_since, 0);
         assert_eq!(inspector.kept(), 0);
     }

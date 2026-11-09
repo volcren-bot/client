@@ -303,7 +303,6 @@ fn color(kind: Kind, dark: bool) -> Color32 {
     if dark { dark_color } else { light_color }
 }
 
-/// `hidden` holds sorted, separate byte ranges (see `fold`) that stay in the text but are laid out with no height and no ink.
 pub fn layout_job(source: &str, font: FontId, dark: bool, hidden: &[Range<usize>]) -> LayoutJob {
     let mut job = LayoutJob::default();
     let tokens = tokenize(source);

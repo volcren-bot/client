@@ -2,11 +2,9 @@ use std::time::Duration;
 
 use injector::form::Counter;
 
-/// What the script last said it had counted. Totals are the script's own since it started; the rates come from the run clock.
 #[derive(Default)]
 pub struct CountersTracker {
     counters: Vec<Counter>,
-    /// The run time when the script last reported; rates are worked out against it, so they hold still between reports.
     read_at: Duration,
 }
 
@@ -14,7 +12,6 @@ pub struct CounterRow {
     pub label: String,
     pub total: f64,
     pub per_hour: Option<f64>,
-    /// "per Games" or "of Games", with the number.
     pub ratio: Option<String>,
 }
 
@@ -35,7 +32,6 @@ impl CountersTracker {
             .map(|c| (c.label.as_str(), c.value))
     }
 
-    /// The rows with rates over the run up to the last report, in the order the script sent them.
     pub fn rows(&self) -> Vec<CounterRow> {
         let hours = self.read_at.as_secs_f64() / 3600.0;
         self.counters
@@ -68,7 +64,6 @@ impl CountersTracker {
     }
 }
 
-/// 1234567.8 -> "1,234,568"; one decimal below 100.
 pub fn number(n: f64) -> String {
     if n.abs() < 100.0 && n != n.round() {
         return format!("{n:.1}");
@@ -114,7 +109,6 @@ mod tests {
         assert_eq!(rows[2].per_hour, None);
         assert_eq!(rows[2].ratio.as_deref(), Some("750 per Games"));
 
-        // rates hold still until the next report, which brings new totals and a new clock
         assert_eq!(tracker.rows()[0].per_hour, Some(24.0));
         tracker.update(
             vec![counter("games", "Games", 24.0)],

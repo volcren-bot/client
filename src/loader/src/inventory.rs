@@ -1,5 +1,3 @@
-//! The Inventory Inspector: snapshots of the client's item containers, built from one initial read plus the agent's logged changes.
-
 use std::{
     collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
@@ -9,16 +7,11 @@ use injector::{Item, ItemChange, ItemPage};
 
 use crate::log_view::Poller;
 
-/// Snapshots kept per container; the oldest go first.
 pub const KEEP: usize = 25;
-/// The game value kind that names item containers (`ipc::state::game_val::INV`, which the loader does not link).
 pub const INV_GAME_VAL: u32 = 2;
-/// How long a read waits for a logged change before returning empty.
 pub const WAIT_FOR_CHANGE: Duration = Duration::from_secs(1);
-/// How long to wait before reading again after a failed read.
 pub const RETRY_AFTER_ERROR: Duration = Duration::from_secs(1);
 
-/// One read of the client: the changes since the last one, and, on the first read, every container as it is.
 pub struct Poll {
     pub page: ItemPage,
     pub baseline: Option<Vec<(i32, Vec<Item>)>>,
@@ -27,27 +20,22 @@ pub struct Poll {
     pub stackable: Vec<(i32, bool)>,
 }
 
-/// What a read needs: where to read the log from (none: baseline) and the names and definitions already known.
 pub struct Request {
     pub since: Option<u64>,
     pub known_containers: Vec<i32>,
     pub known_items: Vec<i32>,
 }
 
-/// A container as it was after one change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub tick: Option<i32>,
     pub items: Vec<Item>,
 }
 
-/// Copies of one non stackable item listed for a change; a container holds fewer slots than this.
 const MAX_COPIES: i64 = 4096;
 
-/// Item id and quantity of something that was added to or removed from a container.
 pub type Delta = (i32, i32);
 
-/// Items `current` has that `previous` didn't (added) and the reverse (removed), summed by id; unknown items are taken to stack.
 pub fn compare(
     previous: &[Item],
     current: &[Item],
@@ -68,7 +56,9 @@ pub fn compare(
             (&mut removed, -quantity)
         };
         if copies == 0 {
-        } else if stackable(id) {
+            continue;
+        }
+        if stackable(id) {
             list.push((id, copies.min(i64::from(i32::MAX)) as i32));
         } else {
             list.extend(std::iter::repeat_n(
@@ -83,16 +73,11 @@ pub fn compare(
 #[derive(Default)]
 pub struct Inspector {
     pub enabled: bool,
-    /// The snapshot shown on the right: container id and index into its snapshots.
     pub selected: Option<(i32, usize)>,
     pub error: Option<String>,
-    /// Snapshots shown in the tree, oldest first.
     logs: BTreeMap<i32, Vec<Snapshot>>,
-    /// Snapshots made since Refresh; the tree only takes them when Refresh is pressed, like RuneLite's.
     pending: Vec<(i32, Snapshot)>,
-    /// What each container holds now, by applying the log's changes to the baseline.
     copy: HashMap<i32, Vec<Item>>,
-    /// Where to read the log from; none until the baseline is read (and again when the log skipped something).
     next: Option<u64>,
     container_names: HashMap<i32, String>,
     item_names: HashMap<i32, String>,
@@ -105,12 +90,10 @@ impl Inspector {
         &self.logs
     }
 
-    /// Snapshots waiting for Refresh.
     pub fn pending(&self) -> usize {
         self.pending.len()
     }
 
-    /// `93 - INV` or just the id when the client has no name for it.
     pub fn container_label(&self, id: i32) -> String {
         match self.container_names.get(&id) {
             Some(name) => format!("{id} - {name}"),
@@ -122,7 +105,6 @@ impl Inspector {
         self.item_names.get(&id).map_or("?", String::as_str)
     }
 
-    /// Whether the item stacks; true until its definition has been read.
     pub fn is_stackable(&self, id: i32) -> bool {
         self.stackable.get(&id).copied().unwrap_or(true)
     }
@@ -133,7 +115,6 @@ impl Inspector {
         self.selected = None;
     }
 
-    /// Moves the snapshots made since the last Refresh into the tree.
     pub fn refresh(&mut self) {
         self.selected = None;
         for (id, snapshot) in std::mem::take(&mut self.pending) {
@@ -145,7 +126,6 @@ impl Inspector {
         }
     }
 
-    /// The snapshot picked in the tree and the one before it, if any.
     pub fn picked(&self) -> Option<(&Snapshot, Option<&Snapshot>)> {
         let (id, index) = self.selected?;
         let log = self.logs.get(&id)?;
@@ -155,19 +135,16 @@ impl Inspector {
         ))
     }
 
-    /// How long until the read that follows a failed one may start; none when no read is waiting for that.
     pub fn retry_in(&self, now: Instant) -> Option<Duration> {
         self.poller
             .next_poll()
             .map(|at| at.saturating_duration_since(now))
     }
 
-    /// Whether a read of `pid`'s log should start now.
     pub fn due(&self, pid: u32, now: Instant) -> bool {
         self.poller.due(self.enabled, pid, now)
     }
 
-    /// Marks a read started and says what it needs. Another client than last time starts over.
     pub fn start(&mut self, pid: u32) -> Request {
         if self.poller.start(pid) {
             self.clear();
@@ -205,7 +182,6 @@ impl Inspector {
                     self.next = Some(page.next);
                     return;
                 }
-                // a log that skipped changes (overwritten, or a new agent's log) can't be applied to the copy: read it all again
                 let expected = self.next.unwrap_or(0);
                 if page.dropped > 0
                     || page
@@ -223,7 +199,6 @@ impl Inspector {
         }
     }
 
-    /// Applies changes in order and makes a snapshot of each container after every run of changes made in one tick.
     fn apply(&mut self, changes: &[ItemChange]) {
         let mut run: Option<(i32, Option<i32>)> = None;
         for change in changes {
@@ -396,7 +371,6 @@ mod tests {
                 ],
             ),
         );
-        // both changes are in one tick of one container: one snapshot
         assert_eq!(inspector.pending(), 1);
         assert!(inspector.logs().is_empty());
         inspector.refresh();
@@ -452,7 +426,6 @@ mod tests {
     #[test]
     fn a_log_that_skipped_changes_is_read_again_from_a_baseline() {
         let mut inspector = started();
-        // the next change is not the one after the last read
         read(&mut inspector, 21, vec![change(20, 93, 7, 0, true, 1, 1)]);
         assert_eq!(inspector.pending(), 0);
         assert_eq!(inspector.start(1).since, None);
@@ -462,7 +435,6 @@ mod tests {
             poll(30, Some(vec![(93, vec![item(0, 1, 1)])]), vec![]),
         );
         assert_eq!(inspector.start(1).since, Some(30));
-        // so is one that says it dropped some
         inspector.finish(
             1,
             Instant::now(),

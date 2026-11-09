@@ -1,5 +1,3 @@
-//! Signing in and out. The blocking parts run on a background thread (see `app.rs`); the state lives in `Auth`.
-
 use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::api::{
@@ -9,9 +7,7 @@ use crate::api::{
 
 pub enum Auth {
     SignedOut,
-    /// Looking for a saved sign-in in the system keyring.
     Restoring,
-    /// Waiting for the browser. Set the flag to cancel.
     SigningIn(Arc<AtomicBool>),
     SignedIn(Me),
 }
@@ -32,7 +28,6 @@ impl Auth {
     }
 }
 
-/// The whole browser round trip: open the sign-in page, wait for the redirect, trade the code for tokens, load the profile.
 pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Me, String> {
     let missing = api.config().missing();
     if !missing.is_empty() {
@@ -42,7 +37,6 @@ pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Me, String> {
         ));
     }
     let pkce = Pkce::generate();
-    // Bind first, so a busy port is reported before a browser tab opens.
     let listener = auth::bind()?;
     let url = auth::authorize_url(api.config(), &pkce);
     webbrowser::open(&url).map_err(|e| {
@@ -59,7 +53,6 @@ pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Me, String> {
     api.me().map_err(|e| e.to_string())
 }
 
-/// Signs in from the saved refresh token. `Ok(None)` means there was none.
 pub fn restore(api: &Api) -> Result<Option<Me>, ApiError> {
     if !api.config().missing().is_empty() || !api.restore()? {
         return Ok(None);
