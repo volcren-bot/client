@@ -232,7 +232,9 @@ pub fn data_climbs(
             continue;
         };
         let span = if row.destination.2 == plane {
-            (row.destination.0 - x).abs().max((row.destination.1 - y).abs())
+            (row.destination.0 - x)
+                .abs()
+                .max((row.destination.1 - y).abs())
         } else {
             0
         };
@@ -322,9 +324,9 @@ const INDEX: u32 = (1 << 30) - 1;
 const SHORTCUT_TICK_COST: u32 = 4;
 
 fn shortcut_extra(climb: &Climb, options: &Options) -> u32 {
-    climb
-        .shortcut_ticks
-        .map_or(0, |ticks| options.shortcut_saving + ticks * SHORTCUT_TICK_COST)
+    climb.shortcut_ticks.map_or(0, |ticks| {
+        options.shortcut_saving + ticks * SHORTCUT_TICK_COST
+    })
 }
 
 pub type Closed = HashSet<(Point, (i32, i32))>;
@@ -717,7 +719,11 @@ mod tests {
             &Closed::default(),
         )
         .unwrap();
-        assert_eq!(plan.actions.len(), 1, "a cheap door beats a step round: {plan:?}");
+        assert_eq!(
+            plan.actions.len(),
+            1,
+            "a cheap door beats a step round: {plan:?}"
+        );
         let costly = super::plan(
             &flags,
             (0, 0, w - 1, h - 1),
@@ -732,7 +738,10 @@ mod tests {
             &Closed::default(),
         )
         .unwrap();
-        assert!(costly.actions.is_empty(), "a dear door loses to a step round: {costly:?}");
+        assert!(
+            costly.actions.is_empty(),
+            "a dear door loses to a step round: {costly:?}"
+        );
     }
 
     #[test]

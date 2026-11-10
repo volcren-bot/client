@@ -2236,7 +2236,10 @@ mod tests {
         });
         zulrah.equipment.push(Equipment {
             name: "Ranged".into(),
-            slots: vec![EquipmentSlot::Item(item(23971, 1, false)), EquipmentSlot::Any],
+            slots: vec![
+                EquipmentSlot::Item(item(23971, 1, false)),
+                EquipmentSlot::Any,
+            ],
             spell: None,
             autocast: false,
         });
