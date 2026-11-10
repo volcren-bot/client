@@ -2777,7 +2777,7 @@ local Diaries = require('@lib/main/diaries')
 local hard = false
 Diaries.tier = function(region, tier) assert(region == 'desert' and tier == 'hard') return hard end
 stage.rows = { row('magic_carpets', '1: Oasis', tile(3000, 3000), tile(3060, 3000), { menu = 'Travel Rug Merchant 17', duration = 30, items = 'COINS=200' }) }
-local oasis = tile(3060, 3000)
+local oasis = tile(3050, 3000)
 assert(T.choose(home, oasis) == nil, 'no fare and no diary')
 hard = true
 local c = T.choose(home, oasis)
@@ -3143,8 +3143,10 @@ assert(c and c.kind == 'fairy_rings' and c.transport.label == 'AIQ', 'the one tr
 c = T.choose(here, tile(3000, 500))
 assert(c and c.kind == 'spirit_trees' and c.transport.label == 'Hosidius', 'and a tree, with the label bare')
 Host.in_instance = function() return false end
+stage.inventory = {}
 c = T.choose(home, inside)
 assert(c and c.kind == 'fairy_rings' and c.transport.label == 'DIQ', 'a ring underfoot goes into the house once it is known')
+stage.inventory = { { id = 8013, quantity = 1, slot = 0 } }
 c = T.choose(home, tile(3000, 500), { exclude = { fairy_rings = true } })
 assert(c and c.kind == 'item', 'from outside a visit makes a tablet and the tree a way')
 "#,

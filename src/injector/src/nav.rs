@@ -92,7 +92,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             near: 0,
-            door_cost: 30,
+            door_cost: 8,
             climb_cost: 50,
             shortcut_saving: 100,
             seed: None,
@@ -231,6 +231,11 @@ pub fn data_climbs(
         let Some(candidates) = by_plane.get(&plane) else {
             continue;
         };
+        let span = if row.destination.2 == plane {
+            (row.destination.0 - x).abs().max((row.destination.1 - y).abs())
+        } else {
+            0
+        };
         let Some(found) = candidates
             .iter()
             .filter(|c| {
@@ -241,7 +246,7 @@ pub fn data_climbs(
                             .any(|d| d.eq_ignore_ascii_case(&c.loc.option)))
             })
             .map(|c| (footprint_distance((x, y), &c.loc), *c))
-            .filter(|(d, _)| *d <= ROW_REACH)
+            .filter(|(d, c)| *d <= ROW_REACH || (c.loc.id == row.id && *d <= span))
             .min_by_key(|(d, c)| (c.loc.id != row.id, *d, c.loc.x, c.loc.y))
             .map(|(_, c)| c)
         else {
@@ -314,10 +319,12 @@ const DOOR: u32 = 1 << 30;
 const CLIMB: u32 = 2 << 30;
 const INDEX: u32 = (1 << 30) - 1;
 
+const SHORTCUT_TICK_COST: u32 = 4;
+
 fn shortcut_extra(climb: &Climb, options: &Options) -> u32 {
     climb
         .shortcut_ticks
-        .map_or(0, |ticks| options.shortcut_saving + ticks * 17)
+        .map_or(0, |ticks| options.shortcut_saving + ticks * SHORTCUT_TICK_COST)
 }
 
 pub type Closed = HashSet<(Point, (i32, i32))>;
@@ -702,7 +709,7 @@ mod tests {
         let plan = super::plan(
             &flags,
             (0, 0, w - 1, h - 1),
-            &[door],
+            std::slice::from_ref(&door),
             &[],
             (3, 1, 0),
             (4, 1, 0),
@@ -710,7 +717,22 @@ mod tests {
             &Closed::default(),
         )
         .unwrap();
-        assert!(plan.actions.is_empty(), "{plan:?}");
+        assert_eq!(plan.actions.len(), 1, "a cheap door beats a step round: {plan:?}");
+        let costly = super::plan(
+            &flags,
+            (0, 0, w - 1, h - 1),
+            &[door],
+            &[],
+            (3, 1, 0),
+            (4, 1, 0),
+            &Options {
+                door_cost: 30,
+                ..Options::default()
+            },
+            &Closed::default(),
+        )
+        .unwrap();
+        assert!(costly.actions.is_empty(), "a dear door loses to a step round: {costly:?}");
     }
 
     #[test]
@@ -1135,6 +1157,34 @@ mod tests {
     }
 
     #[test]
+    fn a_stepping_stone_mid_crossing_links_its_row() {
+        let (planes, w, h) = world(&[&["...##...", "...##...", "...##..."]]);
+        let flags = lookup(&planes, w, h);
+        let stone = with_id(5, 3, 1, 0, "Cross");
+        let rows = [
+            row((0, 1, 0), (6, 1, 0), "Cross", 5),
+            row((6, 1, 0), (0, 1, 0), "Cross", 5),
+        ];
+        let found = data_climbs(&flags, std::slice::from_ref(&stone), &rows);
+        assert_eq!(found.len(), 2);
+        let plan = plan(
+            &flags,
+            (0, 0, w - 1, h - 1),
+            &[],
+            &found,
+            (0, 1, 0),
+            (7, 1, 0),
+            &Options::default(),
+            &Closed::default(),
+        )
+        .unwrap();
+        assert!(plan.reached);
+        assert_eq!(plan.tiles.last(), Some(&(7, 1, 0)));
+        let lookalike = with_id(6, 3, 1, 0, "Cross");
+        assert!(data_climbs(&flags, &[lookalike], &rows).is_empty());
+    }
+
+    #[test]
     fn a_row_picks_its_loc_by_id_then_by_distance() {
         let (planes, w, h) = world(&[&[".......", ".......", "......."]]);
         let flags = lookup(&planes, w, h);
@@ -1209,7 +1259,7 @@ mod tests {
     fn a_shortcut_is_used_only_for_a_real_saving() {
         let rows: &[&str] = &[
             ".......", "...#...", "...#...", "...#...", "...#...", "...#...", "...#...", "...#...",
-            "...#...", "...#...", "...#...", "...#...",
+            "...#...", "...#...",
         ];
         let (planes, w, h) = world(&[rows]);
         let flags = lookup(&planes, w, h);
@@ -1236,7 +1286,7 @@ mod tests {
         let wanted = go(Options::default(), &found);
         assert!(
             wanted.actions.is_empty(),
-            "10 tiles of saving asked, 8 offered: walks round"
+            "10 tiles of saving asked, 7.4 offered: walks round"
         );
         let cheap = go(
             Options {
