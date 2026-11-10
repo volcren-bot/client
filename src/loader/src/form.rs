@@ -214,7 +214,10 @@ impl Form {
             }
             ("number", Some(FieldValue::Number(n))) => {
                 ui.horizontal(|ui| {
-                    ui.label(label);
+                    let box_first = spec_form::box_first(field);
+                    if !box_first {
+                        ui.label(label);
+                    }
                     let mut drag = egui::DragValue::new(n).range(
                         number("min").unwrap_or(f64::MIN)..=number("max").unwrap_or(f64::MAX),
                     );
@@ -228,6 +231,9 @@ impl Form {
                         drag = drag.speed(step);
                     }
                     ui.add(drag);
+                    if box_first {
+                        ui.label(label);
+                    }
                 });
             }
             ("choice", Some(FieldValue::Text(selected))) => {

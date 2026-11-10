@@ -312,6 +312,13 @@ pub fn row_gap(spec: &Value) -> Option<f64> {
     spec.get("row_gap").and_then(Value::as_f64)
 }
 
+pub fn box_first(field: &Value) -> bool {
+    field
+        .get("box_first")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn heading(field: &Value) -> Option<u64> {
     field.get("heading").and_then(Value::as_u64)
 }
@@ -362,6 +369,14 @@ pub fn validate(spec: &Value) -> Result<(), String> {
             && !(kind == "label" && matches!(heading(field), Some(1 | 2)))
         {
             return Err(format!("field {}: `heading` is 1 or 2, on a label", i + 1));
+        }
+        if field.get("box_first").is_some()
+            && !(kind == "number" && field.get("box_first").is_some_and(Value::is_boolean))
+        {
+            return Err(format!(
+                "field {}: `box_first` is true or false, on a number",
+                i + 1
+            ));
         }
         if kind == "label" {
             continue;
@@ -672,6 +687,18 @@ mod tests {
         assert_eq!(default_value(&list), Some(json!({ "x": true, "y": false })));
         assert!(validate(&json!({ "fields": [{ "id": "a" }, { "id": "a" }] })).is_err());
         assert!(validate(&json!({ "fields": [{ "id": "a", "row": 1 }] })).is_err());
+        assert!(
+            validate(&json!({ "fields": [{ "id": "a", "kind": "text", "box_first": true }] }))
+                .is_err()
+        );
+        assert!(
+            validate(&json!({ "fields": [{ "id": "a", "kind": "number", "box_first": 1 }] }))
+                .is_err()
+        );
+        assert_eq!(
+            validate(&json!({ "fields": [{ "id": "a", "kind": "number", "box_first": true }] })),
+            Ok(())
+        );
         assert!(validate(&json!({ "fields": [{ "kind": "label", "heading": 3 }] })).is_err());
         assert!(validate(&json!({ "row_gap": -1, "fields": [] })).is_err());
         assert_eq!(validate(&json!({ "row_gap": 12, "fields": [] })), Ok(()));
