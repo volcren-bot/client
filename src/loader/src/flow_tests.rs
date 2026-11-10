@@ -30,7 +30,7 @@ struct Server {
     price: i64,
     encrypted: bool,
     role: &'static str,
-    credits: i64,
+    microcredits: i64,
 }
 
 const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -60,10 +60,10 @@ impl Server {
             wrong_checksum: false,
             entry: "main.luau",
             no_lib: false,
-            price: 30,
+            price: 180_000,
             encrypted: false,
             role: "user",
-            credits: 0,
+            microcredits: 0,
         }
     }
 
@@ -93,7 +93,7 @@ impl Server {
             ("GET", p) if p.ends_with("/lib.zip") => Reply::bytes(lib),
             ("GET", "/launcher/me") => Reply::json(
                 200,
-                json!({ "username": "tester", "role": self.role, "credits": self.credits, "min_balance_minutes": 10, "api_version": 2 }),
+                json!({ "username": "tester", "role": self.role, "microcredits": self.microcredits, "min_balance_minutes": 10, "api_version": 3 }),
             ),
             ("GET", "/launcher/scripts")
                 if request.path.contains("community=true") && self.role == "user" =>
@@ -106,7 +106,7 @@ impl Server {
             ("GET", "/launcher/scripts") => {
                 let only_community = request.path.contains("community=true");
                 let scripts = [
-                    json!({ "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 30, "revision": 4, "can_access": true }),
+                    json!({ "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 180_000, "revision": 4, "can_access": true }),
                     json!({ "id": COMMUNITY_ID, "url": "mine", "title": "Mine", "price": 0, "revision": 4, "can_access": true, "community": true, "granted": true }),
                 ];
                 let scripts: Vec<_> = scripts
@@ -118,7 +118,7 @@ impl Server {
             ("GET", p) if p.starts_with("/launcher/scripts/") && p.ends_with("/quote") => {
                 Reply::json(
                     200,
-                    json!({ "price": 30, "rank": 0, "fee": 0, "required": 300 }),
+                    json!({ "price": 180_000, "rank": 0, "fee": 0, "required": 30_000 }),
                 )
             }
             ("POST", "/launcher/scripts/redeem") => match request.json()["code"]
@@ -152,7 +152,7 @@ impl Server {
             ),
             ("POST", "/launcher/sessions") if self.start_status == 402 => Reply::json(
                 402,
-                json!({ "error": "Not enough credits.", "required": 300 }),
+                json!({ "error": "Not enough credits.", "required": 30_000 }),
             ),
             ("POST", "/launcher/sessions") => {
                 let checksum = |name: &str, text: &str| {
@@ -193,12 +193,12 @@ impl Server {
                 match request.json()["stats"]["experience"].as_i64() {
                     Some(9999) => Reply::json(
                         200,
-                        json!({ "alive": false, "reason": "insufficient_credits", "credits": 0 }),
+                        json!({ "alive": false, "reason": "insufficient_credits", "microcredits": 0 }),
                     ),
-                    _ => Reply::json(200, json!({ "alive": true, "credits": 120 })),
+                    _ => Reply::json(200, json!({ "alive": true, "microcredits": 12_000 })),
                 }
             }
-            ("POST", "/launcher/sessions/s1/end") => Reply::json(200, json!({ "charged": 60 })),
+            ("POST", "/launcher/sessions/s1/end") => Reply::json(200, json!({ "charged": 6_000 })),
             _ => Reply::status(404),
         }
     }
@@ -237,7 +237,7 @@ fn api(server: &FakeServer) -> Api {
 
 fn script() -> StoreScript {
     serde_json::from_value(json!({
-        "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 30, "revision": 4, "can_access": true
+        "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 180_000, "revision": 4, "can_access": true
     }))
     .unwrap()
 }
@@ -318,7 +318,7 @@ fn a_store_script_runs_from_start_to_end() {
     };
     let beat = api.heartbeat("s1", Some(&stats)).unwrap();
     assert!(beat.alive);
-    assert_eq!(beat.credits, Some(120));
+    assert_eq!(beat.microcredits, Some(12_000));
     let sent = fake
         .requests()
         .into_iter()
@@ -341,7 +341,7 @@ fn a_store_script_runs_from_start_to_end() {
     assert!(!beat.alive);
     assert_eq!(beat.reason.as_deref(), Some("insufficient_credits"));
 
-    assert_eq!(api.end_session("s1").unwrap().charged, 60);
+    assert_eq!(api.end_session("s1").unwrap().charged, 6_000);
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -695,7 +695,7 @@ fn a_restart_ends_the_old_session_before_it_asks_for_the_quote() {
         .expect("quote")
         .expect("listed");
     assert_eq!(script.id, SCRIPT_ID);
-    assert_eq!(quote.required, 300);
+    assert_eq!(quote.required, 30_000);
 
     let paths: Vec<String> = fake.requests().into_iter().map(|r| r.path).collect();
     let end = paths.iter().position(|p| p.ends_with("/s1/end")).unwrap();
@@ -737,13 +737,13 @@ fn a_restart_of_a_community_script_asks_for_the_list_the_account_may_read() {
 #[test]
 fn a_quote_comes_with_the_balance_of_now() {
     let fake = Server {
-        credits: 500,
+        microcredits: 50_000,
         ..Server::healthy()
     }
     .start();
     let (me, quote) = crate::session::quote(&api(&fake), SCRIPT_ID).expect("quote");
-    assert_eq!(me.credits, 500);
-    assert_eq!(start_block(&script(), &quote, me.credits), None);
+    assert_eq!(me.microcredits, 50_000);
+    assert_eq!(start_block(&script(), &quote, me.microcredits), None);
 }
 
 fn quote(price: i64, fee: i64, required: i64) -> Quote {
@@ -757,11 +757,17 @@ fn quote(price: i64, fee: i64, required: i64) -> Quote {
 
 #[test]
 fn a_restart_asks_only_when_the_price_changed_or_a_fee_applies() {
-    assert!(!asks_first(Some(30), &quote(30, 0, 300)));
-    assert!(asks_first(Some(30), &quote(40, 0, 400)), "dearer");
-    assert!(asks_first(Some(30), &quote(20, 0, 200)), "cheaper");
+    assert!(!asks_first(Some(180_000), &quote(180_000, 0, 30_000)));
     assert!(
-        asks_first(Some(30), &quote(30, 30000, 307)),
+        asks_first(Some(180_000), &quote(240_000, 0, 40_000)),
+        "dearer"
+    );
+    assert!(
+        asks_first(Some(180_000), &quote(120_000, 0, 20_000)),
+        "cheaper"
+    );
+    assert!(
+        asks_first(Some(180_000), &quote(180_000, 3_000_000, 30_695)),
         "an extra session"
     );
     assert!(!asks_first(Some(0), &quote(0, 0, 0)));
@@ -769,31 +775,34 @@ fn a_restart_asks_only_when_the_price_changed_or_a_fee_applies() {
 
 #[test]
 fn a_new_run_asks_only_when_a_fee_applies() {
-    assert!(!asks_first(None, &quote(30, 0, 300)));
-    assert!(asks_first(None, &quote(30, 30000, 307)));
+    assert!(!asks_first(None, &quote(180_000, 0, 30_000)));
+    assert!(asks_first(None, &quote(180_000, 3_000_000, 30_695)));
     assert!(
-        asks_first(None, &quote(0, 30000, 7)),
+        asks_first(None, &quote(0, 3_000_000, 695)),
         "a free script's extra session"
     );
 }
 
 #[test]
 fn a_start_is_refused_without_the_balance_or_the_access() {
-    assert_eq!(start_block(&script(), &quote(30, 0, 300), 300), None);
-    assert!(start_block(&script(), &quote(30, 0, 300), 299).is_some());
+    assert_eq!(
+        start_block(&script(), &quote(180_000, 0, 30_000), 30_000),
+        None
+    );
+    assert!(start_block(&script(), &quote(180_000, 0, 30_000), 29_999).is_some());
 
     let mut gone = script();
     gone.can_access = false;
-    assert!(start_block(&gone, &quote(30, 0, 300), 300).is_some());
+    assert!(start_block(&gone, &quote(180_000, 0, 30_000), 30_000).is_some());
 
     let mut unpublished = script();
     unpublished.revision = None;
-    assert!(start_block(&unpublished, &quote(30, 0, 300), 300).is_some());
+    assert!(start_block(&unpublished, &quote(180_000, 0, 30_000), 30_000).is_some());
 }
 
 #[test]
 fn an_exempt_account_starts_a_priced_script_on_no_balance() {
-    assert_eq!(script().price, 30);
+    assert_eq!(script().price, 180_000);
     let exempt = quote(0, 0, 0);
     assert_eq!(start_block(&script(), &exempt, 0), None);
     assert!(!asks_first(None, &exempt));
@@ -803,5 +812,5 @@ fn an_exempt_account_starts_a_priced_script_on_no_balance() {
 fn a_quote_comes_from_the_server() {
     let fake = Server::healthy().start();
     let quote = api(&fake).quote(SCRIPT_ID).expect("quote");
-    assert_eq!((quote.price, quote.required), (30, 300));
+    assert_eq!((quote.price, quote.required), (180_000, 30_000));
 }

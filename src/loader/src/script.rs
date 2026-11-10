@@ -619,11 +619,11 @@ mod tests {
     fn session_server(alive: bool) -> crate::fake_api::FakeServer {
         crate::fake_api::FakeServer::start(move |_, request| {
             if request.path.ends_with("/end") {
-                crate::fake_api::Reply::json(200, serde_json::json!({ "charged": 60 }))
+                crate::fake_api::Reply::json(200, serde_json::json!({ "charged": 6_000 }))
             } else {
                 crate::fake_api::Reply::json(
                     200,
-                    serde_json::json!({ "alive": alive, "reason": "timeout", "credits": 10 }),
+                    serde_json::json!({ "alive": alive, "reason": "timeout", "microcredits": 1_000 }),
                 )
             }
         })

@@ -1,44 +1,44 @@
 use serde::{Deserialize, Serialize};
 
-pub const CREDITS_PER_UNIT: f64 = 10_000.0;
+pub const MICROCREDITS_PER_CREDIT: f64 = 1_000_000.0;
 
-pub fn credits_text(credits: f64) -> String {
-    let four = format!("{:.4}", credits / CREDITS_PER_UNIT);
-    let (int, frac) = four.split_once('.').unwrap_or((&four, ""));
+pub fn credits_text(microcredits: f64) -> String {
+    let six = format!("{:.6}", microcredits / MICROCREDITS_PER_CREDIT);
+    let (int, frac) = six.split_once('.').unwrap_or((&six, ""));
     match frac.trim_end_matches('0') {
         "" => int.to_owned(),
         frac => format!("{int}.{frac:0<2}"),
     }
 }
 
-pub fn credits_label(credits: f64) -> String {
-    format!("{}\u{a0}CREDIT", credits_text(credits))
+pub fn credits_label(microcredits: f64) -> String {
+    format!("{}\u{a0}CREDIT", credits_text(microcredits))
 }
 
-pub fn balance_label(credits: f64) -> String {
-    format!("{:.4}\u{a0}CREDIT", credits / CREDITS_PER_UNIT)
-}
-
-pub fn per_hour(credits_per_minute: i64) -> f64 {
-    credits_per_minute as f64 * 60.0
+pub fn balance_label(microcredits: f64) -> String {
+    format!("{:.6}\u{a0}CREDIT", microcredits / MICROCREDITS_PER_CREDIT)
 }
 
 pub fn fee_per_hour(fee: i64, minutes_per_month: i64) -> f64 {
     fee as f64 * 60.0 / minutes_per_month.max(1) as f64
 }
 
+pub fn per_month(price: i64, fee: i64, minutes_per_month: i64) -> f64 {
+    price as f64 * minutes_per_month as f64 / 60.0 + fee as f64
+}
+
 fn default_minutes_per_month() -> i64 {
     30 * 24 * 60
 }
 
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Me {
     pub username: String,
     #[serde(default)]
     pub role: String,
-    pub credits: i64,
+    pub microcredits: i64,
     pub min_balance_minutes: i64,
     #[serde(default = "default_minutes_per_month")]
     pub minutes_per_month: i64,
@@ -106,19 +106,19 @@ impl StoreScript {
         self.price == 0
     }
 
-    pub fn blocked(&self, credits: i64, min_balance_minutes: i64) -> Option<String> {
+    pub fn blocked(&self, microcredits: i64, min_balance_minutes: i64) -> Option<String> {
         if self.revision.is_none() {
             return Some("This script has no live revision yet.".into());
         }
         if self.can_access {
             return None;
         }
-        let required = self.price * min_balance_minutes;
-        Some(if credits < required {
+        let required = (self.price * min_balance_minutes + 59) / 60;
+        Some(if microcredits < required {
             format!(
                 "Needs a balance of at least {} to start ({} available).",
                 credits_label(required as f64),
-                balance_label(credits as f64)
+                balance_label(microcredits as f64)
             )
         } else {
             "You don't have access to this script.".into()
@@ -194,7 +194,7 @@ pub struct Heartbeat {
     #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
-    pub credits: Option<i64>,
+    pub microcredits: Option<i64>,
     #[serde(default)]
     pub rank: Option<i64>,
     #[serde(default)]
@@ -266,51 +266,66 @@ mod tests {
     #[test]
     fn parses_me() {
         let me: Me = serde_json::from_str(
-            r#"{"username":"dinis","avatar_url":null,"role":"user","credits":125000,"min_balance_minutes":5,"api_version":1}"#,
+            r#"{"username":"dinis","avatar_url":null,"role":"user","microcredits":12500000,"min_balance_minutes":5,"api_version":3}"#,
         )
         .unwrap();
-        assert_eq!(me.credits, 125_000);
-        assert_eq!(credits_text(me.credits as f64), "12.50");
+        assert_eq!(me.microcredits, 12_500_000);
+        assert_eq!(credits_text(me.microcredits as f64), "12.50");
         assert_eq!(me.minutes_per_month, 43_200);
     }
 
     #[test]
-    fn credits_drop_whole_decimals_and_show_two_to_four_otherwise() {
-        assert_eq!(credits_text(125_000.0), "12.50");
-        assert_eq!(credits_text(10.0), "0.001");
-        assert_eq!(credits_text(12_345.0), "1.2345");
+    fn credits_drop_whole_decimals_and_show_two_to_six_otherwise() {
+        assert_eq!(credits_text(12_500_000.0), "12.50");
+        assert_eq!(credits_text(1_000.0), "0.001");
+        assert_eq!(credits_text(1_234_500.0), "1.2345");
+        assert_eq!(credits_text(70_000.0 / 60.0), "0.001167");
+        assert_eq!(credits_text(1.0), "0.000001");
         assert_eq!(credits_text(0.0), "0");
-        assert_eq!(credits_text(10_000.0), "1");
-        assert_eq!(credits_text(-30_000.0), "-3");
-        assert_eq!(credits_text(-500.0), "-0.05");
-        assert_eq!(credits_text(fee_per_hour(30_000, 43_200)), "0.0042");
-        assert_eq!(credits_label(125_000.0), "12.50\u{a0}CREDIT");
-        assert_eq!(balance_label(125_000.0), "12.5000\u{a0}CREDIT");
-        assert_eq!(balance_label(10_000.0), "1.0000\u{a0}CREDIT");
-        assert_eq!(balance_label(-500.0), "-0.0500\u{a0}CREDIT");
+        assert_eq!(credits_text(1_000_000.0), "1");
+        assert_eq!(credits_text(-3_000_000.0), "-3");
+        assert_eq!(credits_text(-50_000.0), "-0.05");
+        assert_eq!(credits_text(fee_per_hour(3_000_000, 43_200)), "0.004167");
+        assert_eq!(credits_label(12_500_000.0), "12.50\u{a0}CREDIT");
+        assert_eq!(balance_label(12_500_000.0), "12.500000\u{a0}CREDIT");
+        assert_eq!(balance_label(1_000_000.0), "1.000000\u{a0}CREDIT");
+        assert_eq!(balance_label(1_234_567.0), "1.234567\u{a0}CREDIT");
+        assert_eq!(balance_label(-50_000.0), "-0.050000\u{a0}CREDIT");
+    }
+
+    #[test]
+    fn a_month_costs_the_price_for_every_minute_plus_the_fee() {
+        assert_eq!(credits_text(per_month(180_000, 0, 43_200)), "129.60");
+        assert_eq!(
+            credits_text(per_month(180_000, 3_000_000, 43_200)),
+            "132.60"
+        );
     }
 
     #[test]
     fn parses_scripts_and_gates_running() {
         let list: ScriptList = serde_json::from_str(
-            r#"{"scripts":[{"id":"a1","url":"tempoross","title":"Tempoross","price":30,"revision":4,"can_access":true,"author":"x","online":12,"future_field":1}]}"#,
+            r#"{"scripts":[{"id":"a1","url":"tempoross","title":"Tempoross","price":180000,"revision":4,"can_access":true,"author":"x","online":12,"future_field":1}]}"#,
         )
         .unwrap();
         let script = &list.scripts[0];
         assert_eq!(script.title, "Tempoross");
         assert!(!script.is_free());
-        assert_eq!(credits_text(per_hour(script.price)), "0.18");
+        assert_eq!(credits_text(script.price as f64), "0.18");
         assert_eq!(script.blocked(1000, 5), None);
         assert_eq!(script.blocked(0, 5), None);
         let mut locked = script.clone();
         locked.can_access = false;
-        assert!(locked.blocked(100, 5).unwrap().contains("0.015"));
-        assert!(locked.blocked(1_000_000, 5).unwrap().contains("access"));
+        assert!(locked.blocked(14_999, 5).unwrap().contains("0.015\u{a0}"));
+        assert!(locked.blocked(15_000, 5).unwrap().contains("access"));
+        locked.price = 70_000;
+        assert!(locked.blocked(1_166, 1).unwrap().contains("0.001167\u{a0}"));
+        assert!(locked.blocked(1_167, 1).unwrap().contains("access"));
         locked.can_access = true;
         locked.revision = None;
         assert!(
             locked
-                .blocked(1_000_000, 5)
+                .blocked(1_000_000_000, 5)
                 .unwrap()
                 .contains("live revision")
         );
@@ -328,7 +343,7 @@ mod tests {
         let me = |role: &str| Me {
             username: "x".into(),
             role: role.into(),
-            credits: 0,
+            microcredits: 0,
             min_balance_minutes: 1,
             minutes_per_month: 43_200,
             api_version: API_VERSION,

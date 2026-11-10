@@ -78,9 +78,9 @@ mod tests {
             ApiError::Unauthorized
         );
         assert_eq!(
-            ApiError::from_status(402, body(r#"{"error":"no","required":300}"#)),
+            ApiError::from_status(402, body(r#"{"error":"no","required":30000}"#)),
             ApiError::InsufficientCredits {
-                required: Some(300)
+                required: Some(30_000)
             }
         );
         assert_eq!(

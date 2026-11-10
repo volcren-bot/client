@@ -132,8 +132,8 @@ pub fn restart_quote(
     Ok(Some((me, script, quote)))
 }
 
-pub fn start_block(script: &StoreScript, quote: &Quote, credits: i64) -> Option<String> {
-    if credits < quote.required {
+pub fn start_block(script: &StoreScript, quote: &Quote, microcredits: i64) -> Option<String> {
+    if microcredits < quote.required {
         return Some(format!(
             "Needs a balance of at least {} to start.",
             credits_label(quote.required as f64)
@@ -430,7 +430,7 @@ mod tests {
         Ok(Heartbeat {
             alive: true,
             reason: None,
-            credits: Some(10),
+            microcredits: Some(1_000),
             rank: None,
             fee: None,
             fee_charged: None,
@@ -533,7 +533,7 @@ mod tests {
         let dead = Ok(Heartbeat {
             alive: false,
             reason: Some("insufficient_credits".into()),
-            credits: None,
+            microcredits: None,
             rank: None,
             fee: None,
             fee_charged: None,

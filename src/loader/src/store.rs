@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     StoreScript,
-    models::{credits_label, normalize_share_code, per_hour},
+    models::{credits_label, normalize_share_code},
 };
 
 const MAX_CONFIRMED: usize = 500;
@@ -66,8 +66,8 @@ pub fn origin_label(script: &StoreScript) -> &'static str {
 pub fn price_texts(script: &StoreScript) -> Option<(String, String)> {
     (!script.is_free()).then(|| {
         (
-            credits_label(per_hour(script.price)),
             credits_label(script.price as f64),
+            credits_label(script.price as f64 / 60.0),
         )
     })
 }
@@ -213,7 +213,7 @@ impl Store {
                         }
                     });
                     ui.horizontal_wrapped(|ui| {
-                        let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.credits, me.min_balance_minutes));
+                        let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.microcredits, me.min_balance_minutes));
                         let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
                         let button = match &blocked {
                             Some(reason) => button.on_disabled_hover_text(reason),
@@ -325,8 +325,12 @@ mod tests {
     fn prices_read_as_credit_amounts() {
         assert_eq!(price_texts(&script("a", 0, &[])), None);
         assert_eq!(
-            price_texts(&script("a", 30, &[])),
+            price_texts(&script("a", 180_000, &[])),
             Some(("0.18\u{a0}CREDIT".into(), "0.003\u{a0}CREDIT".into()))
+        );
+        assert_eq!(
+            price_texts(&script("a", 70_000, &[])),
+            Some(("0.07\u{a0}CREDIT".into(), "0.001167\u{a0}CREDIT".into()))
         );
     }
 

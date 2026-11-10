@@ -45,7 +45,7 @@ Around the loader sits the Volcren backend:
    +------ latest.signed.json, lib/index.json, releases -> public `client` bucket
 ```
 
-The loader never talks to the database directly. The API owns billing: a session is billed per minute while heartbeats arrive. See [loader-gui.md](loader-gui.md).
+The loader never talks to the database directly. The API owns billing in microcredits (1,000,000 = 1 CREDIT = 1 EUR): a session is billed per minute, at an hourly price, while heartbeats arrive. See [loader-gui.md](loader-gui.md).
 
 Per frame:
 

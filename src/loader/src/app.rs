@@ -171,8 +171,7 @@ struct StoreRun {
 
 impl StoreRun {
     fn rate_per_hour(&self, minutes_per_month: i64) -> f64 {
-        crate::api::models::per_hour(self.price)
-            + crate::api::models::fee_per_hour(self.fee, minutes_per_month)
+        self.price as f64 + crate::api::models::fee_per_hour(self.fee, minutes_per_month)
     }
 }
 
@@ -1762,9 +1761,9 @@ impl LoaderApp {
         old_price: Option<i64>,
         quote: Quote,
     ) {
-        let credits = self.auth.me().map_or(0, |me| me.credits);
+        let microcredits = self.auth.me().map_or(0, |me| me.microcredits);
         let target = self.free_client(start.target.client.pid).cloned();
-        let refusal = session::start_block(&start.script, &quote, credits);
+        let refusal = session::start_block(&start.script, &quote, microcredits);
         let (Some(target), None) = (target, refusal.as_ref()) else {
             let why = refusal.unwrap_or_else(|| "Its client is gone or busy.".into());
             self.script_error(format!("Couldn't start {}: {why}", start.script.title));
@@ -2004,11 +2003,12 @@ impl LoaderApp {
         let Some(me) = self.auth.me() else {
             return;
         };
-        use crate::api::models::{credits_label, fee_per_hour, per_hour};
+        use crate::api::models::{credits_label, fee_per_hour, per_month};
         let fee_hour = fee_per_hour(prompt.fee, me.minutes_per_month);
         let fee_minute = fee_hour / 60.0;
-        let price_hour = per_hour(prompt.price);
+        let price_hour = prompt.price as f64;
         let total_hour = price_hour + fee_hour;
+        let total_month = per_month(prompt.price, prompt.fee, me.minutes_per_month);
         let extra = prompt.fee > 0;
         let nth = match prompt.nth {
             2 => "2nd".to_owned(),
@@ -2046,11 +2046,7 @@ impl LoaderApp {
                             );
                             crate::theme::credits(
                                 ui,
-                                egui::RichText::new(format!(
-                                    "{:.7}\u{a0}CREDIT",
-                                    fee_minute / crate::api::models::CREDITS_PER_UNIT
-                                ))
-                                .small(),
+                                egui::RichText::new(credits_label(fee_minute)).small(),
                                 "/min",
                             );
                         });
@@ -2060,7 +2056,7 @@ impl LoaderApp {
                         ui.label("old price");
                         crate::theme::credits(
                             ui,
-                            egui::RichText::new(credits_label(per_hour(old_price))),
+                            egui::RichText::new(credits_label(old_price as f64)),
                             "/h",
                         );
                         ui.end_row();
@@ -2082,8 +2078,7 @@ impl LoaderApp {
                             );
                             crate::theme::credits(
                                 ui,
-                                egui::RichText::new(credits_label(total_hour * 24.0 * 30.0))
-                                    .small(),
+                                egui::RichText::new(credits_label(total_month)).small(),
                                 " per 30 days",
                             );
                         });
@@ -2475,7 +2470,7 @@ impl LoaderApp {
         match &self.auth {
             Auth::SignedIn(me) => {
                 let name = me.username.clone();
-                let balance = crate::api::models::balance_label(me.credits as f64);
+                let balance = crate::api::models::balance_label(me.microcredits as f64);
                 let minutes_per_month = me.minutes_per_month;
                 let rate: f64 = self
                     .store_runs()
@@ -3709,8 +3704,8 @@ impl LoaderApp {
                     }
                 }
                 Event::Heartbeat { session_id, beat } => {
-                    if let (Some(credits), Some(me)) = (beat.credits, self.auth.me_mut()) {
-                        me.credits = credits;
+                    if let (Some(microcredits), Some(me)) = (beat.microcredits, self.auth.me_mut()) {
+                        me.microcredits = microcredits;
                     }
                     if let Some(store) = self.run_by_session(&session_id).and_then(|run| run.store.as_mut()) {
                         store.rank = beat.rank.unwrap_or(store.rank);
