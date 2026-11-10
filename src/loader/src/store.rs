@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{
     StoreScript,
-    models::{credits_label, normalize_share_code},
+    models::{credits_label, normalize_share_code, rate_label},
 };
 
 const MAX_CONFIRMED: usize = 500;
@@ -66,7 +66,7 @@ pub fn origin_label(script: &StoreScript) -> &'static str {
 pub fn price_texts(script: &StoreScript) -> Option<(String, String)> {
     (!script.is_free()).then(|| {
         (
-            credits_label(script.price as f64),
+            rate_label(script.price as f64),
             credits_label(script.price as f64 / 60.0),
         )
     })

@@ -15,6 +15,12 @@ pub fn credits_label(microcredits: f64) -> String {
     format!("{}\u{a0}CREDIT", credits_text(microcredits))
 }
 
+pub fn rate_label(microcredits: f64) -> String {
+    let two = format!("{:.2}", microcredits / MICROCREDITS_PER_CREDIT);
+    let amount = two.strip_suffix(".00").unwrap_or(&two);
+    format!("{amount}\u{a0}CREDIT")
+}
+
 pub fn balance_label(microcredits: f64) -> String {
     format!("{:.6}\u{a0}CREDIT", microcredits / MICROCREDITS_PER_CREDIT)
 }
@@ -291,6 +297,17 @@ mod tests {
         assert_eq!(balance_label(1_000_000.0), "1.000000\u{a0}CREDIT");
         assert_eq!(balance_label(1_234_567.0), "1.234567\u{a0}CREDIT");
         assert_eq!(balance_label(-50_000.0), "-0.050000\u{a0}CREDIT");
+    }
+
+    #[test]
+    fn rates_show_at_most_two_decimals() {
+        assert_eq!(rate_label(180_000.0), "0.18\u{a0}CREDIT");
+        assert_eq!(rate_label(1_234_567.0), "1.23\u{a0}CREDIT");
+        assert_eq!(rate_label(129_600_000.0), "129.60\u{a0}CREDIT");
+        assert_eq!(rate_label(132_604_167.0), "132.60\u{a0}CREDIT");
+        assert_eq!(rate_label(2_000_000.0), "2\u{a0}CREDIT");
+        assert_eq!(rate_label(1_996_000.0), "2\u{a0}CREDIT");
+        assert_eq!(rate_label(0.0), "0\u{a0}CREDIT");
     }
 
     #[test]

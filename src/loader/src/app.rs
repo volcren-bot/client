@@ -2003,7 +2003,7 @@ impl LoaderApp {
         let Some(me) = self.auth.me() else {
             return;
         };
-        use crate::api::models::{credits_label, fee_per_hour, per_month};
+        use crate::api::models::{credits_label, fee_per_hour, per_month, rate_label};
         let fee_hour = fee_per_hour(prompt.fee, me.minutes_per_month);
         let fee_minute = fee_hour / 60.0;
         let price_hour = prompt.price as f64;
@@ -2056,7 +2056,7 @@ impl LoaderApp {
                         ui.label("old price");
                         crate::theme::credits(
                             ui,
-                            egui::RichText::new(credits_label(old_price as f64)),
+                            egui::RichText::new(rate_label(old_price as f64)),
                             "/h",
                         );
                         ui.end_row();
@@ -2064,7 +2064,7 @@ impl LoaderApp {
                     ui.label("script price");
                     crate::theme::credits(
                         ui,
-                        egui::RichText::new(credits_label(price_hour)).strong(),
+                        egui::RichText::new(rate_label(price_hour)).strong(),
                         "/h",
                     );
                     ui.end_row();
@@ -2073,12 +2073,12 @@ impl LoaderApp {
                         ui.horizontal(|ui| {
                             crate::theme::credits(
                                 ui,
-                                egui::RichText::new(credits_label(total_hour)).strong(),
+                                egui::RichText::new(rate_label(total_hour)).strong(),
                                 "/h",
                             );
                             crate::theme::credits(
                                 ui,
-                                egui::RichText::new(credits_label(total_month)).small(),
+                                egui::RichText::new(rate_label(total_month)).small(),
                                 " per 30 days",
                             );
                         });
@@ -2491,7 +2491,7 @@ impl LoaderApp {
                     let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
                 }
                 if rate > 0.0 {
-                    crate::theme::credits(ui, egui::RichText::new(crate::api::models::credits_label(rate)).weak(), "/h")
+                    crate::theme::credits(ui, egui::RichText::new(crate::api::models::rate_label(rate)).weak(), "/h")
                         .on_hover_text("What the scripts running from this loader cost an hour, prices and extra-session fees together.");
                 }
                 crate::theme::credits(ui, egui::RichText::new(balance), "")
@@ -4670,7 +4670,7 @@ impl LoaderApp {
                                 let rate = store.rate_per_hour(minutes_per_month);
                                 crate::theme::credits(
                                     ui,
-                                    egui::RichText::new(crate::api::models::credits_label(rate))
+                                    egui::RichText::new(crate::api::models::rate_label(rate))
                                         .strong(),
                                     "/h",
                                 );
