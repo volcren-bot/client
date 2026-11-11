@@ -974,6 +974,7 @@ const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("interact", "main/interact.luau"),
     lib_module!("inv", "main/interfaces/inv.luau"),
     lib_module!("item", "utils/item.luau"),
+    lib_module!("item_data", "utils/item_data.luau"),
     lib_module!("game_val", "utils/game_val.luau"),
     lib_module!("draw", "utils/draw.luau"),
     lib_module!("random", "utils/math/random.luau"),
@@ -1756,6 +1757,32 @@ pub fn run_with_modules(
                         )?,
                         None,
                     ),
+                    Err(error) => (mlua::Value::Nil, Some(error)),
+                })
+            },
+        )?,
+    )?;
+    let client = s.pid;
+    s.set(
+        "item_prices",
+        lua.create_function(
+            move |lua, items: Vec<mlua::Value>| -> mlua::Result<(mlua::Value, Option<String>)> {
+                let items = items
+                    .into_iter()
+                    .map(|item| match item {
+                        mlua::Value::String(name) => {
+                            Ok(crate::prices::Item::Name(name.to_str()?.to_owned()))
+                        }
+                        other => <i32 as mlua::FromLua>::from_lua(other, lua)
+                            .map(crate::prices::Item::Id),
+                    })
+                    .collect::<mlua::Result<Vec<_>>>()?;
+                let names_of = |ids: &[i32]| match client {
+                    Some(pid) => item_names(pid, ids),
+                    None => Ok(vec![None; ids.len()]),
+                };
+                Ok(match crate::prices::lookup(&items, names_of) {
+                    Ok(prices) => (to_lua(lua, &prices)?, None),
                     Err(error) => (mlua::Value::Nil, Some(error)),
                 })
             },

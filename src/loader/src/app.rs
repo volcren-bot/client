@@ -24,6 +24,7 @@ use crate::api::{
 };
 use crate::feedback;
 use crate::highlight::Highlighter;
+use crate::pipe::Rows;
 use crate::script::{Script, ScriptEvent};
 use crate::session::{self, Kept, Prepared};
 use crate::store::{self, Confirmed, Store};
@@ -197,6 +198,7 @@ struct Run {
     script: Script,
     target: Option<Target>,
     store: Option<StoreRun>,
+    file: Option<ScriptFile>,
     form: Option<crate::form::Form>,
     form_sent: Option<serde_json::Value>,
     antiban_sent: injector::antiban::Config,
@@ -229,6 +231,7 @@ impl Run {
             script,
             target,
             store,
+            file: None,
             form: None,
             form_sent: None,
             antiban_sent: settings.antiban.clone(),
@@ -294,10 +297,14 @@ impl Run {
     }
 }
 
-fn restart_button(ui: &mut egui::Ui, refusal: Option<&str>) -> bool {
+fn restart_button(ui: &mut egui::Ui, label: &str, store: bool, refusal: Option<&str>) -> bool {
     let button = ui
-        .add_enabled(refusal.is_none(), egui::Button::new("Restart"))
-        .on_hover_text("Closes this session and starts the script again on the same client.");
+        .add_enabled(refusal.is_none(), egui::Button::new(label))
+        .on_hover_text(if store {
+            "Closes this session and starts the script again on the same client."
+        } else {
+            "Runs the file again on the same client, asking first if it changed on disk."
+        });
     match refusal {
         Some(why) => button.on_disabled_hover_text(why).clicked(),
         None => button.clicked(),
@@ -373,6 +380,25 @@ fn start_dir(path: &str) -> Option<&std::path::Path> {
 
 fn pause_label(paused: bool) -> &'static str {
     if paused { "Resume" } else { "Pause" }
+}
+
+const ICON_START: &str = "\u{f04b}";
+const ICON_PAUSE: &str = "\u{f04c}";
+const ICON_STOP: &str = "\u{f04d}";
+const ICON_CANCEL: &str = "\u{f00d}";
+const ICON_RESTART: &str = "\u{f01e}";
+const ICON_UPDATE: &str = "\u{f021}";
+
+fn with_icon(icon: &str, label: &str) -> String {
+    format!("{icon} {label}")
+}
+
+fn run_pause_label(paused: bool) -> String {
+    if paused {
+        with_icon(ICON_START, "Resume")
+    } else {
+        with_icon(ICON_PAUSE, "Pause")
+    }
 }
 
 const RESTORING_SIGN_IN: &str = "Checking for a saved sign-in…";
@@ -792,6 +818,7 @@ fn find_matches(text: &str, query: &str, case_sensitive: bool) -> Vec<usize> {
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Clone)]
 struct ScriptFile {
     path: String,
     text: String,
@@ -815,6 +842,19 @@ impl ScriptFile {
             |name| name.to_string_lossy().into_owned(),
         )
     }
+
+    fn changed_on_disk(&self) -> Option<String> {
+        let disk = std::fs::read_to_string(&self.path).ok()?;
+        match &self.disk {
+            Some(known) => (&disk != known).then_some(disk),
+            None => (disk != self.text).then_some(disk),
+        }
+    }
+}
+
+struct ReloadPrompt {
+    disk: String,
+    restart: Option<u64>,
 }
 
 fn default_script_path() -> Option<std::path::PathBuf> {
@@ -1117,6 +1157,7 @@ struct Log {
     text: String,
     revision: u64,
     keep: usize,
+    pipe: Option<crate::pipe::Pipe>,
 }
 
 impl Log {
@@ -1152,10 +1193,14 @@ impl Log {
         if self.filter.is_none() || self.filter == tag {
             self.show(self.lines.len(), &text);
         }
+        let piped = crate::pipe::write(&mut self.pipe, [text.as_str()]);
         self.lines.push(LogLine { tone, text, tag });
         if self.lines.len() > self.keep + self.keep / 4 {
             self.lines.drain(..self.lines.len() - self.keep);
             self.rebuild();
+        }
+        if let Err(error) = piped {
+            self.push_tone(Tone::Error, error);
         }
     }
 
@@ -1248,6 +1293,7 @@ impl Log {
     fn clear(&mut self) {
         *self = Self {
             revision: self.revision + 1,
+            pipe: self.pipe.take(),
             ..Self::new(self.keep)
         };
     }
@@ -1360,7 +1406,7 @@ pub struct LoaderApp {
     next_run: u64,
     run_target: Option<String>,
     start_prompt: Option<StartPrompt>,
-    reload_prompt: Option<String>,
+    reload_prompt: Option<ReloadPrompt>,
     remembered_forms: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
@@ -1688,6 +1734,9 @@ impl LoaderApp {
     }
 
     fn restart_refusal(&self, run: &Run) -> Option<String> {
+        if run.store.is_none() {
+            return self.file_restart_refusal(run);
+        }
         if self.auth.me().is_none() {
             return Some("Sign in to run store scripts.".into());
         }
@@ -1701,11 +1750,29 @@ impl LoaderApp {
             .then(|| "Its client is gone or busy. Start the script from the Scripts page.".into())
     }
 
+    fn file_restart_refusal(&self, run: &Run) -> Option<String> {
+        if self.reload_prompt.is_some() || self.start_prompt.is_some() || self.warning.is_some() {
+            return Some("Answer the open dialog first.".into());
+        }
+        if self
+            .runs
+            .iter()
+            .any(|r| r.store.is_none() && r.is_running())
+        {
+            return Some("A script from the editor is running.".into());
+        }
+        run.target
+            .as_ref()
+            .is_some_and(|t| self.free_client(t.client.pid).is_none())
+            .then(|| "Its client is gone or busy. Run the script from the editor.".into())
+    }
+
     fn restart_run(&mut self, ctx: &egui::Context, id: u64) {
         let Some(run) = self.run_by_id(id) else {
             return;
         };
         let Some(store) = &run.store else {
+            self.restart_file(ctx, id);
             return;
         };
         let (session_id, script_id, community) = (
@@ -2302,7 +2369,12 @@ impl LoaderApp {
             .iter()
             .map(|r| (r.id, sidebar_name(&r.title), !r.is_running()))
             .collect();
-        if let Some((tab, run)) = sidebar_tree(ui, self.tab, self.active_run, &rows) {
+        let picked = egui::ScrollArea::vertical()
+            .id_salt("sidebar")
+            .auto_shrink([false, false])
+            .show(ui, |ui| sidebar_tree(ui, self.tab, self.active_run, &rows))
+            .inner;
+        if let Some((tab, run)) = picked {
             self.tab = tab;
             if run.is_some() {
                 self.active_run = run;
@@ -3072,6 +3144,7 @@ impl LoaderApp {
     fn script_log_ui(&mut self, ui: &mut egui::Ui) {
         let pid = self.selected_loaded_target().map(|t| t.client.pid);
         let mut load_names = false;
+        let mut action = None;
         let inspector = &mut self.script_inspector;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut inspector.enabled, "Enable");
@@ -3089,7 +3162,12 @@ impl LoaderApp {
             if ui.button("Clear").clicked() {
                 inspector.clear();
             }
+            action = rows_buttons(ui, inspector.kept() == 0, inspector.pipe.as_ref());
         });
+        self.rows_action(ui.ctx(), action, "script runs", "scripts.txt", |app| {
+            &mut app.script_inspector
+        });
+        let inspector = &mut self.script_inspector;
         client_caption(ui, pid);
         if let Some(error) = &inspector.names_error {
             error_label(ui, error);
@@ -3136,20 +3214,11 @@ impl LoaderApp {
                 let first = index == 0 || visible[index - 1].run.tick != entry.run.tick;
                 row.col(|ui| {
                     if first {
-                        ui.label(mono(
-                            entry
-                                .run
-                                .tick
-                                .map_or_else(|| "?".to_owned(), |tick| tick.to_string()),
-                        ));
+                        ui.label(mono(entry.tick_text()));
                     }
                 });
                 row.col(|ui| {
-                    ui.label(mono(format!(
-                        "{}{}",
-                        "  ".repeat(entry.run.depth as usize),
-                        entry.name(names)
-                    )));
+                    ui.label(mono(entry.indented_name(names)));
                 });
                 row.col(|ui| {
                     ui.label(mono(entry.args_text()));
@@ -3175,6 +3244,7 @@ impl LoaderApp {
             .show(ui, |ui| self.varps_ui(ui));
         ui.separator();
         let pid = self.selected_loaded_target().map(|t| t.client.pid);
+        let mut action = None;
         let inspector = &mut self.vars;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut inspector.enabled, "Enable");
@@ -3186,7 +3256,12 @@ impl LoaderApp {
             if ui.button("Clear").clicked() {
                 inspector.clear();
             }
+            action = rows_buttons(ui, inspector.kept() == 0, inspector.pipe.as_ref());
         });
+        self.rows_action(ui.ctx(), action, "var changes", "vars.txt", |app| {
+            &mut app.vars
+        });
+        let inspector = &mut self.vars;
         client_caption(ui, pid);
         let visible = inspector.visible();
         ui.weak(format!(
@@ -3226,23 +3301,13 @@ impl LoaderApp {
                 let index = row.index();
                 let entry = &visible[index];
                 let first = index == 0 || visible[index - 1].tick != entry.tick;
-                let kind = match entry.kind {
-                    crate::vars::Kind::Varbit => "Varbit",
-                    crate::vars::Kind::Varp => "VarPlayer",
-                    crate::vars::Kind::VarcInt => "VarClientInt",
-                    crate::vars::Kind::VarcStr => "VarClientStr",
-                };
                 row.col(|ui| {
                     if first {
-                        ui.label(mono(
-                            entry
-                                .tick
-                                .map_or_else(|| "?".to_owned(), |tick| tick.to_string()),
-                        ));
+                        ui.label(mono(entry.tick_text()));
                     }
                 });
                 row.col(|ui| {
-                    ui.label(mono(kind));
+                    ui.label(mono(entry.kind.label()));
                 });
                 row.col(|ui| {
                     ui.label(mono(entry.name.as_str()));
@@ -3259,6 +3324,7 @@ impl LoaderApp {
 
     fn packets_ui(&mut self, ui: &mut egui::Ui) {
         let pid = self.selected_loaded_target().map(|t| t.client.pid);
+        let mut action = None;
         let monitor = &mut self.packets;
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut monitor.capture, "Enable");
@@ -3272,7 +3338,12 @@ impl LoaderApp {
             {
                 monitor.clear();
             }
+            action = rows_buttons(ui, monitor.kept() == 0, monitor.pipe.as_ref());
         });
+        self.rows_action(ui.ctx(), action, "packets", "packets.txt", |app| {
+            &mut app.packets
+        });
+        let monitor = &mut self.packets;
         ui.horizontal(|ui| {
             ui.label("Filter");
             let menu_width = 170.0;
@@ -3335,7 +3406,7 @@ impl LoaderApp {
                 };
                 row.set_selected(selected == Some(packet.sequence));
                 row.col(|ui| {
-                    ui.label(colored(format!("{:.3}", packet.time_ms as f64 / 1000.0)));
+                    ui.label(colored(crate::packets::time_text(packet)));
                 });
                 row.col(|ui| {
                     ui.label(colored(if packet.sent { "→" } else { "←" }.into()));
@@ -3350,19 +3421,7 @@ impl LoaderApp {
                     ui.label(colored(def.map_or(String::new(), |def| def.name.clone())));
                 });
                 row.col(|ui| {
-                    let fields = def.map(|def| {
-                        crate::packet_defs::decode(
-                            def,
-                            &crate::packets::payload_bytes(packet),
-                            packet.length,
-                        )
-                        .fields
-                        .into_iter()
-                        .map(|(_, value)| value)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                    });
-                    ui.label(colored(fields.unwrap_or_default()));
+                    ui.label(colored(crate::packets::fields_text(def, packet)));
                 });
                 row.col(|ui| {
                     ui.label(colored(crate::packets::payload_text(packet)));
@@ -3781,10 +3840,18 @@ impl LoaderApp {
                 Event::RunKept(Err(error)) => {
                     self.error(format!("Couldn't keep the run for bug reports: {error}"))
                 }
-                Event::Packets { pid, result } => self.packets.finish(pid, Instant::now(), result),
+                Event::Packets { pid, result } => {
+                    self.packets.finish(pid, Instant::now(), result);
+                    let piped = self.packets.write_pipe();
+                    self.report_pipe(piped.map(|()| None));
+                }
                 Event::PacketLayouts { pid, result } => self.packets.finish_layouts(pid, result),
                 Event::ScriptNames(result) => self.script_inspector.finish_names(result),
-                Event::ScriptRuns { pid, result } => self.script_inspector.finish(pid, Instant::now(), result),
+                Event::ScriptRuns { pid, result } => {
+                    self.script_inspector.finish(pid, Instant::now(), result);
+                    let piped = self.script_inspector.write_pipe();
+                    self.report_pipe(piped.map(|()| None));
+                }
                 Event::Inventory { pid, result } => self.inventory.finish(pid, Instant::now(), result),
                 Event::Icons { pictures, error } => self.icons.finish(ctx, Instant::now(), pictures, error),
                 Event::LayoutRead { run, kind, result } => {
@@ -3819,7 +3886,11 @@ impl LoaderApp {
                         Err(error) => self.widgets.error = Some(error),
                     }
                 }
-                Event::Vars { pid, result } => self.vars.finish(pid, Instant::now(), result, |id| known_varp(id).map(str::to_owned)),
+                Event::Vars { pid, result } => {
+                    self.vars.finish(pid, Instant::now(), result, |id| known_varp(id).map(str::to_owned));
+                    let piped = self.vars.write_pipe();
+                    self.report_pipe(piped.map(|()| None));
+                }
                 Event::State { pid, read, result } => match result {
                     Ok(state) => self.report_state(pid, read, &state),
                     Err(error) => self.error(format!("Reading the game state of {pid} failed: {error}")),
@@ -4740,8 +4811,12 @@ impl LoaderApp {
                                 close = Some(run.id);
                             }
                             if !running
-                                && run.store.is_some()
-                                && restart_button(ui, self.restart_refusal(run).as_deref())
+                                && restart_button(
+                                    ui,
+                                    "Restart",
+                                    run.store.is_some(),
+                                    self.restart_refusal(run).as_deref(),
+                                )
                             {
                                 restart = Some(run.id);
                             }
@@ -4893,25 +4968,47 @@ impl LoaderApp {
         let has_prayer = has(crate::layouts::Kind::Prayer);
         let mut tools_tab = run.tools_tab;
         let run_id = run.id;
-        let restartable = !running && is_store;
+        let restartable = !running;
         let restart_refusal = self.restart_refusal(run);
-        ui.add(egui::Label::new(egui::RichText::new(&run.title).heading()).truncate());
+        let title_font = egui::FontId::new(
+            egui::TextStyle::Heading.resolve(ui.style()).size,
+            crate::theme::bold_family(),
+        );
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(egui::RichText::new(&run.title).font(title_font)).truncate());
+        ui.add_space(8.0);
+        let pause_width =
+            uniform_button_width(ui, &[&run_pause_label(false), &run_pause_label(true)]);
+        let start_label = with_icon(ICON_START, &submit_label);
+        let update_label = with_icon(ICON_UPDATE, "Update");
+        let submit_width = uniform_button_width(ui, &[&start_label, &update_label]);
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
         let mut restart = false;
         ui.horizontal_wrapped(|ui| {
             if form_sent {
                 update = ui
-                    .add_enabled(running && !stopping && changed_form, egui::Button::new("Update"))
+                    .add_enabled(
+                        running && !stopping && changed_form,
+                        egui::Button::new(update_label).min_size(egui::vec2(submit_width, 0.0)),
+                    )
                     .on_hover_text("Sends the changed settings to the running script.")
                     .clicked();
-            } else if ui.add_enabled(waiting, egui::Button::new(submit_label.as_str())).clicked()
+            } else if ui
+                .add_enabled(
+                    waiting,
+                    egui::Button::new(start_label).min_size(egui::vec2(submit_width, 0.0)),
+                )
+                .clicked()
                 && let Some(form) = self.run().and_then(|r| r.form.as_ref())
             {
                 outcome = form.submitted(self.script_layouts(), &self.known_items);
             }
             if ui
-                .add_enabled(running && !stopping && !waiting, egui::Button::new(pause_label(paused)))
+                .add_enabled(
+                    running && !stopping && !waiting,
+                    egui::Button::new(run_pause_label(paused)).min_size(egui::vec2(pause_width, 0.0)),
+                )
                 .on_hover_text(if is_store {
                     "Suspends the script's process. It is still billed while paused: stop it to stop billing."
                 } else {
@@ -4923,7 +5020,14 @@ impl LoaderApp {
                 self.toggle_pause_of(id);
             }
             if ui
-                .add_enabled(running && !stopping, egui::Button::new(if waiting { "Cancel" } else { "Stop" }))
+                .add_enabled(
+                    running && !stopping,
+                    egui::Button::new(if waiting {
+                        with_icon(ICON_CANCEL, "Cancel")
+                    } else {
+                        with_icon(ICON_STOP, "Stop")
+                    }),
+                )
                 .clicked()
             {
                 if waiting {
@@ -4932,7 +5036,13 @@ impl LoaderApp {
                     run.script.stop();
                 }
             }
-            restart = restartable && restart_button(ui, restart_refusal.as_deref());
+            restart = restartable
+                && restart_button(
+                    ui,
+                    &with_icon(ICON_RESTART, "Restart"),
+                    is_store,
+                    restart_refusal.as_deref(),
+                );
             ui.separator();
             ui.label(self.run().map_or("ended", Run::status));
         });
@@ -4945,7 +5055,7 @@ impl LoaderApp {
             self.restart_run(&ctx, run_id);
             return;
         }
-        ui.add_space(8.0);
+        ui.add_space(16.0);
         ui.spacing_mut().item_spacing.y = 0.0;
         if (tools_tab == ToolsTab::Equipment && !has_equipment)
             || (tools_tab == ToolsTab::Inventory && !has_inventory)
@@ -5009,7 +5119,6 @@ impl LoaderApp {
                         .and_then(|r| r.form.as_mut())
                     {
                         Some(form) => {
-                            ui.label(egui::RichText::new(&form.title).strong());
                             let layouts = self.layouts.get(&form.title).unwrap_or(&EMPTY_LAYOUTS);
                             form.show_inline(ui, layouts);
                         }
@@ -5202,25 +5311,21 @@ impl LoaderApp {
                 let ids: Vec<i32> = items.iter().map(|item| item.id).collect();
                 let (names, stackable) = describe(&ids)?;
                 let mut slots = layouts::items_of(&items, &names, &stackable);
-                let mut dosed: Vec<i32> = slots
+                let mut single: Vec<i32> = slots
                     .iter()
                     .flatten()
-                    .filter(|item| {
-                        !item.stackable && injector::config::dose_of(&item.name).is_some()
-                    })
+                    .filter(|item| !item.stackable)
                     .map(|item| item.id)
                     .collect();
-                dosed.sort_unstable();
-                dosed.dedup();
-                if !dosed.is_empty() {
-                    let families: HashMap<i32, Vec<u32>> = dosed
+                single.sort_unstable();
+                single.dedup();
+                if !single.is_empty() {
+                    let families: HashMap<i32, injector::config::ItemFamily> = single
                         .iter()
-                        .zip(backend::item_doses(&target, &settings, &dosed)?)
-                        .filter_map(|(&id, family)| {
-                            Some((id, family?.into_iter().map(|(dose, _)| dose).collect()))
-                        })
+                        .copied()
+                        .zip(backend::item_families(&target, &settings, &single)?)
                         .collect();
-                    layouts::add_doses(slots.iter_mut().flatten(), &families);
+                    layouts::add_families(slots.iter_mut().flatten(), &families);
                 }
                 match kind {
                     Kind::Prayer => unreachable!("read above"),
@@ -5368,14 +5473,6 @@ impl LoaderApp {
         }
     }
 
-    fn changed_on_disk(&self) -> Option<String> {
-        let disk = std::fs::read_to_string(&self.script_file.path).ok()?;
-        match &self.script_file.disk {
-            Some(known) => (&disk != known).then_some(disk),
-            None => (disk != self.script_file.text).then_some(disk),
-        }
-    }
-
     fn run_prepared(
         &mut self,
         ctx: &egui::Context,
@@ -5450,9 +5547,50 @@ impl LoaderApp {
         }
     }
 
-    fn run_script(&mut self, ctx: &egui::Context, target: Option<&Target>) {
-        let name = self.script_file.name();
-        let path = Some(std::path::Path::new(&self.script_file.path)).filter(|p| p.is_file());
+    fn restart_file(&mut self, ctx: &egui::Context, id: u64) {
+        let Some(file) = self.run_by_id(id).and_then(|r| r.file.clone()) else {
+            return;
+        };
+        match file.changed_on_disk() {
+            Some(disk) => {
+                self.reload_prompt = Some(ReloadPrompt {
+                    disk,
+                    restart: Some(id),
+                })
+            }
+            None => self.rerun_file(ctx, id, file),
+        }
+    }
+
+    fn rerun_file(&mut self, ctx: &egui::Context, id: u64, file: ScriptFile) {
+        let Some(run) = self.run_by_id(id) else {
+            return;
+        };
+        let target = match &run.target {
+            Some(old) => match self.free_client(old.client.pid) {
+                Some(target) => Some(target.clone()),
+                None => {
+                    self.script_error(format!(
+                        "Couldn't restart {}: its client is gone or busy.",
+                        file.name()
+                    ));
+                    return;
+                }
+            },
+            None => None,
+        };
+        self.run_file(ctx, file, target.as_ref(), Some(id));
+    }
+
+    fn run_file(
+        &mut self,
+        ctx: &egui::Context,
+        file: ScriptFile,
+        target: Option<&Target>,
+        replaces: Option<u64>,
+    ) {
+        let name = file.name();
+        let path = Some(std::path::Path::new(&file.path)).filter(|p| p.is_file());
         let lib = Some(std::path::PathBuf::from(self.settings.lib_dir.trim()))
             .filter(|l| path.is_some() && !l.as_os_str().is_empty());
         if let Some(lib) = lib.as_ref().filter(|l| !l.is_dir()) {
@@ -5461,7 +5599,7 @@ impl LoaderApp {
         }
         match Script::start(
             &self.script_host(ctx),
-            &self.script_file.text,
+            &file.text,
             path,
             lib.as_deref(),
             target,
@@ -5478,31 +5616,47 @@ impl LoaderApp {
                     &self.settings,
                 );
                 run.info(format!("Running {name}…"));
+                run.file = Some(file);
                 self.add_run(run);
+                if let Some(old) = replaces {
+                    self.close_run(old);
+                }
             }
             Err(error) => self.script_error(format!("Couldn't start the script: {error}")),
         }
     }
 
     fn reload_prompt_ui(&mut self, ctx: &egui::Context) {
-        if self.reload_prompt.is_none() {
+        let Some(prompt) = &self.reload_prompt else {
             return;
-        }
-        let name = self.script_file.name();
-        let unsaved = self
-            .script_file
-            .disk
-            .as_ref()
-            .is_some_and(|known| known != &self.script_file.text);
+        };
+        let restart = prompt.restart;
+        let file = match restart {
+            Some(id) => match self.run_by_id(id).and_then(|r| r.file.clone()) {
+                Some(file) => file,
+                None => {
+                    self.reload_prompt = None;
+                    return;
+                }
+            },
+            None => self.script_file.clone(),
+        };
+        let name = file.name();
+        let unsaved =
+            restart.is_none() && file.disk.as_ref().is_some_and(|known| known != &file.text);
         let mut choice: Option<Option<bool>> = None;
         egui::Window::new("Script changed on disk")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "{name} changed on disk since it was loaded. Reload it before running?"
-                ));
+                ui.label(if restart.is_some() {
+                    format!(
+                        "{name} changed on disk since it last ran. Reload it before restarting?"
+                    )
+                } else {
+                    format!("{name} changed on disk since it was loaded. Reload it before running?")
+                });
                 if unsaved {
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
@@ -5514,7 +5668,14 @@ impl LoaderApp {
                     if ui.button("Reload and run").clicked() {
                         choice = Some(Some(true));
                     }
-                    if ui.button("Run editor version").clicked() {
+                    if ui
+                        .button(if restart.is_some() {
+                            "Run previous version"
+                        } else {
+                            "Run editor version"
+                        })
+                        .clicked()
+                    {
                         choice = Some(Some(false));
                     }
                     if ui.button("Cancel").clicked() {
@@ -5523,16 +5684,23 @@ impl LoaderApp {
                 });
             });
         let Some(choice) = choice else { return };
-        let Some(disk) = self.reload_prompt.take() else {
+        let Some(ReloadPrompt { disk, .. }) = self.reload_prompt.take() else {
             return;
         };
         let Some(reload) = choice else { return };
-        self.script_file.disk = Some(disk.clone());
+        let mut file = file;
+        file.disk = Some(disk.clone());
         if reload {
-            self.script_file.text = disk;
+            file.text = disk;
         }
-        let target = self.run_target_client();
-        self.run_script(ctx, target.as_ref());
+        match restart {
+            Some(id) => self.rerun_file(ctx, id, file),
+            None => {
+                self.script_file = file.clone();
+                let target = self.run_target_client();
+                self.run_file(ctx, file, target.as_ref(), None);
+            }
+        }
     }
 
     fn save_script(&mut self) {
@@ -5605,9 +5773,14 @@ impl LoaderApp {
             .on_hover_text("Runs what's in the editor, against the client selected above if any.")
             .clicked()
         {
-            match self.changed_on_disk() {
-                Some(disk) => self.reload_prompt = Some(disk),
-                None => self.run_script(ui.ctx(), target),
+            match self.script_file.changed_on_disk() {
+                Some(disk) => {
+                    self.reload_prompt = Some(ReloadPrompt {
+                        disk,
+                        restart: None,
+                    })
+                }
+                None => self.run_file(ui.ctx(), self.script_file.clone(), target, None),
             }
         }
         if width_button(ui, running, pause_label(paused), width)
@@ -6353,7 +6526,7 @@ impl LoaderApp {
             egui::Layout::right_to_left(egui::Align::Center)
         };
         let tab = self.log_tab;
-        let mut save = false;
+        let (mut save, mut pipe) = (false, false);
         ui.with_layout(layout, |ui| {
             let log = self.log_of(tab);
             if ui
@@ -6374,25 +6547,62 @@ impl LoaderApp {
                 .add_enabled(!log.is_empty(), egui::Button::new("Save"))
                 .on_hover_text("Saves the shown output of the open tab to a text file.")
                 .clicked();
+            pipe = crate::pipe::button(ui, log.pipe.as_ref());
         });
         if save {
-            self.save_log(tab);
+            let text = self.log_of(tab).text.clone();
+            self.save_text("output", "output.txt", text);
+        }
+        if pipe {
+            let toggled = crate::pipe::toggle(&mut self.log_of(tab).pipe, "output.txt", 0);
+            self.report_pipe(toggled);
         }
     }
 
-    fn save_log(&mut self, tab: LogTab) {
-        let text = self.log_of(tab).text.clone();
+    fn save_text(&mut self, what: &str, file_name: &str, text: String) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Text", &["txt"])
-            .set_file_name("output.txt")
+            .set_file_name(file_name)
             .save_file()
         else {
             return;
         };
         let shown = path.display().to_string();
         match std::fs::write(&path, text) {
-            Ok(()) => self.info(format!("Saved output to {shown}.")),
-            Err(error) => self.error(format!("Cannot save output to {shown}: {error}")),
+            Ok(()) => self.info(format!("Saved {what} to {shown}.")),
+            Err(error) => self.error(format!("Cannot save {what} to {shown}: {error}")),
+        }
+    }
+
+    fn rows_action<T: crate::pipe::Rows>(
+        &mut self,
+        ctx: &egui::Context,
+        action: Option<RowsAction>,
+        what: &str,
+        file_name: &str,
+        rows: fn(&mut Self) -> &mut T,
+    ) {
+        match action {
+            None => {}
+            Some(RowsAction::Copy) => ctx.copy_text(rows(self).shown_text()),
+            Some(RowsAction::Save) => {
+                let text = rows(self).shown_text();
+                self.save_text(what, file_name, text);
+            }
+            Some(RowsAction::Pipe) => {
+                let rows = rows(self);
+                let next = rows.end();
+                let toggled = crate::pipe::toggle(rows.pipe(), file_name, next);
+                self.report_pipe(toggled);
+            }
+        }
+    }
+
+    fn report_pipe(&mut self, toggled: Result<Option<String>, String>) {
+        match toggled {
+            Ok(Some(message)) => self.info(message),
+            Ok(None) => {}
+            Err(error) => self.error(error),
         }
     }
 
@@ -6710,6 +6920,39 @@ fn varp_text(name: Option<&str>, id: usize, value: i32) -> String {
     text
 }
 
+#[derive(Clone, Copy)]
+enum RowsAction {
+    Copy,
+    Save,
+    Pipe,
+}
+
+fn rows_buttons(
+    ui: &mut egui::Ui,
+    empty: bool,
+    pipe: Option<&crate::pipe::Pipe>,
+) -> Option<RowsAction> {
+    let mut action = None;
+    if ui
+        .add_enabled(!empty, egui::Button::new("Copy all"))
+        .on_hover_text("Copies the shown rows, a tab between columns.")
+        .clicked()
+    {
+        action = Some(RowsAction::Copy);
+    }
+    if ui
+        .add_enabled(!empty, egui::Button::new("Save"))
+        .on_hover_text("Saves the shown rows to a text file, a tab between columns.")
+        .clicked()
+    {
+        action = Some(RowsAction::Save);
+    }
+    if crate::pipe::button(ui, pipe) {
+        action = Some(RowsAction::Pipe);
+    }
+    action
+}
+
 fn pick_file(path: &mut String, name: &str, extension: &str) {
     let mut dialog = rfd::FileDialog::new().add_filter(name, &[extension]);
     if let Some(dir) = start_dir(path.as_str()) {
@@ -6875,7 +7118,7 @@ impl eframe::App for LoaderApp {
                     ui.horizontal_top(|ui| {
                         crate::theme::sidebar_frame().show(ui, |ui| {
                             ui.set_width(width - f32::from(crate::theme::SIDEBAR_INSET));
-                            ui.set_min_height(area.height() - 12.0);
+                            ui.set_height(area.height() - 12.0);
                             ui.vertical(|ui| self.sidebar_ui(ui));
                         });
                         ui.allocate_ui(egui::vec2(SIDEBAR_HANDLE_WIDTH, area.height()), |ui| {

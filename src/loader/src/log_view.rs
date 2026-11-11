@@ -86,8 +86,12 @@ impl<T> Log<T> {
         }
     }
 
-    fn end(&self) -> u64 {
+    pub fn end(&self) -> u64 {
         self.first + self.rows.len() as u64
+    }
+
+    pub fn since(&self, number: u64) -> impl Iterator<Item = (u64, &T)> {
+        (number.max(self.first)..self.end()).map(|number| (number, self.row(number)))
     }
 
     fn row(&self, number: u64) -> &T {

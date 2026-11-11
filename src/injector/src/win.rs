@@ -1501,7 +1501,7 @@ pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String
     })
 }
 
-pub fn item_doses(pid: u32, ids: &[i32]) -> Result<Vec<Option<crate::config::DoseFamily>>, String> {
+pub fn item_families(pid: u32, ids: &[i32]) -> Result<Vec<crate::config::ItemFamily>, String> {
     let decode = |data: Option<Vec<u8>>| {
         data.and_then(|data| crate::config::decode_obj(&data))
             .filter(|def| !def.copy)
@@ -1511,21 +1511,18 @@ pub fn item_doses(pid: u32, ids: &[i32]) -> Result<Vec<Option<crate::config::Dos
         .into_iter()
         .map(decode)
         .collect();
-    let wanted: Vec<Option<&str>> = names.iter().map(Option::as_deref).collect();
-    if wanted
+    let wanted: Vec<(i32, Option<&str>)> = ids
         .iter()
-        .flatten()
-        .all(|name| crate::config::dose_of(name).is_none())
-    {
-        return Ok(vec![None; ids.len()]);
-    }
+        .copied()
+        .zip(names.iter().map(Option::as_deref))
+        .collect();
     let all = config_ids(pid, crate::config::OBJ_ARCHIVE)?;
     let every: Vec<(i32, String)> = all
         .iter()
         .zip(config_files(pid, crate::config::OBJ_ARCHIVE, &all)?)
         .filter_map(|(&id, data)| Some((id, decode(data)?)))
         .collect();
-    Ok(crate::config::dose_families(
+    Ok(crate::config::item_families(
         &wanted,
         every.iter().map(|(id, name)| (*id, name.as_str())),
     ))

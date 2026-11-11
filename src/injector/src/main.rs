@@ -364,8 +364,8 @@ fn dispatch(args: &[&str]) -> String {
         ["sprites", pid, ids @ ..] => checked(args, "sprites command", || {
             Some(injector::sprites(num(pid)?, &nums::<i32>(ids)?))
         }),
-        ["item-doses", pid, ids @ ..] => checked(args, "item-doses command", || {
-            Some(injector::item_doses(num(pid)?, &nums::<i32>(ids)?))
+        ["item-families", pid, ids @ ..] => checked(args, "item-families command", || {
+            Some(injector::item_families(num(pid)?, &nums::<i32>(ids)?))
         }),
         ["item-stackable", pid, ids @ ..] => checked(args, "item-stackable command", || {
             Some(injector::item_stackable(num(pid)?, &nums::<i32>(ids)?))
@@ -469,7 +469,7 @@ fn run() -> ExitCode {
             "       injector varp <pid> <id> | varps <pid> | varbit <pid> <id> | enum <pid> <id> | item-params <pid> <ids...> | name <pid> <display name>"
         );
         eprintln!(
-            "       injector container <pid> <id> | containers <pid> | widget-tree <pid> | widget-words <pid> <group> <child> <index|-1> <count> | widget-dump <pid> <count> | item-names <pid> <id>... | item-icons <pid> <id[:quantity[:1]]>... | sprites <pid> <id>... | item-stackable <pid> <id>... | item-doses <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | scripts <pid> <since> | varc-changes <pid> <since> | item-changes <pid> <since> [wait ms] (u64 max: only the position) | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>"
+            "       injector container <pid> <id> | containers <pid> | widget-tree <pid> | widget-words <pid> <group> <child> <index|-1> <count> | widget-dump <pid> <count> | item-names <pid> <id>... | item-icons <pid> <id[:quantity[:1]]>... | sprites <pid> <id>... | item-stackable <pid> <id>... | item-families <pid> <id>... | varc <pid> <id> | npcs <pid> | tiles <pid> [layer]... | npc-model <pid> <index> | spot-anims <pid> | packets <pid> <since> | scripts <pid> <since> | varc-changes <pid> <since> | item-changes <pid> <since> [wait ms] (u64 max: only the position) | locs <pid> | loc-model <pid> <kind> <scene x> <scene y> <id> | ground-items <pid> | chat <pid> | players <pid> | world-select <pid> | selected <pid>"
         );
         eprintln!(
             "       injector move <pid> <x> <y> | click <pid> left|right|middle <x> <y> | type <pid> <text> [hold ms]"

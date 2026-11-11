@@ -116,12 +116,12 @@ pub fn item_stackable(
     injector::item_stackable(target.client.pid, ids)
 }
 
-pub fn item_doses(
+pub fn item_families(
     target: &Target,
     _settings: &Settings,
     ids: &[i32],
-) -> Result<Vec<Option<injector::config::DoseFamily>>, String> {
-    injector::item_doses(target.client.pid, ids)
+) -> Result<Vec<injector::config::ItemFamily>, String> {
+    injector::item_families(target.client.pid, ids)
 }
 
 pub fn item_icons(

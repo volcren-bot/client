@@ -7,6 +7,7 @@ use crate::theme::ROW_HEIGHT;
 const ACTIONS_WIDTH: f32 = 90.0;
 const INPUT_WIDTH: f32 = 300.0;
 const MAX_USER_ENTRIES: usize = 200;
+const BUILTIN_HOSTS: [&str; 1] = ["prices.runescape.wiki"];
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Whitelist {
@@ -72,6 +73,11 @@ impl Whitelist {
                 && !builtin.contains(&host)
             {
                 builtin.push(host);
+            }
+        }
+        for host in BUILTIN_HOSTS {
+            if !builtin.iter().any(|have| have == host) {
+                builtin.push(host.to_owned());
             }
         }
         Self {
@@ -174,7 +180,7 @@ impl Page {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if builtin {
                                 ui.label(egui::RichText::new("Built in").weak())
-                                    .on_hover_text("The Volcren hosts are always allowed");
+                                    .on_hover_text("Built-in hosts are always allowed");
                             } else {
                                 let armed = self.deleting.as_deref() == Some(host);
                                 if ui.button(if armed { "Sure?" } else { "Delete" }).clicked() {
@@ -291,7 +297,12 @@ mod tests {
     #[test]
     fn builtin_hosts_come_from_the_config_and_are_allowed() {
         let list = Whitelist::new(Vec::new(), &config());
-        for host in ["api.volcren.com", "db.volcren.com", "volcren.com"] {
+        for host in [
+            "api.volcren.com",
+            "db.volcren.com",
+            "volcren.com",
+            "prices.runescape.wiki",
+        ] {
             assert!(list.allows(host), "{host}");
         }
         assert!(!list.allows("example.com"));
@@ -322,6 +333,10 @@ mod tests {
         assert!(list.allows("example.com"));
         assert!(list.add("example.com").is_err(), "twice");
         assert!(list.add("volcren.com").is_err(), "already built in");
+        assert!(
+            list.add("prices.runescape.wiki").is_err(),
+            "already built in"
+        );
         list.remove("volcren.com");
         assert!(list.allows("volcren.com"));
         list.remove("example.com");

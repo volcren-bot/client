@@ -165,32 +165,53 @@ pub fn dose_of(name: &str) -> Option<(&str, u32)> {
 
 pub type DoseFamily = Vec<(u32, i32)>;
 
-pub fn dose_families<'a>(
-    wanted: &[Option<&str>],
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemFamily {
+    pub doses: Option<DoseFamily>,
+    pub variants: Vec<i32>,
+}
+
+pub fn item_families<'a>(
+    wanted: &[(i32, Option<&str>)],
     items: impl IntoIterator<Item = (i32, &'a str)>,
-) -> Vec<Option<DoseFamily>> {
-    let bases: Vec<Option<&str>> = wanted
+) -> Vec<ItemFamily> {
+    let mut doses: BTreeMap<&str, BTreeMap<u32, i32>> = wanted
         .iter()
-        .map(|name| name.and_then(dose_of).map(|(base, _)| base))
+        .filter_map(|(_, name)| dose_of((*name)?))
+        .map(|(base, _)| (base, BTreeMap::new()))
         .collect();
-    let mut families: BTreeMap<&str, BTreeMap<u32, i32>> = bases
+    let mut named: BTreeMap<&str, Vec<i32>> = wanted
         .iter()
-        .flatten()
-        .map(|base| (*base, BTreeMap::new()))
+        .filter_map(|(_, name)| name.filter(|name| !name.is_empty()))
+        .map(|name| (name, Vec::new()))
         .collect();
     for (id, name) in items {
+        if let Some(ids) = named.get_mut(name) {
+            ids.push(id);
+        }
         if let Some((base, dose)) = dose_of(name)
-            && let Some(family) = families.get_mut(base)
+            && let Some(family) = doses.get_mut(base)
         {
             let entry = family.entry(dose).or_insert(id);
             *entry = (*entry).min(id);
         }
     }
-    bases
+    wanted
         .iter()
-        .map(|base| {
-            base.and_then(|base| families.get(base))
-                .map(|family| family.iter().map(|(&dose, &id)| (dose, id)).collect())
+        .map(|&(id, name)| ItemFamily {
+            doses: name
+                .and_then(dose_of)
+                .and_then(|(base, _)| doses.get(base))
+                .map(|family| family.iter().map(|(&dose, &id)| (dose, id)).collect()),
+            variants: name
+                .and_then(|name| named.get(name))
+                .map(|ids| {
+                    let mut others: Vec<i32> = ids.iter().copied().filter(|&o| o != id).collect();
+                    others.sort_unstable();
+                    others.dedup();
+                    others
+                })
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -462,22 +483,46 @@ mod tests {
             (1704, "Amulet of glory"),
             (2440, "Super strength(4)"),
         ];
-        let families = dose_families(
+        let families = item_families(
             &[
-                Some("Prayer potion(3)"),
-                Some("Coins"),
-                None,
-                Some("Amulet of glory(4)"),
+                (139, Some("Prayer potion(3)")),
+                (995, Some("Coins")),
+                (-1, None),
+                (1712, Some("Amulet of glory(4)")),
             ],
             items,
         );
         assert_eq!(
-            families[0].as_deref(),
+            families[0].doses.as_deref(),
             Some(&[(1, 143), (2, 141), (3, 139), (4, 2434)][..])
         );
-        assert_eq!(families[1], None);
-        assert_eq!(families[2], None);
-        assert_eq!(families[3].as_deref(), Some(&[(4, 1712)][..]));
+        assert_eq!(families[1].doses, None);
+        assert_eq!(families[2], ItemFamily::default());
+        assert_eq!(families[3].doses.as_deref(), Some(&[(4, 1712)][..]));
+    }
+
+    #[test]
+    fn lists_the_other_items_of_the_same_name() {
+        let items = [
+            (24125, "Crystal halberd"),
+            (23987, "Crystal halberd"),
+            (23989, "Crystal halberd (inactive)"),
+            (2434, "Prayer potion(4)"),
+            (20393, "Prayer potion(4)"),
+        ];
+        let families = item_families(
+            &[
+                (24125, Some("Crystal halberd")),
+                (2434, Some("Prayer potion(4)")),
+                (4151, Some("Abyssal whip")),
+                (0, Some("")),
+            ],
+            items,
+        );
+        assert_eq!(families[0].variants, [23987]);
+        assert_eq!(families[1].variants, [20393]);
+        assert!(families[2].variants.is_empty());
+        assert!(families[3].variants.is_empty());
     }
 
     #[test]

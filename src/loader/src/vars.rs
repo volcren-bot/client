@@ -5,7 +5,10 @@ use std::{
 
 use injector::{VarcPage, config::VarbitDef};
 
-use crate::log_view::{Filtered, Log, Poller, View};
+use crate::{
+    log_view::{Filtered, Log, Poller, View},
+    pipe::{Pipe, Rows},
+};
 
 pub const KEEP: usize = 10_000;
 pub const POLL_EVERY: Duration = Duration::from_millis(200);
@@ -34,6 +37,17 @@ pub enum Kind {
     VarcStr,
 }
 
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Varbit => "Varbit",
+            Kind::Varp => "VarPlayer",
+            Kind::VarcInt => "VarClientInt",
+            Kind::VarcStr => "VarClientStr",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub tick: Option<i32>,
@@ -41,6 +55,24 @@ pub struct Entry {
     pub name: String,
     pub old: String,
     pub new: String,
+}
+
+impl Entry {
+    pub fn tick_text(&self) -> String {
+        self.tick
+            .map_or_else(|| "?".to_owned(), |tick| tick.to_string())
+    }
+
+    pub fn line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}",
+            self.tick_text(),
+            self.kind.label(),
+            self.name,
+            self.old,
+            self.new
+        )
+    }
 }
 
 pub struct Inspector {
@@ -52,6 +84,7 @@ pub struct Inspector {
     pub follow: bool,
     pub error: Option<String>,
     pub varc_error: Option<String>,
+    pub pipe: Option<Pipe>,
     log: Log<Entry>,
     shown: Filtered<[bool; 4]>,
     poller: Poller,
@@ -71,6 +104,7 @@ impl Default for Inspector {
             follow: true,
             error: None,
             varc_error: None,
+            pipe: None,
             log: Log::default(),
             shown: Filtered::default(),
             poller: Poller::default(),
@@ -237,6 +271,39 @@ impl Inspector {
             Kind::VarcInt => boxes[2],
             Kind::VarcStr => boxes[3],
         })
+    }
+}
+
+impl Rows for Inspector {
+    fn end(&self) -> u64 {
+        self.log.end()
+    }
+
+    fn shown_text(&self) -> String {
+        let visible = self.visible();
+        (0..visible.len())
+            .map(|index| visible[index].line())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn write_pipe(&mut self) -> Result<(), String> {
+        let Some(next) = self.pipe.as_ref().map(|pipe| pipe.next) else {
+            return Ok(());
+        };
+        let lines: Vec<String> = self
+            .log
+            .since(next)
+            .map(|(_, entry)| entry.line())
+            .collect();
+        if let Some(pipe) = &mut self.pipe {
+            pipe.next = self.log.end();
+        }
+        crate::pipe::write(&mut self.pipe, lines)
+    }
+
+    fn pipe(&mut self) -> &mut Option<Pipe> {
+        &mut self.pipe
     }
 }
 

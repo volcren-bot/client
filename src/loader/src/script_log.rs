@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use injector::{ScriptPage, ScriptRun};
 
 use crate::log_view::{Filtered, Log, Poller, View};
+use crate::pipe::{Pipe, Rows};
 use crate::script_names::Names;
 
 pub const KEEP: usize = 10_000;
@@ -85,6 +86,30 @@ impl Row {
     pub fn took(&self) -> String {
         self.duration_us.map_or(String::new(), duration_text)
     }
+
+    pub fn tick_text(&self) -> String {
+        self.run
+            .tick
+            .map_or_else(|| "?".to_owned(), |tick| tick.to_string())
+    }
+
+    pub fn indented_name(&self, names: &Names) -> String {
+        format!(
+            "{}{}",
+            "  ".repeat(self.run.depth as usize),
+            self.name(names)
+        )
+    }
+
+    pub fn line(&self, names: &Names) -> String {
+        format!(
+            "{}\t{}\t{}\t{}",
+            self.tick_text(),
+            self.indented_name(names),
+            self.args_text(),
+            self.took()
+        )
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -117,6 +142,7 @@ pub struct Inspector {
     pub names_error: Option<String>,
     pub dropped: u64,
     pub error: Option<String>,
+    pub pipe: Option<Pipe>,
     rows: Log<Row>,
     shown: Filtered<bool>,
     poller: Poller,
@@ -135,6 +161,7 @@ impl Default for Inspector {
             names_error: None,
             dropped: 0,
             error: None,
+            pipe: None,
             rows: Log::default(),
             shown: Filtered::default(),
             poller: Poller::default(),
@@ -232,6 +259,48 @@ impl Inspector {
         self.shown.view(&self.rows, triggers, |row| {
             triggers || row.script_id().is_some()
         })
+    }
+}
+
+impl Rows for Inspector {
+    fn end(&self) -> u64 {
+        self.rows.end()
+    }
+
+    fn shown_text(&self) -> String {
+        let visible = self.visible();
+        (0..visible.len())
+            .map(|index| visible[index].line(&self.names))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn write_pipe(&mut self) -> Result<(), String> {
+        let Some(next) = self.pipe.as_ref().map(|pipe| pipe.next) else {
+            return Ok(());
+        };
+        let rows: Vec<(u64, &Row)> = self.rows.since(next).collect();
+        let mut lines = Vec::new();
+        let mut piped = next;
+        for (at, &(number, row)) in rows.iter().enumerate() {
+            let over = row.duration_us.is_some()
+                || rows[at + 1..]
+                    .iter()
+                    .any(|(_, later)| later.run.depth <= row.run.depth);
+            if !over {
+                break;
+            }
+            lines.push(row.line(&self.names));
+            piped = number + 1;
+        }
+        if let Some(pipe) = &mut self.pipe {
+            pipe.next = piped;
+        }
+        crate::pipe::write(&mut self.pipe, lines)
+    }
+
+    fn pipe(&mut self) -> &mut Option<Pipe> {
+        &mut self.pipe
     }
 }
 
@@ -392,6 +461,36 @@ mod tests {
             "Script 12  1.25 ms"
         );
         assert_eq!(duration_text(850), "850 µs");
+    }
+
+    #[test]
+    fn the_pipe_gets_every_new_row_once_its_run_is_over() {
+        let now = Instant::now();
+        let path =
+            std::env::temp_dir().join(format!("volcren-script-pipe-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut inspector = Inspector {
+            enabled: true,
+            triggers: false,
+            ..Inspector::default()
+        };
+        inspector.start(32);
+        inspector.finish(32, now, poll(vec![script(0, 9)], 0));
+        inspector.pipe = Some(Pipe::open(path.clone(), inspector.end()).unwrap());
+        let (parent, child) = (run(1, 76, 0, &["1"], 1), run(2, 12, 1, &["5"], 1));
+        inspector.start(32);
+        inspector.finish(32, now, poll(vec![parent.clone(), child], 0));
+        inspector.write_pipe().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        inspector.start(32);
+        inspector.finish(32, now, poll(vec![ended(parent, 3, 1250), script(4, 8)], 0));
+        inspector.write_pipe().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "7\tScript 1\t\t1.24 ms\n7\t  Trigger 12\t5\t\n"
+        );
+        drop(inspector);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

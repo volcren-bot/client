@@ -308,12 +308,12 @@ pub fn game_val_names(
     call_ids(target, settings, "game-vals", &[&kind.to_string()], ids)
 }
 
-pub fn item_doses(
+pub fn item_families(
     target: &Target,
     settings: &Settings,
     ids: &[i32],
-) -> Result<Vec<Option<injector::config::DoseFamily>>, String> {
-    call_ids(target, settings, "item-doses", &[], ids)
+) -> Result<Vec<injector::config::ItemFamily>, String> {
+    call_ids(target, settings, "item-families", &[], ids)
 }
 
 pub fn item_stackable(

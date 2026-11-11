@@ -449,6 +449,8 @@ pub struct Item {
     pub doses: Option<Doses>,
     pub locked: bool,
     pub ids: Vec<i32>,
+    #[serde(default)]
+    pub variants: Vec<i32>,
 }
 
 impl Item {
@@ -463,6 +465,7 @@ impl Item {
             doses: None,
             locked: false,
             ids: Vec::new(),
+            variants: Vec::new(),
         }
     }
 
@@ -499,23 +502,25 @@ impl Item {
     }
 }
 
-pub fn add_doses<'a>(
+pub fn add_families<'a>(
     items: impl IntoIterator<Item = &'a mut Item>,
-    families: &HashMap<i32, Vec<u32>>,
+    families: &HashMap<i32, injector::config::ItemFamily>,
 ) {
     for item in items {
-        let Some(all) = families.get(&item.id).filter(|all| all.len() > 1) else {
+        let Some(family) = families.get(&item.id).filter(|_| !item.stackable) else {
             continue;
         };
-        if item.stackable {
-            continue;
-        }
-        if let Some((_, dose)) = injector::config::dose_of(&item.name) {
+        if let Some(all) = family.doses.as_ref().filter(|all| all.len() > 1)
+            && let Some((_, dose)) = injector::config::dose_of(&item.name)
+        {
             item.doses = Some(Doses {
-                all: all.clone(),
+                all: all.iter().map(|&(dose, _)| dose).collect(),
                 accepted: vec![dose],
                 highest_first: true,
             });
+        } else {
+            item.variants.clone_from(&family.variants);
+            item.ids.clone_from(&family.variants);
         }
     }
 }
@@ -557,6 +562,7 @@ fn required_item(rule: &injector::form::Required, known: &Known) -> Item {
         doses,
         locked: true,
         ids: rule.ids[1..].to_vec(),
+        variants: Vec::new(),
     }
 }
 
@@ -1475,6 +1481,7 @@ fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool, cap: i32) -> O
         });
         ui.weak("Equal: exactly that many. Both 0: any amount.");
     }
+    variants_ui(ui, item);
     if doses_fixed {
         if let Some(doses) = &item.doses {
             ui.weak(format!(
@@ -1512,6 +1519,29 @@ fn item_ui(ui: &mut egui::Ui, item: &mut Item, doses_fixed: bool, cap: i32) -> O
     doses.sort();
     ui.weak("A carried dose that isn't ticked is swapped at the bank.");
     (*doses != before).then(|| doses.clone())
+}
+
+fn variants_ui(ui: &mut egui::Ui, item: &mut Item) {
+    if item.variants.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Also counts:");
+        for &id in &item.variants {
+            let mut on = item.ids.contains(&id);
+            if ui.checkbox(&mut on, format!("id {id}")).changed() {
+                if on {
+                    item.ids.push(id);
+                    item.ids.sort_unstable();
+                } else {
+                    item.ids.retain(|&other| other != id);
+                }
+            }
+        }
+    });
+    ui.weak(
+        "Items of the same name, such as a used and an unused one. The read id is taken first.",
+    );
 }
 
 fn share_doses<'a>(items: impl IntoIterator<Item = &'a mut Item>, base: &str, doses: &Doses) {
@@ -2264,6 +2294,13 @@ mod tests {
         Item::read(id, quantity, format!("item {id}"), stackable)
     }
 
+    fn dose_family(doses: &[u32]) -> injector::config::ItemFamily {
+        injector::config::ItemFamily {
+            doses: Some(doses.iter().map(|&dose| (dose, 0)).collect()),
+            variants: Vec::new(),
+        }
+    }
+
     fn rule(ids: &[i32], slot: Option<usize>) -> injector::form::Required {
         injector::form::Required {
             ids: ids.to_vec(),
@@ -2371,7 +2408,10 @@ mod tests {
         let known = Known::from([(2434, ("Prayer potion(4)".to_owned(), false))]);
         let mut layout = Inventory::default();
         let mut own = Item::read(139, 1, "Prayer potion(3)".into(), false);
-        add_doses([&mut own], &HashMap::from([(139, vec![1, 2, 3, 4])]));
+        add_families(
+            [&mut own],
+            &HashMap::from([(139, dose_family(&[1, 2, 3, 4]))]),
+        );
         *layout.slot_mut(4) = Some(own);
         assert_eq!(rules.fit_inventory(&mut layout, &known), 0);
         assert_eq!(
@@ -2429,11 +2469,11 @@ mod tests {
             Item::read(1712, 1, "Amulet of glory(4)".into(), false),
         ];
         let families = HashMap::from([
-            (2434, vec![1, 2, 3, 4]),
-            (139, vec![1, 2, 3, 4]),
-            (1712, vec![1, 2, 3, 4, 5, 6]),
+            (2434, dose_family(&[1, 2, 3, 4])),
+            (139, dose_family(&[1, 2, 3, 4])),
+            (1712, dose_family(&[1, 2, 3, 4, 5, 6])),
         ]);
-        add_doses(items.iter_mut(), &families);
+        add_families(items.iter_mut(), &families);
         assert_eq!(items[0].doses.as_ref().unwrap().accepted, [4]);
         assert_eq!(items[1].doses.as_ref().unwrap().accepted, [3]);
         assert!(items[2].doses.is_none());
@@ -2457,6 +2497,23 @@ mod tests {
         );
         assert_eq!(required.to_value()["doses"], json!([3, 4]));
         assert!(!required.doses.unwrap().highest_first);
+    }
+
+    #[test]
+    fn items_of_the_same_name_count_as_the_read_one() {
+        let mut items = [
+            Item::read(24125, 1, "Crystal halberd".into(), false),
+            Item::read(995, 10, "Coins".into(), true),
+        ];
+        let variants = |ids: Vec<i32>| injector::config::ItemFamily {
+            doses: None,
+            variants: ids,
+        };
+        let families = HashMap::from([(24125, variants(vec![23987])), (995, variants(vec![617]))]);
+        add_families(items.iter_mut(), &families);
+        assert_eq!(items[0].to_value()["ids"], json!([24125, 23987]));
+        assert_eq!(items[0].variants, [23987]);
+        assert!(items[1].ids.is_empty() && items[1].variants.is_empty());
     }
 
     #[test]

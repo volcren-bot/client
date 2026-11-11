@@ -24,6 +24,7 @@ mod logo;
 mod packet_defs;
 mod packets;
 mod paths;
+mod pipe;
 mod script;
 mod script_log;
 mod script_names;

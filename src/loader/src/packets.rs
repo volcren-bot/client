@@ -7,7 +7,8 @@ use injector::{Packet, PacketPage};
 
 use crate::{
     log_view::{Filtered, Log, Poller, View},
-    packet_defs::{self, Table},
+    packet_defs::{self, Def, Table},
+    pipe::{Pipe, Rows},
 };
 
 pub const KEEP: usize = 5000;
@@ -134,6 +135,7 @@ pub struct Monitor {
     pub error: Option<String>,
     pub selected: Option<u64>,
     pub follow: bool,
+    pub pipe: Option<Pipe>,
     layouts: Option<Table>,
     layouts_pid: Option<u32>,
     layouts_retry_at: Option<Instant>,
@@ -155,6 +157,7 @@ impl Default for Monitor {
             error: None,
             selected: None,
             follow: true,
+            pipe: None,
             layouts: None,
             layouts_pid: None,
             layouts_retry_at: None,
@@ -203,6 +206,20 @@ impl Monitor {
 
     pub fn kept(&self) -> usize {
         self.packets.len()
+    }
+
+    pub fn line(&self, packet: &Packet) -> String {
+        let def = self.table().lookup(packet.sent, packet.opcode);
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            time_text(packet),
+            if packet.sent { "sent" } else { "received" },
+            packet.opcode,
+            packet.length,
+            def.map_or("", |def| def.name.as_str()),
+            fields_text(def, packet),
+            payload_text(packet)
+        )
     }
 
     pub fn clear(&mut self) {
@@ -265,6 +282,56 @@ impl Monitor {
         let sequence = self.selected?;
         self.packets.iter().rev().find(|p| p.sequence == sequence)
     }
+}
+
+impl Rows for Monitor {
+    fn end(&self) -> u64 {
+        self.packets.end()
+    }
+
+    fn shown_text(&self) -> String {
+        let visible = self.visible();
+        (0..visible.len())
+            .map(|index| self.line(&visible[index]))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn write_pipe(&mut self) -> Result<(), String> {
+        let Some(next) = self.pipe.as_ref().map(|pipe| pipe.next) else {
+            return Ok(());
+        };
+        let lines: Vec<String> = self
+            .packets
+            .since(next)
+            .map(|(_, packet)| self.line(packet))
+            .collect();
+        let end = self.packets.end();
+        if let Some(pipe) = &mut self.pipe {
+            pipe.next = end;
+        }
+        crate::pipe::write(&mut self.pipe, lines)
+    }
+
+    fn pipe(&mut self) -> &mut Option<Pipe> {
+        &mut self.pipe
+    }
+}
+
+pub fn time_text(packet: &Packet) -> String {
+    format!("{:.3}", packet.time_ms as f64 / 1000.0)
+}
+
+pub fn fields_text(def: Option<&Def>, packet: &Packet) -> String {
+    def.map(|def| {
+        packet_defs::decode(def, &payload_bytes(packet), packet.length)
+            .fields
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+    .unwrap_or_default()
 }
 
 pub fn payload_bytes(packet: &Packet) -> Vec<u8> {
