@@ -1505,26 +1505,34 @@ pub fn item_families(pid: u32, ids: &[i32]) -> Result<Vec<crate::config::ItemFam
     let decode = |data: Option<Vec<u8>>| {
         data.and_then(|data| crate::config::decode_obj(&data))
             .filter(|def| !def.copy)
-            .and_then(|def| def.name)
+            .and_then(|def| Some((def.name?, crate::config::bonuses_of(&def.params))))
     };
-    let names: Vec<Option<String>> = config_files(pid, crate::config::OBJ_ARCHIVE, ids)?
-        .into_iter()
-        .map(decode)
-        .collect();
-    let wanted: Vec<(i32, Option<&str>)> = ids
+    let named: Vec<Option<(String, crate::config::Bonuses)>> =
+        config_files(pid, crate::config::OBJ_ARCHIVE, ids)?
+            .into_iter()
+            .map(decode)
+            .collect();
+    let wanted: Vec<(i32, Option<&str>, crate::config::Bonuses)> = ids
         .iter()
         .copied()
-        .zip(names.iter().map(Option::as_deref))
+        .zip(named.iter())
+        .map(|(id, def)| match def {
+            Some((name, bonuses)) => (id, Some(name.as_str()), *bonuses),
+            None => (id, None, crate::config::Bonuses::default()),
+        })
         .collect();
     let all = config_ids(pid, crate::config::OBJ_ARCHIVE)?;
-    let every: Vec<(i32, String)> = all
+    let every: Vec<(i32, String, crate::config::Bonuses)> = all
         .iter()
         .zip(config_files(pid, crate::config::OBJ_ARCHIVE, &all)?)
-        .filter_map(|(&id, data)| Some((id, decode(data)?)))
+        .filter_map(|(&id, data)| {
+            let (name, bonuses) = decode(data)?;
+            Some((id, name, bonuses))
+        })
         .collect();
     Ok(crate::config::item_families(
         &wanted,
-        every.iter().map(|(id, name)| (*id, name.as_str())),
+        every.iter().map(|(id, name, bonuses)| (*id, name.as_str(), *bonuses)),
     ))
 }
 

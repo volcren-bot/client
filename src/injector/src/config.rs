@@ -171,21 +171,53 @@ pub struct ItemFamily {
     pub variants: Vec<i32>,
 }
 
+pub fn condition_of(name: &str) -> Option<(&str, u32)> {
+    let (base, digits) = name.rsplit_once(' ')?;
+    if base.is_empty() || digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((base, digits.parse().ok()?))
+}
+
+pub const BONUS_PARAMS: [u32; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 299];
+
+pub type Bonuses = [i64; BONUS_PARAMS.len()];
+
+pub fn bonuses_of(params: &BTreeMap<u32, Value>) -> Bonuses {
+    BONUS_PARAMS.map(|key| match params.get(&key) {
+        Some(Value::Int(v)) => *v,
+        _ => 0,
+    })
+}
+
+fn condition_key<'a>(name: &'a str, bonuses: &Bonuses) -> Option<(&'a str, Bonuses)> {
+    if bonuses.iter().all(|&b| b == 0) {
+        return None;
+    }
+    let base = condition_of(name).map_or(name, |(base, _)| base);
+    Some((base, *bonuses))
+}
+
 pub fn item_families<'a>(
-    wanted: &[(i32, Option<&str>)],
-    items: impl IntoIterator<Item = (i32, &'a str)>,
+    wanted: &[(i32, Option<&str>, Bonuses)],
+    items: impl IntoIterator<Item = (i32, &'a str, Bonuses)>,
 ) -> Vec<ItemFamily> {
     let mut doses: BTreeMap<&str, BTreeMap<u32, i32>> = wanted
         .iter()
-        .filter_map(|(_, name)| dose_of((*name)?))
+        .filter_map(|(_, name, _)| dose_of((*name)?))
         .map(|(base, _)| (base, BTreeMap::new()))
         .collect();
     let mut named: BTreeMap<&str, Vec<i32>> = wanted
         .iter()
-        .filter_map(|(_, name)| name.filter(|name| !name.is_empty()))
+        .filter_map(|(_, name, _)| name.filter(|name| !name.is_empty()))
         .map(|name| (name, Vec::new()))
         .collect();
-    for (id, name) in items {
+    let mut conditions: BTreeMap<(&str, Bonuses), Vec<i32>> = wanted
+        .iter()
+        .filter_map(|(_, name, bonuses)| condition_key((*name)?, bonuses))
+        .map(|key| (key, Vec::new()))
+        .collect();
+    for (id, name, bonuses) in items {
         if let Some(ids) = named.get_mut(name) {
             ids.push(id);
         }
@@ -195,23 +227,31 @@ pub fn item_families<'a>(
             let entry = family.entry(dose).or_insert(id);
             *entry = (*entry).min(id);
         }
+        if let Some(key) = condition_key(name, &bonuses)
+            && let Some(ids) = conditions.get_mut(&key)
+        {
+            ids.push(id);
+        }
     }
     wanted
         .iter()
-        .map(|&(id, name)| ItemFamily {
+        .map(|&(id, name, bonuses)| ItemFamily {
             doses: name
                 .and_then(dose_of)
                 .and_then(|(base, _)| doses.get(base))
                 .map(|family| family.iter().map(|(&dose, &id)| (dose, id)).collect()),
-            variants: name
-                .and_then(|name| named.get(name))
-                .map(|ids| {
-                    let mut others: Vec<i32> = ids.iter().copied().filter(|&o| o != id).collect();
-                    others.sort_unstable();
-                    others.dedup();
-                    others
-                })
-                .unwrap_or_default(),
+            variants: {
+                let same_name = name.and_then(|name| named.get(name)).into_iter().flatten();
+                let condition = name
+                    .and_then(|name| condition_key(name, &bonuses))
+                    .and_then(|key| conditions.get(&key))
+                    .into_iter()
+                    .flatten();
+                let mut others: Vec<i32> = same_name.chain(condition).copied().filter(|&o| o != id).collect();
+                others.sort_unstable();
+                others.dedup();
+                others
+            },
         })
         .collect()
 }
@@ -309,6 +349,8 @@ pub fn decode_varbit(data: &[u8]) -> Option<VarbitDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NONE: Bonuses = [0; BONUS_PARAMS.len()];
 
     fn hex(text: &str) -> Vec<u8> {
         (0..text.len())
@@ -485,12 +527,12 @@ mod tests {
         ];
         let families = item_families(
             &[
-                (139, Some("Prayer potion(3)")),
-                (995, Some("Coins")),
-                (-1, None),
-                (1712, Some("Amulet of glory(4)")),
+                (139, Some("Prayer potion(3)"), NONE),
+                (995, Some("Coins"), NONE),
+                (-1, None, NONE),
+                (1712, Some("Amulet of glory(4)"), NONE),
             ],
-            items,
+            items.map(|(id, name)| (id, name, NONE)),
         );
         assert_eq!(
             families[0].doses.as_deref(),
@@ -512,15 +554,56 @@ mod tests {
         ];
         let families = item_families(
             &[
-                (24125, Some("Crystal halberd")),
-                (2434, Some("Prayer potion(4)")),
-                (4151, Some("Abyssal whip")),
-                (0, Some("")),
+                (24125, Some("Crystal halberd"), NONE),
+                (2434, Some("Prayer potion(4)"), NONE),
+                (4151, Some("Abyssal whip"), NONE),
+                (0, Some(""), NONE),
             ],
-            items,
+            items.map(|(id, name)| (id, name, NONE)),
         );
         assert_eq!(families[0].variants, [23987]);
         assert_eq!(families[1].variants, [20393]);
+        assert!(families[2].variants.is_empty());
+        assert!(families[3].variants.is_empty());
+    }
+
+    #[test]
+    fn condition_numbers_end_the_name_after_a_space() {
+        assert_eq!(condition_of("Ahrim's robetop 75"), Some(("Ahrim's robetop", 75)));
+        assert_eq!(condition_of("Ahrim's robetop"), None);
+        assert_eq!(condition_of("Prayer potion(4)"), None);
+        assert_eq!(condition_of(" 75"), None);
+        assert_eq!(condition_of("Robe 7a"), None);
+    }
+
+    #[test]
+    fn groups_conditions_with_the_same_bonuses() {
+        let mut worn = NONE;
+        worn[3] = 30;
+        worn[8] = 30;
+        let mut other = worn;
+        other[3] = 31;
+        let items = [
+            (4712, "Ahrim's robetop", worn),
+            (4868, "Ahrim's robetop 100", worn),
+            (4869, "Ahrim's robetop 75", worn),
+            (4870, "Ahrim's robetop 50", worn),
+            (4871, "Ahrim's robetop 25", worn),
+            (4872, "Ahrim's robetop 0", NONE),
+            (9999, "Ahrim's robetop 10", other),
+            (4151, "Abyssal whip", NONE),
+        ];
+        let families = item_families(
+            &[
+                (4868, Some("Ahrim's robetop 100"), worn),
+                (4712, Some("Ahrim's robetop"), worn),
+                (4872, Some("Ahrim's robetop 0"), NONE),
+                (4151, Some("Abyssal whip"), NONE),
+            ],
+            items,
+        );
+        assert_eq!(families[0].variants, [4712, 4869, 4870, 4871]);
+        assert_eq!(families[1].variants, [4868, 4869, 4870, 4871]);
         assert!(families[2].variants.is_empty());
         assert!(families[3].variants.is_empty());
     }
