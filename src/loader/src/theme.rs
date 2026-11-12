@@ -123,17 +123,49 @@ pub fn button_width(ui: &egui::Ui, font: &egui::FontId, labels: &[&str]) -> f32 
     widest(ui, font, labels) + 2.0 * ui.spacing().button_padding.x
 }
 
+fn credits_job(ui: &egui::Ui, text: egui::RichText, suffix: &str) -> egui::text::LayoutJob {
+    let style = ui.style();
+    let size = ui.ctx().fonts_mut(|fonts| text.font_height(fonts, style));
+    let mut job = egui::text::LayoutJob::default();
+    text.append_to(
+        &mut job,
+        style,
+        egui::FontSelection::Default,
+        egui::Align::Center,
+    );
+    if !suffix.is_empty() {
+        egui::RichText::new(suffix)
+            .size(size * 0.85)
+            .weak()
+            .append_to(
+                &mut job,
+                style,
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+    }
+    job
+}
+
 pub fn credits(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::Response {
-    let style = ui.style().clone();
-    let size = ui.ctx().fonts_mut(|fonts| text.font_height(fonts, &style));
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label(text);
-        if !suffix.is_empty() {
-            ui.label(egui::RichText::new(suffix).size(size * 0.85).weak());
-        }
-    })
-    .response
+    let job = credits_job(ui, text, suffix);
+    ui.add(egui::Label::new(job).selectable(false).extend())
+}
+
+pub fn credits_link(ui: &mut egui::Ui, text: egui::RichText, suffix: &str) -> egui::Response {
+    let text = if link_hovered(ui, ui.next_auto_id()) {
+        text.color(BLUE)
+    } else {
+        text
+    };
+    let job = credits_job(ui, text, suffix);
+    ui.add(
+        egui::Label::new(job)
+            .selectable(false)
+            .extend()
+            .sense(egui::Sense::click()),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub fn sidebar_child<T: PartialEq>(
@@ -291,13 +323,62 @@ pub fn status_dot(ui: &mut egui::Ui, color: Color32) -> egui::Response {
 }
 
 pub fn button_group<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    button_group_in(ui, false, add)
+}
+
+pub fn button_group_in<R>(
+    ui: &mut egui::Ui,
+    vertical: bool,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
     egui::Frame::new()
         .fill(BORDER)
         .inner_margin(egui::Margin::same(1))
         .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 1.0;
-            ui.horizontal(add).inner
+            ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
+            if vertical {
+                ui.vertical(add).inner
+            } else {
+                ui.horizontal(add).inner
+            }
         })
+        .inner
+}
+
+pub fn button_group_width(buttons: usize, button_width: f32) -> f32 {
+    buttons as f32 * (button_width + 1.0) + 1.0
+}
+
+pub fn button_group_size(
+    ui: &egui::Ui,
+    buttons: usize,
+    button_width: f32,
+    vertical: bool,
+) -> egui::Vec2 {
+    let height = ui.spacing().interact_size.y;
+    if vertical {
+        vec2(
+            button_group_width(1, button_width),
+            button_group_width(buttons, height),
+        )
+    } else {
+        vec2(
+            button_group_width(buttons, button_width),
+            button_group_width(1, height),
+        )
+    }
+}
+
+pub fn button_group_at<R>(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    vertical: bool,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let builder = egui::UiBuilder::new()
+        .max_rect(rect)
+        .layout(egui::Layout::top_down(egui::Align::Min));
+    ui.scope_builder(builder, |ui| button_group_in(ui, vertical, add))
         .inner
 }
 

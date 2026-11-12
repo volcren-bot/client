@@ -53,7 +53,33 @@ pub enum Action {
     Run(Box<StoreScript>),
     Redeem(String),
     RemoveGrant(Box<StoreScript>),
+    OpenSite(String),
 }
+
+const MIN_DETAILS_WIDTH: f32 = 240.0;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Placement {
+    Beside,
+    Stacked,
+    Below,
+}
+
+impl Placement {
+    fn of(room: f32, buttons: usize, button_width: f32) -> Self {
+        let row = crate::theme::button_group_width(buttons, button_width);
+        let column = crate::theme::button_group_width(1, button_width);
+        if room - row >= MIN_DETAILS_WIDTH {
+            Self::Beside
+        } else if buttons > 1 && room - column >= MIN_DETAILS_WIDTH {
+            Self::Stacked
+        } else {
+            Self::Below
+        }
+    }
+}
+const ICON_WEBSITE: &str = "\u{f0ac}";
+const ICON_ADD_FUNDS: &str = "\u{f09d}";
 
 pub fn origin_label(script: &StoreScript) -> &'static str {
     if script.community {
@@ -115,6 +141,7 @@ impl Store {
         ui: &mut egui::Ui,
         me: &crate::api::Me,
         run_block: Option<&str>,
+        has_site: bool,
     ) -> Option<Action> {
         let mut action = None;
         let width = ui.available_width();
@@ -193,16 +220,26 @@ impl Store {
         }
 
         let (mut run, mut remove, mut start_remove, mut cancel_remove) = (None, None, None, false);
+        let mut open_site = None;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for script in self.visible() {
                 ui.add_space(8.0);
                 crate::theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.microcredits, me.min_balance_minutes));
-                    let run_width = crate::theme::icon_button_width(ui, &[(crate::app::ICON_START, "Run")]);
-                    ui.horizontal_top(|ui| {
-                        let details_width = (ui.available_width() - run_width - ui.spacing().item_spacing.x).max(0.0);
-                        ui.allocate_ui_with_layout(egui::vec2(details_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    let add_funds = has_site && script.short_of_funds(me.microcredits, me.min_balance_minutes);
+                    let button_width = crate::theme::icon_button_width(ui, &[(ICON_WEBSITE, "Website"), (crate::app::ICON_START, "Run"), (ICON_ADD_FUNDS, "Add funds")]);
+                    let buttons = 1 + usize::from(has_site);
+                    let full = ui.available_width();
+                    let spacing = ui.spacing().item_spacing;
+                    let placement = Placement::of(full - spacing.x, buttons, button_width);
+                    let vertical = placement == Placement::Stacked;
+                    let size = crate::theme::button_group_size(ui, buttons, button_width, vertical);
+                    let details_width = if placement == Placement::Below { full } else { (full - size.x - spacing.x).max(0.0) };
+                    let top_left = ui.cursor().min;
+                    let details = ui
+                        .allocate_ui_with_layout(egui::vec2(details_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.set_width(details_width);
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(egui::RichText::new(&script.title).strong().size(16.0));
                                 ui.label(egui::RichText::new(format!("by {}", script.author)).weak());
@@ -238,9 +275,25 @@ impl Store {
                                     }
                                 });
                             }
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                            let button = crate::theme::icon_button(ui, crate::app::ICON_START, "Run", run_width, blocked.is_none());
+                        })
+                        .response
+                        .rect;
+                    let at = match placement {
+                        Placement::Below => egui::pos2(top_left.x, details.bottom() + spacing.y),
+                        _ => egui::pos2(top_left.x + full - size.x, details.bottom().max(top_left.y + size.y) - size.y),
+                    };
+                    crate::theme::button_group_at(ui, egui::Rect::from_min_size(at, size), vertical, |ui| {
+                            if has_site && crate::theme::icon_button(ui, ICON_WEBSITE, "Website", button_width, true).on_hover_text("Opens the script's page on the website.").clicked() {
+                                open_site = Some(format!("/scripts/{}", script.url));
+                            }
+                            if add_funds {
+                                let reason = script.blocked(me.microcredits, me.min_balance_minutes).unwrap_or_default();
+                                if crate::theme::icon_button(ui, ICON_ADD_FUNDS, "Add funds", button_width, true).on_hover_text(reason).clicked() {
+                                    open_site = Some("/credits".to_owned());
+                                }
+                                return;
+                            }
+                            let button = crate::theme::icon_button(ui, crate::app::ICON_START, "Run", button_width, blocked.is_none());
                             let button = match &blocked {
                                 Some(reason) => button.on_disabled_hover_text(reason),
                                 None => button,
@@ -248,7 +301,6 @@ impl Store {
                             if button.clicked() {
                                 run = Some(Box::new(script.clone()));
                             }
-                        });
                     });
                 });
             }
@@ -261,6 +313,7 @@ impl Store {
         }
         run.map(Action::Run)
             .or(remove.map(Action::RemoveGrant))
+            .or(open_site.map(Action::OpenSite))
             .or(action)
     }
 }

@@ -112,6 +112,16 @@ impl StoreScript {
         self.price == 0
     }
 
+    fn required_balance(&self, min_balance_minutes: i64) -> i64 {
+        (self.price * min_balance_minutes + 59) / 60
+    }
+
+    pub fn short_of_funds(&self, microcredits: i64, min_balance_minutes: i64) -> bool {
+        self.revision.is_some()
+            && !self.can_access
+            && microcredits < self.required_balance(min_balance_minutes)
+    }
+
     pub fn blocked(&self, microcredits: i64, min_balance_minutes: i64) -> Option<String> {
         if self.revision.is_none() {
             return Some("This script has no live revision yet.".into());
@@ -119,7 +129,7 @@ impl StoreScript {
         if self.can_access {
             return None;
         }
-        let required = (self.price * min_balance_minutes + 59) / 60;
+        let required = self.required_balance(min_balance_minutes);
         Some(if microcredits < required {
             format!(
                 "Needs a balance of at least {} to start ({} available).",
@@ -331,15 +341,19 @@ mod tests {
         assert_eq!(credits_text(script.price as f64), "0.18");
         assert_eq!(script.blocked(1000, 5), None);
         assert_eq!(script.blocked(0, 5), None);
+        assert!(!script.short_of_funds(0, 5));
         let mut locked = script.clone();
         locked.can_access = false;
         assert!(locked.blocked(14_999, 5).unwrap().contains("0.015\u{a0}"));
+        assert!(locked.short_of_funds(14_999, 5));
         assert!(locked.blocked(15_000, 5).unwrap().contains("access"));
+        assert!(!locked.short_of_funds(15_000, 5));
         locked.price = 70_000;
         assert!(locked.blocked(1_166, 1).unwrap().contains("0.001167\u{a0}"));
         assert!(locked.blocked(1_167, 1).unwrap().contains("access"));
         locked.can_access = true;
         locked.revision = None;
+        assert!(!locked.short_of_funds(0, 5));
         assert!(
             locked
                 .blocked(1_000_000_000, 5)

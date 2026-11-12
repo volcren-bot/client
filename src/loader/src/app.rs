@@ -424,6 +424,7 @@ const ICON_OPEN_RUN: &str = "\u{f08e}";
 const ICON_LOAD: &str = "\u{f1e6}";
 const ICON_UNLOAD: &str = "\u{f052}";
 const ICON_CONSOLE: &str = "\u{f120}";
+const ICON_SIGN_OUT: &str = "\u{f08b}";
 
 const PAUSE_BUTTONS: [(&str, &str); 2] = [(ICON_PAUSE, "Pause"), (ICON_START, "Resume")];
 
@@ -571,10 +572,6 @@ const HEADER_TINY_WINDOW: f32 = 200.0;
 const SIDEBAR_HANDLE_WIDTH: f32 = 18.0;
 const CLIENT_PREFIX_WIDTH: f32 = 130.0;
 const CLIENT_STATUS_WIDTH: f32 = 220.0;
-
-fn uniform_button_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
-    crate::theme::button_width(ui, &egui::TextStyle::Button.resolve(ui.style()), labels)
-}
 
 fn centered_row(
     ui: &mut egui::Ui,
@@ -2068,7 +2065,9 @@ impl LoaderApp {
         let Some(me) = self.auth.me() else {
             return;
         };
-        match self.store.ui(ui, me, block.as_deref()) {
+        let has_site = !self.api.config().site_url.is_empty();
+        match self.store.ui(ui, me, block.as_deref(), has_site) {
+            Some(store::Action::OpenSite(path)) => open_site(&self.api.config().site_url, &path),
             Some(store::Action::Refresh) => {
                 self.fetch_scripts(&ctx);
                 self.api_job(&ctx, |api| Event::Me(api.me()));
@@ -2612,13 +2611,8 @@ impl LoaderApp {
         text
     }
 
-    fn account_ui(&mut self, ui: &mut egui::Ui, stacked: bool) {
+    fn account_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let button_size = if stacked {
-            egui::vec2(uniform_button_width(ui, &["Sign out", "Add funds"]), 0.0)
-        } else {
-            egui::Vec2::ZERO
-        };
         match &self.auth {
             Auth::SignedIn(me) => {
                 let name = me.username.clone();
@@ -2628,26 +2622,25 @@ impl LoaderApp {
                     .store_runs()
                     .map(|s| s.rate_per_hour(minutes_per_month))
                     .sum();
-                if ui
-                    .add(egui::Button::new("Sign out").min_size(button_size))
-                    .clicked()
-                {
+                let sign_out_width = icon_button_width(ui, &[(ICON_SIGN_OUT, "Sign out")]);
+                if icon_button(ui, ICON_SIGN_OUT, "Sign out", sign_out_width, true).clicked() {
                     self.sign_out(None);
                     return;
-                }
-                if !self.api.config().site_url.is_empty()
-                    && ui
-                        .add(egui::Button::new("Add funds").min_size(button_size))
-                        .clicked()
-                {
-                    open_site(&self.api.config().site_url, "/credits");
                 }
                 if rate > 0.0 {
                     crate::theme::credits(ui, egui::RichText::new(crate::api::models::rate_label(rate)).weak(), "/h")
                         .on_hover_text("What the scripts running from this loader cost an hour, prices and extra-session fees together.");
                 }
-                crate::theme::credits(ui, egui::RichText::new(balance), "")
-                    .on_hover_text("Your balance.");
+                let site_url = &self.api.config().site_url;
+                let balance = egui::RichText::new(balance);
+                if site_url.is_empty() {
+                    crate::theme::credits(ui, balance, "").on_hover_text("Your balance.");
+                } else if crate::theme::credits_link(ui, balance, "")
+                    .on_hover_text("Your balance. Click to add funds on the website.")
+                    .clicked()
+                {
+                    open_site(site_url, "/credits");
+                }
                 ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
             }
             Auth::SigningIn(cancel) => {
@@ -5090,19 +5083,21 @@ impl LoaderApp {
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
         let mut restart = false;
-        crate::theme::button_group(ui, |ui| {
-            let width = icon_button_width(
-                ui,
-                &[
-                    (ICON_START, &submit_label),
-                    (ICON_UPDATE, "Update"),
-                    PAUSE_BUTTONS[0],
-                    PAUSE_BUTTONS[1],
-                    (ICON_STOP, "Stop"),
-                    (ICON_CANCEL, "Cancel"),
-                    (ICON_RESTART, "Restart"),
-                ],
-            );
+        let width = icon_button_width(
+            ui,
+            &[
+                (ICON_START, &submit_label),
+                (ICON_UPDATE, "Update"),
+                PAUSE_BUTTONS[0],
+                PAUSE_BUTTONS[1],
+                (ICON_STOP, "Stop"),
+                (ICON_CANCEL, "Cancel"),
+                (ICON_RESTART, "Restart"),
+            ],
+        );
+        let buttons = 3 + usize::from(restartable);
+        let stack_buttons = crate::theme::button_group_width(buttons, width) > ui.available_width();
+        crate::theme::button_group_in(ui, stack_buttons, |ui| {
             if form_sent {
                 update = icon_button(
                     ui,
@@ -5953,12 +5948,21 @@ impl LoaderApp {
                 (ICON_SAVE_AS, "Save as…"),
             ],
         );
-        ui.horizontal_wrapped(|ui| {
-            crate::theme::button_group(ui, |ui| {
+        let group_gap = 8.0;
+        let available = ui.available_width();
+        let run_group = crate::theme::button_group_width(3, width);
+        let file_group = crate::theme::button_group_width(4, width);
+        let stack_groups =
+            run_group + ui.spacing().item_spacing.x + group_gap + file_group > available;
+        let stack_buttons = run_group.max(file_group) > available;
+        fit_row(ui, !stack_groups, |ui| {
+            crate::theme::button_group_in(ui, stack_buttons, |ui| {
                 self.run_buttons(ui, running, paused, target.as_ref(), width)
             });
-            ui.add_space(8.0);
-            crate::theme::button_group(ui, |ui| self.file_buttons(ui, running, width));
+            ui.add_space(group_gap);
+            crate::theme::button_group_in(ui, stack_buttons, |ui| {
+                self.file_buttons(ui, running, width)
+            });
         });
         let status = match (running, paused) {
             (true, true) => "paused",
@@ -7252,7 +7256,7 @@ impl eframe::App for LoaderApp {
                         brand_ui(ui);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-                            self.account_ui(ui, false)
+                            self.account_ui(ui)
                         });
                     },
                 );
@@ -7271,7 +7275,7 @@ impl eframe::App for LoaderApp {
                     }
                     ui.add_space(4.0);
                     if stack_account {
-                        ui.vertical_centered(|ui| self.account_ui(ui, true));
+                        ui.vertical_centered(|ui| self.account_ui(ui));
                     } else {
                         let height = ui.spacing().interact_size.y;
                         centered_row(
@@ -7279,7 +7283,7 @@ impl eframe::App for LoaderApp {
                             "header_account",
                             egui::Layout::right_to_left(egui::Align::Center),
                             height,
-                            |ui| self.account_ui(ui, false),
+                            |ui| self.account_ui(ui),
                         );
                     }
                 });
