@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-const USERS: &str = "\\old school runescape\\users\\";
-
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Swap {
     pub target: String,
@@ -34,11 +32,14 @@ pub fn parse(text: &str) -> Vec<Swap> {
 }
 
 pub fn user_folder(path: &str) -> Option<String> {
-    let lower = path.to_ascii_lowercase();
-    let start = lower.find(USERS)? + USERS.len();
-    let id = path[start..].split('\\').next()?;
-    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
-        .then(|| path[..start + id.len()].trim_start_matches("\\\\?\\").to_owned())
+    let segments: Vec<&str> = path.trim_start_matches("\\\\?\\").split('\\').collect();
+    let users = (2..segments.len().saturating_sub(1)).find(|&i| {
+        let id = segments[i + 1];
+        segments[i].eq_ignore_ascii_case("users")
+            && !id.is_empty()
+            && id.bytes().all(|b| b.is_ascii_digit())
+    })?;
+    Some(segments[..users + 2].join("\\"))
 }
 
 #[cfg(test)]
@@ -67,19 +68,33 @@ mod tests {
 
     #[test]
     fn it_finds_the_account_folder_of_a_handle_path() {
-        let path = "\\\\?\\C:\\users\\a\\AppData\\Local\\Jagex\\Old School Runescape\\users\\750210\\LootTracker.db";
+        let path = "\\\\?\\C:\\users\\a\\AppData\\Local\\Studio\\Game\\users\\750210\\Tracker.db";
         assert_eq!(
             user_folder(path).as_deref(),
-            Some("C:\\users\\a\\AppData\\Local\\Jagex\\Old School Runescape\\users\\750210")
+            Some("C:\\users\\a\\AppData\\Local\\Studio\\Game\\users\\750210")
         );
     }
 
     #[test]
-    fn it_ignores_other_paths() {
-        assert_eq!(user_folder("C:\\Jagex\\Old School Runescape\\data\\x.dat"), None);
+    fn it_finds_the_account_folder_itself() {
         assert_eq!(
-            user_folder("C:\\Jagex\\Old School Runescape\\users\\Highlights\\x"),
-            None
+            user_folder("C:\\Game\\users\\750210").as_deref(),
+            Some("C:\\Game\\users\\750210")
         );
+    }
+
+    #[test]
+    fn it_skips_a_numeric_windows_profile() {
+        assert_eq!(
+            user_folder("C:\\users\\1001\\AppData\\Local\\Game\\users\\750210\\x").as_deref(),
+            Some("C:\\users\\1001\\AppData\\Local\\Game\\users\\750210")
+        );
+        assert_eq!(user_folder("C:\\users\\1001\\AppData\\x"), None);
+    }
+
+    #[test]
+    fn it_ignores_other_paths() {
+        assert_eq!(user_folder("C:\\Game\\data\\x.dat"), None);
+        assert_eq!(user_folder("C:\\Game\\users\\Highlights\\x"), None);
     }
 }
