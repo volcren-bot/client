@@ -1,41 +1,36 @@
 # agent (`src/agent`)
 
-`agent.dll`, a `cdylib` injected into the game client. The only component that touches the client's memory directly. Windows-only, cross-compiled for `x86_64-pc-windows-gnu`, x64 only.
-
-How offsets are found, and what is known about the client's internals: [reverse-engineering.md](reverse-engineering.md).
+`agent.dll`, a `cdylib` injected into the game client; the only component that touches client memory directly. Windows x64 only. Offsets and client internals: [reverse-engineering.md](reverse-engineering.md).
 
 ## Lifecycle
 
-1. **Load.** The injector copies the DLL to `%TEMP%\agent\<name>-<version>.dll` (so a new build can replace a loaded one) and injects it (`injector load <pid> <dll>`, or the loader's Load/Reload).
-2. **Start.** `client::hooks::start` runs on a new thread: find the client window (`JagRenderView`), run every `find_*` offset rule, install the hooks (`retour` detours), and point the client's `USER32!GetFocus` import at the agent (`client::focus`, below).
-3. **Every frame** (OpenGL swap hook): read game state into `AGENT_STATE_<pid>`, capture the frame if a reader turned `capture_enabled` on (only `injector screenshot` reads pixels; Luau never does), draw the overlay (re-uploaded only when its serial changes, from the slot the serial selects; capture and overlay are both skipped while the viewport is larger than `IMAGE_DATA_SIZE` holds), then after the real swap bump `frame_serial` and set `AGENT_FRAME_<pid>`. Rule results are logged to the client console and summarised in the header's `offsets_state`, which the loader shows.
-4. **Commands** arrive as custom window messages (`ipc::input::*_MESSAGE`) on the window-procedure hook: open console, set modifiers, set display name, offset total XP, resolve item/game-val names, project world points, read the menu, models, locs and the cache, and draw item icons (a cache request of kind `ITEM_ICONS`: the agent calls the client's own icon builder on the game thread, see "Item icons" in [reverse-engineering.md](reverse-engineering.md)). A locs request names a plane, or all of them, optionally only the clickable locs (`ipc::state::locs_request`); each loc carries its plane in its flags, and walls and decorations their shape and rotation from their config byte (`offsets::scene::find_loc_configs`, Java's `Scene.getConfig`).
-5. **Unload** on the named event `AGENT_UNLOAD_<pid>` (works with the window hook off): unhook, wait for hook calls to drain, stop the listener, close mappings, `FreeLibraryAndExitThread`.
+- **Load:** the injector copies the DLL to `%TEMP%\agent\` under a versioned name, so a new build can replace a loaded one, then `LoadLibraryW`s it. Only `DllMain` is exported; everything else goes through shared memory, named events and window messages.
+- **Start** (`hooks::start`, own thread): find the `JagRenderView` window, run every offset rule, install `retour` detours, patch `GetFocus` (below).
+- **Per frame** (swap hook): publish state; capture pixels only when a reader set `capture_enabled` (only `injector screenshot`; Luau never reads pixels); draw the overlay, re-uploaded only when its serial changes. Capture and overlay are skipped while the viewport exceeds `IMAGE_DATA_SIZE`. Rule results go to the header's `offsets_state`, shown by the loader.
+- **Commands:** custom `ipc::input::*_MESSAGE` window messages handled by the WndProc hook. Worker requests (polled decoders) are signalled on `AGENT_WORK_<pid>` and answered by `client/worker.rs`.
+- **Unload:** named event `AGENT_UNLOAD_<pid>` (works with the WndProc hook off): unhook, drain in-flight hook calls, restore `GetFocus`, close mappings, `FreeLibraryAndExitThread` (`client/unload.rs`).
 
-Input: real mouse input is blocked for `REAL_MOUSE_BLOCK_MS` after synthetic input (told apart by the `SYNTHETIC` flag). Keys work with another window focused: the client asks `GetFocus` before it takes a key and drops it unless its own window has the focus (mouse messages it takes either way), so `client::focus` patches the main module's import slot of `USER32!GetFocus` to answer with the render view. Only the client's own calls go through that slot, not Wine's or other DLLs'; the window procedure also swallows `WM_KILLFOCUS`. The slot is put back before the DLL unloads (`unload`).
+## Input
 
-The DLL exports only `DllMain`: the injector loads it with `LoadLibraryW` and talks to it through shared memory, named events and window messages.
+- Real mouse input is dropped for `REAL_MOUSE_BLOCK_MS` after synthetic input (`SYNTHETIC` flag).
+- The client drops keys unless `GetFocus` returns its window, so `client/focus.rs` patches the main module's `USER32!GetFocus` import slot to return the render view. Only the client's own calls are affected. The WndProc hook also swallows `WM_KILLFOCUS`.
+
+## Event logs
+
+`packets.rs`, `script_runs.rs`, `varc_log.rs`, `item_log.rs` detour client functions (rules in `offsets/`) and append to shared rings `AGENT_PACKETS_`/`SCRIPTS_`/`VARCS_`/`ITEMS_<pid>`; `log.rs` holds the shared parts. Format and reader wake-ups: [ipc-protocol.md](ipc-protocol.md).
+
+- Hooks run on the game thread (packet send: network thread), copy only what they need and return fast.
+- `packets.rs` checks the local player's server tile before each packet receive and publishes changes, so no tick's move is missed however slow a script is.
+- Script runs log the tick read where the game thread writes it; scripts the client starts without an event aren't logged.
+- Varc and item writes that leave the value unchanged aren't logged.
 
 ## Layout
 
-| Path | Contents |
-| --- | --- |
-| `src/lib.rs` | Crate root. |
-| `src/shared/` | `main.rs` DLL entry, `memory.rs` shared-memory manager, `sync.rs` unload event, `windows.rs` the `JagRenderView` lookup. |
-| `src/client/hooks.rs` | Hook installation, per-frame work, message handling. |
-| `src/client/focus.rs` | The `GetFocus` import patch: finds the slot by walking the main module's import descriptors (PE32+), writes it under `VirtualProtect`, restores it on unload. |
-| `src/client/offsets.rs`, `offsets/*.rs` | Offset rules, one module per feature. |
-| `src/client/own.rs` | In-process `Memory` impl, the global `Layout`, game-thread tracking. |
-| `src/client/packets.rs` | The packet log: creates `AGENT_PACKETS_<pid>` and detours the client's packet receive and send functions, and publishes the server packet layouts the rule in `offsets/packet_layouts.rs` read from the client's dispatcher (rule in `offsets/packets.rs`). The hooks run on the game thread (receive) and the network thread (send), copy at most 104 payload bytes, set the wake event of each reader whose filter has the packet (see [ipc-protocol.md](ipc-protocol.md)) and return. Before each receive, `observe_player` compares the local player's server tile (`decode::state::server_tile`, needs `part::PATH` and `part::TICK_COUNT`) with the last one it saw and, when it changed, publishes the new tile, the old one and the tick counter in the log's `Movement` block; the previous packet's handler has returned by then, so no tick's change is missed however busy a script is. |
-| `src/client/script_runs.rs` | The script log: creates `AGENT_SCRIPTS_<pid>` and detours the client's event script runner (rule in `offsets/script_runs.rs`; see "CS2 interpreter" in `reverse-engineering.md`). The hook runs on the game thread: it reads the event's type and first arguments and the client's tick counter, logs a start entry, calls through, then logs an end entry; a thread local counts nesting. The tick is read where the game thread writes it, so it is the tick the script ran in. Scripts started by the client without an event (by trigger lookup) aren't logged. |
-| `src/client/varc_log.rs` | The varc log: creates `AGENT_VARCS_<pid>` and detours the client's int and object (string) varc setters (rule in `offsets/varc_setters.rs`). An int's old value comes from the client's own getter before the call; a string's from what the hook last saw it set to. A set to the same value isn't logged. |
-| `src/client/item_log.rs` | The item log: creates `AGENT_ITEMS_<pid>` and detours the client's item container slot writer (rule in `offsets/item_setter.rs`, see "Item containers" in `reverse-engineering.md`). The hook runs on the game thread: it reads the slot's item and quantity before the call (`decode::world::item_slot`), calls through, and logs the change with the game tick unless the write left the slot as it was, then sets the wake event of every reader subscribed in the log header (a bit mask; usually none). |
-| `src/client/log.rs` | What the four logs share: `SharedLog` creates, maps and closes a log's shared memory, `wake` sets the event of each reader in a subscriber mask, `Tick` reads the client's tick counter. |
-| `src/client/detour.rs` | `retour` helpers: a typed function pointer from an address, and creating, enabling and disabling a detour with the agent's console messages. |
-| `src/client/*.rs` | Readers that use the rules' results (`state`, `scene`, `model`, `menu`, `items`, `cache`, `projection`, ...); `graphics.rs` does frame capture and overlay drawing. |
+- `shared/`: DLL entry, shared-memory manager, unload/worker events, window lookup.
+- `client/hooks.rs`: hooks, per-frame work, messages. `client/offsets/`: one rule module per feature. `client/own.rs`: in-process `Memory`, global `Layout`, game-thread tracking. `client/graphics.rs`: capture and overlay. Other `client/*.rs`: readers over rule results.
 
 ## Gotchas
 
-- A panic in a hook takes the client down: wrap hook bodies in `catch_unwind`.
-- Save and restore OpenGL state around overlay drawing (`graphics.rs`, `restore_state`).
-- Anything written to shared memory is part of the protocol: change it in `src/ipc` and bump `PROTOCOL_VERSION` ([ipc-protocol.md](ipc-protocol.md)).
+- A panic in a hook kills the client: wrap hook bodies in `catch_unwind`.
+- Save and restore OpenGL state around overlay drawing (`graphics::restore_state`).
+- Anything in shared memory is protocol: change it in `src/ipc` and bump `PROTOCOL_VERSION`.

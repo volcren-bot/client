@@ -1,192 +1,264 @@
 # Reverse engineering the native client
 
-How the agent finds game data in a client that changes every week, the tools and reference material for it, and the hard-won facts about the client's internals. Read before writing or fixing an offset rule.
+Facts about the client's internals that the code does not state, and the steps for finding offsets again after a game update. Read this before writing or fixing an offset rule. Addresses are image VAs or RVAs from the build named next to them, and they move with every update. Use them only as hints when probing.
 
 ## Offset rules (`src/agent/src/client/offsets*`)
 
-A rule finds a field offset or function from structure that survives game updates, e.g. "the only function containing both `cmp r32, 0x600` and `cmp r32, 0x2E00`" for the actor-position code.
+- A rule `find_<name>(pe: &Pe, ...)` finds a field offset or a function from structure that survives updates, such as a constant, the order of compares or the shape of a call. `find_offsets` (`client/hooks.rs`) parses the image once and hands every rule the same `Pe`. Tests use `Pe::parse(&image)`.
+- Procedure:
+  1. Find the logic in `standalone/` and pick something that native code must also have.
+  2. Scan the code, map each hit to its function through `.pdata`, decode it with `iced-x86` and track which `[base+disp]` loaded each register. Confirm the hit by matching the surrounding flow.
+  3. Require exactly one match. Anything else is a `ScanError`, so a changed shape fails the rule instead of hooking the wrong code.
+  4. Store the result in an `ipc::state` layout type.
+- Every build in `archive/` is regression data. Each rule must still find exactly one match on all of them.
+- Leaf functions such as `mov rax,[rcx+X]; ret` have no `.pdata` entry and are missing from `Pe::functions`. Find them by their bytes, or by scanning `direct_calls` targets up to the first `ret`.
+- Some functions are split across chained `.pdata` chunks. `chunk_root` walks back to the entry.
+- Hash tables are custom chained tables, not `std::unordered_map`.
 
-1. Find the game logic in the Java reference (`standalone/`) and pick something that must also exist in native code: a constant, a compare order, a call shape.
-2. Scan the PE's code for it, map hits to functions with `.pdata`, decode with `iced-x86`, and track which `[base+disp]` each register was loaded from. Confirm by matching the surrounding flow (same compare order, same calls).
-3. Require **exactly one** match; anything else returns `ScanError`.
-4. Store the result in a layout type from `ipc::state` (`LayoutMap`, `Layout`) for the readers.
+## Reference material and tools
 
-Rules scan the file image only, so every build in `archive/` is regression data: does the rule still find exactly one match on each?
+- **`standalone/`** is the decompiled Java client with the names from its API applied. Its version is in `standalone/VERSION`, and only about 93 of 730 classes are named. It is read only, private and git-ignored. `MAPPING.md` and `mapping.tsv` hold the renames and the field multipliers.
+  - Obfuscated Java int fields store `real * k`. The native client stores plain values.
+  - Ignore the junk extra parameter, the `try/catch` wrappers and the injected `getX`/`setX`/`rl$` methods. The code does not compile.
+- **`archive/`** holds one exe per update, named `client-<file date>-<first 8 hex of sha256>.exe` (git-ignored). After each update:
+  1. Copy the installed exe (under Bolt: `~/.local/share/bolt-launcher/`) into `archive/`.
+  2. Hash the exe itself, because the `.sha256` file beside it doesn't match.
+  3. Add a row to `archive/README.md`.
+- **`tools/memscan`** is a Linux-only crate outside the workspace (`cargo build --release` inside it). It reads `/proc/<pid>/mem` of a client running under Wine. It scans for exact 8-byte values, `[lo,hi)` pointer ranges, aligned `i32`s, `pair`s (x/y within 16 bytes) and `fpair`s. See `src/main.rs`.
+  - Workflow: scan for a value you can see in game, change it in game, rescan to narrow the hits, then turn the hit into a rule.
+  - Helpers: `dump.py` dumps `i32` fields for diffing, and `watch.py` prints `i32` changes with timestamps. `snapmenu.py` and `probe_region.py` hardcode addresses from one build.
+  - Under Wine, a diff that skips stack regions (`0x7ffffe...`) misses objects on the main thread's stack, such as the menu.
+- **gdb probing**:
+  - Run `gdb -batch -x script -p <linux pid>` under `timeout -s INT`.
+  - Use `hbreak`, which leaves the code unpatched. Set `handle SIGUSR1 nostop noprint pass` because Wine uses that signal, and put `commands; silent; printf ...; continue; end` on each breakpoint.
+  - Finish with `delete; detach; quit`. Never kill gdb while breakpoints are set.
+  - Never use `hbreak ... if` on a hot function: gdb stops on every hit to check the condition, and the client froze. Test the condition inside `commands` instead.
+- **Injector dumps**: `injector player-words <pid> <index> <count>`, `injector widget-dump <pid> <count>`, `injector cache-file <pid> <index> <group> <file> <out>`.
 
-A rule is `find_<name>(pe: &Pe, ...)`: `find_offsets` (`client/hooks.rs`) parses the image once with `Pe::parse` and hands every rule the same `Pe`, whose `direct_calls` are scanned on first use and kept. Tests do the same with `Pe::parse(&image)`.
+## Keyboard focus (`client/focus.rs`)
 
-## Reference material
+- The client drops posted `WM_KEYDOWN`s while `GetFocus` isn't its own window. Mouse input still works. The agent's `GetFocus` import hook answers with the render view, which fixes this. Swallowing `WM_KILLFOCUS` or posting `WM_SETFOCUS` does not help. Where the client makes the check wasn't traced.
 
-### `standalone/`: decompiled Java client
+## Menu (`offsets/menu.rs`)
 
-RuneLite's injected Java client, decompiled, with every name RuneLite's API reveals applied (version in `standalone/VERSION`). Most classes stay obfuscated (about 93 of 730 named). **Read only, never modify, keep private** (git-ignored).
+- The menu object lives on the main thread's stack. The selected spell (Java's `widgetSelected` group) is a sub-object of it, found by `find_selection` through the native deselect and select functions.
+- Rows are 22.5 px high with a 16 px header. The Java client's 19/15 is wrong for the native client.
+- The client doesn't store the menu's geometry. It lays the menu out every frame and keeps the result on the stack. The agent calls the layout routine itself (`find_menu_layout`) on the window-procedure thread: `fn(view, out: *mut [i32; 26], path: &std::vector<u64>)`. An empty path means the menu, and row indices mean a submenu.
+  - You can recognise the routine because it refuses paths of 5 or more submenus and calls itself for the parent.
+  - The view is the minimenu's list view (`minimenu+0x158`, also vtable slot 3).
+  - Inputs:
+    - The anchor written on the right click: `view+0x10`, holding x, y, area w and h.
+    - The style block at `menu+0xac`: caps, scrollbar width, paddings and the header flag.
+  - Row width is the font width of `option + " " + target`. The space stays when the target is empty.
+  - The open rows are `minimenu+0x140`, which leaves out hidden entries.
+- **Stay open**: the menu stays open while the mouse, rounded to interface units, is inside any open level's rect grown by the input handler's margin (`+0x18`, set to 10 in the constructor). The margin is in the caller of the layout routine that grows the rect by a field and its double.
+- **Submenus** (Java's `Menu.au[]`) are rows too.
+  - A row is 24 bytes: the source entry list (0x150-byte entries), the index in that list, and a pointer to the submenu's rows vector, or null.
+  - The open path is the minimenu's `std::vector<u64>` of parent rows, then its open row (-1 for none).
+  - The stay-open check lays out every prefix of that path. The agent does the same.
 
-- `src/`: one Java file per class. `MAPPING.md`, `mapping.tsv`: every rename and each obfuscated field's decode multiplier. `build/`, `tools/`: the pipeline that produced it.
-- Obfuscated Java int fields hold `real * k` for a secret `k`; **the native client stores plain values**.
-- Ignore the junk extra parameter and `try/catch` wrapper on most methods, and RuneLite's injected `getX`/`setX`/`rl$` methods. It does not compile; it is for reading.
+## Chat (`offsets/scripts.rs`, `offsets/chat.rs`)
 
-### `archive/`: old native client builds
+- `Messages` is found through the CS2 interpreter. The range dispatcher sends opcodes 5000-5099 to one switch.
+  - Case 4 (`chat_gethistory_byuid`) holds the uid lookup in a global hash table, followed by type, cycle, name, sender and the text at `+0x88`. That text has `[HH:MM] ` prepended when the timestamp setting is on.
+  - Case 30 exists only in the native client. It pushes the text as received (`+0xa0`) and calls the stamp chooser: mode 1 is UTC (`+0x28`) and mode 2 is local time (`+0x10`).
+- No epoch is stored. The injector converts a message's cycle to a time with the client cycle (`clientclock`, opcode 3300, read from a global), which ticks 50 times a second.
+- Messages are `shared_ptr`s. Dialogue lines are logged as type 114 `"Speaker|line"`.
 
-One client exe per game update, named `client-<file date>-<first 8 hex of sha256>.exe` (the exes are git-ignored). `archive/README.md` lists them with per-build notes; add a row when you add a build. After each update, copy the installed client exe (under Bolt: `~/.local/share/bolt-launcher/`) here and hash the exe itself (the `.sha256` beside it doesn't match it).
+## Scene loader and instances (`ipc::read::map_regions`, `offsets/scene_loader.rs`)
 
-### `tools/memscan`: live memory scanner
+- A `shared_ptr` member of the client object holds the scene loader L. The packet dispatcher calls one of two methods on L, one for normal scenes and one for instances. Each method stores its vtable into a fresh builder (`0xf8` or `0xb0` bytes), stores the builder at `L+0x28` and sets L's instance flag byte to 0 or 1 (it was `+0x54dd`; `find_instance_flag` finds it). These two methods and the dispatcher are the anchors if the rule breaks.
+- L layout:
+  - `+0x10` is the world view.
+  - `+0x38` is the inline template table (`instanceTemplateChunks`): 4x13x13 entries of 16 bytes, each `(chunkX, chunkY)` plus the plane as an `i64`. The index is `(plane*13+col)*13+row`.
+  - Entries the packet doesn't fill are not cleared, so the table can hold stale data. Use the builder's vector for the list of source squares.
+- Builder layout:
+  - `+0x58` holds a copy of baseX and baseY.
+  - `+0x68` is a `std::vector` of 0x88-byte records: `i32 x, y` (map square), `x<<8|y` at `+0x10`, then the per-plane sub-records.
+  - Outdoors the records are the squares around the player. In an instance they are only the source squares (Tempoross: one record, 47,44).
+- Other objects carry stale copies of baseX and baseY that look live but never change. Match by structure, not by value. `map_regions` requires exactly one builder vector of the right shape.
+- Instances sit at x >= 6400, so `in_instance` is a coordinate test.
 
-Linux-only CLI (own `Cargo.toml`, not in the workspace; `cargo build --release` inside it). Scans a client running under Wine through `/proc/<pid>/mem`: exact 8-byte values or a `[lo, hi)` range (pointers into a region), aligned `i32`s, `pair`s (two `i32`s within 16 bytes, for x/y) or `fpair`s (an `f32` in one range with one in another within 16 bytes). Arguments in `src/main.rs`.
+## Projectiles (`offsets/projectiles.rs`)
 
-Workflow: scan for a value you can see in game, change it in game, rescan to narrow, then turn the hit into an offset rule. The Python helpers beside it read `/proc/<pid>/mem` too: `dump.py <pid> <out> <start> <len> [<start> <len>...]` writes the `i32` fields of regions to a file for diffing, `watch.py <pid> <start,len[,label]>...` prints timestamped `i32` changes in regions (addresses and lengths in hex), `snapmenu.py <pid> <label>` prints a labelled block of the menu's `i32` fields, and `probe_region.py <linux pid> <wine pid> <anchor x> <anchor y> [<probe x> <probe y>]` bisects the region the minimenu stays open in (with `WINEPREFIX` set, and `INJECTOR` for another injector than the release build). `snapmenu.py` and `probe_region.py` hardcode addresses from one build.
+- The client object holds a circular list. Its head is a sentinel node (next, prev, size at `+0x10`), and each node holds a `shared_ptr` with the projectile at `+0x18`.
+- Anchor: the update function (Java `Projectile.am`) is the only code that reads the double `0.02454369`. Its first chunk is chained, so the rule uses `chunk_root`. The function gives every field except the id:
+  - start cycle: the first compare
+  - target position, then source position: two calls to one helper (`edx` actor, `r8d` x, `r9d` y, level on the stack), each followed by a `sub` of the end or start height
+  - the `moving` byte, slope and start position
+  - end cycle: `- cycle + 1`
+  - x, z and y doubles, in the order they are written back
+  - orientation: the first `and 0x7ff` store
+- The only caller is the loop, which compares the end cycle with the client cycle global. A client method `mov rdx,rcx; add rcx,list; jmp loop` gives the list offset.
+- The constructor ends by reading the id back to look up the spot animation.
+- Positions are world tiles. Actor references are NPC index + 1 or -(player index + 1), and 0 means none. The server often sends no source actor, including for your own bolts. `z` is measured from the heightmap's zero, so the height above the ground is the bilinear height minus `z`.
 
-Under Wine, memory diffs that skip stack regions (`0x7ffffe...`) miss anything on the main thread's stack, such as the menu object below.
+## Spot animations on tiles (`offsets/spot_anims.rs`)
 
-## Native client facts
+- Java's `GraphicsObject`. An actor's own spot animation is the actor's `graphic` field, not this list.
+- The list lives in the world view (`+0x160`) and has the same node shape as the projectile list.
+- Anchor: the constructor is a function of at most 0x200 bytes that calls `lookup; mov rdx,[rax+8]; mov edx,[rdx+8]; call init` and stores its parameters in `this`.
+  - The id is the register passed to the lookup, and the level is the value stored from `r9d`.
+  - The three stack parameters are x, y and z.
+  - The start cycle is `add edx,[rsp+n]` (delay plus client cycle).
+- The constructor is reached through a `make_shared` thunk from the spot-animation packet handler, either directly or through an allocating wrapper. Each site then appends to the list (`lea rcx,[view+list]` or `add rcx,list`), which gives the list offset.
+- Fields on 2026-10-28:
 
-- Hash tables are custom chained, not `std::unordered_map`.
-- Short leaf getters (`mov rax, [rcx+X]; ret`) have no `.pdata` entry, so they are missing from `Pe::functions`; find them by their bytes.
+  | Field | Offset |
+  | --- | --- |
+  | start cycle | `+0x260` |
+  | level | `+0x264` |
+  | x, y, z | `+0x268`, `+0x26c`, `+0x270` |
+  | id | `+0x274` |
+  | view | `+0x278` |
+  | animation | `+0x280` |
 
-### Keyboard focus (`client/focus.rs`)
+  z is the ground height minus the height sent, so negative is up.
+- Live trigger: Telekinetic Grab on a ground item places id 144 on the item's tile. Teleports and similar spells set the actor's spot animation instead.
+- The agent reads the main view, plus the player's view when the player is on a boat. The overlay draws only the main view.
 
-The client imports `GetFocus`, `GetAsyncKeyState` and `SetWindowsHookExA` from USER32 and drops posted `WM_KEYDOWN`s while `GetFocus` isn't its window (seen 2026-11-07 under Wine on Hyprland: F-keys and typed digits did nothing with another window focused, mouse input worked; with the import answering the render view both worked unfocused). Swallowing `WM_KILLFOCUS` on the render view alone doesn't help, and posting `WM_SETFOCUS` doesn't either. Where in the client the check sits wasn't traced.
+## Actor path and server tile (`offsets/actor_path.rs`)
 
-### Menu (`offsets/menu.rs`)
+- `pathX`, `pathY` and `pathLength` hold scene tiles, newest first. Entry 0 is the tile the server last set. The fine position lags it by a tick or two. The world tile is the view base (`view+0x24`, `+0x28`) plus entry 0.
+- Anchor: the path reset `(rcx actor, edx x, r8d y)` (Java `Player.ax`). It is a leaf with no `.pdata` entry, and it computes `local = (size + 2*tile) << 6`.
+- Fields (2026-10-11 and 2026-10-12): size `+0x278`, length `+0x3ec`, `pathX` `int[10]` at `+0x3f0`, `pathY` at `+0x418`.
+- The receive hook compares the server tile at its start (see Packets).
 
-- The menu object (`client + Menu.object`) lives on the main thread's stack, not the heap. Java's `widgetSelected` group (selected spell: verb, name, component id, child, item id, target mask, flag) is a sub-object of it, found by `find_selection` from the native `ug()`/`ut()` (deselect/select) and read with the menu reply.
-- Menu rows are 22.5 px high with a 16 px header; the Java client's 19/15 is wrong for the native client.
-- The open menu's geometry isn't stored: the client lays it out every frame with a generic list-layout routine (`find_menu_layout`: the one that refuses paths of 5+ submenus and calls itself for the parent) on the minimenu's list view (`minimenu+0x158`, returned by vtable slot 3 of the minimenu), and keeps the result on the stack. The agent calls that routine itself on the window-procedure thread while the menu is open: `fn(view, out: *mut [i32; 26], path: &std::vector<u64>)`, empty path = the menu, row indices = a submenu.
-  - Inputs: the anchor written on the opening right click (`view+0x10`: x, y, area w, h) and the style block at `menu+0xac` (width cap, height cap, scrollbar width, paddings, header flag).
-  - Row width is the font width of `option + " " + target`; the separator is a fixed string, so the space stays when the target is empty.
-  - The open rows are the minimenu's rows vector (`minimenu+0x140`), which leaves out entries the client hides.
-- Stay-open check: the menu stays open while the mouse, rounded to interface units, is inside any open level's rect grown by the input handler's margin (`+0x18`, the immediate 10 its constructor stores; check at the caller of the layout routine that grows the rect by a field and its double).
-- Submenus (Java's `Menu.au[]`, one per entry) are rows too. A row is 24 bytes: the entry list it comes from (the menu's own list is a sub-object of the menu object; a submenu's list has the same type and the same 0x150-byte entries), the entry's index in that list, and a pointer to the `std::vector` of the rows of the submenu it opens (null for none; surfaced as `MenuLayout::submenu`). The open submenus are the minimenu's `std::vector<u64>` of parent rows followed by its open row (-1 for none). The stay-open check builds that same path, lays out every prefix, and closes only when the mouse is outside all of them; the agent lays out each open submenu the same way.
+## Movement poses (`decode::world::PLAYER_MOVEMENT`)
 
-### Chat history (`offsets/scripts.rs`, `offsets/chat.rs`)
+- Eight `i32`s at `+0x280`, right after the size: stand, turn left, turn right, walk, walk back, walk left, walk right and run.
+- The poses come from the appearance packet, so they follow the weapon:
+  - unarmed: 808, 823, 823, 819, 820, 821, 822, 824
+  - staff: 813, 1209, 1209, 1205, 1206, 1207, 1208, 1210
+- The pose at `+0x4b8` is one of these unless something overrides it, such as a tightrope or a ledge.
+- To find them again: `injector player-words <pid> <index> 400` while wielding a known weapon, then look for the run of eight values.
 
-Java's `Messages` is found through the CS2 interpreter, not Java code shape. The range dispatcher (`scripts::range_handler`) sends opcodes 5000-5099 to a handler whose switch (`scripts::switch_cases`) has:
+## Packets (`offsets/packets.rs`, `client/packets.rs`, `offsets/packet_layouts.rs`)
 
-- case 4 (`chat_gethistory_byuid`): the uid lookup over a global hash table, then type, cycle, name, sender, text (`+0x88`, with "[HH:MM] " prepended when the timestamp setting is on);
-- native-only case 30: pushes the text as received (`+0xa0`) and calls the stamp chooser (mode 1 `+0x28` UTC, mode 2 `+0x10` local, via `_localtime64`/strftime `"[%H:%M]"`).
+- **Network thread, receive**:
+  1. Reads one byte through a buffered recv wrapper that every socket reader shares.
+  2. Subtracts the next ISAAC byte. If the result is `>= 0x80`, a second opcode byte follows.
+  3. Looks up the size in an `i32` table of 151 entries. -1 means a length byte follows, and -2 means a length short follows.
+  4. Reads the payload and pushes a kind-3 node (opcode at `+0x10`, buffer at `+0x18`) on a lock-free list at `connection+0x20`.
+  - ISAAC masks only the opcode. The payload is plain.
+- **Game thread, receive**:
+  - The dispatcher, which has a 151-case jump table, calls `receive(connection, out) -> bool`. It writes the opcode at `out+0` and moves the buffer into `out+8`.
+  - That function is the receive hook: one call per packet, plus at least one call per frame when the queue is empty.
+  - The dispatcher calls `receive` only after the previous handler returned, so the start of the hook sees the effects of every packet.
+  - Opcode 2 has no payload, arrives once per tick and increments the tick counter. Opcode 40 (6 bytes) is the most frequent. Both are easy to see live.
+- **Buffer object**: `+8` allocated size, `+0x10` data, `+0x18` cursor. No code shape names `BUFFER_SIZE`. The data and cursor offsets come from the opcode writer.
+- **Send**:
+  - The packet constructor (`js.ac`, 97 call sites) takes `(packet, type, cipher)`. It stores the plain type at `packet+0` and writes the opcode through the opcode writer (`byte = opcode + next cipher byte`).
+  - The network thread pops the queue at `connection+0x30` and calls `send(connection, result, packet)`.
+  - The hook reads the type, so it never needs the cipher. The first data byte is the masked opcode, and a variable-length packet has its length right after.
+- **`find_packets` chain**:
+  1. The opcode writer: at most 0x80 bytes, a byte `add`, `mov r32,0x100`, an indexed byte store and one call.
+  2. Its only caller, the constructor.
+  3. The send function: at most 0x60 bytes, one call, loads at the data and cursor offsets from `r8`.
+  - The receive function is found independently.
+- **Layouts** (`find_packet_layouts`) are published to the loader live, so this needs no step after an update.
+  - Each case's reads go through small buffer read functions. A tiny interpreter classifies each one on probe bytes: byte order, the `x`/`x-128`/`-x`/`128-x` transforms and signedness from the caller's `movsx`.
+  - Big-endian reads first test a global against `0x03020100`. The interpreter takes that test as equal.
+  - A case's layout is its reads up to the first branch. It is kept only when the widths sum to the size in the table.
+  - The size table is found as the one `lea r,[rip+table]` right after a `jae` whose 151 values are all in -2..512, with 10 or more distinct values.
+  - Strings, smarts and loops have branches, so they don't classify. 86 of 151 packets get a layout, and none differs from what the Java client reads.
+- **Names and the fallback table**: `tools/packetdefs/gen.py` produces `src/loader/src/packet_defs.tsv` from `standalone/` (`ServerPacket` `jc` sizes plus the reads of the `Client.iy` handlers).
+  - `--exe` checks the native size table against `jc`.
+  - `names.tsv` names packets and their fields in wire order. Check the order against the Java handler.
+  - After an update, rebuild `standalone/` first. This step is optional because layouts don't depend on it.
+  - Sent packets aren't covered.
+  - Tests: `cd tools/packetdefs && python3 -m unittest test_gen`.
+- A packet with no payload has a null data pointer.
 
-No epoch is stored: the injector converts the message cycle to a time with the client cycle, which `clientclock` (opcode 3300) reads from a global; it ticks 50 times a second. Messages are `shared_ptr`s; dialogue lines are logged as type 114 `"Speaker|line"`.
+## CS2 interpreter (`offsets/script_runs.rs`, `client/script_runs.rs`)
 
-### Scene loader and instances (`ipc::read::map_regions`)
+- Found from the Java side, where `StructComposition.az(event, 500000, 475000)` is the event runner: search the native image for the 500000 (`0x7a120`) operation limit.
+- The agent hooks only the event runner, which handles nearly all runs. The interpreter, the trigger runner and the script-by-trigger runner are not hooked.
+- The interpreter's signature is `(ctx, &{control, Script*}, max_ops, ?)`. Script fields: `+0x30` instructions, `+0x48` int operands, `+0x78` long operands, `+0x80`/`+0x84`/`+0x88` local int/object/long counts.
+- Event fields:
+  - `+0x8c` type: 76 for ordinary scripts. 10..17, 0x12, 0x55 and 0x56 are trigger types.
+  - `+8` argument count.
+  - `+0x10` argument vector of 0x28-byte variants (kind byte at `+0x20`: 1 int, 2 string). Argument 0 is the script id.
+  - `+0x48`/`+0x4c` mouse x/y. The placeholder ints `0x80000001..a` are filled from the event.
+- The Script's id is at `+0x18` for event runs. Scripts found by trigger show `0xfe310000` there, so their id is unknown.
+- An idle account runs about 2000 scripts a second, mostly two per frame. The default blacklist from other tools is for other builds, so the loader needs its own blacklist box.
 
-The client rebuilds the scene from a map-rebuild packet, in the packet dispatcher: a `shared_ptr` member of the client object (the one whose offset the `client` pointer already gives) holds the **scene loader** L, and the dispatcher calls one of two methods on it, one for normal scenes and one for instances (each allocates a builder object, stores it at `L+0x28`, frees the previous one, and sets the byte `L+0x54dd` to 0 or 1: the client's own instance flag).
+## Varcs (`offsets/varc_setters.rs`, `client/varc_log.rs`)
 
-- L: `+0x10` the world view (the one `local_player` returns), `+0x28` the current builder, the **template table** inline from `+0x38` (Java's `instanceTemplateChunks`: 4 planes x 13 columns x 13 rows of 16-byte entries, `(chunkX, chunkY)` in 8-tile chunk units and the destination plane as an `i64`; entry index `(plane * 13 + column) * 13 + row`; written by the builder function that holds `[this+0x18] + index * 16`). Outdoors an entry is the chunk's own coordinates; in an instance it is the source chunk. Chunks the packet doesn't fill are not cleared, so a stale source can stay in the table: use the region vector below for the list of source squares.
-- The builder: the base coordinates copied at `+0x58` (`baseX`, `baseY`), the world view at `+0x28`, and at `+0x68` a `std::vector` (begin, end, capacity) of 0x88-byte records: `i32 x, i32 y` (map square), `x << 8 | y` at `+0x10`, then per-plane sub-records. Outdoors it lists the squares around the player; in an instance only the *source* squares (Tempoross: one record, 47,44). Next come the squares the scene sits on (min/max x and y).
-- The world view `local_player` returns has the live `baseX`/`baseY` but none of this; other objects carry stale copies of the base coordinates (they look live but never change), so match by structure, not by value.
-- `map_regions` finds all of this by shape and takes it only when exactly one builder in the client's loader has a vector of that shape; nothing is an address or a fixed offset. If a game update makes it fail, the code anchors are the two builder methods (each stores its vtable into a fresh `0xf8`/`0xb0` byte object and sets the `+0x54dd` flag) and their caller, the packet dispatcher.
-- Instances are placed at x >= 6400, so `Position.in_instance` is a coordinate test; the loader tells which squares an instance copies.
+- Only the interpreter's varc opcodes write varcs: 42/43 int, 51/52 long, 49/50 object. Server varc packets run scripts.
+- The opcodes call methods on one `Varcs` object, which holds a map from index to a variant.
+- The setters share the getter's map search and end with `mov byte [varcs+0x80],1`, a dirty flag that makes the client save the varcs.
+  - `mov r11b,1` marks the int setter.
+  - `mov r11b,5` marks the long setter.
+  - The setter with neither is the object setter, which takes a `variant*`.
+- A variant is 0x28 bytes with its kind at `+0x20` (2 is a string).
+- A string is 0x18 bytes: up to 0x17 inline characters, with the room left in byte `+0x17`. When that byte's top bit is set, the string is on the heap with its pointer at `+0` and its length at `+8`. The empty string is all zeros with `0x17` in the last byte.
 
-### Projectiles (`offsets/projectiles.rs`)
+## Item containers (`offsets/items.rs`, `offsets/item_setter.rs`)
 
-Java keeps projectiles in `Client.projectiles`; the native client keeps them in a circular list inside the client object (the one the `client` global points to): the list head is its own sentinel node (next, previous, size at `+0x10`), and each node holds a `shared_ptr` whose object pointer (`+0x18`) is the projectile.
-
-- The anchor is the update function (Java's `Projectile.am`): the only code that reads the double `0.02454369` (`tan(slope * 0.02454369)`). Its first `.pdata` entry holding the constant is a chained chunk, so `chunk_root` walks back to the function. It gives every field but the id: the start cycle (first compare), the target and then the source position (two calls to one helper with actor in `edx`, x in `r8d`, y in `r9d`, level on the stack, each followed by `sub` of the end or start height), the `moving` byte (Java's `ay`), slope, start position, end cycle (`- cycle + 1`), the x, z, y doubles (written back to the caller in that order) and the orientation (the first `and 0x7ff` store).
-- Its only caller is the loop (Java's `Client.pp`), which compares the end cycle with the client cycle global (the same one chat uses), and a client method `mov rdx, rcx; add rcx, list; jmp loop` gives the list's offset.
-- The constructor copies a parameter block over the fields from the source level (`movups`), clears `moving`, and ends with the id, which it reads back to look up the spot animation.
-- Tiles are world coordinates; actors are NPC index + 1 or -(player index + 1), 0 for none; the server often sends no source actor (your own bolts have none). `z` counts from the heightmap's zero: the height above the ground is the bilinear heightmap height minus `z`.
-
-### Spot animations on tiles (`offsets/spot_anims.rs`)
-
-Java's `GraphicsObject`s (RuneLite: graphics objects). They are not on actors: an actor's own spot animation is the `graphic` of the NPC or player. The native client keeps the tile ones in a circular list in the world view (not the client object, unlike projectiles): head at `world view + 0x160` (next, previous, size at `+0x10`), each node holding the object pointer at `+0x18`, like the projectile list.
-
-- The anchor is the object's constructor, found by shape: a function of at most 0x200 bytes that looks up the spot animation for the id (`call lookup; mov rdx, [rax+8]; mov edx, [rdx+8]; call init`, as the projectile constructor does) and stores its parameters in fields of `this`. The id is the register it passes to the lookup; the level is the one stored from `r9d`; the three stack parameters are x, y and z in stack order; the start cycle is `add edx, [rsp+n]` (the delay plus the client cycle).
-- The constructor is `std::make_shared`'s: a thunk that tail-jumps to it, called from the packet handler for the spot-animation packet. One site calls it directly and one goes through a small wrapper that allocates the block; both then append the new object to the list (`lea rcx, [view + list]` or `add rcx, list`, then a call), which gives the list offset. The last stack argument of the call is the address of the client cycle.
-- Fields (build of 2026-10-28): start cycle `+0x260`, level `+0x264`, local fine x, y and z `+0x268`, `+0x26c`, `+0x270` (z is the ground height at the tile minus the height the server sent, so negative is up), id `+0x274`, world view `+0x278`, animation state `+0x280`.
-- Camelot Teleport and other spells that flash on the caster set the actor's spot animation, not this list; Telekinetic Grab on a ground item places id 144 on the item's tile, a handy live trigger. The list is read for the main world view (id 0) and, when the local player is in another view (on a boat), for that one too, like RuneLite's overlay; `SpotAnim.view_id` says which. The overlay only draws the main world's: it projects points in the main world, and a boat's effects have the boat's own coordinates.
-
-
-### Actor path and the server tile (`offsets/actor_path.rs`)
-
-Java's `Actor.pathX`, `pathY` and `pathLength` (`dc`, `dw`, `dn` in `standalone/`): scene tiles, newest first, so entry 0 is the tile the server last put the actor on and the length is how many steps the client still has to animate. The model's fine position (`ActorPosition`) walks there smoothly and lags the server by up to a tick or two; the head of the path doesn't. World tile = the world view's base (`view + 0x24`, `+0x28`) + `pathX[0]`, `pathY[0]`.
-
-- The anchor is the path reset `(actor in rcx, x in edx, y in r8d)` (Java `Player.ax`; `Actor.oq` does the same math): it zeroes the length, stores x and y as entry 0 and moves the actor onto the tile, `local = (size + 2 * tile) << 6`. `find_actor_path` takes the one leaf with a dword store from `edx` and one from `r8d`, a dword store of a register zeroed by `xor r, r` (the length), `lea` with each tile scaled by 2, two `shl 6` and stores at `local_x` and `local_x + 4` (the fine position offset the actor rule found).
-- It is a leaf with no `.pdata` entry, so it is missing from `Pe::functions`: the rule scans the targets of direct calls, each up to its first `ret`.
-- Fields (identical in the builds of 2026-10-11 and 2026-10-12): size `+0x278`, length `+0x3ec`, `pathX` `int[10]` at `+0x3f0`, `pathY` at `+0x418`, fine position `+0x268`/`+0x26c`. The reset is at `0x14009e320` in `a2636a01`. `finds_actor_path_in_archived_builds` checks every build in `archive/`.
-- `decode::state::server_tile` reads the local player's; the agent's receive hook watches it for `Movement` (see Packets below).
-
-### Movement poses (`decode::world::PLAYER_MOVEMENT`)
-
-Java's `Actor` stand, turn left, turn right, walk, walk back, walk left, walk right and run sequences: eight `i32`s at a fixed `+0x280`, right after the size. The server sends them in the player's appearance, so they follow the weapon (unarmed 808, 823, 823, 819, 820, 821, 822, 824; a staff 813, 1209, 1209, 1205, 1206, 1207, 1208, 1210). The pose at `+0x4b8` is one of them unless something overrides it (a tightrope, a ledge, a magic carpet). Found on 2026-11-12 with `injector player-words <pid> <index> 400` while wielding a staff, by looking for the standing pose and the run pose read from `players`. If an update moves them, the same dump finds the run of eight again.
-
-### Packets (`offsets/packets.rs`, `client/packets.rs`)
-
-Java sends packets from `co.az` (a queue of `js` nodes written to the socket once per tick) and reads them in `Client.iy`. The native client splits the same job across two threads:
-
-- **Network thread, receive** (the chunk around `0x202c1a` in the build of 2026-10-12): reads one byte through a buffered recv wrapper (shared by every socket reader; the same function reads the lobby), subtracts the next ISAAC byte (`sub eax, [state + idx*4 + 4]`, state refilled when its counter hits 0) and reads a second byte if the result is `>= 0x80`, then looks the size up in an int32 table indexed by opcode (`cmp r14w, 0x97` bounds it: 151 packets; `-1` a length byte follows, `-2` a short), allocates a buffer (`call alloc; vector, size, 5`), reads the payload into it and pushes a node (kind 3: opcode at `+0x10`, buffer at `+0x18`) on a lock-free list at `connection + 0x20`. The payload is plain: ISAAC only masks the opcode.
-- **Game thread, receive**: the dispatcher (`0x14008e670(client, connection)`, a 151 case jump table on `[rsp+0x70]`) calls `receive(connection, out)` (`0x202840`) for the next packet: it returns a bool, writes the opcode at `out+0` and moves the node's buffer object into `out+8`. That is the receive hook: a plain function entry, one call per packet (about 7 a second in a busy area; the per tick packet is opcode 2 with no payload, and its handler increments the tick counter at `client + 0x3198`). The dispatcher also calls it at least once a frame when the queue is empty, and only after the previous packet's handler returned, so the start of the hook sees every packet's effects: that is where `observe_player` compares the server tile. `receive_fields` finds it by shape: `cmp dword [rcx + state], 3` first, node kind compared with 3 and 4, the opcode stored at the start of the copy of `rdx`, `lea rcx, [out + n]` before a call.
-- **Buffer object**: `+8` size (what the payload was allocated with), `+0x10` data pointer, `+0x18` cursor (bytes written, for packets being built). `BUFFER_SIZE` is the only one of these no code shape names: the allocator and the move treat the first three fields as a unit. The data and cursor offsets come from the opcode writer.
-- **Send**: `js.ac` is the packet constructor (`0x6793c0`, 97 call sites, one per client packet type): `(packet, type, cipher)`. It stores the type at `packet+0`, sets up the buffer at `packet+8` and writes the opcode through the **opcode writer** (`0x67d9c0`, `buffer, opcode in dl, cipher`: `byte = opcode + next cipher byte`, appended at `[data + cursor]`). The network thread's send loop (`0x2041f2`) pops the node queue at `connection + 0x30` and calls `send(connection, result, packet)` (`0x204110`), which hands `[packet + 0x18]` and `[packet + 0x20]` to the send-all wrapper. The send hook reads the plain type from `packet+0`, so it never needs the cipher; the first byte of the data is the masked opcode, and a variable length packet has its length right after.
-- `find_packets` goes opcode writer (a function of at most 0x80 bytes with a byte `add`, the cipher refill test `mov r32, 0x100`, a byte store through base+index and one call) → its one caller, the constructor → the send function (at most 0x60 bytes, one call, loads at the buffer's data and cursor displacements from `r8`) and, independently, the receive function. Every step wants exactly one match, so a game update that changes the shapes fails the rule instead of hooking something else.
-- Sizes of received packets are in the table at `0xbaf8f0` (build of 2026-10-12): the first entries are `1, 0, 0, 2, 4, 0, 5, 6, 0, -1, 28, ...`, and opcode 40 (6 bytes, the most frequent) and 2 (0 bytes, once per tick) are the easiest to see live.
-- **Packet layouts** (`offsets/packet_layouts.rs`, `find_packet_layouts`; published to the loader through the packet log's `layouts`, so no step after a game update): the dispatcher is the caller of `receive` that has a jump table (`cmp id, last; ja; ... mov r, [base + id*4 + table]; add; jmp r`, 151 cases), and a case reads its fields by calling the buffer's small read functions (through `jmp` thunks; leaf functions have no unwind entry, so they are decoded to their padding). Each read function is classified by running it in a small interpreter on probe bytes (a buffer object with the data pointer and cursor at `buffer_data`/`buffer_cursor`): a 1 in each byte position shows where that byte lands in the result (big or little endian, or the odd int orders), and the result for zeros and for a 1 in the low byte shows `x`, `x - 128`, `-x` or `128 - x`; a function is a read only if the model predicts a few other inputs. Big endian reads test a global against `0x03020100` first (a byte order check) and swap when it matches, which the interpreter takes as equal. A case's layout is its reads up to the first branch or `jmp`; the caller's `movsx` after the call says signed. It is kept only when the field widths add up to the packet's size, from the size table: int32 per id, found as the one `lea r, [rip + table]` right after a `jae` whose 151 values are all in -2..512, 10+ distinct. Reads of strings, smarts and loops don't classify (they have branches), so those packets keep their size only; 86 of 151 get a layout, 80 of them identical to what the Java client's reader says (the other 6 the Java route couldn't read), none different (`reads_packet_layouts_in_archived_builds` checks both archived builds against `packet_defs.tsv`, ignoring signedness).
-- **Packet names and the fallback table** (`tools/packetdefs/gen.py` → `src/loader/src/packet_defs.tsv`): the Java client and the native one share the protocol: `ServerPacket` (`jc`) lists `new jc(opcode, size)` and `Client.iy` reads each packet's fields with the buffer's (`xw`) read methods, so the generator classifies those by shape and lists the reads of each `jc.X` handler (103 layouts). `--exe` finds the native size table and checks all 151 against `jc` (both archived builds match). The loader uses the table when no agent has published layouts, and takes names from it for packets whose size and layout match the client's. `tools/packetdefs/names.tsv` names packets and, optionally, their fields in wire order (by opcode for one build, or by an identifier the handler touches for any build); check the order against the order the Java handler reads them in. It needs `standalone/` rebuilt after an update and is optional: layouts don't depend on it. Sent packets (`ClientPacket`, written through the buffer's write methods after `js.ac`) are not covered. Tests: `cd tools/packetdefs && python3 -m unittest test_gen`.
-- Probing the live client for this: `gdb -batch -x script -p <linux pid>` with `hbreak` at the addresses above, `handle SIGUSR1 nostop noprint pass` (Wine uses it), `commands; silent; printf ...; continue; end`, then `continue; delete; detach; quit` under `timeout -s INT`. Hardware breakpoints leave the code unpatched; never kill gdb while they are set. A packet with no payload has a null data pointer.
-
-### CS2 interpreter (`offsets/script_runs.rs`, `client/script_runs.rs`; build of 2026-10-12)
-
-The agent hooks the **event runner** (`0x1995c0`, found by `find_script_runs`: the one function of 0x200-0x800 bytes with `lea r, [type-0xa]; cmp r, 7` and compares with 0x12, 0x55 and 0x56; the type, argument vector and count are read from the loads of the event register). Nested runs show as depth. The interpreter itself and the trigger runners are not hooked. Found from the Java side (`ao.co/cm/dn` and `CollisionData.aq` are copies of the interpreter; `StructComposition.az(event, 500000, 475000)` is the event runner) by looking for the 500000 (`0x7a120`) operation limit in the native image. Offsets are image VAs; verified live with `hbreak`.
-
-- **Interpreter** `0x140199dc0` (7.6 KB, opcode jump table, no recursion for gosub): `(ctx rcx, &{control block, Script*} rdx, max_ops r8d, r9d)`. The `shared_ptr` pair is `[rdx]` = control block, `[rdx+8]` = the Script. Every script run goes through it, from three callers: the event runner `0x1995c0` (return `0x199a64`, nearly all runs), the trigger runner `0x199b20` (return `0x199cf4`) and the script-by-trigger runner `0x1993e0` (return `0x199566`, via the `0x199000` wrapper; 22 call sites such as `0x6a2f0`).
-- **Event runner** `0x1995c0(ctx, event, max_ops, ?)`: the event's type is `[event+0x8c]` (76 for ordinary scripts; 10..17, 0x12, 0x55, 0x56 are trigger types that find the script with `0x1400325b0(trigger, a, b)`, anything else uses `0x140032350(id)`), the argument count `[event+8]`, the argument vector `[event+0x10]` of 0x28-byte variants (kind byte at `+0x20`: 1 int, 2 string, 3 and 5 other; the int is at `+0`), and `argument 0` is the script id. Mouse x/y are `[event+0x48]`/`[event+0x4c]`, and the `0x80000001..a` placeholder ints in the arguments are replaced from the event before the run.
-- **Script id**: for scripts run by the event runner the Script has its id at `+0x18` (matched argument 0 in 12 of 12 distinct scripts). Scripts found by trigger (`0x1993e0`, trigger 49 with a=b=-1) show a constant `0xfe310000` there instead, so their id isn't known; `0x1400325b0` tries `trigger + a<<8`, then `trigger - (b+3)<<8`, then `trigger - 0x200`.
-- **Script fields** (as the interpreter reads them): `+0x30` instructions, `+0x48` int operands, `+0x78` long operands, `+0x80`/`+0x84`/`+0x88` local int/object/long counts.
-- **Volume**: an idle logged-in account runs about 2000 scripts a second (700 under gdb, which slows it), nearly all two scripts per frame (ids 6697 and 4730 here); the rest run about 7 a second each. RuneLite's default blacklist (3174, 1004) is for other builds' per-tick scripts, so a blacklist box is needed.
-- **Probing**: do not use a breakpoint condition (`hbreak ... if`) on `0x199dc0`: gdb evaluates it by stopping every hit and the client froze until gdb was interrupted. Test inside `commands` instead.
-
-### Client variables, varcs (`offsets/varc_setters.rs`, `client/varc_log.rs`; build of 2026-10-12)
-
-The interpreter's varc opcodes (42 and 43 int, 51 and 52 long, 49 and 50 object, as in Java's `kh.ex`) call methods on one `Varcs` object (`[[client] + 0x417ca8]`), and nothing else writes a varc, in the native client or in Java (server varc packets run scripts). The object holds a map from index to a 0x28 byte variant (value at `+8`, kind byte at `+0x28` of a map node).
-
-- `get_int(varcs, index)` (`0x33220`): the function `getIntegerVarc` jumps to; -1 when the varc isn't an int. `set_int(varcs, index, value)` (`0x33130`), `set_long` (`0x33280`) and `set_object(varcs, index, variant*)` (`0x333f0`, takes a pointer to a variant such as an object stack slot) share the map search `0x47b40` with the getters and end by setting a dirty byte (`mov byte [varcs + 0x80], 1`, which makes the client save the varcs). `find_varc_setters` takes the getter, then the functions of 0x80-0x130 bytes that call the same search, load the same two map fields and store that byte; `mov r11b, 1` marks the int one, `mov r11b, 5` the long one, and the one with neither is the object one.
-- A variant is 0x28 bytes with its kind at `+0x20` (2 string). A string is inline in the first 0x17 bytes with the room left in the byte at `+0x17`, or, when that byte's top bit is set, a pointer at `+0` and a length at `+8`.
-
-## Item containers
-
-The client keeps its item containers (inventory 93, equipment 94, bank 95, ...) in a hash table global (`find_item_containers` finds the table through the getters the interface scripts call). Each node is `{id at +0, item vector at +8, quantity vector at +0x20, next at +0x38}`.
-
-- **Slot writer** (`0x140030f60` on build a2636a01, Java `ItemContainer.ab`/`setItemTableSlot`): `set_slot(container: ecx, slot: edx, item: r8d, quantity: r9d)`. It finds the node (making it when missing: the map insert function, then the vectors are filled with -1 and 0), grows both vectors with one resize function called twice, then stores the item and the quantity through `[base + index]`. The inventory update packets call it once per slot, so a full update of the bank is a few hundred calls in one tick.
-- The unwind table splits the function in two chunks (the stores are in the second), so `find_item_setter` reads on from the start of the first chunk to the padding. It wants the one function that reads both of the table's globals (buckets and bucket count), calls one function twice and has two indexed 32 bit stores. The getters read the same globals but neither resize nor store.
-- Removing a container (Java `ItemContainer.ai`) is a separate function the agent does not hook: the log never says a container went away, only that a later write made it again (`old_known` false).
-- Verified live on a2636a01 with an unequip/equip: both containers' writes were logged in the same tick.
+- The containers are in a global hash table (inventory 93, equipment 94, bank 95). A node is `{id +0, items vector +8, quantities vector +0x20, next +0x38}`.
+- The slot writer `set_slot(ecx container, edx slot, r8d item, r9d qty)` (Java `setItemTableSlot`) is the one function that:
+  - reads both table globals (buckets and count),
+  - calls one resize function twice,
+  - and makes two indexed 32-bit stores.
+- The writer is split in two chunks, so the rule reads from the first chunk on to the padding. The getters read the same globals but neither resize nor store.
+- A full bank update is a few hundred calls in one tick.
+- Removing a container is a separate function that isn't hooked, so the log only shows a container being recreated (`old_known` false).
 
 ## Item icons (`offsets/item_icon.rs`, `client/cache.rs`)
 
-The client draws an item's inventory icon with one function (Java `ItemComposition.bf`/`getSprite`), `0x1406016c0` on the build of 2026-11-02: `(out: &mut [control, sprite], id, quantity, border, shadow, text mode, noted: byte, width, height, text: &string)`, the first four in `rcx`, `edx`, `r8d`, `r9d` and the rest on the stack. It looks the definition up, picks the count variant (coins, arrows), renders the model with the rasterizer into a fresh sprite, outlines it (`border` 1 or 2), shadows it, draws the number when `text mode` is 1 (the Java client's mode 2, "when stackable", is decided by the native caller; mode 2 draws the `text` given) and, unless `noted`, keeps the sprite in the client's own icon cache keyed by all of that, so our calls cost what the inventory's own draws cost. The agent calls it with border 1, shadow `0x302020`, 36 x 32 and an empty string: what the inventory shows.
+- Java `getSprite` is native `(out: &mut [control, sprite], id, qty, border, shadow, text mode, noted: u8, width, height, text: &string)`.
+  - The client caches the sprite unless the item is noted, so the agent's calls cost the same as the inventory's own draws.
+  - Native text mode 1 draws the number. Java's "when stackable" is decided by the caller.
+  - The agent passes border 1, shadow `0x302020`, 36x32 and an empty string, which matches what the inventory shows.
+- To find the function:
+  1. Find the stack-number builder, the one function holding `<col=ffff00>`, `<col=ffffff>` and `<col=00ff80>` that compares with both thresholds.
+  2. Its only caller is a chunk of the icon function. Use `chunk_root`, then check that the prologue homes `r8d` and `r9d`.
+- The sprite is a shared pointer pair. The object has its pixel count at `+0` and its pixels at `+0x10`, as `0xAARRGGBB` words with alpha already applied. A pixel count other than width x height means there is no icon.
+- An out-of-range id draws a default definition, so the agent refuses ids outside `0..65536`.
 
-- **Finding it**: the stack number builder (`0x602790`) is the one function that names all three colours `<col=ffff00>`, `<col=ffffff>`, `<col=00ff80>` (yellow below 100000, white thousands below 10 million, green millions) and compares with both thresholds. Its only caller is a chunk (`.pdata` entry with chained unwind info) of the builder, so `chunk_root` gives the entry, checked by its prologue homing `r8d` and `r9d`. The three callers of the builder are the component drawer (twice) and the item-on-cursor drawer.
-- **The string**: 0x18 bytes, 0x17 inline characters and a last byte holding the room left (top bit set: heap, pointer at +0 and length at +8). The empty string is all zero with the last byte `0x17`.
-- **The sprite**: a shared pointer pair (control block, object; released like the item definition's). The object has its pixel count at `+0` and its pixels at `+0x10`, `0xAARRGGBB` words, 0 where transparent; the builder multiplies the colours by the alpha and sets it to 255 before returning. A count other than width x height is treated as no icon.
-- The definition lookup takes any id (one past the last item gives a default definition, drawn as a stray icon), so the agent refuses ids outside `0..65536`.
+## Component fields (`decode/src/widgets.rs`)
 
-## Component fields (`WidgetDetail`)
-
-A component's model is at 0xfc (type, 1 is a model id) and 0x100 (id), with its rotation at 0x11c/0x120 and zoom at 0x128: `decode::widgets::MODEL_TYPE` and `MODEL_ID`, read by `widget_model`. Found on the certer's quiz, whose three buttons hold models 8965, 8966 and 8967 in order.
-
-The inspector's extra fields are read at fixed offsets of the client's component object (`decode/src/widgets.rs`, `DETAIL_*`; the offsets in `InterfaceLayout` that the agent finds by rules are id, index, kind, position, parent, hidden, scroll, sprite, text colour, text and the dynamic children). The Java client's field order isn't kept by the native struct, so they were found by correlation, which works for any field the cache's interface definitions state:
-
-1. `injector widget-dump <pid> 1024` lists the first 1024 words of every open component; `injector cache-file <pid> 3 <group> <component> <out>` writes its definition from the cache (index 3, group = interface, file = component).
-2. Decode the definitions with the reader in the Java client (`Widget.af`, the IF3 decoder: type, content type, original x y width height, width/height/x/y modes, parent, hidden, then per type scroll, sprite, model, font and text, rectangle or line fields, click mask, name, actions, listeners).
-3. For each field, count per word (or byte) offset how many components hold the field's value there. A real field matches about 98-100% (the rest are values scripts changed after loading); chance matches are visible as a rate equal to the share of zeros.
-
-Found on build a2636a01, by byte offset: content type 0x30, x/y/width/height modes 0x3c/0x40/0x44/0x48, original x/y/width/height 0x4c..0x58, relative x/y/width/height 0x5c..0x68, filled 0xa8 (byte), opacity 0xb0 (byte, 255 is invisible), sprite tiling 0xec (byte), font 0x150, line height 0x188, x and y alignment 0x18c/0x190, text shadowed 0x194 (byte), click mask 0x2b0 (three bytes of flags, not shown), item id 0xb38 and quantity 0xb3c (dynamic children only; matched against the inventory's slots, the quantity only seen as 1 and 0), no click through 0xb98 (byte, 99%). Width, height and their modes match the cache in only about 70%: scripts resize most of the resizable interface. The listeners are vectors (begin and end pointers; the load listener is at 0x358, mouse over 0x448); name, target verb, model fields (no open interface had a model), border type, drag settings and the item quantity mode were not found.
+- Model: the type is at 0xfc (1 means a model id), the id at 0x100, the rotation at 0x11c/0x120 and the zoom at 0x128. They were found on the certer's quiz, whose buttons hold models 8965-8967.
+- The `DETAIL_*` offsets were found by correlation, because the native struct doesn't keep the Java field order. The same method works for any field the cache definition states:
+  1. Run `injector widget-dump <pid> 1024` and `injector cache-file <pid> 3 <interface> <component> <out>`.
+  2. Decode the definitions with Java `Widget.af`, the IF3 decoder.
+  3. For each field, count how many components hold its value at each offset. A real field matches about 98-100%. A chance match shows up as a rate equal to the share of zeros.
+- Width, height and their modes match only about 70%, because scripts resize most of the resizable interface.
+- Listeners are vectors: onLoad at 0x358, mouseover at 0x448.
+- Not found: name, target verb, border type, drag settings, the item quantity mode, and the model fields by correlation (no open interface had a model).
 
 ## Objects and the scene's edge
 
-- **An object's transforms come in four forms.** Definition opcodes 77 and 92 have two-byte ids, and 97 and 98 are the same with three-byte ids. 92 and 98 end on a default id. An opcode the decoder doesn't know fails the whole definition with no error, and that object then has no collision in the world file and no options for the planner. Missing 97 and 98 hid 842 of 63,320 definitions, doors among them.
-- **The client doesn't fill the scene's outer rows.** They read as open ground, so the planner takes those tiles from the cache. Planning on them made false routes that vanished as the player came closer, and the walk went back and forth.
+- Object definition transform opcodes 77 and 92 use 2-byte ids, and 97 and 98 use 3-byte ids. 92 and 98 end with a default id.
+- An opcode the decoder doesn't know fails the whole definition silently, and the object then has no collision or options. Missing 97 and 98 once hid 842 of 63,320 definitions, doors among them.
+- The client doesn't fill the scene's outer rows, which read as open ground. The planner takes those tiles from the cache. Planning on them made false routes and back-and-forth walking.
 
-## Definitions and models on request (`offsets/types.rs`, `client/model.rs`)
+## Definitions and models (`offsets/types.rs`, `client/model.rs`)
 
-The agent has the client build an NPC type's model posed at an animation frame (`model_target::NPC_TYPE`, `Host.npc_type_model`), with the client's own functions, on the game thread like the other model requests. Found on build 704f1c08 (2026-11-05) and checked on every archived build.
+- Every definition lookup calls one cache reader with the config group in `r8d`. A lookup takes `(out: *mut [u64;2], id: edx)` and returns a {control, object} pair that `release` frees.
+- Groups: idk 3, inv 5, enum 8, NPC 9, obj 10, param 11, seq 12, spotanim 13, varbit 14, hitsplat 32, healthbar 33 (id in `rdx`), struct 34, db row 38, db table 39.
+  - Locs (6), varps (16) and varcs (19) take the id in `ecx` and return a pointer into the cache.
+  - A bad id gives a default definition, so the agent refuses ids outside `0..0x10000`.
+- `NpcType::getModel(npc, out, seq, frame, seq2, frame2, overrides)`:
+  - It is the call right after the NPC actor's get-model loads `[actor+npc_definition]` into `rcx`, and it calls itself for an NPC's other forms.
+  - `seq` is the animation object or null. `seq2` is null with `frame2` -1, and `overrides` is null.
+  - Posing copies the cached model, so the cached one is never changed.
+- Animation frames:
+  - The skeletal check is the leaf `mov eax,[rcx+4]; shr eax,31; xor al,1; ret`.
+  - When it says no, the callers read the frame count (`+0x48`) and the frame array (`+0x50`).
+  - The client doesn't bounds-check, so the agent checks `0 <= frame < count` with a non-null array.
+  - Skeletal animations (`[seq+0x38]`/`[seq+0x3c]`) aren't supported.
+- Found but unused:
+  - the model loader `(out, source = client+0x2570, id)`
+  - `ModelData` lighting (vtable `+0x70`)
+  - generic animate `(out, 0x48-byte params)`
+  - the spot animation and loc model builders
+  - set-sequence `(client, actor, seq, delay)`, which works on any actor until the server overrides it
 
-- **Definition lookups** all call one cache reader (`cache_reader`, found from the item lookup), loading the config group into `r8d` right before: the function holding that call is the group's lookup, `(out: *mut [u64; 2], id: edx)` giving a {control, object} pair that `release` frees. NPCs are group 9 and animations (seq) 12; others seen the same way: idk 3, inv 5, enum 8, obj 10, param 11, spot animation 13, varbit 14, hitsplat 32, healthbar 33 (id in `rdx`), struct 34, db row 38, db table 39. Locs (6), varps (16) and varcs (19) take the id in `ecx` and return a pointer into the cache instead. A bad id gives a default definition, so the agent refuses ids outside `0..0x10000`.
-- **`NpcType::getModel(npc, out, seq, frame, seq2, frame2, overrides)`**: the call right after the NPC actor's get-model loads `[actor + npc_definition]` into `rcx`, and the one that calls itself (for an NPC's other forms). `seq` is the animation definition's object (the pair's second word) or null, `seq2` null with `frame2` -1, `overrides` null. It applies the NPC's scale, and posing copies the cached model first, so the cached one is never changed.
-- **Animation frames**: the skeletal check is the leaf `mov eax, [rcx+4]; shr eax, 31; xor al, 1; ret` (true when the skeletal animation id isn't -1). Its callers, after it says no (`test al, al; jne`), read the frame count (a dword, `+0x48`) or the frame array (a qword, `+0x50`). The client indexes the frames without checking, so the agent checks `0 <= frame < count` with a non-null array before every call, and refuses skeletal animations (their frames come another way, through `[seq+0x38]`/`[seq+0x3c]`; not supported yet).
-- **Not used yet but found** (research of 2026-11-05, build 704f1c08): the model loader by model id (`(out, source, id)`, source `client + 0x2570`) and `ModelData` lighting (vtable `+0x70`), the generic animate (`(out, params)`, a 0x48-byte block), spot animation and loc model builders, and the set-sequence function the `playAnimation` script binding reaches (`(client, actor, seq, delay)`, which works on any actor until the server overrides it).
+## NPC head icons (`offsets/values.rs` `find_npc_head_icons`)
 
-## NPC head icons (`offsets/values.rs` `find_npc_head_icons`, `decode::world::Npc::head_icons`)
-
-Java's `NPC.au` (class `ya`): the head icons the server sets on an NPC, such as an overhead prayer, as an archive id and a sprite index per slot. Native, the NPC holds a pointer at `+0x760` to a 0x90-byte object of two `std::vector<int>` with inline storage for 8: archive ids at `+0` (begin, end) and sprite indices at `+0x48`, unset slots -1. Archive 440 is `headicons_prayer`: sprite 0 protect from melee, 1 from missiles, 2 from magic (checked on Tormented Demons on build 704f1c08).
-
-- The rule is the function that clears them: `mov r, [rcx+X]; test r, r; je; mov qword [rcx+X], 0; lea rcx, [r+V]; call F; mov rcx, r; call F; mov edx, 2V` (destroy both vectors, free the object). One match on every archived build, X 0x760, V 0x48.
-- Only server-set icons are read; an NPC's default icons from its definition (Java `NPCComposition` arrays) are not.
+- The NPC holds a pointer at `+0x760` to a 0x90-byte object of two `std::vector<int>` with inline storage for 8: archive ids at `+0` and sprite indices at `+0x48`. Unset slots are -1.
+- Archive 440 is the prayer icons: sprite 0 protects from melee, 1 from missiles and 2 from magic.
+- The rule matches the clear function: `mov r,[rcx+X]; test; je; mov qword [rcx+X],0; lea rcx,[r+V]; call F; mov rcx,r; call F`.
+- Only icons the server sets are read. Default icons from the NPC's definition are not.
