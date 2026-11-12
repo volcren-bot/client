@@ -249,7 +249,10 @@ pub fn data_climbs(
             })
             .map(|c| (footprint_distance((x, y), &c.loc), *c))
             .filter(|(d, c)| *d <= ROW_REACH || (c.loc.id == row.id && *d <= span))
-            .min_by_key(|(d, c)| (c.loc.id != row.id, *d, c.loc.x, c.loc.y))
+            .min_by_key(|(d, c)| {
+                let toward = footprint_distance((row.destination.0, row.destination.1), &c.loc);
+                (c.loc.id != row.id, *d, toward, c.loc.x, c.loc.y)
+            })
             .map(|(_, c)| c)
         else {
             continue;
@@ -1191,6 +1194,19 @@ mod tests {
         assert_eq!(plan.tiles.last(), Some(&(7, 1, 0)));
         let lookalike = with_id(6, 3, 1, 0, "Cross");
         assert!(data_climbs(&flags, &[lookalike], &rows).is_empty());
+    }
+
+    #[test]
+    fn a_hop_between_two_gaps_picks_the_one_it_crosses() {
+        let (planes, w, h) = world(&[&["...........", "...........", "..........."]]);
+        let flags = lookup(&planes, w, h);
+        let behind = with_id(9, 4, 1, 0, "Jump");
+        let ahead = with_id(9, 6, 1, 0, "Jump");
+        let gaps = [behind.clone(), ahead.clone()];
+        let east = data_climbs(&flags, &gaps, &[row((5, 1, 0), (7, 1, 0), "Jump", 9)]);
+        assert_eq!(east[0].loc, ahead.loc);
+        let west = data_climbs(&flags, &gaps, &[row((5, 1, 0), (3, 1, 0), "Jump", 9)]);
+        assert_eq!(west[0].loc, behind.loc);
     }
 
     #[test]
