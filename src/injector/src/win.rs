@@ -21,8 +21,9 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND,
-            INVALID_HANDLE_VALUE, LPARAM, POINT, WAIT_ABANDONED, WAIT_OBJECT_0,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ALREADY_EXISTS,
+            ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT,
+            WAIT_ABANDONED, WAIT_OBJECT_0,
         },
         Graphics::Gdi::ClientToScreen,
         Storage::FileSystem::{FILE_TYPE_DISK, GetFileType, GetFinalPathNameByHandleW},
@@ -41,12 +42,11 @@ use windows_sys::{
                 OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile, VirtualAllocEx, VirtualFreeEx,
             },
             Threading::{
-                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, GetCurrentProcess,
-                IsWow64Process,
-                OpenEventW, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_DUP_HANDLE,
-                PROCESS_NAME_WIN32,
-                PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
-                PROCESS_VM_READ, PROCESS_VM_WRITE, QueryFullProcessImageNameW, ReleaseMutex,
+                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE,
+                GetCurrentProcess, IsWow64Process, OpenEventW, OpenProcess, PROCESS_CREATE_THREAD,
+                PROCESS_DUP_HANDLE, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+                PROCESS_VM_WRITE, QueryFullProcessImageNameW, ReleaseMutex,
                 SYNCHRONIZATION_ACCESS_RIGHTS, SYNCHRONIZATION_SYNCHRONIZE, SetEvent,
                 WaitForMultipleObjects, WaitForSingleObject,
             },
@@ -1535,7 +1535,9 @@ pub fn item_families(pid: u32, ids: &[i32]) -> Result<Vec<crate::config::ItemFam
         .collect();
     Ok(crate::config::item_families(
         &wanted,
-        every.iter().map(|(id, name, bonuses)| (*id, name.as_str(), *bonuses)),
+        every
+            .iter()
+            .map(|(id, name, bonuses)| (*id, name.as_str(), *bonuses)),
     ))
 }
 

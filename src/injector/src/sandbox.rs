@@ -25,14 +25,14 @@ use crate::bank_pin::enter as bank_pin_enter;
 #[cfg(windows)]
 use crate::{
     ItemWatcher, PacketWatcher, cache_files, cache_locs, chat_messages, client_cycle, connection,
-    draw, draw_batch, draw_lines, entry_swaps, enum_def, find_path, game_state, game_val_names, ground_items,
-    in_instance, item_container, item_names, item_params, item_stackable, landmasses, loc_model,
-    loc_shown, locs, map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
-    npc_hitsplats, npc_model, npc_sizes, npc_type_model, npcs, player_hitsplats, player_model,
-    player_plane, players, project, project_moved, projectiles, scene_collision, scene_route,
-    selected_widget, send_input, send_input_with, server_tile, spot_anims, sub_interfaces, varbit,
-    varc, varp_value, varps, wait_watchers, widget, widget_children, widget_model, world_route,
-    world_select,
+    draw, draw_batch, draw_lines, entry_swaps, enum_def, find_path, game_state, game_val_names,
+    ground_items, in_instance, item_container, item_names, item_params, item_stackable, landmasses,
+    loc_model, loc_shown, locs, map_regions, menu, menu_click, menu_layout, menu_open, movement,
+    nav_plan, npc_hitsplats, npc_model, npc_sizes, npc_type_model, npcs, player_hitsplats,
+    player_model, player_plane, players, project, project_moved, projectiles, scene_collision,
+    scene_route, selected_widget, send_input, send_input_with, server_tile, spot_anims,
+    sub_interfaces, varbit, varc, varp_value, varps, wait_watchers, widget, widget_children,
+    widget_model, world_route, world_select,
 };
 #[cfg(not(windows))]
 use offline::*;

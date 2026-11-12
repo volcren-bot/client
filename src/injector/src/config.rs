@@ -247,7 +247,11 @@ pub fn item_families<'a>(
                     .and_then(|key| conditions.get(&key))
                     .into_iter()
                     .flatten();
-                let mut others: Vec<i32> = same_name.chain(condition).copied().filter(|&o| o != id).collect();
+                let mut others: Vec<i32> = same_name
+                    .chain(condition)
+                    .copied()
+                    .filter(|&o| o != id)
+                    .collect();
                 others.sort_unstable();
                 others.dedup();
                 others
@@ -569,7 +573,10 @@ mod tests {
 
     #[test]
     fn condition_numbers_end_the_name_after_a_space() {
-        assert_eq!(condition_of("Ahrim's robetop 75"), Some(("Ahrim's robetop", 75)));
+        assert_eq!(
+            condition_of("Ahrim's robetop 75"),
+            Some(("Ahrim's robetop", 75))
+        );
         assert_eq!(condition_of("Ahrim's robetop"), None);
         assert_eq!(condition_of("Prayer potion(4)"), None);
         assert_eq!(condition_of(" 75"), None);
