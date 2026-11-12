@@ -22,7 +22,7 @@ pub fn rate_label(microcredits: f64) -> String {
 }
 
 pub fn balance_label(microcredits: f64) -> String {
-    format!("{:.6}\u{a0}CREDIT", microcredits / MICROCREDITS_PER_CREDIT)
+    format!("{:.2}\u{a0}CREDIT", microcredits / MICROCREDITS_PER_CREDIT)
 }
 
 pub fn fee_per_hour(fee: i64, minutes_per_month: i64) -> f64 {
@@ -293,10 +293,10 @@ mod tests {
         assert_eq!(credits_text(-50_000.0), "-0.05");
         assert_eq!(credits_text(fee_per_hour(3_000_000, 43_200)), "0.004167");
         assert_eq!(credits_label(12_500_000.0), "12.50\u{a0}CREDIT");
-        assert_eq!(balance_label(12_500_000.0), "12.500000\u{a0}CREDIT");
-        assert_eq!(balance_label(1_000_000.0), "1.000000\u{a0}CREDIT");
-        assert_eq!(balance_label(1_234_567.0), "1.234567\u{a0}CREDIT");
-        assert_eq!(balance_label(-50_000.0), "-0.050000\u{a0}CREDIT");
+        assert_eq!(balance_label(12_500_000.0), "12.50\u{a0}CREDIT");
+        assert_eq!(balance_label(1_000_000.0), "1.00\u{a0}CREDIT");
+        assert_eq!(balance_label(1_234_567.0), "1.23\u{a0}CREDIT");
+        assert_eq!(balance_label(-50_000.0), "-0.05\u{a0}CREDIT");
     }
 
     #[test]
