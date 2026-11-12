@@ -409,6 +409,7 @@ pub(crate) mod tests {
             supabase_url: url.into(),
             anon_key: "anon".into(),
             site_url: String::new(),
+            prices_url: String::new(),
         })
     }
 

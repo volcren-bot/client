@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError, mpsc},
 };
 
-use injector::{antiban, form, http, transports};
+use injector::{antiban, form, http, prices, transports};
 #[cfg(windows)]
 use {
     serde::Serialize,
@@ -518,6 +518,10 @@ fn apply_setting(line: &str) -> bool {
     if let Some(payload) = line.strip_prefix(antiban::PREFIX) {
         if let Some(config) = antiban::parse(payload) {
             antiban::set(config);
+        }
+    } else if let Some(payload) = line.strip_prefix(prices::PREFIX) {
+        if let Some(url) = prices::parse_url(payload) {
+            prices::set_url(url);
         }
     } else if let Some(payload) = line.strip_prefix(transports::SETTINGS_PREFIX) {
         if let Some(settings) = transports::parse_settings(payload) {

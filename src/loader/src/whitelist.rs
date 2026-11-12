@@ -7,7 +7,6 @@ use crate::theme::ROW_HEIGHT;
 const ACTIONS_WIDTH: f32 = 90.0;
 const INPUT_WIDTH: f32 = 300.0;
 const MAX_USER_ENTRIES: usize = 200;
-const BUILTIN_HOSTS: [&str; 1] = ["prices.runescape.wiki"];
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Whitelist {
@@ -67,17 +66,17 @@ fn matches(entry: &str, host: &str) -> bool {
 impl Whitelist {
     pub fn new(user: Vec<String>, config: &Config) -> Self {
         let mut builtin = Vec::new();
-        for url in [&config.api_url, &config.supabase_url, &config.site_url] {
+        for url in [
+            &config.api_url,
+            &config.supabase_url,
+            &config.site_url,
+            &config.prices_url,
+        ] {
             if let Ok(uri) = url.parse::<ureq::http::Uri>()
                 && let Ok(host) = crate::http::host_of(&uri)
                 && !builtin.contains(&host)
             {
                 builtin.push(host);
-            }
-        }
-        for host in BUILTIN_HOSTS {
-            if !builtin.iter().any(|have| have == host) {
-                builtin.push(host.to_owned());
             }
         }
         Self {
@@ -260,6 +259,7 @@ mod tests {
             supabase_url: "https://db.volcren.com".into(),
             anon_key: String::new(),
             site_url: "https://volcren.com".into(),
+            prices_url: "https://prices.example.org/api".into(),
         }
     }
 
@@ -301,7 +301,7 @@ mod tests {
             "api.volcren.com",
             "db.volcren.com",
             "volcren.com",
-            "prices.runescape.wiki",
+            "prices.example.org",
         ] {
             assert!(list.allows(host), "{host}");
         }
@@ -333,10 +333,7 @@ mod tests {
         assert!(list.allows("example.com"));
         assert!(list.add("example.com").is_err(), "twice");
         assert!(list.add("volcren.com").is_err(), "already built in");
-        assert!(
-            list.add("prices.runescape.wiki").is_err(),
-            "already built in"
-        );
+        assert!(list.add("prices.example.org").is_err(), "already built in");
         list.remove("volcren.com");
         assert!(list.allows("volcren.com"));
         list.remove("example.com");

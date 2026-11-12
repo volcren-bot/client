@@ -381,6 +381,7 @@ mod tests {
             supabase_url: "http://sb".into(),
             anon_key: String::new(),
             site_url: String::new(),
+            prices_url: String::new(),
         };
         let url = authorize_url(&config, &Pkce::from_verifier("v".into()));
         assert!(url.starts_with("http://sb/auth/v1/authorize?provider=discord&redirect_to=http%3A%2F%2Flocalhost%3A5217%2F&code_challenge="));

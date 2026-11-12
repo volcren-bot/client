@@ -38,6 +38,7 @@ pub struct Host {
     pub ctx: egui::Context,
     pub accounts: Arc<RwLock<Accounts>>,
     pub whitelist: Arc<RwLock<Whitelist>>,
+    pub prices_url: String,
 }
 
 impl Host {
@@ -182,9 +183,10 @@ impl Script {
         let stdout = child.stdout.take().expect("piped");
         let mut stderr_pipe = child.stderr.take().expect("piped");
         let pins = format!(
-            "{}\n{}\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n{}\n{}\n",
             injector::form::PINS_PREFIX,
             injector::http::CAPABILITY_PREFIX,
+            injector::prices::line(&host.prices_url),
             injector::antiban::line(&settings.antiban),
             injector::transports::settings_line(&settings.transports),
             crate::transports::line()
@@ -499,6 +501,7 @@ mod tests {
                 whitelist,
                 &crate::api::Config::default(),
             ))),
+            prices_url: String::new(),
         }
     }
 
@@ -642,6 +645,7 @@ mod tests {
                 supabase_url: fake.url.clone(),
                 anon_key: "anon".into(),
                 site_url: String::new(),
+                prices_url: String::new(),
             },
             "token",
         );

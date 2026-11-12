@@ -231,6 +231,7 @@ fn api(server: &FakeServer) -> Api {
         supabase_url: server.url.clone(),
         anon_key: "anon".into(),
         site_url: String::new(),
+        prices_url: String::new(),
     };
     Api::signed_in(config, "token-1")
 }

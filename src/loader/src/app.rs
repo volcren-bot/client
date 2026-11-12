@@ -1960,6 +1960,7 @@ impl LoaderApp {
             ctx: ctx.clone(),
             accounts: self.accounts.clone(),
             whitelist: self.http_whitelist.clone(),
+            prices_url: self.api.config().prices_url.clone(),
         }
     }
 

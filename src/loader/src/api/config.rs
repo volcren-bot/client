@@ -5,6 +5,7 @@ pub struct Config {
     pub supabase_url: String,
     pub anon_key: String,
     pub site_url: String,
+    pub prices_url: String,
 }
 
 impl Config {
@@ -24,6 +25,7 @@ impl Config {
             supabase_url: var("SUPABASE_URL", compiled.supabase_url),
             anon_key: var("SUPABASE_ANON_KEY", compiled.anon_key),
             site_url: var("SITE_URL", compiled.site_url),
+            prices_url: var("PRICES_URL", compiled.prices_url),
         }
     }
 
@@ -56,6 +58,7 @@ mod tests {
     fn the_compiled_config_is_complete() {
         let config: Config = serde_json::from_str(include_str!("../../config.json")).unwrap();
         assert!(config.missing().is_empty());
+        assert!(!config.prices_url.is_empty());
     }
 
     #[test]
@@ -65,6 +68,7 @@ mod tests {
             supabase_url: "http://localhost:54321".into(),
             anon_key: String::new(),
             site_url: String::new(),
+            prices_url: String::new(),
         };
         assert_eq!(
             config.api("/api/launcher/me"),

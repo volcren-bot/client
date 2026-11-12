@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const API: &str = "https://prices.runescape.wiki/api/v2/osrs";
+pub const PREFIX: &str = "\u{1e}PRICES ";
 const LATEST_EVERY: Duration = Duration::from_secs(10 * 60);
 const MAPPING_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -197,9 +197,32 @@ impl Prices {
     }
 }
 
+static URL: Mutex<String> = Mutex::new(String::new());
+
+pub fn line(url: &str) -> String {
+    format!(
+        "{PREFIX}{}",
+        serde_json::to_string(url).expect("strings serialize")
+    )
+}
+
+pub fn parse_url(payload: &str) -> Option<String> {
+    serde_json::from_str::<String>(payload.trim())
+        .ok()
+        .map(|url| url.trim().trim_end_matches('/').to_owned())
+}
+
+pub fn set_url(url: String) {
+    *URL.lock().unwrap_or_else(PoisonError::into_inner) = url;
+}
+
 fn fetch(path: &str) -> Result<String, String> {
+    let api = URL.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if api.is_empty() {
+        return Err("the loader gave no price API".into());
+    }
     let response = crate::http::request(&crate::http::Request {
-        url: format!("{API}/{path}"),
+        url: format!("{api}/{path}"),
         method: "GET".into(),
         headers: BTreeMap::new(),
         body: None,
@@ -398,6 +421,20 @@ mod tests {
         assert_eq!(api.calls, ["mapping"]);
         api.fail = false;
         assert!(ask(&mut prices, &mut api, start + RETRY_AFTER, &items).is_ok());
+    }
+
+    #[test]
+    fn the_url_line_round_trips() {
+        let url = "https://prices.example.org/api/";
+        let payload = line(url);
+        assert_eq!(
+            parse_url(payload.strip_prefix(PREFIX).unwrap()).as_deref(),
+            Some("https://prices.example.org/api")
+        );
+        assert_eq!(
+            parse_url(line("").trim_end().strip_prefix(PREFIX).unwrap()).as_deref(),
+            Some("")
+        );
     }
 
     #[test]
