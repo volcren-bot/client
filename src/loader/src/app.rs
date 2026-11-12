@@ -4464,6 +4464,7 @@ impl LoaderApp {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             if ui.input(|i| i.pointer.primary_clicked()) {
                                 self.selected = Some(target.key());
+                                self.run_target.clone_from(&self.selected);
                             }
                         } else if index % 2 == 1 {
                             ui.painter().set(
@@ -4619,6 +4620,7 @@ impl LoaderApp {
             (Some(i), false) => i.saturating_sub(1),
         };
         self.selected = Some(keys[next].clone());
+        self.run_target.clone_from(&self.selected);
     }
 
     fn selected_target(&self) -> Option<&Target> {
@@ -4959,7 +4961,11 @@ impl LoaderApp {
             .iter()
             .any(|(_, key)| Some(key) == self.run_target.as_ref())
         {
-            self.run_target = free.first().map(|(_, key)| key.clone());
+            self.run_target = free
+                .iter()
+                .find(|(_, key)| Some(key) == self.selected.as_ref())
+                .or_else(|| free.first())
+                .map(|(_, key)| key.clone());
         }
         ui.vertical(|ui| {
             ui.label("Client:");
