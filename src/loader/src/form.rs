@@ -12,6 +12,14 @@ const FIELD_GAP: f32 = 10.0;
 
 const ROW_GAP: f32 = 24.0;
 
+const HEADING_GAP: f32 = 12.0;
+
+#[derive(Clone, Copy)]
+struct Gaps {
+    row: f32,
+    heading: f32,
+}
+
 fn with_colon(label: &str) -> String {
     if label.ends_with(':') {
         label.to_owned()
@@ -320,10 +328,13 @@ impl Form {
             .get("columns")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let gap = spec_form::row_gap(&self.spec).map_or(ROW_GAP, |g| g as f32);
+        let gaps = Gaps {
+            row: spec_form::row_gap(&self.spec).map_or(ROW_GAP, |g| g as f32),
+            heading: spec_form::heading_gap(&self.spec).map_or(HEADING_GAP, |g| g as f32),
+        };
         let values = &mut self.values;
         if !columns {
-            Self::show_fields(ui, fields, gap, values, layouts, rules);
+            Self::show_fields(ui, fields, gaps, values, layouts, rules);
             return;
         }
         let (checks, others): (Vec<&Value>, Vec<&Value>) = fields
@@ -333,7 +344,7 @@ impl Form {
             Self::show_fields(
                 ui,
                 others.into_iter().chain(checks),
-                gap,
+                gaps,
                 values,
                 layouts,
                 rules,
@@ -341,15 +352,15 @@ impl Form {
             return;
         }
         ui.columns(2, |cols| {
-            Self::show_fields(&mut cols[0], others, gap, values, layouts, rules);
-            Self::show_fields(&mut cols[1], checks, gap, values, layouts, rules);
+            Self::show_fields(&mut cols[0], others, gaps, values, layouts, rules);
+            Self::show_fields(&mut cols[1], checks, gaps, values, layouts, rules);
         });
     }
 
     fn show_fields<'a>(
         ui: &mut egui::Ui,
         fields: impl IntoIterator<Item = &'a Value>,
-        gap: f32,
+        gaps: Gaps,
         values: &mut HashMap<String, FieldValue>,
         layouts: &ScriptLayouts,
         rules: &KindRules,
@@ -365,12 +376,16 @@ impl Form {
                     .take_while(|field| spec_form::row(field) == Some(row))
                     .count()
             });
+            let at_top = rest.len() == shown.len();
             let (line, after) = rest.split_at(len);
             rest = after;
+            if !at_top && spec_form::kind(first) == "label" && spec_form::heading(first).is_some() {
+                ui.add_space(gaps.heading);
+            }
             if len == 1 {
                 Self::show_field(ui, first, values, layouts, rules);
             } else {
-                Self::show_row(ui, line, gap, values, layouts, rules);
+                Self::show_row(ui, line, gaps.row, values, layouts, rules);
             }
         }
     }

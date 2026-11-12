@@ -316,6 +316,10 @@ pub fn row_gap(spec: &Value) -> Option<f64> {
     spec.get("row_gap").and_then(Value::as_f64)
 }
 
+pub fn heading_gap(spec: &Value) -> Option<f64> {
+    spec.get("heading_gap").and_then(Value::as_f64)
+}
+
 pub fn box_first(field: &Value) -> bool {
     field
         .get("box_first")
@@ -355,6 +359,11 @@ pub fn validate(spec: &Value) -> Result<(), String> {
     }
     if spec.get("row_gap").is_some() && !row_gap(spec).is_some_and(|g| (0.0..=500.0).contains(&g)) {
         return Err("`row_gap` is a number of points, 0 to 500".into());
+    }
+    if spec.get("heading_gap").is_some()
+        && !heading_gap(spec).is_some_and(|g| (0.0..=500.0).contains(&g))
+    {
+        return Err("`heading_gap` is a number of points, 0 to 500".into());
     }
     let mut seen = Vec::new();
     for (i, field) in fields(spec).iter().enumerate() {
@@ -706,6 +715,9 @@ mod tests {
         assert!(validate(&json!({ "fields": [{ "kind": "label", "heading": 3 }] })).is_err());
         assert!(validate(&json!({ "row_gap": -1, "fields": [] })).is_err());
         assert_eq!(validate(&json!({ "row_gap": 12, "fields": [] })), Ok(()));
+        assert!(validate(&json!({ "heading_gap": 501, "fields": [] })).is_err());
+        assert!(validate(&json!({ "heading_gap": "big", "fields": [] })).is_err());
+        assert_eq!(validate(&json!({ "heading_gap": 0, "fields": [] })), Ok(()));
         assert!(validate(&json!({ "fields": [{ "id": "a", "heading": 1 }] })).is_err());
         assert_eq!(
             validate(&json!({ "fields": [{ "kind": "label", "text": "A", "heading": 2 }] })),
