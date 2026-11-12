@@ -4399,11 +4399,7 @@ impl LoaderApp {
                             .rect
                             .expand2(egui::vec2(8.0, 2.0));
                         ui.add_space(spacing.y);
-                        let hovered = enabled
-                            && ui.is_rect_visible(row)
-                            && ui.input(|i| i.pointer.hover_pos()).is_some_and(|pos| {
-                                row.contains(pos) && ui.clip_rect().contains(pos)
-                            });
+                        let hovered = enabled && ui.rect_contains_pointer(row);
                         if hovered {
                             ui.painter().set(
                                 background,
