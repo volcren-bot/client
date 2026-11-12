@@ -104,6 +104,10 @@ Java's `Actor.pathX`, `pathY` and `pathLength` (`dc`, `dw`, `dn` in `standalone/
 - Fields (identical in the builds of 2026-10-11 and 2026-10-12): size `+0x278`, length `+0x3ec`, `pathX` `int[10]` at `+0x3f0`, `pathY` at `+0x418`, fine position `+0x268`/`+0x26c`. The reset is at `0x14009e320` in `a2636a01`. `finds_actor_path_in_archived_builds` checks every build in `archive/`.
 - `decode::state::server_tile` reads the local player's; the agent's receive hook watches it for `Movement` (see Packets below).
 
+### Movement poses (`decode::world::PLAYER_MOVEMENT`)
+
+Java's `Actor` stand, turn left, turn right, walk, walk back, walk left, walk right and run sequences: eight `i32`s at a fixed `+0x280`, right after the size. The server sends them in the player's appearance, so they follow the weapon (unarmed 808, 823, 823, 819, 820, 821, 822, 824; a staff 813, 1209, 1209, 1205, 1206, 1207, 1208, 1210). The pose at `+0x4b8` is one of them unless something overrides it (a tightrope, a ledge, a magic carpet). Found on 2026-11-12 with `injector player-words <pid> <index> 400` while wielding a staff, by looking for the standing pose and the run pose read from `players`. If an update moves them, the same dump finds the run of eight again.
+
 ### Packets (`offsets/packets.rs`, `client/packets.rs`)
 
 Java sends packets from `co.az` (a queue of `js` nodes written to the socket once per tick) and reads them in `Client.iy`. The native client splits the same job across two threads:

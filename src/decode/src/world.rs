@@ -167,6 +167,18 @@ pub struct Player {
     pub target_y: i32,
     pub interacting_npc: i32,
     pub interacting_player: i32,
+    pub movement: [i32; MOVEMENT_POSES],
+}
+
+pub const MOVEMENT_POSES: usize = 8;
+const PLAYER_MOVEMENT: u64 = 0x280;
+
+fn movement(memory: &impl Memory, player: u64) -> [i32; MOVEMENT_POSES] {
+    std::array::from_fn(|i| {
+        memory
+            .i32(player + PLAYER_MOVEMENT + 4 * i as u64)
+            .unwrap_or(-1)
+    })
 }
 
 const PLAYER_TARGET_STATE: u64 = 0x3a4;
@@ -241,8 +253,12 @@ fn npc_fields(layout: &WorldLayout) -> [(u64, u64); 3] {
     ]
 }
 
-fn player_fields(layout: &WorldLayout) -> [(u64, u64); 2] {
-    [(layout.player_name as u64, 8), (PLAYER_TARGET_TILE, 8)]
+fn player_fields(layout: &WorldLayout) -> [(u64, u64); 3] {
+    [
+        (layout.player_name as u64, 8),
+        (PLAYER_TARGET_TILE, 8),
+        (PLAYER_MOVEMENT, 4 * MOVEMENT_POSES as u64),
+    ]
 }
 
 fn int_vector(memory: &impl Memory, at: u64) -> Option<(u64, u64)> {
@@ -722,6 +738,7 @@ pub fn players(memory: &impl Memory, layout: &WorldLayout) -> Option<Vec<Player>
                 target_y,
                 interacting_npc: a.interacting_npc,
                 interacting_player: a.interacting_player,
+                movement: movement(m, player),
             }
         },
     )
@@ -1204,7 +1221,8 @@ mod tests {
                 target_x: -1,
                 target_y: -1,
                 interacting_npc: -1,
-                interacting_player: -1
+                interacting_player: -1,
+                movement: [-1; MOVEMENT_POSES],
             }]
         );
     }

@@ -13,7 +13,7 @@ pub mod script_runs;
 pub mod state;
 pub mod varc_log;
 
-pub const PROTOCOL_VERSION: u8 = 58;
+pub const PROTOCOL_VERSION: u8 = 59;
 
 pub fn shared_memory_name(pid: u32) -> String {
     format!("AGENT_DATA_{pid}")
