@@ -22,6 +22,10 @@ impl Pipe {
         Ok(Self { path, file, next })
     }
 
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     fn append(&mut self, lines: impl IntoIterator<Item = impl AsRef<str>>) -> std::io::Result<()> {
         let mut text = String::new();
         for line in lines {

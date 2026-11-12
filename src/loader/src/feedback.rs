@@ -458,8 +458,8 @@ impl Page {
         }
         for session in &self.sessions {
             let draft = self.drafts.entry(session.session_id.clone()).or_default();
-            ui.add_space(6.0);
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.add_space(8.0);
+            crate::theme::card().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(&session.title).strong());

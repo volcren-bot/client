@@ -195,54 +195,61 @@ impl Store {
         let (mut run, mut remove, mut start_remove, mut cancel_remove) = (None, None, None, false);
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for script in self.visible() {
-                ui.group(|ui| {
+                ui.add_space(8.0);
+                crate::theme::card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new(&script.title).strong().size(16.0));
-                        ui.label(egui::RichText::new(format!("by {}", script.author)).weak());
-                        ui.label(egui::RichText::new(&script.stage).small());
-                        let tag = egui::RichText::new(origin_label(script)).small();
-                        if script.community {
-                            ui.label(tag.color(egui::Color32::from_rgb(0xff, 0x9e, 0x64)))
-                                .on_hover_text("Written by a community member, not reviewed by staff. You're warned before it runs.");
-                        } else {
-                            ui.label(tag.color(crate::theme::BLUE)).on_hover_text("Written by a scripter.");
-                        }
-                        if script.granted {
-                            ui.label(egui::RichText::new("shared with you").small().color(crate::theme::GREEN));
-                        }
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.microcredits, me.min_balance_minutes));
-                        let button = ui.add_enabled(blocked.is_none(), egui::Button::new("Run"));
-                        let button = match &blocked {
-                            Some(reason) => button.on_disabled_hover_text(reason),
-                            None => button,
-                        };
-                        if button.clicked() {
-                            run = Some(Box::new(script.clone()));
-                        }
-                        price_ui(ui, script);
-                        ui.label(format!("{} online", script.online));
-                    });
-                    if !script.description.is_empty() {
-                        ui.label(egui::RichText::new(&script.description).weak());
-                    }
-                    if script.granted {
-                        ui.horizontal(|ui| {
-                            if self.removing.as_deref() == Some(script.id.as_str()) {
-                                ui.label("Remove it from your account? You'll need a new code to get it back.");
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(Box::new(script.clone()));
+                    let blocked = run_block.map(str::to_owned).or_else(|| script.blocked(me.microcredits, me.min_balance_minutes));
+                    let run_width = crate::theme::icon_button_width(ui, &[(crate::app::ICON_START, "Run")]);
+                    ui.horizontal_top(|ui| {
+                        let details_width = (ui.available_width() - run_width - ui.spacing().item_spacing.x).max(0.0);
+                        ui.allocate_ui_with_layout(egui::vec2(details_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new(&script.title).strong().size(16.0));
+                                ui.label(egui::RichText::new(format!("by {}", script.author)).weak());
+                                ui.label(egui::RichText::new(&script.stage).small());
+                                let tag = egui::RichText::new(origin_label(script)).small();
+                                if script.community {
+                                    ui.label(tag.color(egui::Color32::from_rgb(0xff, 0x9e, 0x64)))
+                                        .on_hover_text("Written by a community member, not reviewed by staff. You're warned before it runs.");
+                                } else {
+                                    ui.label(tag.color(crate::theme::BLUE)).on_hover_text("Written by a scripter.");
                                 }
-                                if ui.button("Keep").clicked() {
-                                    cancel_remove = true;
+                                if script.granted {
+                                    ui.label(egui::RichText::new("shared with you").small().color(crate::theme::GREEN));
                                 }
-                            } else if ui.small_button("Remove from my account").clicked() {
-                                start_remove = Some(script.id.clone());
+                            });
+                            ui.label(format!("{} online", script.online));
+                            price_ui(ui, script);
+                            if !script.description.is_empty() {
+                                ui.label(egui::RichText::new(&script.description).weak());
+                            }
+                            if script.granted {
+                                ui.horizontal(|ui| {
+                                    if self.removing.as_deref() == Some(script.id.as_str()) {
+                                        ui.label("Remove it from your account? You'll need a new code to get it back.");
+                                        if ui.button("Remove").clicked() {
+                                            remove = Some(Box::new(script.clone()));
+                                        }
+                                        if ui.button("Keep").clicked() {
+                                            cancel_remove = true;
+                                        }
+                                    } else if ui.small_button("Remove from my account").clicked() {
+                                        start_remove = Some(script.id.clone());
+                                    }
+                                });
                             }
                         });
-                    }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            let button = crate::theme::icon_button(ui, crate::app::ICON_START, "Run", run_width, blocked.is_none());
+                            let button = match &blocked {
+                                Some(reason) => button.on_disabled_hover_text(reason),
+                                None => button,
+                            };
+                            if button.clicked() {
+                                run = Some(Box::new(script.clone()));
+                            }
+                        });
+                    });
                 });
             }
         });

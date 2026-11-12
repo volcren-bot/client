@@ -28,6 +28,7 @@ use crate::pipe::Rows;
 use crate::script::{Script, ScriptEvent};
 use crate::session::{self, Kept, Prepared};
 use crate::store::{self, Confirmed, Store};
+use crate::theme::{icon_button, icon_button_width, slide_button};
 use crate::update;
 
 enum Event {
@@ -282,29 +283,62 @@ impl Run {
         }
     }
 
-    fn status(&self) -> &'static str {
+    fn state(&self) -> RunState {
         if !self.is_running() {
-            "ended"
+            RunState::Ended
         } else if self.script.stop_requested() {
-            "stopping"
+            RunState::Stopping
         } else if self.script.is_paused() {
-            "paused"
+            RunState::Paused
         } else if self.form.is_some() && self.form_sent.is_none() {
-            "waiting"
+            RunState::Waiting
         } else {
-            "running"
+            RunState::Running
         }
     }
 }
 
-fn restart_button(ui: &mut egui::Ui, label: &str, store: bool, refusal: Option<&str>) -> bool {
-    let button = ui
-        .add_enabled(refusal.is_none(), egui::Button::new(label))
-        .on_hover_text(if store {
+#[derive(Clone, Copy)]
+enum RunState {
+    Running,
+    Waiting,
+    Paused,
+    Stopping,
+    Ended,
+}
+
+impl RunState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Paused => "paused",
+            Self::Stopping => "stopping",
+            Self::Ended => "ended",
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            Self::Running => crate::theme::GREEN,
+            Self::Waiting => crate::theme::BLUE,
+            Self::Paused => crate::theme::YELLOW,
+            Self::Stopping => crate::theme::RED,
+            Self::Ended => crate::theme::COMMENT,
+        }
+    }
+}
+
+const EXTRA_SESSION_FEE_HINT: &str = "Each script runs on its own client. Every script past the oldest pays the extra-session fee; the oldest runs without one.";
+
+fn restart_button(ui: &mut egui::Ui, width: f32, store: bool, refusal: Option<&str>) -> bool {
+    let button = icon_button(ui, ICON_RESTART, "Restart", width, refusal.is_none()).on_hover_text(
+        if store {
             "Closes this session and starts the script again on the same client."
         } else {
             "Runs the file again on the same client, asking first if it changed on disk."
-        });
+        },
+    );
     match refusal {
         Some(why) => button.on_disabled_hover_text(why).clicked(),
         None => button.clicked(),
@@ -336,13 +370,6 @@ fn decision_window(
             });
         });
     decision
-}
-
-fn width_button(ui: &mut egui::Ui, enabled: bool, label: &str, width: f32) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(label).min_size(egui::vec2(width, 0.0)),
-    )
 }
 
 fn client_caption(ui: &mut egui::Ui, pid: Option<u32>) {
@@ -378,34 +405,34 @@ fn start_dir(path: &str) -> Option<&std::path::Path> {
     std::path::Path::new(path).parent().filter(|d| d.is_dir())
 }
 
-fn pause_label(paused: bool) -> &'static str {
-    if paused { "Resume" } else { "Pause" }
-}
-
-const ICON_START: &str = "\u{f04b}";
+pub(crate) const ICON_START: &str = "\u{f04b}";
 const ICON_PAUSE: &str = "\u{f04c}";
 const ICON_STOP: &str = "\u{f04d}";
 const ICON_CANCEL: &str = "\u{f00d}";
 const ICON_RESTART: &str = "\u{f01e}";
 const ICON_UPDATE: &str = "\u{f021}";
+const ICON_EXPAND: &str = "\u{f077}";
+const ICON_COLLAPSE: &str = "\u{f078}";
+const ICON_CLEAR: &str = "\u{f1f8}";
+const ICON_COPY: &str = "\u{f0c5}";
+const ICON_SAVE: &str = "\u{f0c7}";
+const ICON_SAVE_AS: &str = "\u{f0cfb}";
+const ICON_OPEN: &str = "\u{f07c}";
+const ICON_OPEN_LAST: &str = "\u{f1da}";
+const ICON_PIPE: &str = "\u{f07e5}";
+const ICON_OPEN_RUN: &str = "\u{f08e}";
+const ICON_LOAD: &str = "\u{f1e6}";
+const ICON_UNLOAD: &str = "\u{f052}";
+const ICON_CONSOLE: &str = "\u{f120}";
 
-fn with_icon(icon: &str, label: &str) -> String {
-    format!("{icon} {label}")
-}
+const PAUSE_BUTTONS: [(&str, &str); 2] = [(ICON_PAUSE, "Pause"), (ICON_START, "Resume")];
 
-fn run_pause_label(paused: bool) -> String {
-    if paused {
-        with_icon(ICON_START, "Resume")
-    } else {
-        with_icon(ICON_PAUSE, "Pause")
-    }
+fn run_pause_label(paused: bool) -> (&'static str, &'static str) {
+    PAUSE_BUTTONS[usize::from(paused)]
 }
 
 const RESTORING_SIGN_IN: &str = "Checking for a saved sign-in…";
 const WAITING_FOR_BROWSER: &str = "Waiting for you to sign in in the browser…";
-
-const PAUSE_HINT: &str =
-    "Suspends the script's process, so it takes effect immediately, even in a tight loop.";
 
 const SCRIPT_FILTER: &[&str] = &["luau", "lua"];
 
@@ -476,15 +503,24 @@ fn sidebar_name(title: &str) -> String {
     name.chars().take(MAX - 1).chain(['\u{2026}']).collect()
 }
 
+fn open_site(site_url: &str, path: &str) {
+    if !site_url.is_empty() {
+        let _ = webbrowser::open(&format!("{site_url}{path}"));
+    }
+}
+
 fn sidebar_tree(
     ui: &mut egui::Ui,
     tab: Tab,
     active_run: Option<u64>,
     runs: &[(u64, String, bool)],
+    site_url: &str,
 ) -> Option<(Tab, Option<u64>)> {
     ui.spacing_mut().item_spacing.y = 0.0;
     crate::theme::sidebar_header(ui, "explorer");
-    crate::theme::sidebar_root(ui, "\u{f233}", "volcren");
+    if crate::theme::sidebar_root(ui, "\u{f233}", "volcren", !site_url.is_empty()).clicked() {
+        open_site(site_url, "");
+    }
     let items = [
         (Tab::Clients, "\u{f108}", "client"),
         (Tab::Store, "\u{f489}", "scripts"),
@@ -749,6 +785,7 @@ const LAST_SCRIPT_KEY: &str = "last_script";
 const FORMS_KEY: &str = "forms";
 const LAYOUTS_KEY: &str = "layouts";
 const CURSOR_KEY: &str = "cursor";
+const UI_FONT_KEY: &str = "ui_font";
 const CONFIRMED_KEY: &str = "community_confirmed";
 const HTTP_WHITELIST_KEY: &str = "http_whitelist";
 
@@ -1213,6 +1250,10 @@ impl Log {
         self.revision += 1;
     }
 
+    fn last(&self) -> Option<&LogLine> {
+        self.view.last().map(|&index| &self.lines[index])
+    }
+
     fn texts(&self) -> Vec<String> {
         self.lines.iter().map(|line| line.text.clone()).collect()
     }
@@ -1410,6 +1451,7 @@ pub struct LoaderApp {
     remembered_forms: HashMap<String, serde_json::Map<String, serde_json::Value>>,
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
+    ui_font: crate::theme::UiFont,
     dev_tab: DevTab,
     inspector_tab: InspectorTab,
     tiles: Option<TilesWorker>,
@@ -1435,6 +1477,7 @@ pub struct LoaderApp {
     selected: Option<String>,
     busy: Option<&'static str>,
     log_tab: LogTab,
+    log_collapsed: bool,
     followed_tab: (Tab, Option<u64>),
     loader_log: Log,
     log_job: Option<LogJob>,
@@ -1494,7 +1537,11 @@ impl LoaderApp {
         let data_dir = crate::paths::project_dirs().map(|dirs| dirs.data_dir().to_path_buf());
         let (layouts, layouts_unreadable) =
             crate::layouts::load(cc.storage, LAYOUTS_KEY, data_dir.as_deref());
-        crate::theme::apply(&cc.egui_ctx);
+        let ui_font = cc
+            .storage
+            .and_then(|s| eframe::get_value(s, UI_FONT_KEY))
+            .unwrap_or_default();
+        crate::theme::apply(&cc.egui_ctx, ui_font);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let (tx, rx) = channel();
@@ -1532,6 +1579,7 @@ impl LoaderApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, CURSOR_KEY))
                 .unwrap_or(DEFAULT_CURSOR),
+            ui_font,
             dev_tab: DevTab::Tools,
             inspector_tab: InspectorTab::Widget,
             tiles: None,
@@ -1570,6 +1618,7 @@ impl LoaderApp {
             selected: None,
             busy: None,
             log_tab: LogTab::Loader,
+            log_collapsed: false,
             followed_tab: (Tab::Clients, None),
             breaks_tab: BreaksTab::Breaks,
             icons: Default::default(),
@@ -2373,7 +2422,15 @@ impl LoaderApp {
         let picked = egui::ScrollArea::vertical()
             .id_salt("sidebar")
             .auto_shrink([false, false])
-            .show(ui, |ui| sidebar_tree(ui, self.tab, self.active_run, &rows))
+            .show(ui, |ui| {
+                sidebar_tree(
+                    ui,
+                    self.tab,
+                    self.active_run,
+                    &rows,
+                    &self.api.config().site_url,
+                )
+            })
             .inner;
         if let Some((tab, run)) = picked {
             self.tab = tab;
@@ -2468,54 +2525,63 @@ impl LoaderApp {
             return;
         };
         let (release, kind) = (&available.release, available.kind);
+        if kind == update::Kind::Dev {
+            return;
+        }
         let running = self.start_in_progress();
-        let status = match (&self.update_state, kind) {
-            (_, update::Kind::Dev) => Some("Development build: updates aren't installed here."),
-            (UpdateState::Failed(error), _) => Some(error.as_str()),
-            (_, update::Kind::Auto { .. }) if running => Some("Stop running scripts to update"),
-            (_, update::Kind::Auto { admin: true }) => {
-                Some("An administrator has to approve the update.")
-            }
+        let failure = match &self.update_state {
+            UpdateState::Failed(error) => Some(error.as_str()),
             _ => None,
         };
-        let main_button = match (&self.update_state, kind) {
-            (_, update::Kind::Dev) => None,
-            (_, update::Kind::Manual) => Some("Download"),
-            (UpdateState::Failed(_), _) => Some("Retry"),
-            _ => Some("Update and restart"),
+        let main_button = match (failure, kind) {
+            (_, update::Kind::Manual) => "Download",
+            (Some(_), _) => "Retry",
+            _ => "Update and restart",
         };
         let mut clicked = false;
         let mut dismissed = false;
         egui::Panel::bottom("update").show(ui, |ui| {
-            let row = ui.text_style_height(&egui::TextStyle::Body);
-            let font = egui::FontId::monospace(12.0);
-            let width = crate::theme::button_width(ui, &font, &["Update and restart"]);
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(
-                        (ui.available_width() - width - ui.spacing().item_spacing.x).max(0.0),
-                    );
-                    ui.label(format!("Version {} is available", release.version));
-                    ui.label(format!("You have version {}", update::VERSION));
-                    if let Some(status) = status {
-                        ui.label(status);
-                    }
-                });
-                ui.add_space((ui.available_width() - width).max(0.0));
-                ui.vertical(|ui| {
-                    ui.spacing_mut().button_padding.y = 0.0;
-                    let size = egui::vec2(width, row);
-                    let button = |text: &str| {
-                        egui::Button::new(egui::RichText::new(text).font(font.clone()))
-                            .min_size(size)
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    dismissed = ui
+                        .add(egui::Button::new(ICON_CANCEL).frame(false))
+                        .on_hover_text("Dismiss")
+                        .clicked();
+                    let enabled = kind == update::Kind::Manual || !running;
+                    let button = ui.add_enabled(enabled, egui::Button::new(main_button));
+                    let button = button.on_disabled_hover_text("Stop running scripts to update.");
+                    let button = if kind == (update::Kind::Auto { admin: true }) {
+                        button.on_hover_text("An administrator has to approve the update.")
+                    } else {
+                        button
                     };
-                    if let Some(label) = main_button {
-                        let enabled = kind == update::Kind::Manual || !running;
-                        clicked = ui.add_enabled(enabled, button(label)).clicked();
-                    }
-                    dismissed = ui.add(button("Dismiss")).clicked();
+                    clicked = button.clicked();
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!(
+                                    "Version {} is available",
+                                    release.version
+                                ))
+                                .color(crate::theme::BLUE),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(format!("You have version {}", update::VERSION));
+                        if let Some(error) = failure {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(error).color(ui.visuals().error_fg_color),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(error);
+                        }
+                    });
                 });
             });
+            ui.add_space(2.0);
         });
         if clicked {
             if kind == update::Kind::Manual {
@@ -2531,6 +2597,19 @@ impl LoaderApp {
             self.update = None;
             ctx.request_repaint();
         }
+    }
+
+    fn version_text(&self) -> String {
+        let mut text = format!("Version {}", update::VERSION);
+        if let Some(available) = &self.update
+            && available.kind == update::Kind::Dev
+        {
+            text.push_str(&format!(
+                "\nVersion {} is available. Development build: updates aren't installed here.",
+                available.release.version
+            ));
+        }
+        text
     }
 
     fn account_ui(&mut self, ui: &mut egui::Ui, stacked: bool) {
@@ -2561,7 +2640,7 @@ impl LoaderApp {
                         .add(egui::Button::new("Add funds").min_size(button_size))
                         .clicked()
                 {
-                    let _ = webbrowser::open(&format!("{}/credits", self.api.config().site_url));
+                    open_site(&self.api.config().site_url, "/credits");
                 }
                 if rate > 0.0 {
                     crate::theme::credits(ui, egui::RichText::new(crate::api::models::rate_label(rate)).weak(), "/h")
@@ -4049,6 +4128,20 @@ impl LoaderApp {
                 ui.label("output lines").on_hover_text("How many lines each output tab keeps. A tab lays out all of its lines again whenever one is added, so more lines cost more CPU and memory.");
                 log_lines_changed = ui.add(egui::DragValue::new(&mut self.settings.log_lines).range(backend::LOG_LINES).speed(50.0)).changed();
                 ui.end_row();
+
+                ui.label("interface font").on_hover_text("The font of the pages, buttons and labels. The output, the editor, the terminal and the inspectors stay monospace.");
+                let before = self.ui_font;
+                egui::ComboBox::from_id_salt("ui_font")
+                    .selected_text(self.ui_font.label())
+                    .show_ui(ui, |ui| {
+                        for font in crate::theme::UiFont::ALL {
+                            ui.selectable_value(&mut self.ui_font, font, font.label());
+                        }
+                    });
+                if self.ui_font != before {
+                    crate::theme::set_ui_font(ui.ctx(), self.ui_font);
+                }
+                ui.end_row();
             });
             self.whitelist_page
                 .ui(ui, &mut crate::script::write(&self.http_whitelist));
@@ -4146,7 +4239,6 @@ impl LoaderApp {
         });
         ui.add_space(4.0);
 
-        let mut action: Option<(ClientAction, Target)> = None;
         if self.targets.is_empty() {
             if self.busy.is_none() {
                 ui.label(
@@ -4161,8 +4253,6 @@ impl LoaderApp {
             let body = egui::TextStyle::Body.resolve(ui.style()).size;
             let bold = egui::FontId::new(body, crate::theme::bold_family());
             let measure = |ui: &egui::Ui, text: &str| crate::theme::text_width(ui, &bold, text);
-            let button_width = uniform_button_width(ui, &["Reload", "Unload", "Console"]);
-            let button_size = egui::vec2(button_width, 0.0);
             let pid_width = self
                 .targets
                 .iter()
@@ -4173,22 +4263,15 @@ impl LoaderApp {
                 .iter()
                 .map(|t| measure(ui, &t.client.title))
                 .fold(measure(ui, "Title"), f32::max);
-            let row_controls_width = 3.0 * button_width + 2.0 * spacing.x;
             let mut flex = vec![("Title", title_width)];
             if show_prefix {
                 flex.push(("Prefix", CLIENT_PREFIX_WIDTH));
             }
             flex.push(("Status", CLIENT_STATUS_WIDTH));
-            let columns = flex.len() + 2;
+            let columns = flex.len() + 1;
             let natural: f32 = flex.iter().map(|(_, w)| w).sum();
             let other = pid_width + gap * (columns - 1) as f32 + 16.0;
-            let stack_controls = ui.available_width() - other - row_controls_width < natural;
-            let controls_width = if stack_controls {
-                button_width
-            } else {
-                row_controls_width
-            };
-            let room = ui.available_width() - other - controls_width;
+            let room = ui.available_width() - other;
             let narrow = room < natural;
             if narrow {
                 let scale = (room / natural).max(0.0);
@@ -4212,7 +4295,6 @@ impl LoaderApp {
                         for (i, (title, _)) in flex.iter().enumerate() {
                             header(ui, widths[i], title);
                         }
-                        header(ui, controls_width, "Controls");
                     });
                     ui.add_space(spacing.y);
 
@@ -4260,14 +4342,6 @@ impl LoaderApp {
                             (text.clone(), crate::theme::COMMENT, text)
                         };
                         let bold_status = active || !enabled;
-                        let loaded = client.loaded.is_some();
-                        let outdated = client.version != self.dll_version;
-                        let can_load = self.busy.is_none()
-                            && enabled
-                            && !self.settings.dll.is_empty()
-                            && client.is_64bit
-                            && (!loaded || outdated);
-                        let can_unload = self.busy.is_none() && enabled && loaded;
                         let prefix = target.location.label().unwrap_or_default();
 
                         let painter = ui.painter().clone();
@@ -4280,16 +4354,25 @@ impl LoaderApp {
                             widths[0],
                         );
                         let status_index = flex.len() - 1;
-                        let status_font = if bold_status { bold.clone() } else { normal.clone() };
-                        let status_galley =
-                            painter.layout(status.clone(), status_font, color, widths[status_index]);
+                        let status_font = if bold_status {
+                            bold.clone()
+                        } else {
+                            normal.clone()
+                        };
+                        let status_galley = painter.layout(
+                            status.clone(),
+                            status_font,
+                            color,
+                            widths[status_index],
+                        );
                         let pid_galley = painter.layout_no_wrap(
                             client.pid.to_string(),
                             font.clone(),
                             text_color,
                         );
                         let prefix_galley = show_prefix.then(|| {
-                            let lines = title_galley.rows.len().max(status_galley.rows.len()).max(1);
+                            let lines =
+                                title_galley.rows.len().max(status_galley.rows.len()).max(1);
                             let mut job = egui::text::LayoutJob::simple(
                                 prefix.clone(),
                                 font.clone(),
@@ -4300,18 +4383,11 @@ impl LoaderApp {
                             job.wrap.break_anywhere = true;
                             painter.layout_job(job)
                         });
-                        let button_height = ui.spacing().interact_size.y;
-                        let controls_height = if stack_controls {
-                            3.0 * button_height + 2.0 * spacing.y
-                        } else {
-                            button_height
-                        };
                         let row_height = [
                             pid_galley.size().y,
                             title_galley.size().y,
                             status_galley.size().y,
                             prefix_galley.as_ref().map_or(0.0, |g| g.size().y),
-                            controls_height,
                         ]
                         .into_iter()
                         .fold(0.0, f32::max);
@@ -4320,25 +4396,46 @@ impl LoaderApp {
                         let row = ui
                             .horizontal_top(|ui| {
                                 ui.spacing_mut().item_spacing.x = gap;
-                                client_cell(ui, pid_width, pad(pid_galley.size().y), spacing, |ui| {
-                                    ui.add(
-                                        egui::Label::new(styled(&client.pid.to_string()))
-                                            .selectable(false),
-                                    );
-                                });
-                                client_cell(ui, widths[0], pad(title_galley.size().y), spacing, |ui| {
-                                    ui.add(egui::Label::new(styled(&client.title)).selectable(false))
-                                        .on_hover_text(&client.exe);
-                                });
-                                if let Some(galley) = prefix_galley {
-                                    client_cell(ui, widths[1], pad(galley.size().y), spacing, |ui| {
-                                        let (rect, response) = ui.allocate_exact_size(
-                                            egui::vec2(widths[1], galley.size().y),
-                                            egui::Sense::hover(),
+                                client_cell(
+                                    ui,
+                                    pid_width,
+                                    pad(pid_galley.size().y),
+                                    spacing,
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(styled(&client.pid.to_string()))
+                                                .selectable(false),
                                         );
-                                        ui.painter().galley(rect.min, galley, text_color);
-                                        response.on_hover_text(&prefix);
-                                    });
+                                    },
+                                );
+                                client_cell(
+                                    ui,
+                                    widths[0],
+                                    pad(title_galley.size().y),
+                                    spacing,
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(styled(&client.title))
+                                                .selectable(false),
+                                        )
+                                        .on_hover_text(&client.exe);
+                                    },
+                                );
+                                if let Some(galley) = prefix_galley {
+                                    client_cell(
+                                        ui,
+                                        widths[1],
+                                        pad(galley.size().y),
+                                        spacing,
+                                        |ui| {
+                                            let (rect, response) = ui.allocate_exact_size(
+                                                egui::vec2(widths[1], galley.size().y),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().galley(rect.min, galley, text_color);
+                                            response.on_hover_text(&prefix);
+                                        },
+                                    );
                                 }
                                 client_cell(
                                     ui,
@@ -4356,45 +4453,6 @@ impl LoaderApp {
                                             .on_hover_text(&tip);
                                     },
                                 );
-                                client_cell(ui, controls_width, pad(controls_height), spacing, |ui| {
-                                    let buttons = |ui: &mut egui::Ui| {
-                                        if ui
-                                            .add_enabled(
-                                                can_load,
-                                                egui::Button::new(if loaded {
-                                                    "Reload"
-                                                } else {
-                                                    "Load"
-                                                })
-                                                .min_size(button_size),
-                                            )
-                                            .on_hover_text("Loads the DLL from the settings, unloading another build first.")
-                                            .clicked()
-                                        {
-                                            action = Some((ClientAction::Load, target.clone()));
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                can_unload,
-                                                egui::Button::new("Unload").min_size(button_size),
-                                            )
-                                            .clicked()
-                                        {
-                                            action = Some((ClientAction::Unload, target.clone()));
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                can_unload,
-                                                egui::Button::new("Console").min_size(button_size),
-                                            )
-                                            .on_hover_text("Opens agent's console window in the client.")
-                                            .clicked()
-                                        {
-                                            action = Some((ClientAction::Console, target.clone()));
-                                        }
-                                    };
-                                    fit_row(ui, !stack_controls, buttons);
-                                });
                             })
                             .response
                             .rect
@@ -4423,12 +4481,6 @@ impl LoaderApp {
                     }
                 });
         }
-        match action {
-            Some((ClientAction::Load, target)) => self.load(&ctx, target),
-            Some((ClientAction::Unload, target)) => self.unload(&ctx, target),
-            Some((ClientAction::Console, target)) => self.console(&ctx, target),
-            None => {}
-        }
 
         let loaded = self
             .selected_target()
@@ -4438,6 +4490,8 @@ impl LoaderApp {
         ui.add_space(8.0);
         ui.heading("Client options");
         ui.add_space(4.0);
+        self.client_buttons_ui(ui);
+        ui.add_space(6.0);
         let mut changed = false;
         let mut set_name = false;
         ui.vertical(|ui| {
@@ -4488,6 +4542,60 @@ impl LoaderApp {
             }
         }
     }
+    fn client_buttons_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let target = self
+            .selected_target()
+            .filter(|t| t.client.foreign_bot.is_none())
+            .cloned();
+        let client = target.as_ref().map(|t| &t.client);
+        let idle = self.busy.is_none();
+        let loaded = client.is_some_and(|c| c.loaded.is_some());
+        let can_load = idle
+            && !self.settings.dll.is_empty()
+            && client.is_some_and(|c| {
+                c.is_64bit && (c.loaded.is_none() || c.version != self.dll_version)
+            });
+        let can_unload = idle && loaded;
+        let (load_icon, load_label) = if loaded {
+            (ICON_UPDATE, "Reload")
+        } else {
+            (ICON_LOAD, "Load")
+        };
+        let mut action = None;
+        crate::theme::button_group(ui, |ui| {
+            let width = icon_button_width(
+                ui,
+                &[
+                    (ICON_LOAD, "Load"),
+                    (ICON_UPDATE, "Reload"),
+                    (ICON_UNLOAD, "Unload"),
+                    (ICON_CONSOLE, "Console"),
+                ],
+            );
+            let load = icon_button(ui, load_icon, load_label, width, can_load)
+                .on_hover_text("Loads the DLL from the settings, unloading another build first.");
+            if load.clicked() {
+                action = Some(ClientAction::Load);
+            }
+            if icon_button(ui, ICON_UNLOAD, "Unload", width, can_unload).clicked() {
+                action = Some(ClientAction::Unload);
+            }
+            if icon_button(ui, ICON_CONSOLE, "Console", width, can_unload)
+                .on_hover_text("Opens agent's console window in the client.")
+                .clicked()
+            {
+                action = Some(ClientAction::Console);
+            }
+        });
+        match (action, target) {
+            (Some(ClientAction::Load), Some(target)) => self.load(&ctx, target),
+            (Some(ClientAction::Unload), Some(target)) => self.unload(&ctx, target),
+            (Some(ClientAction::Console), Some(target)) => self.console(&ctx, target),
+            _ => {}
+        }
+    }
+
     fn step_selected_client(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -4706,7 +4814,6 @@ impl LoaderApp {
             return;
         }
         let minutes_per_month = self.auth.me().map_or(43_200, |me| me.minutes_per_month);
-        ui.label(egui::RichText::new("Each script runs on its own client. Every script past the oldest pays the extra-session fee; the oldest runs without one.").weak());
         ui.add_space(6.0);
         let mut open = None;
         let mut pause = None;
@@ -4717,48 +4824,54 @@ impl LoaderApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for run in &self.runs {
-                    ui.add_space(4.0);
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.add_space(8.0);
+                    crate::theme::card().show(ui, |ui| {
                         ui.set_width(ui.available_width());
+                        let client = run.target.as_ref().map_or("no client".to_owned(), |t| {
+                            format!("client {}", t.client.pid)
+                        });
+                        let rate = run
+                            .store
+                            .as_ref()
+                            .map_or(0.0, |store| store.rate_per_hour(minutes_per_month));
+                        let billed = run
+                            .store
+                            .as_ref()
+                            .filter(|store| rate > 0.0 || store.fee_charged > 0);
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new(&run.title).strong().size(16.0));
-                            ui.label(egui::RichText::new(run.status()).weak());
-                            match &run.target {
-                                Some(t) => ui.label(
-                                    egui::RichText::new(format!("client {}", t.client.pid)).weak(),
-                                ),
-                                None => ui.label(egui::RichText::new("no client").weak()),
-                            };
+                            let state = run.state();
+                            let about = format!("{}, {client}", state.label());
+                            crate::theme::status_dot(ui, state.color()).on_hover_text(&about);
+                            ui.label(egui::RichText::new(&run.title).strong().size(16.0))
+                                .on_hover_text(&about);
                             ui.label(
                                 egui::RichText::new(crate::xp::duration(run.run_time())).weak(),
                             );
+                            if billed.is_none() {
+                                ui.label(egui::RichText::new("free").weak().small())
+                                    .on_hover_text(if run.store.is_some() {
+                                        "This session costs nothing."
+                                    } else {
+                                        "Run from the editor, not billed."
+                                    });
+                            }
                         });
-                        ui.horizontal_wrapped(|ui| match &run.store {
-                            Some(store) => {
-                                let rate = store.rate_per_hour(minutes_per_month);
+                        if let Some(store) = billed {
+                            ui.horizontal_wrapped(|ui| {
                                 crate::theme::credits(
                                     ui,
                                     egui::RichText::new(crate::api::models::rate_label(rate))
                                         .strong(),
                                     "/h",
-                                );
+                                )
+                                .on_hover_text(EXTRA_SESSION_FEE_HINT);
                                 if store.fee > 0 {
                                     ui.label(
-                                        egui::RichText::new(format!(
-                                            "includes the extra-session fee, {}",
-                                            if store.rank >= 1 {
-                                                "yours is not the oldest session"
-                                            } else {
-                                                ""
-                                            }
-                                        ))
-                                        .weak()
-                                        .small(),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new("no extra-session fee").weak().small(),
-                                    );
+                                        egui::RichText::new("includes the extra-session fee")
+                                            .weak()
+                                            .small(),
+                                    )
+                                    .on_hover_text(EXTRA_SESSION_FEE_HINT);
                                 }
                                 if store.fee_charged > 0 {
                                     crate::theme::credits(
@@ -4770,38 +4883,38 @@ impl LoaderApp {
                                         " in fees so far",
                                     );
                                 }
-                            }
-                            None => {
-                                ui.label(
-                                    egui::RichText::new("from the editor, not billed")
-                                        .weak()
-                                        .small(),
-                                );
-                            }
-                        });
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.button("Open").clicked() {
+                            });
+                        }
+                        ui.add_space(4.0);
+                        crate::theme::button_group(ui, |ui| {
+                            let width = icon_button_width(
+                                ui,
+                                &[
+                                    (ICON_OPEN_RUN, "Open"),
+                                    PAUSE_BUTTONS[0],
+                                    PAUSE_BUTTONS[1],
+                                    (ICON_STOP, "Stop"),
+                                    (ICON_CANCEL, "Close"),
+                                    (ICON_RESTART, "Restart"),
+                                ],
+                            );
+                            if icon_button(ui, ICON_OPEN_RUN, "Open", width, true).clicked() {
                                 open = Some(run.id);
                             }
                             let running = run.is_running();
                             let stopping = run.script.stop_requested();
-                            if ui
-                                .add_enabled(
-                                    running && !stopping,
-                                    egui::Button::new(pause_label(run.script.is_paused())),
-                                )
+                            let (pause_icon, pause_text) = run_pause_label(run.script.is_paused());
+                            if icon_button(ui, pause_icon, pause_text, width, running && !stopping)
                                 .clicked()
                             {
                                 pause = Some(run.id);
                             }
-                            if ui
-                                .add_enabled(running && !stopping, egui::Button::new("Stop"))
+                            if icon_button(ui, ICON_STOP, "Stop", width, running && !stopping)
                                 .clicked()
                             {
                                 stop = Some(run.id);
                             }
-                            if ui
-                                .add_enabled(!running, egui::Button::new("Close"))
+                            if icon_button(ui, ICON_CANCEL, "Close", width, !running)
                                 .on_hover_text("Takes the ended run and its log off the list.")
                                 .clicked()
                             {
@@ -4810,7 +4923,7 @@ impl LoaderApp {
                             if !running
                                 && restart_button(
                                     ui,
-                                    "Restart",
+                                    width,
                                     run.store.is_some(),
                                     self.restart_refusal(run).as_deref(),
                                 )
@@ -4855,8 +4968,8 @@ impl LoaderApp {
         {
             self.run_target = free.first().map(|(_, key)| key.clone());
         }
-        ui.horizontal(|ui| {
-            ui.label("Run on");
+        ui.vertical(|ui| {
+            ui.label("Client:");
             let label = |t: &Target| format!("client {} ({})", t.client.pid, t.client.title);
             let current = free.iter().find(|(_, key)| Some(key) == self.run_target.as_ref());
             egui::ComboBox::from_id_salt("run_target")
@@ -4974,74 +5087,86 @@ impl LoaderApp {
         ui.add_space(4.0);
         ui.add(egui::Label::new(egui::RichText::new(&run.title).font(title_font)).truncate());
         ui.add_space(8.0);
-        let pause_width =
-            uniform_button_width(ui, &[&run_pause_label(false), &run_pause_label(true)]);
-        let start_label = with_icon(ICON_START, &submit_label);
-        let update_label = with_icon(ICON_UPDATE, "Update");
-        let submit_width = uniform_button_width(ui, &[&start_label, &update_label]);
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
         let mut restart = false;
-        ui.horizontal_wrapped(|ui| {
+        crate::theme::button_group(ui, |ui| {
+            let width = icon_button_width(
+                ui,
+                &[
+                    (ICON_START, &submit_label),
+                    (ICON_UPDATE, "Update"),
+                    PAUSE_BUTTONS[0],
+                    PAUSE_BUTTONS[1],
+                    (ICON_STOP, "Stop"),
+                    (ICON_CANCEL, "Cancel"),
+                    (ICON_RESTART, "Restart"),
+                ],
+            );
             if form_sent {
-                update = ui
-                    .add_enabled(
-                        running && !stopping && changed_form,
-                        egui::Button::new(update_label).min_size(egui::vec2(submit_width, 0.0)),
-                    )
-                    .on_hover_text("Sends the changed settings to the running script.")
-                    .clicked();
-            } else if ui
-                .add_enabled(
-                    waiting,
-                    egui::Button::new(start_label).min_size(egui::vec2(submit_width, 0.0)),
+                update = icon_button(
+                    ui,
+                    ICON_UPDATE,
+                    "Update",
+                    width,
+                    running && !stopping && changed_form,
                 )
-                .clicked()
+                .clicked();
+            } else if icon_button(ui, ICON_START, &submit_label, width, waiting).clicked()
                 && let Some(form) = self.run().and_then(|r| r.form.as_ref())
             {
                 outcome = form.submitted(self.script_layouts(), &self.known_items);
             }
-            if ui
-                .add_enabled(
-                    running && !stopping && !waiting,
-                    egui::Button::new(run_pause_label(paused)).min_size(egui::vec2(pause_width, 0.0)),
-                )
-                .on_hover_text(if is_store {
-                    "Suspends the script's process. It is still billed while paused: stop it to stop billing."
-                } else {
-                    PAUSE_HINT
-                })
-                .clicked()
+            let (pause_icon, pause_text) = run_pause_label(paused);
+            let pause = icon_button(
+                ui,
+                pause_icon,
+                pause_text,
+                width,
+                running && !stopping && !waiting,
+            );
+            let pause = if is_store {
+                pause.on_hover_text("Still billed while paused: stop the script to stop billing.")
+            } else {
+                pause
+            };
+            if pause.clicked()
                 && let Some(id) = self.active_run
             {
                 self.toggle_pause_of(id);
             }
-            if ui
-                .add_enabled(
-                    running && !stopping,
-                    egui::Button::new(if waiting {
-                        with_icon(ICON_CANCEL, "Cancel")
-                    } else {
-                        with_icon(ICON_STOP, "Stop")
-                    }),
-                )
-                .clicked()
-            {
+            let (stop_icon, stop_text) = if waiting {
+                (ICON_CANCEL, "Cancel")
+            } else {
+                (ICON_STOP, "Stop")
+            };
+            if icon_button(ui, stop_icon, stop_text, width, running && !stopping).clicked() {
                 if waiting {
                     outcome = crate::form::Outcome::Cancelled;
                 } else if let Some(run) = self.run_mut() {
                     run.script.stop();
                 }
             }
-            restart = restartable
-                && restart_button(
+            if restartable {
+                let button = icon_button(
                     ui,
-                    &with_icon(ICON_RESTART, "Restart"),
-                    is_store,
-                    restart_refusal.as_deref(),
+                    ICON_RESTART,
+                    "Restart",
+                    width,
+                    restart_refusal.is_none(),
                 );
-            ui.separator();
-            ui.label(self.run().map_or("ended", Run::status));
+                restart = match restart_refusal.as_deref() {
+                    Some(why) => button.on_disabled_hover_text(why),
+                    None => button,
+                }
+                .clicked();
+            }
+        });
+        let state = self.run().map_or(RunState::Ended, Run::state);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            crate::theme::status_dot(ui, state.color());
+            ui.label(egui::RichText::new(state.label()).color(state.color()));
         });
         self.answer_form(outcome);
         if update {
@@ -5727,32 +5852,38 @@ impl LoaderApp {
     }
 
     fn file_buttons(&mut self, ui: &mut egui::Ui, running: bool, width: f32) {
-        if width_button(ui, !running, "Open…", width).clicked() {
+        if icon_button(ui, ICON_OPEN, "Open…", width, !running).clicked() {
             self.open_script();
         }
         let last = self.last_script.as_deref();
-        if width_button(ui, !running && last.is_some(), "Open last", width)
-            .on_hover_text(last.unwrap_or("No file has been opened yet."))
-            .on_disabled_hover_text("No file has been opened yet.")
-            .clicked()
+        let open_last = icon_button(
+            ui,
+            ICON_OPEN_LAST,
+            "Open last",
+            width,
+            !running && last.is_some(),
+        );
+        let open_last = match last {
+            Some(path) => open_last.on_hover_text(path),
+            None => open_last,
+        };
+        if open_last.clicked()
             && let Some(path) = self.last_script.clone()
         {
             self.open_path(std::path::Path::new(&path));
         }
-        if width_button(
+        if icon_button(
             ui,
-            !running && !self.script_file.path.is_empty(),
+            ICON_SAVE,
             "Save",
             width,
+            !running && !self.script_file.path.is_empty(),
         )
         .clicked()
         {
             self.save_script();
         }
-        if width_button(ui, !running, "Save as…", width)
-            .on_hover_text("Saves a copy of what's in the editor.")
-            .clicked()
-        {
+        if icon_button(ui, ICON_SAVE_AS, "Save as…", width, !running).clicked() {
             self.save_script_as();
         }
     }
@@ -5766,10 +5897,7 @@ impl LoaderApp {
         width: f32,
     ) {
         let can_run = !running && !self.script_file.text.trim().is_empty();
-        if width_button(ui, can_run, "Run", width)
-            .on_hover_text("Runs what's in the editor, against the client selected above if any.")
-            .clicked()
-        {
+        if icon_button(ui, ICON_START, "Run", width, can_run).clicked() {
             match self.script_file.changed_on_disk() {
                 Some(disk) => {
                     self.reload_prompt = Some(ReloadPrompt {
@@ -5780,14 +5908,13 @@ impl LoaderApp {
                 None => self.run_file(ui.ctx(), self.script_file.clone(), target, None),
             }
         }
-        if width_button(ui, running, pause_label(paused), width)
-            .on_hover_text(PAUSE_HINT)
-            .clicked()
+        let (pause_icon, pause_text) = run_pause_label(paused);
+        if icon_button(ui, pause_icon, pause_text, width, running).clicked()
             && let Some(id) = self.editor_run_mut().map(|r| r.id)
         {
             self.toggle_pause_of(id);
         }
-        if width_button(ui, running, "Stop", width).clicked()
+        if icon_button(ui, ICON_STOP, "Stop", width, running).clicked()
             && let Some(run) = self.editor_run_mut()
         {
             run.script.stop();
@@ -5813,41 +5940,26 @@ impl LoaderApp {
 
         let target = self.run_target_ui(ui);
 
-        let button_width = uniform_button_width(
+        let width = icon_button_width(
             ui,
             &[
-                "Run",
-                "Pause",
-                "Resume",
-                "Stop",
-                "Open…",
-                "Open last",
-                "Save",
-                "Save as…",
+                (ICON_START, "Run"),
+                PAUSE_BUTTONS[0],
+                PAUSE_BUTTONS[1],
+                (ICON_STOP, "Stop"),
+                (ICON_OPEN, "Open…"),
+                (ICON_OPEN_LAST, "Open last"),
+                (ICON_SAVE, "Save"),
+                (ICON_SAVE_AS, "Save as…"),
             ],
         );
-        let run_width = 3.0 * button_width + 2.0 * ui.spacing().item_spacing.x;
-        let file_width = 4.0 * button_width + 3.0 * ui.spacing().item_spacing.x;
-        let gap = 16.0;
-        let available = ui.available_width();
-        if run_width + gap + file_width <= available {
-            ui.horizontal(|ui| {
-                ui.horizontal(|ui| {
-                    self.run_buttons(ui, running, paused, target.as_ref(), button_width)
-                });
-                ui.add_space(gap);
-                ui.horizontal(|ui| self.file_buttons(ui, running, button_width));
+        ui.horizontal_wrapped(|ui| {
+            crate::theme::button_group(ui, |ui| {
+                self.run_buttons(ui, running, paused, target.as_ref(), width)
             });
-        } else {
-            ui.vertical(|ui| {
-                fit_row(ui, run_width <= available, |ui| {
-                    self.run_buttons(ui, running, paused, target.as_ref(), button_width)
-                });
-                fit_row(ui, file_width <= available, |ui| {
-                    self.file_buttons(ui, running, button_width)
-                });
-            });
-        }
+            ui.add_space(8.0);
+            crate::theme::button_group(ui, |ui| self.file_buttons(ui, running, width));
+        });
         let status = match (running, paused) {
             (true, true) => "paused",
             (true, false) => "running",
@@ -5939,7 +6051,7 @@ impl LoaderApp {
                     for row in first..last.min(view.visible.len()) {
                         let line = view.visible[row];
                         let number_color = if hover_row == Some(row) {
-                            ui.visuals().strong_text_color()
+                            ui.visuals().text_color()
                         } else {
                             gutter_color
                         };
@@ -6516,35 +6628,30 @@ impl LoaderApp {
                 });
             log.set_filter(filter);
         }
-        let narrow = ui.available_width() < 150.0;
-        let layout = if narrow {
-            egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true)
-        } else {
-            egui::Layout::right_to_left(egui::Align::Center)
-        };
         let tab = self.log_tab;
         let (mut save, mut pipe) = (false, false);
-        ui.with_layout(layout, |ui| {
-            let log = self.log_of(tab);
-            if ui
-                .add_enabled(!log.is_empty(), egui::Button::new("Clear"))
-                .on_hover_text("Clears the output of the open tab.")
-                .clicked()
-            {
-                log.clear();
-            }
-            if ui
-                .add_enabled(!log.is_empty(), egui::Button::new("Copy all"))
-                .on_hover_text("Copies the shown output of the open tab.")
-                .clicked()
-            {
-                ui.ctx().copy_text(log.text.clone());
-            }
-            save = ui
-                .add_enabled(!log.is_empty(), egui::Button::new("Save"))
-                .on_hover_text("Saves the shown output of the open tab to a text file.")
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::theme::button_group(ui, |ui| {
+                let log = self.log_of(tab);
+                let filled = !log.is_empty();
+                if slide_button(ui, ICON_CLEAR, "Clear", filled, false).clicked() {
+                    log.clear();
+                }
+                if slide_button(ui, ICON_COPY, "Copy all", filled, false).clicked() {
+                    ui.ctx().copy_text(log.text.clone());
+                }
+                save = slide_button(ui, ICON_SAVE, "Save", filled, false).clicked();
+                let piping = log
+                    .pipe
+                    .as_ref()
+                    .map(|pipe| pipe.path().display().to_string());
+                let button = slide_button(ui, ICON_PIPE, "Pipe", true, piping.is_some());
+                pipe = match piping {
+                    Some(path) => button.on_hover_text(format!("Appending to {path}")),
+                    None => button,
+                }
                 .clicked();
-            pipe = crate::pipe::button(ui, log.pipe.as_ref());
+            });
         });
         if save {
             let text = self.log_of(tab).text.clone();
@@ -6603,15 +6710,84 @@ impl LoaderApp {
         }
     }
 
+    fn shown_run_log(&self) -> Option<&Run> {
+        let id = match self.log_tab {
+            LogTab::Run(id) => Some(id),
+            LogTab::Loader => self.active_run,
+        };
+        id.and_then(|id| self.run_by_id(id))
+    }
+
+    fn log_line_ui(&mut self, ui: &mut egui::Ui) {
+        let tab = self.log_tab;
+        let shown_run = self.shown_run_log().map(|run| (run.id, run.title.clone()));
+        let title = match (tab, &shown_run) {
+            (LogTab::Run(_), Some((_, title))) => title.clone(),
+            _ => "Loader".to_owned(),
+        };
+        let last = self.log_ref(tab).last();
+        let (text, tone) = last.map_or(("", Tone::Normal), |line| {
+            (line.text.lines().last().unwrap_or_default(), line.tone)
+        });
+        let color = match tone {
+            Tone::Normal => ui.visuals().text_color(),
+            Tone::Warning => ui.visuals().warn_fg_color,
+            Tone::Error => ui.visuals().error_fg_color,
+        };
+        let mut expand = false;
+        let mut picked = tab;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                expand = log_collapse_button(ui, true);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let title = egui::RichText::new(title).color(crate::theme::COMMENT);
+                    match &shown_run {
+                        Some((id, run_title)) => {
+                            egui::ComboBox::from_id_salt("log_line_tab")
+                                .selected_text(title)
+                                .width(0.0)
+                                .truncate()
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut picked, LogTab::Loader, "Loader");
+                                    ui.selectable_value(&mut picked, LogTab::Run(*id), run_title);
+                                });
+                        }
+                        None => {
+                            ui.label(title);
+                        }
+                    }
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).monospace().color(color))
+                            .truncate(),
+                    );
+                });
+            });
+        });
+        if expand {
+            self.log_collapsed = false;
+        }
+        self.log_tab = picked;
+    }
+
     fn log_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.shrink_clip_rect(ui.available_rect_before_wrap());
         ui.spacing_mut().item_spacing.y = 0.0;
-        ui.horizontal_wrapped(|ui| {
-            crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
-            for run in &self.runs {
-                crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Run(run.id), &run.title);
-            }
+        let shown_run = self.shown_run_log().map(|run| (run.id, run.title.clone()));
+        let mut collapse = false;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                collapse = log_collapse_button(ui, false);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                    crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Loader, "Loader");
+                    if let Some((id, title)) = &shown_run {
+                        crate::theme::tab_value(ui, &mut self.log_tab, LogTab::Run(*id), title);
+                    }
+                });
+            });
         });
+        if collapse {
+            self.log_collapsed = true;
+        }
         divider(ui);
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal_wrapped(|ui| self.log_controls_ui(ui));
@@ -6620,7 +6796,7 @@ impl LoaderApp {
 
     fn log_ui(&mut self, ui: &mut egui::Ui) {
         let tab = self.log_tab;
-        let font = egui::TextStyle::Body.resolve(ui.style());
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
         let normal = ui.visuals().text_color();
         let error = ui.visuals().error_fg_color;
         let warning = ui.visuals().warn_fg_color;
@@ -6677,7 +6853,7 @@ impl LoaderApp {
             .show(ui, |ui| {
                 let mut read_only = text;
                 let output = egui::TextEdit::multiline(&mut read_only)
-                    .font(egui::TextStyle::Body)
+                    .font(egui::TextStyle::Monospace)
                     .frame(egui::Frame::NONE)
                     .desired_width(ui.available_width())
                     .layouter(&mut layouter)
@@ -6732,19 +6908,40 @@ impl LoaderApp {
                     egui::pos2(output.response.rect.left(), rect.top()),
                     egui::pos2(output.response.rect.right(), rect.bottom()),
                 );
-                let copy = ui
-                    .put(line_rect, |ui: &mut egui::Ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.small_button("Copy")
-                        })
-                        .inner
-                    })
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if copy.clicked() {
+                if line_copy_button(ui, line_rect).clicked() {
                     ui.ctx().copy_text(log.lines[log.view[entry]].text.clone());
                 }
             });
     }
+}
+
+fn line_copy_button(ui: &mut egui::Ui, line: egui::Rect) -> egui::Response {
+    let height = (line.height() - 2.0).max(1.0);
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(line.right() - height * 1.6, line.top() + 1.0),
+        egui::pos2(line.right(), line.top() + 1.0 + height),
+    );
+    let response = ui
+        .interact(rect, ui.id().with("copy_line"), egui::Sense::click())
+        .on_hover_text("Copy this line")
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let visuals = ui.style().interact(&response);
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        egui::CornerRadius::ZERO,
+        visuals.weak_bg_fill,
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        ICON_COPY,
+        egui::FontId::monospace(height * 0.7),
+        visuals.text_color(),
+    );
+    response
 }
 
 fn paint_arrow(
@@ -6924,6 +7121,17 @@ enum RowsAction {
     Pipe,
 }
 
+fn log_collapse_button(ui: &mut egui::Ui, collapsed: bool) -> bool {
+    let (icon, hint) = if collapsed {
+        (ICON_EXPAND, "Show the output")
+    } else {
+        (ICON_COLLAPSE, "Hide the output, keeping its last line")
+    };
+    ui.add(egui::Button::new(icon).frame(false))
+        .on_hover_text(hint)
+        .clicked()
+}
+
 fn rows_buttons(
     ui: &mut egui::Ui,
     empty: bool,
@@ -7000,14 +7208,40 @@ impl eframe::App for LoaderApp {
         let stack_brand = window.width() < HEADER_TINY_WINDOW;
         egui::Panel::top("settings").show(ui, |ui| {
             ui.add_space(6.0);
+            let version = self.version_text();
+            let site_url = self.api.config().site_url.clone();
             let brand = |ui: &mut egui::Ui| {
+                let id = egui::Id::new("header_brand");
+                let link = !site_url.is_empty();
+                let hovered = link && crate::theme::link_hovered(ui, id);
                 let logo = egui::Image::new(egui::include_image!("../assets/volcren.svg"))
                     .fit_to_exact_size(egui::vec2(32.0, 32.0));
-                ui.add(logo);
-                ui.label(
+                let logo = ui.add(logo);
+                let title = ui.label(
                     egui::RichText::new("VOLCREN")
-                        .font(egui::FontId::new(22.0, crate::theme::bold_family())),
+                        .font(egui::FontId::new(22.0, crate::theme::bold_family()))
+                        .color(if hovered {
+                            crate::theme::BLUE
+                        } else {
+                            ui.visuals().text_color()
+                        }),
                 );
+                let sense = if link {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                };
+                let brand = ui
+                    .interact(logo.rect.union(title.rect), id, sense)
+                    .on_hover_text(&version);
+                let brand = if link {
+                    brand.on_hover_cursor(egui::CursorIcon::PointingHand)
+                } else {
+                    brand
+                };
+                if brand.clicked() {
+                    open_site(&site_url, "");
+                }
             };
             let brand_ui = |ui: &mut egui::Ui| fit_row(ui, !stack_brand, brand);
             if !wrap_account {
@@ -7054,15 +7288,21 @@ impl eframe::App for LoaderApp {
         });
         self.update_banner_ui(&ctx, ui);
         let log_max = (window.height() * 0.5).max(60.0);
-        egui::Panel::bottom("log")
-            .resizable(true)
-            .default_size((window.height() * 0.22).clamp(70.0, 180.0))
-            .min_size(48.0)
-            .max_size(log_max)
-            .show(ui, |ui| {
-                ui.add_space(4.0);
-                self.log_panel_ui(ui);
-            });
+        if self.log_collapsed {
+            egui::Panel::bottom("log_collapsed")
+                .resizable(false)
+                .show(ui, |ui| self.log_line_ui(ui));
+        } else {
+            egui::Panel::bottom("log")
+                .resizable(true)
+                .default_size((window.height() * 0.22).clamp(70.0, 180.0))
+                .min_size(48.0)
+                .max_size(log_max)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    self.log_panel_ui(ui);
+                });
+        }
         if self.auth.me().is_none() {
             egui::CentralPanel::default_margins().show(ui, |ui| {
                 self.login_gate_ui(ui);
@@ -7146,6 +7386,8 @@ impl eframe::App for LoaderApp {
             let followed = (self.tab, self.active_run);
             if followed != self.followed_tab {
                 self.followed_tab = followed;
+                self.log_collapsed =
+                    matches!(self.tab, Tab::Accounts | Tab::Settings | Tab::Feedback);
                 self.log_tab = match self.tab {
                     Tab::Run | Tab::Sessions | Tab::Scripts | Tab::Store => {
                         self.active_run.map_or(LogTab::Loader, LogTab::Run)
@@ -7180,6 +7422,7 @@ impl eframe::App for LoaderApp {
             eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
         }
         eframe::set_value(storage, CURSOR_KEY, &self.cursor);
+        eframe::set_value(storage, UI_FONT_KEY, &self.ui_font);
         eframe::set_value(storage, CONFIRMED_KEY, &self.confirmed);
         eframe::set_value(
             storage,
@@ -7367,7 +7610,7 @@ mod tests {
         };
         let mut picked = None;
         ctx.run_ui(input, |ui| {
-            picked = sidebar_tree(ui, tab, active_run, &runs);
+            picked = sidebar_tree(ui, tab, active_run, &runs, "");
         })
         .textures_delta
         .clear();
@@ -7377,7 +7620,7 @@ mod tests {
     #[test]
     fn the_sidebar_reports_no_pick_without_a_click_while_a_run_is_active() {
         let ctx = egui::Context::default();
-        crate::theme::apply(&ctx);
+        crate::theme::apply(&ctx, crate::theme::UiFont::default());
         for tab in [
             Tab::Clients,
             Tab::Store,
@@ -7394,7 +7637,7 @@ mod tests {
     #[test]
     fn a_click_on_a_sidebar_row_picks_its_page() {
         let ctx = egui::Context::default();
-        crate::theme::apply(&ctx);
+        crate::theme::apply(&ctx, crate::theme::UiFont::default());
         let mut picks = Vec::new();
         for y in (0..400).step_by(5) {
             let pos = egui::pos2(40.0, y as f32);
