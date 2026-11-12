@@ -426,8 +426,9 @@ impl Form {
         if !Self::visible(field, values) {
             return;
         }
-        let usable = spec_form::enabled_by(field)
-            .is_none_or(|id| matches!(values.get(id), Some(FieldValue::Check(true))));
+        let checked = |id: &str| matches!(values.get(id), Some(FieldValue::Check(true)));
+        let usable = spec_form::enabled_by(field).is_none_or(checked)
+            && !spec_form::disabled_by(field).is_some_and(checked);
         let value = spec_form::id(field).and_then(|id| values.get_mut(id));
         ui.add_enabled_ui(usable, |ui| {
             Self::field_ui(ui, field, value, layouts, rules)

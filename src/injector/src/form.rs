@@ -308,6 +308,10 @@ pub fn enabled_by(field: &Value) -> Option<&str> {
     field.get("enabled_by").and_then(Value::as_str)
 }
 
+pub fn disabled_by(field: &Value) -> Option<&str> {
+    field.get("disabled_by").and_then(Value::as_str)
+}
+
 pub fn row_gap(spec: &Value) -> Option<f64> {
     spec.get("row_gap").and_then(Value::as_f64)
 }
