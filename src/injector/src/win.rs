@@ -21,10 +21,11 @@ use std::{
 use windows_sys::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND,
+            CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_BAD_LENGTH, GetLastError, HANDLE, HWND,
             INVALID_HANDLE_VALUE, LPARAM, POINT, WAIT_ABANDONED, WAIT_OBJECT_0,
         },
         Graphics::Gdi::ClientToScreen,
+        Storage::FileSystem::{FILE_TYPE_DISK, GetFileType, GetFinalPathNameByHandleW},
         System::{
             Diagnostics::{
                 Debug::{ReadProcessMemory, WriteProcessMemory},
@@ -40,8 +41,10 @@ use windows_sys::{
                 OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile, VirtualAllocEx, VirtualFreeEx,
             },
             Threading::{
-                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, IsWow64Process,
-                OpenEventW, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_NAME_WIN32,
+                CreateEventW, CreateMutexW, CreateRemoteThread, EVENT_MODIFY_STATE, GetCurrentProcess,
+                IsWow64Process,
+                OpenEventW, OpenProcess, PROCESS_CREATE_THREAD, PROCESS_DUP_HANDLE,
+                PROCESS_NAME_WIN32,
                 PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
                 PROCESS_VM_READ, PROCESS_VM_WRITE, QueryFullProcessImageNameW, ReleaseMutex,
                 SYNCHRONIZATION_ACCESS_RIGHTS, SYNCHRONIZATION_SYNCHRONIZE, SetEvent,
@@ -2812,6 +2815,68 @@ pub fn menu_layout(pid: u32) -> Result<Option<crate::MenuLayout>, String> {
         margin: g.margin,
         submenus,
     }))
+}
+
+const HANDLE_SCAN_LIMIT: usize = 0x4000;
+static SWAP_FOLDER: Mutex<Option<(u32, Option<String>, PathBuf)>> = Mutex::new(None);
+
+fn find_user_folder(pid: u32) -> Option<PathBuf> {
+    let process = Handle::new(unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) })?;
+    let current = unsafe { GetCurrentProcess() };
+    let mut buffer = [0u16; 1024];
+    (4..HANDLE_SCAN_LIMIT).step_by(4).find_map(|value| {
+        let mut copy: HANDLE = null_mut();
+        let duplicated = unsafe {
+            DuplicateHandle(
+                process.0,
+                value as HANDLE,
+                current,
+                &mut copy,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if duplicated == 0 {
+            return None;
+        }
+        let copy = Handle(copy);
+        if unsafe { GetFileType(copy.0) } != FILE_TYPE_DISK {
+            return None;
+        }
+        let len = unsafe {
+            GetFinalPathNameByHandleW(copy.0, buffer.as_mut_ptr(), buffer.len() as u32, 0)
+        } as usize;
+        if len == 0 || len >= buffer.len() {
+            return None;
+        }
+        crate::entry_swaps::user_folder(&String::from_utf16_lossy(&buffer[..len]))
+            .map(PathBuf::from)
+    })
+}
+
+fn swap_folder(pid: u32, account: Option<String>) -> Result<PathBuf, String> {
+    let mut cached = lock(&SWAP_FOLDER);
+    if let Some((_, _, folder)) = cached
+        .as_ref()
+        .filter(|(p, a, folder)| *p == pid && *a == account && folder.is_dir())
+    {
+        return Ok(folder.clone());
+    }
+    let folder = find_user_folder(pid)
+        .ok_or_else(|| format!("Client {pid} has no account folder open (not logged in?)"))?;
+    *cached = Some((pid, account, folder.clone()));
+    Ok(folder)
+}
+
+pub fn entry_swaps(pid: u32) -> Result<crate::EntrySwaps, String> {
+    let account = game_state(pid)?.account_name;
+    let folder = swap_folder(pid, account)?;
+    let read = |name: &str| fs::read_to_string(folder.join(name)).unwrap_or_default();
+    Ok(crate::EntrySwaps {
+        swaps: crate::entry_swaps::parse(&read("entryswaps.dat")),
+        alt: crate::entry_swaps::parse(&read("entryswapsalt.dat")),
+    })
 }
 
 pub fn menu_click(pid: u32) -> Result<Option<crate::MenuClick>, String> {

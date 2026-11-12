@@ -25,7 +25,7 @@ use crate::bank_pin::enter as bank_pin_enter;
 #[cfg(windows)]
 use crate::{
     ItemWatcher, PacketWatcher, cache_files, cache_locs, chat_messages, client_cycle, connection,
-    draw, draw_batch, draw_lines, enum_def, find_path, game_state, game_val_names, ground_items,
+    draw, draw_batch, draw_lines, entry_swaps, enum_def, find_path, game_state, game_val_names, ground_items,
     in_instance, item_container, item_names, item_params, item_stackable, landmasses, loc_model,
     loc_shown, locs, map_regions, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
     npc_hitsplats, npc_model, npc_sizes, npc_type_model, npcs, player_hitsplats, player_model,
@@ -103,6 +103,7 @@ mod offline {
         fn menu(u32) -> Vec<MenuEntry>;
         fn menu_open(u32) -> bool;
         fn menu_click(u32) -> Option<MenuClick>;
+        fn entry_swaps(u32) -> crate::EntrySwaps;
         fn menu_layout(u32) -> Option<MenuLayout>;
         fn selected_widget(u32) -> Option<crate::SelectedWidget>;
         fn project(u32, &[crate::projection::Point], crate::projection::Via) -> Vec<[f32; 2]>;
@@ -1502,6 +1503,7 @@ pub fn run_with_modules(
     )?;
     s.menu_query("menu", menu)?;
     s.read("menu_click", menu_click)?;
+    s.read("entry_swaps", entry_swaps)?;
     s.menu_query("menu_open", menu_open)?;
     s.menu_query("menu_layout", menu_layout)?;
     s.read("selected_widget", selected_widget)?;

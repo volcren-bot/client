@@ -14,7 +14,7 @@ use ipc::{Header, Incompatible};
 pub use ipc::{PROTOCOL_VERSION, state::varp};
 use serde::{Deserialize, Serialize};
 
-pub const HOST_API: u32 = 17;
+pub const HOST_API: u32 = 18;
 
 pub mod antiban;
 pub mod async_input;
@@ -25,6 +25,8 @@ pub mod cache;
 pub mod collision;
 pub mod config;
 pub mod devtools;
+pub mod entry_swaps;
+pub use entry_swaps::{EntrySwaps, Swap};
 pub mod font;
 pub mod form;
 pub mod http;
@@ -324,7 +326,8 @@ pub(crate) use win::paint_overlay;
 pub use win::{
     ItemWatcher, PacketWatcher, cache_archive_files, cache_archives, cache_files, cache_locs,
     chat_messages, client_cycle, collision_area, connection, draw, draw_batch, draw_lines,
-    enum_def, find_path, game_state, game_val_names, ground_items, in_instance, item_changes,
+    entry_swaps, enum_def, find_path, game_state, game_val_names, ground_items, in_instance,
+    item_changes,
     item_changes_wait, item_container, item_containers, item_families, item_icons, item_names,
     item_params, item_stackable, landmasses, list_clients, load, loc_model, loc_shown, locs,
     map_regions, memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
