@@ -956,6 +956,7 @@ const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("occult_altar", "main/occult_altar.luau"),
     lib_module!("randoms", "main/antiban/randoms.luau"),
     lib_module!("scrollbook", "main/interfaces/mainscreen/scrollbook.luau"),
+    lib_module!("shopmain", "main/interfaces/mainscreen/shopmain.luau"),
     lib_module!("boltpouch", "main/interfaces/mainscreen/boltpouch.luau"),
     lib_module!("runepouch", "main/interfaces/mainscreen/runepouch.luau"),
     lib_module!("bankpouch", "main/interfaces/mainscreen/bankpouch.luau"),
