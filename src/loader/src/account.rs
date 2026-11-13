@@ -1,9 +1,18 @@
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    panic,
+    sync::{Arc, atomic::AtomicBool},
+    thread,
+};
 
 use crate::api::{
-    Api, ApiError, Me,
+    Api, ApiError, Me, StoreScript,
     auth::{self, Pkce, TokenError},
 };
+
+pub struct Account {
+    pub me: Me,
+    pub scripts: Result<Vec<StoreScript>, ApiError>,
+}
 
 pub enum Auth {
     SignedOut,
@@ -28,7 +37,18 @@ impl Auth {
     }
 }
 
-pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Me, String> {
+pub fn load(api: &Api) -> Result<Account, ApiError> {
+    thread::scope(|scope| {
+        let scripts = scope.spawn(|| api.scripts("", "", false));
+        let me = api.me();
+        let scripts = scripts
+            .join()
+            .unwrap_or_else(|payload| panic::resume_unwind(payload));
+        me.map(|me| Account { me, scripts })
+    })
+}
+
+pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Account, String> {
     let missing = api.config().missing();
     if !missing.is_empty() {
         return Err(format!(
@@ -50,12 +70,12 @@ pub fn sign_in(api: &Api, cancel: &AtomicBool) -> Result<Me, String> {
             TokenError::Other(error) => error.to_string(),
         })?;
     api.set_tokens(tokens);
-    api.me().map_err(|e| e.to_string())
+    load(api).map_err(|e| e.to_string())
 }
 
-pub fn restore(api: &Api) -> Result<Option<Me>, ApiError> {
+pub fn restore(api: &Api) -> Result<Option<Account>, ApiError> {
     if !api.config().missing().is_empty() || !api.restore()? {
         return Ok(None);
     }
-    api.me().map(Some)
+    load(api).map(Some)
 }

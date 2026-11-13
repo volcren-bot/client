@@ -1,7 +1,7 @@
 use std::{
-    fs,
+    fs, panic,
     path::{Path, PathBuf},
-    thread,
+    thread::{self, ScopedJoinHandle},
     time::{Duration, Instant},
 };
 
@@ -11,7 +11,7 @@ use crate::api::{
     Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript,
     models::{Ended, Me, Quote, credits_label, end_reason_message},
 };
-use crate::libs;
+use crate::libs::{self, Lib};
 use crate::script::Process;
 
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(4 * 60);
@@ -103,33 +103,79 @@ pub struct Prepared {
     pub lib_version: String,
 }
 
-pub fn prepare(api: &Api, script: &StoreScript, warned: Option<i64>) -> Result<Prepared, String> {
-    let root = cache_root().ok_or("Can't find a cache folder on this system.")?;
-    prepare_warned(api, script, &root, warned)
+const NO_CACHE: &str = "Can't find a cache folder on this system.";
+
+#[derive(Debug, PartialEq)]
+pub struct Quoted {
+    pub me: Me,
+    pub quote: Quote,
+    pub lib: Result<Lib, String>,
 }
 
-pub fn quote(api: &Api, script_id: &str) -> Result<(Me, Quote), ApiError> {
-    let me = api.me()?;
-    Ok((me, api.quote(script_id)?))
+fn joined<T>(handle: ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|payload| panic::resume_unwind(payload))
+}
+
+fn ensure_lib(api: &Api, root: Option<&Path>) -> Result<Lib, String> {
+    libs::ensure(api, root.ok_or(NO_CACHE)?)
+}
+
+pub fn prepare(
+    api: &Api,
+    script: &StoreScript,
+    lib: Lib,
+    warned: Option<i64>,
+) -> Result<Prepared, String> {
+    let root = cache_root().ok_or(NO_CACHE)?;
+    prepare_warned(api, script, &root, lib, warned)
+}
+
+pub fn quote(api: &Api, root: Option<&Path>, script_id: &str) -> Result<Quoted, ApiError> {
+    thread::scope(|scope| {
+        let lib = scope.spawn(|| ensure_lib(api, root));
+        let me = scope.spawn(|| api.me());
+        let quote = api.quote(script_id);
+        let me = joined(me);
+        let lib = joined(lib);
+        Ok(Quoted {
+            me: me?,
+            quote: quote?,
+            lib,
+        })
+    })
 }
 
 pub fn restart_quote(
     api: &Api,
+    root: Option<&Path>,
     old_session: &str,
     script_id: &str,
     community: bool,
-) -> Result<Option<(Me, StoreScript, Quote)>, ApiError> {
-    let _ = api.end_session(old_session);
-    let me = api.me()?;
-    let Some(script) = api
-        .scripts("", "", community && me.can_browse_community())?
-        .into_iter()
-        .find(|s| s.id == script_id)
-    else {
-        return Ok(None);
-    };
-    let quote = api.quote(script_id)?;
-    Ok(Some((me, script, quote)))
+) -> Result<Option<(StoreScript, Quoted)>, ApiError> {
+    thread::scope(|scope| {
+        let lib = scope.spawn(|| ensure_lib(api, root));
+        let _ = api.end_session(old_session);
+        let quote = scope.spawn(|| api.quote(script_id));
+        let me = api.me()?;
+        let Some(script) = api
+            .scripts("", "", community && me.can_browse_community())?
+            .into_iter()
+            .find(|s| s.id == script_id)
+        else {
+            return Ok(None);
+        };
+        let quote = joined(quote)?;
+        Ok(Some((
+            script,
+            Quoted {
+                me,
+                quote,
+                lib: joined(lib),
+            },
+        )))
+    })
 }
 
 pub fn start_block(script: &StoreScript, quote: &Quote, microcredits: i64) -> Option<String> {
@@ -156,10 +202,10 @@ pub fn prepare_warned(
     api: &Api,
     script: &StoreScript,
     root: &Path,
+    lib: Lib,
     warned: Option<i64>,
 ) -> Result<Prepared, String> {
     let id = safe_id(&script.id).ok_or("The server sent a script id that can't be used.")?;
-    let lib = libs::ensure(api, root)?;
     let session = api.start_session(id).map_err(|e| e.to_string())?;
     if script.community && warned != Some(session.revision) {
         let _ = api.end_session(&session.session_id);

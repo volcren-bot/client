@@ -24,6 +24,7 @@ use crate::api::{
 };
 use crate::feedback;
 use crate::highlight::Highlighter;
+use crate::libs::Lib;
 use crate::pipe::Rows;
 use crate::script::{Script, ScriptEvent};
 use crate::session::{self, Kept, Prepared};
@@ -109,8 +110,8 @@ enum Event {
         pid: u32,
         result: Result<Option<(i32, i32)>, String>,
     },
-    Restored(Result<Option<Me>, ApiError>),
-    SignedIn(Result<Me, String>),
+    Restored(Result<Option<account::Account>, ApiError>),
+    SignedIn(Result<account::Account, String>),
     Me(Result<Me, ApiError>),
     Scripts(Result<Vec<StoreScript>, ApiError>),
     Redeemed(Result<Redeemed, ApiError>),
@@ -125,12 +126,13 @@ enum Event {
         result: Result<Prepared, String>,
     },
     RunQuoted {
-        start: Box<PendingStart>,
-        result: Result<(Me, Quote), ApiError>,
+        script: Box<StoreScript>,
+        target: Box<Target>,
+        result: Result<session::Quoted, ApiError>,
     },
     RestartQuoted {
         run: u64,
-        result: Result<Option<(Me, StoreScript, Quote)>, ApiError>,
+        result: Result<Option<(StoreScript, session::Quoted)>, ApiError>,
     },
     Heartbeat {
         session_id: String,
@@ -441,6 +443,7 @@ struct PendingStart {
     script: StoreScript,
     target: Target,
     replaces: Option<u64>,
+    lib: Lib,
 }
 
 struct StartPrompt {
@@ -1701,13 +1704,26 @@ impl LoaderApp {
         }
     }
 
-    fn signed_in(&mut self, ctx: &egui::Context, me: Me) {
+    fn signed_in(&mut self, account: account::Account) {
+        let me = account.me;
         self.info(format!("Signed in as {}.", me.username));
         if me.api_version > API_VERSION {
             self.error("This launcher is too old for the server. Update it to run store scripts.");
         }
         self.auth = Auth::SignedIn(me);
-        self.fetch_scripts(ctx);
+        self.scripts_loaded(account.scripts);
+    }
+
+    fn scripts_loaded(&mut self, result: Result<Vec<StoreScript>, ApiError>) {
+        self.store.loading = false;
+        match result {
+            Ok(scripts) => {
+                self.store.scripts = scripts;
+                self.store.loaded = true;
+            }
+            Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
+            Err(error) => self.store.error = Some(format!("Couldn't load the scripts: {error}")),
+        }
     }
 
     fn store_changed<T>(
@@ -1831,11 +1847,28 @@ impl LoaderApp {
         self.log_tab = LogTab::Run(id);
         self.api_job(ctx, move |api| Event::RestartQuoted {
             run: id,
-            result: session::restart_quote(&api, &session_id, &script_id, community),
+            result: session::restart_quote(
+                &api,
+                session::cache_root().as_deref(),
+                &session_id,
+                &script_id,
+                community,
+            ),
         });
     }
 
-    fn restart_quoted(&mut self, ctx: &egui::Context, id: u64, script: StoreScript, quote: Quote) {
+    fn restart_quoted(
+        &mut self,
+        ctx: &egui::Context,
+        id: u64,
+        script: StoreScript,
+        quote: Quote,
+        lib: Result<Lib, String>,
+    ) {
+        let lib = match lib {
+            Ok(lib) => lib,
+            Err(error) => return self.script_error(format!("Couldn't restart: {error}")),
+        };
         let Some(run) = self.run_by_id(id) else {
             return;
         };
@@ -1848,16 +1881,17 @@ impl LoaderApp {
             script,
             target,
             replaces: Some(id),
+            lib,
         };
         self.start_at_quote(ctx, start, Some(old_price), quote);
     }
 
-    fn quote_store_script(&mut self, ctx: &egui::Context, start: PendingStart) {
-        self.starting = Some(start.target.client.pid);
-        let id = start.script.id.clone();
+    fn quote_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+        self.starting = Some(target.client.pid);
         self.api_job(ctx, move |api| Event::RunQuoted {
-            result: session::quote(&api, &id),
-            start: Box::new(start),
+            result: session::quote(&api, session::cache_root().as_deref(), &script.id),
+            script: Box::new(script),
+            target: Box::new(target),
         });
     }
 
@@ -1902,13 +1936,14 @@ impl LoaderApp {
             script,
             target,
             replaces,
+            lib,
         } = start;
         let pid = target.client.pid;
         self.starting = Some(pid);
         self.info(format!("Starting {}…", script.title));
         let warned = script.community.then_some(script.revision).flatten();
         self.api_job(ctx, move |api| {
-            let result = session::prepare(&api, &script, warned);
+            let result = session::prepare(&api, &script, lib, warned);
             Event::StoreStarted {
                 pid,
                 script: Box::new(script),
@@ -2074,14 +2109,7 @@ impl LoaderApp {
             }
             Some(store::Action::Run(script)) => {
                 if let Some(target) = target {
-                    self.quote_store_script(
-                        &ctx,
-                        PendingStart {
-                            script: *script,
-                            target,
-                            replaces: None,
-                        },
-                    );
+                    self.quote_store_script(&ctx, *script, target);
                 }
             }
             Some(store::Action::Redeem(code)) => {
@@ -3721,7 +3749,7 @@ impl LoaderApp {
                     }
                 }
                 Event::Restored(result) => match result {
-                    Ok(Some(me)) => self.signed_in(ctx, me),
+                    Ok(Some(account)) => self.signed_in(account),
                     Ok(None) => self.auth = Auth::SignedOut,
                     Err(error) => {
                         self.auth = Auth::SignedOut;
@@ -3733,7 +3761,7 @@ impl LoaderApp {
                     }
                 },
                 Event::SignedIn(result) => match result {
-                    Ok(me) => self.signed_in(ctx, me),
+                    Ok(account) => self.signed_in(account),
                     Err(error) => {
                         self.auth = Auth::SignedOut;
                         self.error(error);
@@ -3776,17 +3804,7 @@ impl LoaderApp {
                     }
                     Err(error) => self.error(format!("Couldn't refresh your account: {error}")),
                 },
-                Event::Scripts(result) => {
-                    self.store.loading = false;
-                    match result {
-                        Ok(scripts) => {
-                            self.store.scripts = scripts;
-                            self.store.loaded = true;
-                        }
-                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
-                        Err(error) => self.store.error = Some(format!("Couldn't load the scripts: {error}")),
-                    }
-                }
+                Event::Scripts(result) => self.scripts_loaded(result),
                 Event::Redeemed(result) => {
                     self.store.redeeming = false;
                     if self.store_changed(ctx, result, "Added to your scripts.") {
@@ -3812,23 +3830,29 @@ impl LoaderApp {
                         Err(error) => self.start_failed(ctx, &script.title, error),
                     }
                 }
-                Event::RunQuoted { start, result } => {
+                Event::RunQuoted { script, target, result } => {
                     self.starting = None;
                     match result {
-                        Ok((me, quote)) => {
+                        Ok(session::Quoted { me, quote, lib }) => {
                             self.refresh_me(me);
-                            self.start_at_quote(ctx, *start, None, quote);
+                            match lib {
+                                Ok(lib) => {
+                                    let start = PendingStart { script: *script, target: *target, replaces: None, lib };
+                                    self.start_at_quote(ctx, start, None, quote);
+                                }
+                                Err(error) => self.start_failed(ctx, &script.title, error),
+                            }
                         }
                         Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
-                        Err(error) => self.start_failed(ctx, &start.script.title, error),
+                        Err(error) => self.start_failed(ctx, &script.title, error),
                     }
                 }
                 Event::RestartQuoted { run, result } => {
                     self.starting = None;
                     match result {
-                        Ok(Some((me, script, quote))) => {
+                        Ok(Some((script, session::Quoted { me, quote, lib }))) => {
                             self.refresh_me(me);
-                            self.restart_quoted(ctx, run, script, quote);
+                            self.restart_quoted(ctx, run, script, quote, lib);
                         }
                         Ok(None) => self.script_error("Couldn't restart: the script is no longer available to this account."),
                         Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
@@ -5198,7 +5222,7 @@ impl LoaderApp {
             if has_prayer {
                 crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Prayer, "Prayer");
             }
-            crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Xp, "XP Tracker");
+            crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Xp, "Stats");
             crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Breaks, "Breaks");
             if is_store {
                 crate::theme::tab_value(ui, &mut tools_tab, ToolsTab::Feedback, "Feedback");

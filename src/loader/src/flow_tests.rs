@@ -10,7 +10,8 @@ use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 use crate::{
     api::{Api, ApiError, Config, Stats, StoreScript, models::Quote},
     fake_api::{FakeServer, Reply, Request},
-    session::{asks_first, prepare_warned, restart_quote, revision_dir, sha256_hex, start_block},
+    libs,
+    session::{self, Prepared, asks_first, restart_quote, revision_dir, sha256_hex, start_block},
 };
 
 const SCRIPT_ID: &str = "7d081fdd-59de-4a4e-9c29-b2f92d9bc697";
@@ -236,6 +237,16 @@ fn api(server: &FakeServer) -> Api {
     Api::signed_in(config, "token-1")
 }
 
+fn prepare_warned(
+    api: &Api,
+    script: &StoreScript,
+    root: &std::path::Path,
+    warned: Option<i64>,
+) -> Result<Prepared, String> {
+    let lib = libs::ensure(api, root)?;
+    session::prepare_warned(api, script, root, lib, warned)
+}
+
 fn script() -> StoreScript {
     serde_json::from_value(json!({
         "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 180_000, "revision": 4, "can_access": true
@@ -248,6 +259,34 @@ fn free_script() -> StoreScript {
         "id": SCRIPT_ID, "url": "tempoross", "title": "Tempoross", "price": 0, "revision": 4, "can_access": true
     }))
     .unwrap()
+}
+
+#[test]
+fn signing_in_loads_the_account_and_the_scripts() {
+    let fake = Server::healthy().start();
+    let account = crate::account::load(&api(&fake)).expect("load");
+    assert_eq!(account.me.username, "tester");
+    assert_eq!(account.scripts.expect("scripts").len(), 2);
+    let paths: Vec<String> = fake.requests().iter().map(|r| r.path.clone()).collect();
+    assert!(
+        paths.iter().all(|path| !path.contains("community=true")),
+        "the first list is the default one: {paths:?}"
+    );
+}
+
+#[test]
+fn a_quote_without_a_lib_still_quotes_and_says_why() {
+    let fake = Server {
+        no_lib: true,
+        ..Server::healthy()
+    }
+    .start();
+    let quoted = session::quote(&api(&fake), Some(&cache("quote-no-lib")), SCRIPT_ID)
+        .expect("quote");
+    assert!(
+        quoted.lib.unwrap_err().contains("script library"),
+        "the run is refused with the lib's reason"
+    );
 }
 
 #[test]
@@ -692,11 +731,13 @@ fn a_restart_ends_the_old_session_before_it_asks_for_the_quote() {
     let fake = Server::healthy().start();
     let api = api(&fake);
 
-    let (_, script, quote) = restart_quote(&api, "s1", SCRIPT_ID, false)
+    let root = cache("restart");
+    let (script, quoted) = restart_quote(&api, Some(&root), "s1", SCRIPT_ID, false)
         .expect("quote")
         .expect("listed");
     assert_eq!(script.id, SCRIPT_ID);
-    assert_eq!(quote.required, 30_000);
+    assert_eq!(quoted.quote.required, 30_000);
+    assert_eq!(quoted.lib.expect("lib").version, LIB_VERSION);
 
     let paths: Vec<String> = fake.requests().into_iter().map(|r| r.path).collect();
     let end = paths.iter().position(|p| p.ends_with("/s1/end")).unwrap();
@@ -709,14 +750,16 @@ fn a_restart_of_a_script_no_longer_listed_finds_nothing() {
     let fake = Server::healthy().start();
     let api = api(&fake);
 
-    let found = restart_quote(&api, "s1", "not-listed", false).expect("quote");
+    let found = restart_quote(&api, Some(&cache("unlisted")), "s1", "not-listed", false)
+        .expect("quote");
     assert_eq!(found, None);
 }
 
 #[test]
 fn a_restart_of_a_community_script_asks_for_the_list_the_account_may_read() {
     let fake = Server::healthy().start();
-    let (_, script, _) = restart_quote(&api(&fake), "s1", COMMUNITY_ID, true)
+    let root = cache("restart-community");
+    let (script, _) = restart_quote(&api(&fake), Some(&root), "s1", COMMUNITY_ID, true)
         .expect("quote")
         .expect("listed");
     assert!(script.community);
@@ -728,7 +771,7 @@ fn a_restart_of_a_community_script_asks_for_the_list_the_account_may_read() {
     }
     .start();
     assert!(
-        restart_quote(&api(&fake), "s1", COMMUNITY_ID, true)
+        restart_quote(&api(&fake), Some(&root), "s1", COMMUNITY_ID, true)
             .expect("quote")
             .is_some()
     );
@@ -742,9 +785,18 @@ fn a_quote_comes_with_the_balance_of_now() {
         ..Server::healthy()
     }
     .start();
-    let (me, quote) = crate::session::quote(&api(&fake), SCRIPT_ID).expect("quote");
-    assert_eq!(me.microcredits, 50_000);
-    assert_eq!(start_block(&script(), &quote, me.microcredits), None);
+    let root = cache("quote");
+    let quoted = session::quote(&api(&fake), Some(&root), SCRIPT_ID).expect("quote");
+    assert_eq!(quoted.me.microcredits, 50_000);
+    assert_eq!(start_block(&script(), &quoted.quote, quoted.me.microcredits), None);
+    assert_eq!(quoted.lib.expect("lib").version, LIB_VERSION);
+    assert_eq!(
+        fs::read_to_string(root.join("lib/.version")).unwrap(),
+        LIB_VERSION,
+        "the lib is ready before anything is billed"
+    );
+    assert_eq!(fake.count("POST", "/launcher/sessions"), 0);
+    let _ = fs::remove_dir_all(&root);
 }
 
 fn quote(price: i64, fee: i64, required: i64) -> Quote {
