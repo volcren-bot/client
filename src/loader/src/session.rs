@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api::{
     Api, ApiError, Heartbeat, StartedSession, Stats, StoreScript,
-    models::{Ended, Me, Quote, credits_label, end_reason_message},
+    models::{Ended, Me, Quote, SessionFile, credits_label, end_reason_message},
 };
 use crate::libs::{self, Lib};
 use crate::script::Process;
@@ -18,6 +18,7 @@ pub const GIVE_UP_AFTER: Duration = Duration::from_secs(4 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_EVERY: Duration = Duration::from_millis(250);
 const MAX_FILE_BYTES: u64 = 6 * 1024 * 1024;
+const PARALLEL_DOWNLOADS: usize = 8;
 
 pub fn cache_root() -> Option<PathBuf> {
     crate::paths::project_dirs().map(|dirs| dirs.cache_dir().to_path_buf())
@@ -287,6 +288,17 @@ fn fetch(
     }
 }
 
+fn fetch_text(
+    api: &Api,
+    id: &str,
+    session: &StartedSession,
+    file: &SessionFile,
+    name: &str,
+) -> Result<String, String> {
+    let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
+    String::from_utf8(bytes).map_err(|_| format!("{name} isn't valid text."))
+}
+
 type Downloaded = (PathBuf, String, Vec<(String, String)>);
 
 fn download_to_memory(
@@ -316,19 +328,31 @@ fn download_to_memory(
             )
         })?;
 
+    let wanted: Vec<_> = session
+        .files
+        .iter()
+        .zip(names)
+        .filter(|(_, name)| {
+            *name == entry_name || name.ends_with(".luau") || name.ends_with(".lua")
+        })
+        .collect();
     let mut source = None;
     let mut modules = Vec::new();
-    for (file, name) in session.files.iter().zip(&names) {
-        let is_entry = *name == entry_name;
-        if !is_entry && !name.ends_with(".luau") && !name.ends_with(".lua") {
-            continue;
-        }
-        let bytes = fetch(api, id, session, &file.url, name, file.sha256.as_deref())?;
-        let text = String::from_utf8(bytes).map_err(|_| format!("{name} isn't valid text."))?;
-        if is_entry {
-            source = Some(text);
-        } else {
-            modules.push(((*name).to_owned(), text));
+    for batch in wanted.chunks(PARALLEL_DOWNLOADS) {
+        let texts = thread::scope(|scope| {
+            let downloads: Vec<_> = batch
+                .iter()
+                .map(|&(file, name)| scope.spawn(move || fetch_text(api, id, session, file, name)))
+                .collect();
+            downloads.into_iter().map(joined).collect::<Vec<_>>()
+        });
+        for (&(_, name), text) in batch.iter().zip(texts) {
+            let text = text?;
+            if name == entry_name {
+                source = Some(text);
+            } else {
+                modules.push((name.to_owned(), text));
+            }
         }
     }
     let dir = revision_dir(root, id, session.revision);

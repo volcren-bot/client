@@ -386,6 +386,40 @@ fn a_store_script_runs_from_start_to_end() {
 }
 
 #[test]
+fn the_script_files_download_at_the_same_time() {
+    let arrived = std::sync::Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new()));
+    let server = Server::healthy();
+    let fake = FakeServer::start(move |base, request| {
+        if request.path.starts_with("/files/") {
+            let (count, all_in) = &*arrived;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            all_in.notify_all();
+            let (count, _) = all_in
+                .wait_timeout_while(count, std::time::Duration::from_secs(5), |count| *count < 2)
+                .unwrap();
+            if *count < 2 {
+                return Reply::status(504);
+            }
+        }
+        server.answer(base, request, &[])
+    });
+    let lib = libs::Lib {
+        version: LIB_VERSION.into(),
+        warning: None,
+    };
+    let root = cache("parallel");
+    let prepared = session::prepare_warned(&api(&fake), &script(), &root, lib, None)
+        .expect("both files are requested before either answers");
+    assert_eq!(prepared.source, MAIN);
+    assert_eq!(
+        prepared.modules,
+        vec![("util.luau".to_owned(), UTIL.to_owned())]
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn encrypted_files_are_opened_with_the_session_key() {
     let root = cache("encrypted");
     let fake = Server {

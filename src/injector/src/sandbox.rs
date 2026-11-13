@@ -945,6 +945,7 @@ const LIB_MODULES: &[(&str, &str, &str)] = &[
         "main/interfaces/mainscreen/jewellerybox.luau"
     ),
     lib_module!("lamp", "main/interfaces/mainscreen/lamp.luau"),
+    lib_module!("anvil", "main/interfaces/mainscreen/anvil.luau"),
     lib_module!(
         "surprise_exam",
         "main/interfaces/mainscreen/surprise_exam.luau"
