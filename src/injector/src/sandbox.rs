@@ -912,6 +912,7 @@ const LIB_MODULES: &[(&str, &str, &str)] = &[
     lib_module!("varps", "main/varps.luau"),
     lib_module!("varbits", "main/varbits.luau"),
     lib_module!("player", "main/player.luau"),
+    lib_module!("handoff", "main/handoff.luau"),
     lib_module!("projection", "main/projection/projection.luau"),
     lib_module!("camera", "main/camera.luau"),
     lib_module!("walker", "main/walker.luau"),
@@ -1114,7 +1115,6 @@ pub fn run_with_modules(
     source: &str,
     pid: Option<u32>,
     print: impl FnMut(String) + 'static,
-    form: Option<crate::form::FormHandler>,
     script_path: Option<&Path>,
     lib_dir: Option<&Path>,
     modules: HashMap<String, String>,
@@ -1265,6 +1265,19 @@ pub fn run_with_modules(
             .map_err(|e| mlua::Error::RuntimeError(format!("report_breaks: {e}")))?;
         Ok(crate::form::breaks_line(&plan))
     })?;
+    s.printing(
+        "report_exit",
+        &print,
+        |lua, (status, reason): (mlua::Value, Option<String>)| {
+            let status: crate::form::ExitStatus = lua.from_value(status).map_err(|_| {
+                mlua::Error::RuntimeError(
+                    "report_exit: status is \"done\" or \"blocked\"".into(),
+                )
+            })?;
+            let reason = reason.map(|r| without_separators(&r));
+            Ok(crate::form::exit_line(&crate::form::Exit { status, reason }))
+        },
+    )?;
     s.printing("report_warning", &print, |_, text: mlua::LuaString| {
         let text = without_separators(&String::from_utf8_lossy(&text.as_bytes()));
         Ok(format!("{}{text}", crate::form::WARN_PREFIX))
@@ -1450,24 +1463,9 @@ pub fn run_with_modules(
     })?;
     s.query("item_container", item_container)?;
     s.read("sub_interfaces", sub_interfaces)?;
-    let form = RefCell::new(form);
-    s.set(
-        "form",
-        lua.create_function(
-            move |lua, spec: mlua::Value| -> mlua::Result<(mlua::Value, Option<String>)> {
-                let spec: serde_json::Value = lua.from_value(spec)?;
-                crate::form::validate(&spec).map_err(mlua::Error::RuntimeError)?;
-                let values = match form.borrow_mut().as_mut() {
-                    Some(handler) => handler(&spec).map_err(mlua::Error::RuntimeError)?,
-                    None => Some(crate::form::defaults(&spec)),
-                };
-                match values {
-                    Some(values) => Ok((to_lua(lua, &values)?, None)),
-                    None => Ok((mlua::Value::Nil, Some("cancelled".into()))),
-                }
-            },
-        )?,
-    )?;
+    s.value("settings", crate::form::settings)?;
+    s.value("finish_requested", crate::form::finish_requested)?;
+    s.value("antiban_resume", crate::form::take_resume)?;
     s.value("form_update", crate::form::take_update)?;
     s.value("antiban_config", crate::antiban::current_value)?;
     s.value("transport_settings", crate::transports::current_settings)?;
@@ -1882,7 +1880,6 @@ mod tests {
             source,
             None,
             move |line| collected.borrow_mut().push(line),
-            None,
             script_path,
             lib_dir,
             modules,
@@ -1986,6 +1983,42 @@ mod tests {
         assert!(plan.sleeps.is_empty());
         assert_eq!(plan.active.unwrap().kind, "break");
         assert!(run_lines("report_breaks({ breaks = 5 })").1.is_err());
+    }
+
+    #[test]
+    fn handoff_globals_read_what_the_loader_sent() {
+        crate::form::set_settings(serde_json::json!({ "eat_at": 40 }));
+        crate::form::set_resume(crate::form::BreakPlan {
+            breaks: vec![crate::form::PlannedBreak {
+                remaining: 5000.0,
+                length: 60000.0,
+                at: None,
+                index: 1,
+            }],
+            ..Default::default()
+        });
+        let (lines, result) = run_lines(
+            "local s = settings() print(s.eat_at) print(finish_requested()) local r = antiban_resume() print(r.breaks[1].index, r.breaks[1].remaining) print(antiban_resume() == nil)",
+        );
+        result.unwrap();
+        assert_eq!(lines, ["40", "false", "1\t5000", "true"]);
+        crate::form::request_finish();
+        let (lines, result) = run_lines("print(finish_requested())");
+        result.unwrap();
+        assert_eq!(lines, ["true"]);
+    }
+
+    #[test]
+    fn report_exit_writes_an_exit_line() {
+        let (lines, result) = run_lines("report_exit('blocked', 'out of food')");
+        result.unwrap();
+        let exit =
+            crate::form::parse_exit(lines[0].strip_prefix(crate::form::EXIT_PREFIX).unwrap())
+                .unwrap();
+        assert_eq!(exit.status, crate::form::ExitStatus::Blocked);
+        assert_eq!(exit.reason.as_deref(), Some("out of food"));
+        assert!(run_lines("report_exit('done')").1.is_ok());
+        assert!(run_lines("report_exit('failed')").1.is_err());
     }
 
     #[test]

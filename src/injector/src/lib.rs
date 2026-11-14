@@ -14,7 +14,7 @@ use ipc::{Header, Incompatible};
 pub use ipc::{PROTOCOL_VERSION, state::varp};
 use serde::{Deserialize, Serialize};
 
-pub const HOST_API: u32 = 19;
+pub const HOST_API: u32 = 20;
 
 pub mod antiban;
 pub mod async_input;
@@ -32,6 +32,7 @@ pub mod form;
 pub mod http;
 pub mod input_jobs;
 pub mod lamp;
+pub mod manifest;
 pub mod landmass;
 pub mod nav;
 pub mod pathfinding;

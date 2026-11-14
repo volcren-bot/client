@@ -11,7 +11,7 @@ use super::{
     error::{ApiError, ErrorBody},
     models::{
         Ended, Heartbeat, Me, Quote, RecentSession, RecentSessions, Redeemed, Removed, Report,
-        Reported, Scored, ScriptList, StartedSession, Stats, StoreScript,
+        Reported, Scored, ScriptList, ScriptManifest, StartedSession, Stats, StoreScript,
     },
 };
 
@@ -270,6 +270,13 @@ impl Api {
     pub fn quote(&self, script_id: &str) -> Result<Quote, ApiError> {
         self.get(
             &format!("/launcher/scripts/{}/quote", path_id(script_id, "script")?),
+            &[],
+        )
+    }
+
+    pub fn manifest(&self, script_id: &str) -> Result<ScriptManifest, ApiError> {
+        self.get(
+            &format!("/launcher/scripts/{}/manifest", path_id(script_id, "script")?),
             &[],
         )
     }

@@ -76,10 +76,39 @@ fn answer_http(stdin: Arc<Mutex<ChildStdin>>, payload: &str, whitelist: Whitelis
     });
 }
 
+#[derive(Default)]
+pub struct Launch {
+    pub values: serde_json::Value,
+    pub resume: Option<injector::form::BreakPlan>,
+}
+
+impl Launch {
+    pub fn with(values: serde_json::Value) -> Self {
+        Self {
+            values,
+            resume: None,
+        }
+    }
+
+    fn header(&self) -> String {
+        let values = if self.values.is_object() {
+            self.values.clone()
+        } else {
+            serde_json::json!({})
+        };
+        let mut header = format!("{}\n", injector::form::settings_line(&values));
+        if let Some(plan) = &self.resume {
+            header.push_str(&injector::form::resume_line(plan));
+            header.push('\n');
+        }
+        header
+    }
+}
+
 pub enum ScriptEvent {
     Output(String),
     Warning(String),
-    Form(serde_json::Value),
+    Exit(injector::form::Exit),
     Breaks(injector::form::BreakPlan),
     Counters(Vec<injector::form::Counter>),
     Finished {
@@ -153,10 +182,12 @@ impl Script {
         lib: Option<&Path>,
         target: Option<&Target>,
         settings: &Settings,
+        launch: &Launch,
     ) -> Result<Self, String> {
-        Self::start_with(host, source, &[], path, lib, target, settings)
+        Self::start_with(host, source, &[], path, lib, target, settings, launch)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with(
         host: &Host,
         source: &str,
@@ -165,6 +196,7 @@ impl Script {
         lib: Option<&Path>,
         target: Option<&Target>,
         settings: &Settings,
+        launch: &Launch,
     ) -> Result<Self, String> {
         let mut command = backend::script_command(target, settings, path, lib)?;
         let mut child = command
@@ -190,7 +222,7 @@ impl Script {
             injector::antiban::line(&settings.antiban),
             injector::transports::settings_line(&settings.transports),
             crate::transports::line()
-        );
+        ) + &launch.header();
         let header = format!("{}{}\n", injector::form::SCRIPT_PREFIX, source.len());
         let files = if modules.is_empty() {
             String::new()
@@ -299,12 +331,8 @@ impl Script {
         reply(&self.stdin, line, what)
     }
 
-    pub fn answer_form(&self, values: Option<serde_json::Value>) -> Result<(), String> {
-        let reply = match values {
-            Some(values) => serde_json::json!({ "values": values }),
-            None => serde_json::json!({ "cancelled": true }),
-        };
-        self.reply(&reply.to_string(), "form")
+    pub fn finish(&self) -> Result<(), String> {
+        self.reply(injector::form::FINISH_PREFIX, "finish request")
     }
 
     pub fn push_update(&self, values: &serde_json::Value) -> Result<(), String> {
@@ -395,14 +423,11 @@ impl Script {
                         }
                     };
                 }
-                match line
-                    .strip_prefix(injector::form::FORM_PREFIX)
-                    .map(serde_json::from_str)
-                {
-                    Some(Ok(spec)) => ScriptEvent::Form(spec),
-                    Some(Err(error)) => {
-                        ScriptEvent::Output(format!("Bad form from the script: {error}"))
-                    }
+                match line.strip_prefix(injector::form::EXIT_PREFIX) {
+                    Some(payload) => match injector::form::parse_exit(payload) {
+                        Some(exit) => ScriptEvent::Exit(exit),
+                        None => ScriptEvent::Output(format!("Bad exit from the script: {payload}")),
+                    },
                     None => ScriptEvent::Output(line),
                 }
             })
@@ -476,7 +501,7 @@ mod tests {
                 match event {
                     ScriptEvent::Output(line) => lines.push(line),
                     ScriptEvent::Warning(line) => lines.push(format!("warning {line}")),
-                    ScriptEvent::Form(spec) => lines.push(format!("form {spec}")),
+                    ScriptEvent::Exit(exit) => lines.push(format!("exit {:?}", exit.status)),
                     ScriptEvent::Breaks(plan) => {
                         lines.push(format!("breaks {}", plan.breaks.len()))
                     }
@@ -507,7 +532,16 @@ mod tests {
 
     fn start_on(host: &Host, source: &str) -> Script {
         ensure_runner_built();
-        Script::start(host, source, None, None, None, &Settings::default()).unwrap()
+        Script::start(
+            host,
+            source,
+            None,
+            None,
+            None,
+            &Settings::default(),
+            &Launch::default(),
+        )
+        .unwrap()
     }
 
     fn start(source: &str) -> Script {
@@ -557,26 +591,6 @@ mod tests {
         assert!(!script.is_running());
     }
 
-    fn wait_form(script: &mut Script, lines: &mut Vec<String>) -> serde_json::Value {
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(5) {
-            for event in script.poll() {
-                match event {
-                    ScriptEvent::Form(spec) => return spec,
-                    ScriptEvent::Output(line) => lines.push(line),
-                    ScriptEvent::Warning(..)
-                    | ScriptEvent::Breaks(..)
-                    | ScriptEvent::Counters(..) => {}
-                    ScriptEvent::Finished { .. } => {
-                        panic!("the script ended before asking for a form")
-                    }
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the script never asked for a form");
-    }
-
     #[test]
     fn report_warning_arrives_as_a_warning_not_output() {
         let mut script = start("report_warning('Escape is off')\nprint('after')");
@@ -585,23 +599,54 @@ mod tests {
     }
 
     #[test]
-    fn forms_round_trip_through_the_loader() {
-        let mut script = start(
-            "local s = assert(form({ title = 'Fisher', fields = { { id = 'spot', kind = 'choice', options = { 'Harpoon', 'Cage' } }, { id = 'hours', kind = 'number', default = 2 } } }))\n\
-             print(s.spot, s.hours)\n\
-             print(form({ title = 'Again', fields = {} }))",
-        );
+    fn settings_resume_and_finish_reach_the_script_and_exits_come_back() {
+        ensure_runner_built();
+        let launch = Launch {
+            values: serde_json::json!({ "spot": "Cage", "hours": 3 }),
+            resume: Some(injector::form::BreakPlan {
+                breaks: vec![injector::form::PlannedBreak {
+                    remaining: 900.0,
+                    length: 60_000.0,
+                    at: None,
+                    index: 0,
+                }],
+                ..Default::default()
+            }),
+        };
+        let mut script = Script::start(
+            &host(Vec::new(), Vec::new()),
+            "local s = settings() print(s.spot, s.hours)\n\
+             print(antiban_resume().breaks[1].remaining)\n\
+             while not finish_requested() do sleep(10) end\n\
+             report_exit('blocked', 'out of bait')",
+            None,
+            None,
+            None,
+            &Settings::default(),
+            &launch,
+        )
+        .unwrap();
+        let start = Instant::now();
         let mut lines = Vec::new();
-        let spec = wait_form(&mut script, &mut lines);
-        assert_eq!(spec["title"], "Fisher");
-        script
-            .answer_form(Some(serde_json::json!({ "spot": "Cage", "hours": 3 })))
-            .unwrap();
-        wait_form(&mut script, &mut lines);
-        script.answer_form(None).unwrap();
+        while lines.len() < 2 && start.elapsed() < Duration::from_secs(5) {
+            lines.extend(script.poll().into_iter().filter_map(|e| match e {
+                ScriptEvent::Output(line) => Some(line),
+                _ => None,
+            }));
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(lines, ["Cage\t3", "900"]);
+        script.finish().unwrap();
         let (rest, end) = wait(&mut script, Duration::from_secs(5));
-        lines.extend(rest);
-        assert_eq!(lines, ["Cage\t3", "nil\tcancelled"]);
+        assert_eq!(rest, ["exit Blocked"]);
+        assert_eq!(end, Some((Ok(()), false)));
+    }
+
+    #[test]
+    fn without_settings_a_script_gets_an_empty_table() {
+        let mut script = start("local n = 0 for _ in settings() do n += 1 end print(n)");
+        let (lines, end) = wait(&mut script, Duration::from_secs(5));
+        assert_eq!(lines, ["0"]);
         assert_eq!(end, Some((Ok(()), false)));
     }
 
@@ -868,6 +913,7 @@ mod tests {
             None,
             Some(&client.0),
             &client.1,
+            &Launch::default(),
         )
         .unwrap();
         let (lines, end) = wait(&mut script, Duration::from_secs(30));

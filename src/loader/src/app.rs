@@ -26,11 +26,13 @@ use crate::feedback;
 use crate::highlight::Highlighter;
 use crate::libs::Lib;
 use crate::pipe::Rows;
-use crate::script::{Script, ScriptEvent};
+use crate::script::{Launch, Script, ScriptEvent};
 use crate::session::{self, Kept, Prepared};
 use crate::store::{self, Confirmed, Store};
 use crate::theme::{icon_button, icon_button_width, slide_button};
 use crate::update;
+
+mod queue_page;
 
 enum Event {
     Scanned(Scan),
@@ -123,12 +125,30 @@ enum Event {
         pid: u32,
         script: Box<StoreScript>,
         replaces: Option<u64>,
+        run: Option<u64>,
+        launch: Box<Launch>,
         result: Result<Prepared, String>,
     },
     RunQuoted {
         script: Box<StoreScript>,
         target: Box<Target>,
+        run: Option<u64>,
+        values: serde_json::Value,
         result: Result<session::Quoted, ApiError>,
+    },
+    ManifestFetched {
+        script: Box<StoreScript>,
+        target: Box<Target>,
+        result: Result<crate::api::models::ScriptManifest, ApiError>,
+    },
+    QueueManifest {
+        script_id: String,
+        result: Result<crate::api::models::ScriptManifest, ApiError>,
+    },
+    QueueChecked {
+        pid: u32,
+        entry: bool,
+        result: Result<Box<queue_page::Check>, ApiError>,
     },
     RestartQuoted {
         run: u64,
@@ -195,15 +215,25 @@ fn progress_text(progress: &update::Progress) -> String {
     }
 }
 
+#[derive(Clone)]
+enum Source {
+    File(ScriptFile),
+    Store(StoreScript),
+}
+
 struct Run {
     id: u64,
     title: String,
-    script: Script,
+    script: Option<Script>,
+    source: Option<Source>,
     target: Option<Target>,
     store: Option<StoreRun>,
     file: Option<ScriptFile>,
     form: Option<crate::form::Form>,
     form_sent: Option<serde_json::Value>,
+    last_breaks: Option<(injector::form::BreakPlan, Instant)>,
+    exit: Option<injector::form::Exit>,
+    finished: Option<(Result<(), String>, bool)>,
     antiban_sent: injector::antiban::Config,
     log: Log,
     xp: crate::xp::XpTracker,
@@ -222,7 +252,7 @@ impl Run {
     fn new(
         id: u64,
         title: String,
-        script: Script,
+        script: Option<Script>,
         target: Option<Target>,
         store: Option<StoreRun>,
         settings: &Settings,
@@ -232,11 +262,15 @@ impl Run {
             id,
             title,
             script,
+            source: None,
             target,
             store,
             file: None,
             form: None,
             form_sent: None,
+            last_breaks: None,
+            exit: None,
+            finished: None,
             antiban_sent: settings.antiban.clone(),
             log: Log::new(settings.log_lines),
             xp: Default::default(),
@@ -253,7 +287,31 @@ impl Run {
     }
 
     fn is_running(&self) -> bool {
-        self.script.is_running()
+        self.script.as_ref().is_some_and(Script::is_running)
+    }
+
+    fn is_configuring(&self) -> bool {
+        self.script.is_none()
+    }
+
+    fn stop(&mut self) {
+        if let Some(script) = self.script.as_mut() {
+            script.stop();
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        self.script.as_ref().is_some_and(Script::stop_requested)
+    }
+
+    fn is_paused(&self) -> bool {
+        self.script.as_ref().is_some_and(Script::is_paused)
+    }
+
+    fn send(&self, line: impl FnOnce(&Script) -> Result<(), String>) -> Result<(), String> {
+        self.script
+            .as_ref()
+            .map_or_else(|| Err("The script isn't running yet.".into()), line)
     }
 
     fn run_time(&self) -> Duration {
@@ -286,14 +344,14 @@ impl Run {
     }
 
     fn state(&self) -> RunState {
-        if !self.is_running() {
-            RunState::Ended
-        } else if self.script.stop_requested() {
-            RunState::Stopping
-        } else if self.script.is_paused() {
-            RunState::Paused
-        } else if self.form.is_some() && self.form_sent.is_none() {
+        if self.is_configuring() {
             RunState::Waiting
+        } else if !self.is_running() {
+            RunState::Ended
+        } else if self.stop_requested() {
+            RunState::Stopping
+        } else if self.is_paused() {
+            RunState::Paused
         } else {
             RunState::Running
         }
@@ -444,6 +502,8 @@ struct PendingStart {
     target: Target,
     replaces: Option<u64>,
     lib: Lib,
+    run: Option<u64>,
+    launch: Launch,
 }
 
 struct StartPrompt {
@@ -459,6 +519,7 @@ enum Tab {
     Clients,
     Store,
     Sessions,
+    Queue,
     Run,
     Scripts,
     Development,
@@ -530,6 +591,7 @@ fn sidebar_tree(
         (Tab::Store, "\u{f489}", "scripts"),
         (Tab::Scripts, "\u{f044}", "editor"),
         (Tab::Sessions, "\u{f04b}", "sessions"),
+        (Tab::Queue, "\u{f0cb}", "queue"),
         (Tab::Development, "\u{f188}", "development"),
         (Tab::Terminal, "\u{f120}", "terminal"),
         (Tab::Accounts, "\u{f007}", "accounts"),
@@ -1449,6 +1511,10 @@ pub struct LoaderApp {
     start_prompt: Option<StartPrompt>,
     reload_prompt: Option<ReloadPrompt>,
     remembered_forms: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    manifests: HashMap<String, (i64, injector::manifest::Manifest)>,
+    queues: crate::queue::Saved,
+    queue_runners: Vec<crate::queue::Runner>,
+    queue_page: queue_page::Page,
     dev_toggles: [bool; DEV_TOGGLES.len()],
     cursor: Cursor,
     ui_font: crate::theme::UiFont,
@@ -1574,6 +1640,13 @@ impl LoaderApp {
                 .storage
                 .and_then(|s| eframe::get_value(s, FORMS_KEY))
                 .unwrap_or_default(),
+            manifests: HashMap::new(),
+            queues: cc
+                .storage
+                .and_then(|s| eframe::get_value(s, crate::queue::STORAGE_KEY))
+                .unwrap_or_default(),
+            queue_runners: Vec::new(),
+            queue_page: queue_page::Page::default(),
             dev_toggles: [false; DEV_TOGGLES.len()],
             cursor: cc
                 .storage
@@ -1682,9 +1755,10 @@ impl LoaderApp {
     }
 
     fn stop_all(&mut self) {
+        self.queue_runners.clear();
         let deadline = Instant::now() + Duration::from_secs(3);
         for run in &mut self.runs {
-            run.script.stop();
+            run.stop();
         }
         for store in self.runs.iter().filter_map(|r| r.store.as_ref()) {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -1877,22 +1951,104 @@ impl LoaderApp {
         else {
             return;
         };
+        let values = run
+            .form_sent
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         let start = PendingStart {
             script,
             target,
             replaces: Some(id),
             lib,
+            run: None,
+            launch: Launch::with(values),
         };
         self.start_at_quote(ctx, start, Some(old_price), quote);
     }
 
-    fn quote_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+    fn quote_store_script(
+        &mut self,
+        ctx: &egui::Context,
+        script: StoreScript,
+        target: Target,
+        run: Option<u64>,
+        values: serde_json::Value,
+    ) {
         self.starting = Some(target.client.pid);
         self.api_job(ctx, move |api| Event::RunQuoted {
             result: session::quote(&api, session::cache_root().as_deref(), &script.id),
             script: Box::new(script),
             target: Box::new(target),
+            run,
+            values,
         });
+    }
+
+    fn open_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
+        match script
+            .revision
+            .and_then(|revision| self.manifests.get(&script.id).filter(|(r, _)| *r == revision))
+        {
+            Some((_, manifest)) => {
+                let manifest = manifest.clone();
+                self.configure_store_script(ctx, script, target, &manifest);
+            }
+            None => {
+                self.starting = Some(target.client.pid);
+                let id = script.id.clone();
+                self.api_job(ctx, move |api| Event::ManifestFetched {
+                    result: api.manifest(&id),
+                    script: Box::new(script),
+                    target: Box::new(target),
+                });
+            }
+        }
+    }
+
+    fn manifest_fetched(
+        &mut self,
+        ctx: &egui::Context,
+        script: StoreScript,
+        target: Target,
+        fetched: crate::api::models::ScriptManifest,
+    ) {
+        match injector::manifest::Manifest::parse(fetched.manifest) {
+            Ok(manifest) => {
+                self.manifests
+                    .insert(script.id.clone(), (fetched.revision, manifest.clone()));
+                let script = StoreScript {
+                    revision: Some(fetched.revision),
+                    ..script
+                };
+                self.configure_store_script(ctx, script, target, &manifest);
+            }
+            Err(error) => self.start_failed(ctx, &script.title, error),
+        }
+    }
+
+    fn configure_store_script(
+        &mut self,
+        ctx: &egui::Context,
+        script: StoreScript,
+        target: Target,
+        manifest: &injector::manifest::Manifest,
+    ) {
+        let Some(spec) = manifest.settings.clone() else {
+            return self.quote_store_script(ctx, script, target, None, serde_json::json!({}));
+        };
+        let title = script.title.clone();
+        let id = self.next_run_id();
+        let mut run = Run::new(id, title.clone(), None, Some(target), None, &self.settings);
+        run.source = Some(Source::Store(script));
+        run.form = Some(self.settings_form(spec, &title));
+        run.info(format!("Set up {title}, then press Start. Nothing is billed until it starts."));
+        self.add_run(run);
+    }
+
+    fn settings_form(&self, spec: serde_json::Value, title: &str) -> crate::form::Form {
+        let mut form = crate::form::Form::new(spec, self.remembered_forms.get(title));
+        form.title = title.to_owned();
+        form
     }
 
     fn refresh_me(&mut self, me: Me) {
@@ -1937,6 +2093,8 @@ impl LoaderApp {
             target,
             replaces,
             lib,
+            run,
+            launch,
         } = start;
         let pid = target.client.pid;
         self.starting = Some(pid);
@@ -1948,6 +2106,8 @@ impl LoaderApp {
                 pid,
                 script: Box::new(script),
                 replaces,
+                run,
+                launch: Box::new(launch),
                 result,
             }
         });
@@ -1988,6 +2148,7 @@ impl LoaderApp {
             self.warning.as_ref(),
         ];
         self.starting == Some(pid)
+            || self.queue_runners.iter().any(|r| r.pid == pid)
             || pending
                 .into_iter()
                 .flatten()
@@ -2109,7 +2270,7 @@ impl LoaderApp {
             }
             Some(store::Action::Run(script)) => {
                 if let Some(target) = target {
-                    self.quote_store_script(&ctx, *script, target);
+                    self.open_store_script(&ctx, *script, target);
                 }
             }
             Some(store::Action::Redeem(code)) => {
@@ -3817,27 +3978,43 @@ impl LoaderApp {
                         self.confirmed.forget(&id);
                     }
                 }
-                Event::StoreStarted { pid, script, replaces, result } => {
+                Event::StoreStarted { pid, script, replaces, run, launch, result } => {
                     self.starting = None;
-                    match result {
+                    let started = match result {
                         Ok(prepared) => {
-                            if self.run_prepared(ctx, pid, &script, prepared)
+                            let started = self.run_prepared(ctx, pid, &script, prepared, run, *launch);
+                            if started.is_some()
                                 && let Some(old) = replaces
                             {
                                 self.close_run(old);
                             }
+                            started
                         }
+                        Err(error) => {
+                            self.start_failed(ctx, &script.title, error);
+                            None
+                        }
+                    };
+                    self.queue_entry_started(pid, started);
+                }
+                Event::QueueManifest { script_id, result } => self.queue_manifest(script_id, result),
+                Event::QueueChecked { pid, entry, result } => self.queue_checked(ctx, pid, entry, result),
+                Event::ManifestFetched { script, target, result } => {
+                    self.starting = None;
+                    match result {
+                        Ok(fetched) => self.manifest_fetched(ctx, *script, *target, fetched),
+                        Err(ApiError::SignedOut(why)) => self.sign_out(Some(why)),
                         Err(error) => self.start_failed(ctx, &script.title, error),
                     }
                 }
-                Event::RunQuoted { script, target, result } => {
+                Event::RunQuoted { script, target, run, values, result } => {
                     self.starting = None;
                     match result {
                         Ok(session::Quoted { me, quote, lib }) => {
                             self.refresh_me(me);
                             match lib {
                                 Ok(lib) => {
-                                    let start = PendingStart { script: *script, target: *target, replaces: None, lib };
+                                    let start = PendingStart { script: *script, target: *target, replaces: None, lib, run, launch: Launch::with(values) };
                                     self.start_at_quote(ctx, start, None, quote);
                                 }
                                 Err(error) => self.start_failed(ctx, &script.title, error),
@@ -3871,7 +4048,7 @@ impl LoaderApp {
                 }
                 Event::SessionStopped { session_id, reason, sign_out } => {
                     if let Some(run) = self.run_by_session(&session_id) {
-                        run.script.stop();
+                        run.stop();
                         run.error(reason.clone());
                     }
                     if sign_out {
@@ -4233,7 +4410,7 @@ impl LoaderApp {
         if changed {
             let settings = self.settings.transports.clone();
             for run in self.runs.iter_mut().filter(|r| r.is_running()) {
-                if let Err(error) = run.script.push_transport_settings(&settings) {
+                if let Err(error) = run.send(|s| s.push_transport_settings(&settings)) {
                     run.error(error);
                 }
             }
@@ -4752,42 +4929,52 @@ impl LoaderApp {
 
     fn handle_script_events(&mut self, ctx: &egui::Context) {
         for index in 0..self.runs.len() {
-            {
+            let events = {
                 let run = &mut self.runs[index];
-                if run.script.stop_ignored(Duration::from_secs(2)) {
+                let Some(script) = run.script.as_mut() else {
+                    continue;
+                };
+                if script.stop_ignored(Duration::from_secs(2)) {
                     run.error("The script's process didn't exit after being killed. It will end when the loader closes.");
-                } else if run.is_running() && run.script.stop_requested() {
+                } else if script.is_running() && script.stop_requested() {
                     ctx.request_repaint_after(Duration::from_millis(250));
                 }
-            }
-            let events = self.runs[index].script.poll();
+                match run.script.as_mut() {
+                    Some(script) => script.poll(),
+                    None => continue,
+                }
+            };
             for event in events {
                 let finished = matches!(event, ScriptEvent::Finished { .. });
                 let run = &mut self.runs[index];
+                if let ScriptEvent::Finished { result, stopped } = &event {
+                    run.finished = Some((result.clone(), *stopped));
+                }
                 match event {
                     ScriptEvent::Output(line) => run.info(line),
                     ScriptEvent::Warning(line) => run.log.push_tone(Tone::Warning, line),
-                    ScriptEvent::Form(spec) => {
-                        run.form_sent = None;
-                        let title = spec
-                            .get("title")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("Script settings")
-                            .to_owned();
-                        run.form = Some(crate::form::Form::new(
-                            spec,
-                            self.remembered_forms.get(&title),
-                        ));
-                        self.active_run = Some(run.id);
-                        self.tab = Tab::Run;
-                        run.editors = Default::default();
-                        ctx.request_repaint();
+                    ScriptEvent::Exit(exit) => {
+                        match (&exit.status, &exit.reason) {
+                            (injector::form::ExitStatus::Blocked, Some(reason)) => {
+                                run.info(format!("The script can't go on: {reason}"));
+                            }
+                            (injector::form::ExitStatus::Blocked, None) => {
+                                run.info("The script can't go on.");
+                            }
+                            (injector::form::ExitStatus::Done, Some(reason)) => run.info(reason.clone()),
+                            (injector::form::ExitStatus::Done, None) => {}
+                        }
+                        run.exit = Some(exit);
                     }
                     ScriptEvent::Counters(counters) => {
                         let elapsed = run.run_time();
                         run.counters.update(counters, elapsed);
                     }
-                    ScriptEvent::Breaks(plan) => run.breaks.update(plan, Instant::now()),
+                    ScriptEvent::Breaks(plan) => {
+                        let now = Instant::now();
+                        run.last_breaks = Some((plan.clone(), now));
+                        run.breaks.update(plan, now);
+                    }
                     ScriptEvent::Finished { stopped: true, .. } => run.info("Script stopped."),
                     ScriptEvent::Finished { result: Ok(()), .. } => run.info("Script finished."),
                     ScriptEvent::Finished {
@@ -4921,8 +5108,8 @@ impl LoaderApp {
                                 open = Some(run.id);
                             }
                             let running = run.is_running();
-                            let stopping = run.script.stop_requested();
-                            let (pause_icon, pause_text) = run_pause_label(run.script.is_paused());
+                            let stopping = run.stop_requested();
+                            let (pause_icon, pause_text) = run_pause_label(run.is_paused());
                             if icon_button(ui, pause_icon, pause_text, width, running && !stopping)
                                 .clicked()
                             {
@@ -4940,6 +5127,7 @@ impl LoaderApp {
                                 close = Some(run.id);
                             }
                             if !running
+                                && !run.is_configuring()
                                 && restart_button(
                                     ui,
                                     width,
@@ -4963,7 +5151,7 @@ impl LoaderApp {
         if let Some(id) = stop
             && let Some(run) = self.run_by_id_mut(id)
         {
-            run.script.stop();
+            run.stop();
         }
         if let Some(id) = close {
             self.close_run(id);
@@ -5018,7 +5206,11 @@ impl LoaderApp {
     }
 
     fn drop_ended_forms(&mut self) {
-        for run in self.runs.iter_mut().filter(|r| !r.is_running()) {
+        for run in self
+            .runs
+            .iter_mut()
+            .filter(|r| !r.is_running() && !r.is_configuring())
+        {
             run.form = None;
             run.form_sent = None;
         }
@@ -5031,27 +5223,29 @@ impl LoaderApp {
         }
     }
 
-    fn answer_form(&mut self, outcome: crate::form::Outcome) {
-        let answer = match outcome {
-            crate::form::Outcome::Open => return,
+    fn answer_form(&mut self, ctx: &egui::Context, id: u64, outcome: crate::form::Outcome) {
+        match outcome {
+            crate::form::Outcome::Open => {}
             crate::form::Outcome::Submitted(values) => {
                 self.remember_form();
-                if let Some(run) = self.run_mut() {
-                    run.form_sent = Some(values.clone());
-                }
-                Some(values)
+                self.launch_run(ctx, id, values);
             }
-            crate::form::Outcome::Cancelled => {
-                if let Some(run) = self.run_mut() {
-                    run.form = None;
-                }
-                None
-            }
+            crate::form::Outcome::Cancelled => self.close_run(id),
+        }
+    }
+
+    fn launch_run(&mut self, ctx: &egui::Context, id: u64, values: serde_json::Value) {
+        let Some(run) = self.run_by_id(id).filter(|r| r.is_configuring()) else {
+            return;
         };
-        if let Some(run) = self.run_mut()
-            && let Err(error) = run.script.answer_form(answer)
-        {
-            run.error(error);
+        let target = run.target.clone();
+        match run.source.clone() {
+            Some(Source::File(file)) => self.start_file(ctx, id, &file, target.as_ref(), values),
+            Some(Source::Store(script)) => match target {
+                Some(target) => self.quote_store_script(ctx, script, target, Some(id), values),
+                None => self.script_error("Pick a client to run the script on."),
+            },
+            None => {}
         }
     }
 
@@ -5066,7 +5260,7 @@ impl LoaderApp {
         };
         self.remember_form();
         if let Some(run) = self.run_mut() {
-            match run.script.push_update(&values) {
+            match run.send(|s| s.push_update(&values)) {
                 Ok(()) => {
                     run.form_sent = Some(values);
                     run.info("Settings updated.");
@@ -5081,11 +5275,12 @@ impl LoaderApp {
             return;
         };
         let running = run.is_running();
-        let paused = running && run.script.is_paused();
-        let stopping = run.script.stop_requested();
+        let paused = running && run.is_paused();
+        let stopping = run.stop_requested();
         let is_store = run.store.is_some();
-        let form_sent = run.form_sent.is_some();
-        let waiting = run.form.is_some() && !form_sent;
+        let waiting = run.is_configuring();
+        let form_sent = !waiting && run.form_sent.is_some();
+        let can_start = waiting && !self.start_in_progress();
         let changed_form = form_sent && run.form.as_ref().is_some_and(|f| {
             matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != run.form_sent.as_ref())
         });
@@ -5101,7 +5296,7 @@ impl LoaderApp {
         let has_prayer = has(crate::layouts::Kind::Prayer);
         let mut tools_tab = run.tools_tab;
         let run_id = run.id;
-        let restartable = !running;
+        let restartable = !running && !waiting;
         let restart_refusal = self.restart_refusal(run);
         let title_font = egui::FontId::new(
             egui::TextStyle::Heading.resolve(ui.style()).size,
@@ -5109,6 +5304,9 @@ impl LoaderApp {
         );
         ui.add_space(4.0);
         ui.add(egui::Label::new(egui::RichText::new(&run.title).font(title_font)).truncate());
+        if let Some(progress) = self.queue_banner(run_id) {
+            ui.label(egui::RichText::new(format!("Queue {progress}")).color(crate::theme::BLUE));
+        }
         ui.add_space(8.0);
         let mut outcome = crate::form::Outcome::Open;
         let mut update = false;
@@ -5137,10 +5335,11 @@ impl LoaderApp {
                     running && !stopping && changed_form,
                 )
                 .clicked();
-            } else if icon_button(ui, ICON_START, &submit_label, width, waiting).clicked()
-                && let Some(form) = self.run().and_then(|r| r.form.as_ref())
-            {
-                outcome = form.submitted(self.script_layouts(), &self.known_items);
+            } else if icon_button(ui, ICON_START, &submit_label, width, can_start).clicked() {
+                outcome = self.run().and_then(|r| r.form.as_ref()).map_or_else(
+                    || crate::form::Outcome::Submitted(serde_json::json!({})),
+                    |form| form.submitted(self.script_layouts(), &self.known_items),
+                );
             }
             let (pause_icon, pause_text) = run_pause_label(paused);
             let pause = icon_button(
@@ -5165,11 +5364,13 @@ impl LoaderApp {
             } else {
                 (ICON_STOP, "Stop")
             };
-            if icon_button(ui, stop_icon, stop_text, width, running && !stopping).clicked() {
+            if icon_button(ui, stop_icon, stop_text, width, waiting || (running && !stopping))
+                .clicked()
+            {
                 if waiting {
                     outcome = crate::form::Outcome::Cancelled;
                 } else if let Some(run) = self.run_mut() {
-                    run.script.stop();
+                    run.stop();
                 }
             }
             if restartable {
@@ -5193,7 +5394,7 @@ impl LoaderApp {
             crate::theme::status_dot(ui, state.color());
             ui.label(egui::RichText::new(state.label()).color(state.color()));
         });
-        self.answer_form(outcome);
+        self.answer_form(ui.ctx(), run_id, outcome);
         if update {
             self.push_form_update();
         }
@@ -5575,8 +5776,10 @@ impl LoaderApp {
         let Some(run) = self.run_by_id_mut(id) else {
             return;
         };
-        let paused = run.script.is_paused();
-        run.script.set_paused(!paused);
+        let paused = run.is_paused();
+        if let Some(script) = run.script.as_mut() {
+            script.set_paused(!paused);
+        }
         run.info(if paused {
             "Script resumed."
         } else {
@@ -5626,7 +5829,9 @@ impl LoaderApp {
         pid: u32,
         script: &StoreScript,
         prepared: Prepared,
-    ) -> bool {
+        configured: Option<u64>,
+        launch: Launch,
+    ) -> Option<u64> {
         let title = script.title.as_str();
         let session_id = prepared.session.session_id.clone();
         let Some(target) = self
@@ -5639,7 +5844,7 @@ impl LoaderApp {
                 "The client {pid} is gone, so {title} wasn't started."
             ));
             self.end_session_job(ctx, session_id);
-            return false;
+            return None;
         };
         match Script::start_with(
             &self.script_host(ctx),
@@ -5649,6 +5854,7 @@ impl LoaderApp {
             None,
             Some(&target),
             &self.settings,
+            &launch,
         ) {
             Ok(process) => {
                 let interval =
@@ -5666,15 +5872,29 @@ impl LoaderApp {
                     fee: prepared.session.fee,
                     fee_charged: 0,
                 };
-                let id = self.next_run_id();
-                let mut run = Run::new(
-                    id,
-                    title.to_owned(),
-                    process,
-                    Some(target),
-                    Some(store),
-                    &self.settings,
-                );
+                let id = match configured.filter(|id| {
+                    self.run_by_id(*id).is_some_and(Run::is_configuring)
+                }) {
+                    Some(id) => id,
+                    None => {
+                        let id = self.next_run_id();
+                        let run = Run::new(id, title.to_owned(), None, None, None, &self.settings);
+                        if self.queue_runners.iter().any(|r| r.pid == pid) {
+                            self.runs.push(run);
+                        } else {
+                            self.add_run(run);
+                        }
+                        id
+                    }
+                };
+                let quiet = self.queue_runners.iter().any(|r| r.pid == pid);
+                let run = self.run_by_id_mut(id)?;
+                run.script = Some(process);
+                run.target = Some(target);
+                run.store = Some(store);
+                run.source = Some(Source::Store(script.clone()));
+                run.form_sent = Some(launch.values);
+                run.started = Instant::now();
                 if let Some(warning) = &prepared.warning {
                     run.info(format!("Warning: {warning}"));
                 }
@@ -5682,14 +5902,17 @@ impl LoaderApp {
                     "Running {title} (revision {}).",
                     prepared.session.revision
                 ));
+                if !quiet {
+                    self.active_run = Some(id);
+                    self.log_tab = LogTab::Run(id);
+                }
                 self.feedback.fetched_at = None;
-                self.add_run(run);
-                true
+                Some(id)
             }
             Err(error) => {
                 self.script_error(format!("Couldn't start {title}: {error}"));
                 self.end_session_job(ctx, session_id);
-                false
+                None
             }
         }
     }
@@ -5726,7 +5949,8 @@ impl LoaderApp {
             },
             None => None,
         };
-        self.run_file(ctx, file, target.as_ref(), Some(id));
+        let values = run.form_sent.clone();
+        self.run_file(ctx, file, target.as_ref(), Some(id), values);
     }
 
     fn run_file(
@@ -5735,6 +5959,48 @@ impl LoaderApp {
         file: ScriptFile,
         target: Option<&Target>,
         replaces: Option<u64>,
+        values: Option<serde_json::Value>,
+    ) {
+        let name = file.name();
+        let path = std::path::Path::new(&file.path);
+        let manifest = if path.is_file() {
+            match injector::manifest::Manifest::beside(path) {
+                Ok(manifest) => manifest.unwrap_or_default(),
+                Err(error) => {
+                    return self.script_error(format!("Couldn't start the script: {error}"));
+                }
+            }
+        } else {
+            injector::manifest::Manifest::default()
+        };
+        let id = self.next_run_id();
+        let mut run = Run::new(id, name.clone(), None, target.cloned(), None, &self.settings);
+        run.source = Some(Source::File(file.clone()));
+        run.file = Some(file.clone());
+        let spec = manifest.settings.clone().filter(|_| values.is_none());
+        if let Some(spec) = spec {
+            run.form = Some(self.settings_form(spec, &name));
+            run.info(format!("Set up {name}, then press Start."));
+        } else if let Some(spec) = manifest.settings.clone() {
+            run.form = Some(self.settings_form(spec, &name));
+        }
+        self.add_run(run);
+        if let Some(old) = replaces {
+            self.close_run(old);
+        }
+        if manifest.settings.is_none() || values.is_some() {
+            let values = values.unwrap_or_else(|| manifest.defaults());
+            self.start_file(ctx, id, &file, target, values);
+        }
+    }
+
+    fn start_file(
+        &mut self,
+        ctx: &egui::Context,
+        id: u64,
+        file: &ScriptFile,
+        target: Option<&Target>,
+        values: serde_json::Value,
     ) {
         let name = file.name();
         let path = Some(std::path::Path::new(&file.path)).filter(|p| p.is_file());
@@ -5744,6 +6010,7 @@ impl LoaderApp {
             self.script_error(format!("Couldn't start the script: the lib folder {} doesn't exist. Fix it in the settings.", lib.display()));
             return;
         }
+        let launch = Launch::with(values.clone());
         match Script::start(
             &self.script_host(ctx),
             &file.text,
@@ -5751,25 +6018,21 @@ impl LoaderApp {
             lib.as_deref(),
             target,
             &self.settings,
+            &launch,
         ) {
             Ok(script) => {
-                let id = self.next_run_id();
-                let mut run = Run::new(
-                    id,
-                    name.clone(),
-                    script,
-                    target.cloned(),
-                    None,
-                    &self.settings,
-                );
-                run.info(format!("Running {name}…"));
-                run.file = Some(file);
-                self.add_run(run);
-                if let Some(old) = replaces {
-                    self.close_run(old);
+                if let Some(run) = self.run_by_id_mut(id) {
+                    run.script = Some(script);
+                    run.form_sent = Some(values);
+                    run.started = Instant::now();
+                    run.info(format!("Running {name}…"));
                 }
             }
-            Err(error) => self.script_error(format!("Couldn't start the script: {error}")),
+            Err(error) => {
+                if let Some(run) = self.run_by_id_mut(id) {
+                    run.error(format!("Couldn't start the script: {error}"));
+                }
+            }
         }
     }
 
@@ -5845,7 +6108,7 @@ impl LoaderApp {
             None => {
                 self.script_file = file.clone();
                 let target = self.run_target_client();
-                self.run_file(ctx, file, target.as_ref(), None);
+                self.run_file(ctx, file, target.as_ref(), None, None);
             }
         }
     }
@@ -5930,7 +6193,7 @@ impl LoaderApp {
                         restart: None,
                     })
                 }
-                None => self.run_file(ui.ctx(), self.script_file.clone(), target, None),
+                None => self.run_file(ui.ctx(), self.script_file.clone(), target, None, None),
             }
         }
         let (pause_icon, pause_text) = run_pause_label(paused);
@@ -5942,14 +6205,14 @@ impl LoaderApp {
         if icon_button(ui, ICON_STOP, "Stop", width, running).clicked()
             && let Some(run) = self.editor_run_mut()
         {
-            run.script.stop();
+            run.stop();
         }
     }
 
     fn scripts_ui(&mut self, ui: &mut egui::Ui) {
         let (running, paused) = self
             .editor_run_mut()
-            .map_or((false, false), |r| (true, r.script.is_paused()));
+            .map_or((false, false), |r| (true, r.is_paused()));
 
         let (find, replace) = ui.input_mut(|i| {
             (
@@ -6613,7 +6876,7 @@ impl LoaderApp {
         if update {
             let config = self.settings.antiban.clone();
             if let Some(run) = self.run_mut() {
-                match run.script.push_antiban(&config) {
+                match run.send(|s| s.push_antiban(&config)) {
                     Ok(()) => {
                         run.antiban_sent = config;
                         run.info("Breaks updated.");
@@ -6625,7 +6888,7 @@ impl LoaderApp {
         if let Some((kind, index)) = skip
             && let Some(run) = self.run_mut()
         {
-            let result = run.script.skip_next(kind, index);
+            let result = run.send(|s| s.skip_next(kind, index));
             run.report(result, &format!("Skipping the next {kind}."));
         }
     }
@@ -7217,6 +7480,7 @@ impl eframe::App for LoaderApp {
         let ctx = ui.ctx().clone();
         self.handle_events(&ctx);
         self.handle_script_events(&ctx);
+        self.drive_queues(&ctx);
         self.drive_xp(&ctx);
         if matches!(
             self.update_state,
@@ -7433,6 +7697,7 @@ impl eframe::App for LoaderApp {
                 Tab::Clients => self.clients_ui(ui),
                 Tab::Store => self.store_ui(ui),
                 Tab::Sessions => self.sessions_ui(ui),
+                Tab::Queue => self.queue_ui(ui),
                 Tab::Run => self.running_ui(ui),
                 Tab::Scripts => self.scripts_ui(ui),
                 Tab::Development => self.development_ui(ui),
@@ -7452,6 +7717,8 @@ impl eframe::App for LoaderApp {
         eframe::set_value(storage, SCRIPT_KEY, &self.script_file);
         eframe::set_value(storage, LAST_SCRIPT_KEY, &self.last_script);
         eframe::set_value(storage, FORMS_KEY, &self.remembered_forms);
+        self.sync_queue_form();
+        eframe::set_value(storage, crate::queue::STORAGE_KEY, &self.queues);
         if !self.layouts_unreadable {
             eframe::set_value(storage, LAYOUTS_KEY, &self.layouts);
         }

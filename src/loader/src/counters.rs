@@ -25,6 +25,10 @@ impl CountersTracker {
         self.counters.is_empty()
     }
 
+    pub fn value(&self, id: &str) -> Option<f64> {
+        self.counters.iter().find(|c| c.id == id).map(|c| c.value)
+    }
+
     fn label_of(&self, id: &str) -> Option<(&str, f64)> {
         self.counters
             .iter()

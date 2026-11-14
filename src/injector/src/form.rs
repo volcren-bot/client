@@ -6,7 +6,10 @@ pub const MODULES_PREFIX: &str = "\u{1e}MODULES ";
 pub const PINS_PREFIX: &str = "\u{1e}PINS";
 pub const PIN_REQUEST_PREFIX: &str = "\u{1e}PINREQ ";
 pub const LAMP_REQUEST_PREFIX: &str = "\u{1e}LAMPREQ ";
-pub const FORM_PREFIX: &str = "\u{1e}FORM ";
+pub const SETTINGS_PREFIX: &str = "\u{1e}SETTINGS ";
+pub const FINISH_PREFIX: &str = "\u{1e}FINISH";
+pub const EXIT_PREFIX: &str = "\u{1e}EXIT ";
+pub const RESUME_PREFIX: &str = "\u{1e}RESUME ";
 pub const UPDATE_PREFIX: &str = "\u{1e}UPDATE ";
 pub const STATS_PREFIX: &str = "\u{1e}STATS ";
 
@@ -106,7 +109,93 @@ pub fn parse_update(payload: &str) -> Option<Value> {
         .filter(Value::is_object)
 }
 
-pub type FormHandler = Box<dyn FnMut(&Value) -> Result<Option<Value>, String>>;
+static SETTINGS: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+pub fn set_settings(values: Value) {
+    *SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(values);
+}
+
+pub fn settings() -> Value {
+    SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .unwrap_or_else(|| json!({}))
+}
+
+pub fn settings_given() -> bool {
+    SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+pub fn settings_line(values: &Value) -> String {
+    format!("{SETTINGS_PREFIX}{values}")
+}
+
+pub fn parse_settings(payload: &str) -> Option<Value> {
+    parse_update(payload)
+}
+
+static FINISH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_finish() {
+    FINISH.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn finish_requested() -> bool {
+    FINISH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExitStatus {
+    Done,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exit {
+    pub status: ExitStatus,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub fn exit_line(exit: &Exit) -> String {
+    format!(
+        "{EXIT_PREFIX}{}",
+        serde_json::to_string(exit).unwrap_or_default()
+    )
+}
+
+pub fn parse_exit(payload: &str) -> Option<Exit> {
+    serde_json::from_str(payload).ok()
+}
+
+static RESUME: std::sync::Mutex<Option<BreakPlan>> = std::sync::Mutex::new(None);
+
+pub fn resume_line(plan: &BreakPlan) -> String {
+    format!(
+        "{RESUME_PREFIX}{}",
+        serde_json::to_string(plan).unwrap_or_default()
+    )
+}
+
+pub fn set_resume(plan: BreakPlan) {
+    *RESUME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plan);
+}
+
+pub fn take_resume() -> Option<BreakPlan> {
+    RESUME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
 
 pub const KINDS: [&str; 9] = [
     "label",
@@ -355,7 +444,7 @@ pub fn matches(value: &Value, equals: &Value) -> bool {
 
 pub fn validate(spec: &Value) -> Result<(), String> {
     if !spec.is_object() {
-        return Err("form() takes a table: { title = ..., fields = { ... } }".into());
+        return Err("settings are an object: { fields = [...] }".into());
     }
     if spec.get("row_gap").is_some() && !row_gap(spec).is_some_and(|g| (0.0..=500.0).contains(&g)) {
         return Err("`row_gap` is a number of points, 0 to 500".into());
@@ -494,10 +583,6 @@ pub fn parse_stats(payload: &str) -> Option<(i64, i64, Vec<i64>)> {
 
 pub const ENTRY_END: char = '\0';
 
-pub fn request_line(spec: &Value) -> String {
-    format!("{FORM_PREFIX}{spec}")
-}
-
 pub fn pin_request_line(hash: &str) -> String {
     format!("{PIN_REQUEST_PREFIX}{hash}")
 }
@@ -540,19 +625,6 @@ fn parse_answer(line: &str, what: &str, key: &str) -> Result<Option<String>, Str
     Ok(reply.get(key).and_then(Value::as_str).map(str::to_owned))
 }
 
-pub fn parse_reply(line: &str) -> Result<Option<Value>, String> {
-    let mut reply: Value = serde_json::from_str(line.trim())
-        .map_err(|e| format!("bad form reply from the loader: {e}"))?;
-    if reply.get("cancelled").and_then(Value::as_bool) == Some(true) {
-        return Ok(None);
-    }
-    reply
-        .get_mut("values")
-        .map(Value::take)
-        .map(Some)
-        .ok_or_else(|| "the loader's form reply has no values".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +638,37 @@ mod tests {
         push_update(values.clone());
         assert_eq!(take_update(), Some(values));
         assert_eq!(take_update(), None);
+    }
+
+    #[test]
+    fn exits_and_resumes_round_trip() {
+        let exit = Exit {
+            status: ExitStatus::Blocked,
+            reason: Some("out of food".into()),
+        };
+        assert_eq!(
+            parse_exit(exit_line(&exit).strip_prefix(EXIT_PREFIX).unwrap()),
+            Some(exit)
+        );
+        assert_eq!(
+            parse_exit(r#"{"status":"done"}"#).map(|e| e.status),
+            Some(ExitStatus::Done)
+        );
+        assert!(parse_exit(r#"{"status":"failed"}"#).is_none());
+        let plan = BreakPlan {
+            breaks: vec![PlannedBreak {
+                remaining: 60_000.0,
+                length: 120_000.0,
+                at: None,
+                index: 2,
+            }],
+            ..Default::default()
+        };
+        let line = resume_line(&plan);
+        assert_eq!(
+            parse_breaks(line.strip_prefix(RESUME_PREFIX).unwrap()),
+            Some(plan)
+        );
     }
 
     #[test]
@@ -784,10 +887,10 @@ mod tests {
         assert!(parse_counters(r#"[{"id":"a","label":"A","value":1}]"#).unwrap()[0].hourly);
         assert_eq!(parse_counters("{}"), None);
         assert_eq!(parse_breaks("{}"), Some(BreakPlan::default()));
-        assert_eq!(parse_reply("{\"cancelled\":true}"), Ok(None));
         assert_eq!(
-            parse_reply("{\"values\":{\"a\":1}}"),
-            Ok(Some(json!({ "a": 1 })))
+            parse_settings(settings_line(&json!({ "a": 1 })).strip_prefix(SETTINGS_PREFIX).unwrap()),
+            Some(json!({ "a": 1 }))
         );
+        assert_eq!(parse_settings("[1]"), None);
     }
 }

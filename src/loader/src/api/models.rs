@@ -78,6 +78,15 @@ pub struct StoreScript {
     pub community: bool,
     #[serde(default)]
     pub granted: bool,
+    #[serde(default)]
+    pub queueable: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ScriptManifest {
+    pub revision: i64,
+    #[serde(default)]
+    pub manifest: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

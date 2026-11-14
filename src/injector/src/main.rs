@@ -599,6 +599,17 @@ fn run_script(args: &[&str]) -> ExitCode {
             form::PINS_PREFIX => loader_has_pins = true,
             http::CAPABILITY_PREFIX => loader_has_http = true,
             line if apply_setting(line) => {}
+            line if line.starts_with(form::SETTINGS_PREFIX) => {
+                match form::parse_settings(&line[form::SETTINGS_PREFIX.len()..]) {
+                    Some(values) => form::set_settings(values),
+                    None => return unreadable("script's settings"),
+                }
+            }
+            line if line.starts_with(form::RESUME_PREFIX) => {
+                if let Some(plan) = form::parse_breaks(&line[form::RESUME_PREFIX.len()..]) {
+                    form::set_resume(plan);
+                }
+            }
             line if line.starts_with(transports::PREFIX) => {
                 if let Some(data) = transports::parse(&line[transports::PREFIX.len()..]) {
                     transports::set(data);
@@ -625,7 +636,18 @@ fn run_script(args: &[&str]) -> ExitCode {
             _ => return unreadable("script's files"),
         }
     }
-    let (source, handler) = match first
+    if !form::settings_given()
+        && let Some(path) = script_path.as_deref()
+    {
+        match injector::manifest::Manifest::beside(path) {
+            Ok(manifest) => form::set_settings(manifest.unwrap_or_default().defaults()),
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let source = match first
         .strip_prefix(form::SCRIPT_PREFIX)
         .map(|len| len.trim().parse::<usize>())
     {
@@ -642,6 +664,10 @@ fn run_script(args: &[&str]) -> ExitCode {
                         break;
                     }
                     if apply_setting(&line) {
+                        continue;
+                    }
+                    if line.trim_end() == form::FINISH_PREFIX {
+                        form::request_finish();
                         continue;
                     }
                     if let Some(payload) = line.strip_prefix(antiban::SKIP_PREFIX) {
@@ -669,21 +695,18 @@ fn run_script(args: &[&str]) -> ExitCode {
                 }));
             }
             if loader_has_http {
-                let replies = replies.clone();
                 http::set_handler(Box::new(move |request| {
                     http::parse_reply(&ask(&replies, http::request_line(request))?)
                 }));
             }
-            let handler: form::FormHandler =
-                Box::new(move |spec| form::parse_reply(&ask(&replies, form::request_line(spec))?));
-            (String::from_utf8_lossy(&bytes).into_owned(), Some(handler))
+            String::from_utf8_lossy(&bytes).into_owned()
         }
         _ => {
             let mut rest = String::new();
             if input.read_to_string(&mut rest).is_err() {
                 return unreadable("script");
             }
-            (first + &rest, None)
+            first + &rest
         }
     };
 
@@ -704,7 +727,6 @@ fn run_script(args: &[&str]) -> ExitCode {
             let _ = write!(out, "{line}{}", form::ENTRY_END);
             let _ = out.flush();
         },
-        handler,
         script_path.as_deref(),
         lib_dir.as_deref(),
         modules,

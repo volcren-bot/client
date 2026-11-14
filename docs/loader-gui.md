@@ -17,6 +17,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 | `layouts.rs` | Equipment/inventory/prayer layouts, rules, picker |
 | `breaks.rs`, `xp.rs`, `counters.rs` | Break/sleep editors, run trackers |
 | `form.rs` | Form spec rendering |
+| `queue.rs`, `app/queue_page.rs` | Queue model and pure rules (when an entry ends, what follows an exit, break carry-over); Queue page, start checks and the per-client runner |
 | `http.rs`, `whitelist.rs` | Script HTTP requests, whitelist |
 | `transports.rs` | Transport data versions |
 | `libs.rs` | Shared lib selection for store scripts |
@@ -34,7 +35,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 
 - The window draws no frames while minimised or on a hidden workspace, so nothing billing-critical runs in `ui()`.
 - Each store run has its own thread (`session::keep`): heartbeat every `heartbeat_seconds` (clamped 10 to 120), stats from `report_stats`, stop on server-ended session, stop after `GIVE_UP_AFTER` (4 min) without a successful beat, before the server's 5 min timeout. Ends the session when the script exits.
-- PIN, lamp and `http_request` are answered on the script's output thread (`script::Host`), since a script blocks until answered. Only forms wait for the window.
+- PIN, lamp and `http_request` are answered on the script's output thread (`script::Host`), since a script blocks until answered. Nothing a script asks for waits for the window: settings are fixed before it starts.
 - All `Api` calls block and run on `api_job` threads.
 - Pausing a store script does not pause billing.
 - Sign-out (button or server-revoked) runs `App::stop_all` first: stops scripts and ends sessions, with a 3 s limit; the server's sweep covers the rest. Same on exit.
@@ -43,7 +44,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 
 - Discord via Supabase, PKCE; listener on `127.0.0.1:5217`, redirect URL `http://localhost:5217/`. Login times out after 5 min.
 - Keyring service `volcren-loader`: `refresh-token` (sign-in), `accounts-key` (32-byte AES-256-GCM key for `accounts.bin` and run records). Never in eframe storage.
-- eframe storage keys: `script`, `last_script`, `forms`, `layouts`, `cursor`, `ui_font`, `community_confirmed`, `http_whitelist`, plus `Settings`.
+- eframe storage keys: `script`, `last_script`, `forms`, `queues`, `layouts`, `cursor`, `ui_font`, `community_confirmed`, `http_whitelist`, plus `Settings`.
 - `accounts.bin` (data dir) is `nonce || ciphertext || tag`. If it can't be opened (no keyring, wrong key) the page refuses to save so it isn't overwritten. Only `hash_name` of the account name is kept, normalised like the client (lowercase, spaces/hyphens to `_`).
 - `layouts`: if unreadable (written by a newer loader) it is copied to `layouts-unreadable-<unix>.ron` and never saved over. Two open loaders still overwrite each other's storage.
 - Endpoints compiled from `src/loader/config.json`; `API_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SITE_URL`, `PRICES_URL` env vars override at run time. No `.env`.
@@ -85,7 +86,8 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 ## Scripts, settings and stdin contract
 
 - Each script runs as `injector run --script <path> <pid>`, so a crash can't take the app down.
-- Lines written to the script's stdin before start: antiban config (`injector::antiban::line`), transports (`TRANSPORT_SETTINGS`), `prices_url` (`injector::prices::line`). Live: `UPDATE` (form update, read by `Host.form_update()`, `HOST_API` 8), antiban push, transport push, skip-next.
+- Lines written to the script's stdin before start: antiban config (`injector::antiban::line`), transports (`TRANSPORT_SETTINGS`), `prices_url` (`injector::prices::line`), `SETTINGS` (the form's values, `script::Launch`) and, for a queue entry, `RESUME` (the previous entry's break plan). Live: `UPDATE` (settings changed while running, read by `Host.form_update()`), antiban push, transport push, skip-next, `FINISH` (queue only).
+- Settings come from the script's `manifest.json` (`injector::manifest`): the store's live revision through `GET /launcher/scripts/:id/manifest`, cached in memory by script and revision, or the file beside an editor script. A script with settings opens a **configuring** run (`Run::is_configuring`: no process, no session) whose Start quotes, starts the session and launches it, so nothing is billed while the form is open. Without settings it starts at once. Values are remembered per script title; layouts resolve to their contents when Start is pressed.
 - Script requests on stdout: `LAMPREQ`, PIN, `HTTPREQ`. The layout JSON a script gets is documented in the lib's `host.luau`.
 - Settings persisted: `dll`, `helper`, `lib_dir`, `antiban`, `transports`, `include_system_info`, `log_lines`; detected next to the executable first, then `target/x86_64-pc-windows-gnu/{release,debug}`.
 - Cursor preference is passed to `injector load`; the injector leaves it in an `AGENT_CURSOR_<pid>` mapping the agent reads.
@@ -120,6 +122,16 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 - Script names are downloaded on demand from RuneLite's `cs2-scripts` zip and kept in memory only (the cache has only hashes).
 - Packet layouts come from the agent (`injector packet-layouts`) and fall back to `packet_defs.tsv`; shipped names apply by opcode only while all packet sizes match. Opcodes change with game updates.
 - Icons are drawn by the selected client and cached in `icons.bin` (append-only; older format restarted), so layouts show icons with no client loaded.
+
+## Queue
+
+- A queue is a list of store scripts whose live revision is queueable, each entry with its own remembered settings, an optional goal (a counter id the manifest names, compared with the script's live `COUNTERS`) and minimum/maximum minutes. Saved by name under `queues`.
+- **One queue per client** (`client_in_use` counts runners), several clients at once. The current entry is an ordinary store run; its session is its own, and the next entry starts only after the previous session's keep thread has ended it (`StoreRun::closed`), so an entry never pays the extra-session fee for its predecessor.
+- **Start** checks every entry once (listing, manifest, quote, lib) and shows one confirmation with each price per hour and the most it can cost (`Entry::most_cost`, from the maximum time). Each entry is checked again just before it starts (`Check::ready`): not queueable any more, settings spec changed since the entry was set up (`spec_hash`), unreviewed community revision, or a price other than the approved one is a **change**, handled by the queue's skip/stop option. Too few credits or a failed start always stops it.
+- **Ending an entry** (`Entry::should_finish`): the maximum time, or the goal (and the minimum time) reached, or the minimum alone when there is no goal. The loader then sends `FINISH`; after the manifest's `finish_grace_minutes` it kills the script, which counts as failed.
+- **Exits** (`queue::outcome`): done and blocked (`report_exit`) move on; failed (error or killed) ends the queue with its when-finished step; stopped by the user ends it at once.
+- **Breaks**: the last `BREAKS` plan of an entry is passed to the next one as `RESUME`, minus the time since it was reported (`queue::resumed`), so a long queue breaks like one long run.
+- **When finished**: log out runs a short lib script (`--lib` the installed store lib) as its own run, or the account is left as it is.
 
 ## Platform gotchas
 

@@ -21,6 +21,7 @@ Library and CLI for everything outside the client: find clients, inject the agen
 | `projection.rs`                            | World to screen                                                                                 |
 | `config.rs`, `font.rs`                     | Cache config definitions; bitmap fonts and sprites                                              |
 | `form.rs`                                  | Settings form spec/validation and all `\u{1e}` line prefixes shared with the loader             |
+| `manifest.rs`                              | `manifest.json`: settings spec, `queueable`, goals, finish grace; shared with the loader        |
 | `bank_pin.rs`, `bank_pin_overlay.rs`, `lamp.rs` | PIN entry and lamp skill lookups by account-name hash                                      |
 | `http.rs`, `prices.rs`                     | `http_request` wire format; `item_prices` cache                                                 |
 | `antiban.rs`, `biometrics.rs`              | Loader-owned break/sleep config; per-account biometrics profile                                 |
@@ -47,7 +48,7 @@ Library and CLI for everything outside the client: find clients, inject the agen
 - `run_with_modules` opens only `TABLE | STRING | MATH | BIT`: no `os`, `io` or `debug`. `dofile` and `loadfile` are removed; `require` is the sandboxed one.
 - Scripts reach the world only through globals. They never see a PIN: `bank_pin_enter` asks the loader by account-name hash (`PINREQ`) and clicks the keypad itself. Lamp skills use the same lookup (`LAMPREQ`).
 - No network from the injector. `http_request` and `item_prices` write `HTTPREQ` lines; the loader enforces the user's host whitelist (prices URL always allowed). Limits enforced in `http::Request::validate`: body 1 MiB, response 8 MiB, timeout 1 to 60000 ms (15 s default).
-- Untrusted input validated: script form specs (`form::validate`, incl. `required`/`locked` rules), HTTP requests (`http::Request::validate`), loader replies (`form::parse_reply`, `parse_pin_reply`, `parse_lamp_reply`, `http::parse_reply`), antiban configs (`antiban::Config::validate`, invalid ones dropped), skips, transports and settings lines (unparseable lines ignored). `report_stats` rejects negative experience.
+- Untrusted input validated: script form specs (`form::validate`, incl. `required`/`locked` rules), HTTP requests (`http::Request::validate`), loader input (`form::parse_settings`, `manifest::Manifest::parse`, `parse_pin_reply`, `parse_lamp_reply`, `http::parse_reply`), antiban configs (`antiban::Config::validate`, invalid ones dropped), skips, transports and settings lines (unparseable lines ignored). `report_stats` rejects negative experience.
 - `run <pid>` exits at startup if the agent is missing or on another protocol, so scripts never see a nil connection; `connection`/`game_state` raise rather than return errors.
 - Input must go through `input.rs`: it sets `ipc::input::SYNTHETIC`. The agent strips the flag and drops real mouse messages for `REAL_MOUSE_BLOCK_MS` after synthetic ones.
 - Shared-state reads race with the agent: use the ipc sequence-locked helpers.
@@ -56,9 +57,11 @@ Library and CLI for everything outside the client: find clients, inject the agen
 
 Usage: `injector run [--script <path> [--lib <dir>]] [pid]`. Lines are `\u{1e}`-prefixed (constants in `form.rs`, `http.rs`, `prices.rs`, `antiban.rs`, `transports.rs`); stdout entries end with `form::ENTRY_END` (`\0`).
 
-- Header lines before the script, any order: `PINS` (enables PIN and lamp lookups), `HTTP` (enables the HTTP handler; otherwise "HTTP requests aren't available"), `ANTIBAN`, `PRICES <url>`, `TRANSPORT_SETTINGS`, `TRANSPORTS`.
-- Then optional `MODULES <len>` + JSON `{path: source}` block (the decrypted store files, served from memory relative to the script dir), then `SCRIPT <len>` + source. Without `SCRIPT`, all of stdin is the source and there is no form handler (hand runs).
-- After the script, a stdin thread applies `ANTIBAN`/`PRICES`/`TRANSPORT_SETTINGS`, `SKIP`, `UPDATE` (form updates); any other line is the reply to the pending request (`ask`).
+- Header lines before the script, any order: `PINS` (enables PIN and lamp lookups), `HTTP` (enables the HTTP handler; otherwise "HTTP requests aren't available"), `ANTIBAN`, `PRICES <url>`, `TRANSPORT_SETTINGS`, `TRANSPORTS`, `SETTINGS <json>` (the values `settings()` returns), `RESUME <break plan>` (the previous queue entry's last `BREAKS` plan, read once by `antiban_resume()`).
+- Settings are fixed before the script starts: there is no form request. Without a `SETTINGS` line, `run` uses the defaults of `manifest.json` beside `--script` (an empty table without one); an invalid manifest stops the run before the script starts.
+- Then optional `MODULES <len>` + JSON `{path: source}` block (the decrypted store files, served from memory relative to the script dir), then `SCRIPT <len>` + source. Without `SCRIPT`, all of stdin is the source and nothing after it is read (hand runs).
+- After the script, a stdin thread applies `ANTIBAN`/`PRICES`/`TRANSPORT_SETTINGS`, `SKIP`, `UPDATE` (live settings changes, `form_update()`), `FINISH` (the queue wants the script to wrap up: `finish_requested()` turns true and stays true); any other line is the reply to the pending request (`ask`).
+- `report_exit("done" | "blocked", reason?)` writes an `EXIT` line before the script returns. The loader treats a clean exit without one as done, and an error or a kill as failed.
 
 ## `require`
 
@@ -68,7 +71,7 @@ Usage: `injector run [--script <path> [--lib <dir>]] [pid]`. Lines are `\u{1e}`-
 
 ## Cross-repo contracts
 
-- **`HOST_API`** (`lib.rs`, now 19): bump when adding or changing a sandbox global. Pair with `lib/HOST_API`, bumped in the lib commit that starts using it; `lib/tools/check-host-api.sh` fails the lib release when `host.luau` gains a global without a bump.
+- **`HOST_API`** (`lib.rs`, now 20): bump when adding or changing a sandbox global. Pair with `lib/HOST_API`, bumped in the lib commit that starts using it; `lib/tools/check-host-api.sh` fails the lib release when `host.luau` gains a global without a bump.
 - **Lib selection** (`loader/src/libs.rs::choose`): the loader takes the newest lib release whose `requires_host <= injector::HOST_API`, warning when a newer one was skipped. A missed bump pairs a lib with an injector that lacks the global.
 - **`PROTOCOL_VERSION`** (`ipc`): any IPC layout change bumps it and updates agent, injector and `lib/host.luau` together. `Connection::problem` reports a mismatch.
 - **Adding a global**: implement and bind in `sandbox.rs`, add the `offline` stub, bump `HOST_API`, add type/wrapper to `lib/host.luau` and document it in `lib/docs/host.md`.

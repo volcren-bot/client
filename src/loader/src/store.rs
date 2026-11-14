@@ -338,6 +338,7 @@ mod tests {
             online: 0,
             community: false,
             granted: false,
+            queueable: false,
         }
     }
 
