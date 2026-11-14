@@ -72,13 +72,13 @@ use ipc::{
     },
     shared_memory_name,
     state::{
-        CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, CacheReply, CacheRequest,
-        GameValRequest, ITEM_ICON_HEIGHT, ITEM_ICON_SHOW_COUNT, ITEM_ICON_WIDTH, ITEM_NAME_BATCH,
-        ItemNameRequest, LAYOUT_SIZE, Layout, LayoutView, LocsReply, ModelRequest, NamesReply,
-        PROJECT_BATCH, ProjectRequest, ReadError, Shared, TotalXpRequest, WorkerRequest,
-        WorldLayout, cache_kind, cache_status, game_state::LOGGED_IN, item_name_status, loc_status,
-        menu_status, model_status, model_target, name_status, part, project_status,
-        state_memory_name, total_xp_status, worker_kind, worker_status,
+        ActRequest, ActState, CACHE_BATCH, CACHE_FILE_MISSING, CACHE_FILE_NO_ROOM, CacheReply,
+        CacheRequest, GameValRequest, ITEM_ICON_HEIGHT, ITEM_ICON_SHOW_COUNT, ITEM_ICON_WIDTH,
+        ITEM_NAME_BATCH, ItemNameRequest, LAYOUT_SIZE, Layout, LayoutView, LocsReply, ModelRequest,
+        NamesReply, PROJECT_BATCH, ProjectRequest, ReadError, Shared, TotalXpRequest,
+        WorkerRequest, WorldLayout, cache_kind, cache_status, game_state::LOGGED_IN,
+        item_name_status, loc_status, menu_status, model_status, model_target, name_status, part,
+        project_status, state_memory_name, total_xp_status, worker_kind, worker_status,
     },
     unload_event_name,
     varc_log::{self, varc_log_memory_name},
@@ -1087,6 +1087,29 @@ fn model(pid: u32, request: ModelRequest) -> Result<Option<crate::EntityModel>, 
         model_status::OTHER_THREAD => Err(OTHER_THREAD.into()),
         other => Err(format!("unknown model status {other}")),
     }
+}
+
+pub(crate) fn act_send(pid: u32, request: &ActRequest) -> Result<(u32, ActState), String> {
+    reader(pid, 0, "")?;
+    let mut sent = 0;
+    let state = ask(
+        pid,
+        ipc::input::ACT_MESSAGE,
+        |shared| {
+            sent = shared.write_act_request(request);
+            sent
+        },
+        |shared| shared.read_act_state(100).map(|s| (s.request, s)),
+    )?;
+    Ok((sent, state))
+}
+
+pub(crate) fn act_state(pid: u32) -> Result<ActState, String> {
+    session(pid)?
+        .view
+        .shared()
+        .read_act_state(100)
+        .ok_or_else(|| "the agent kept rewriting its act state".to_owned())
 }
 
 pub fn npc_model(pid: u32, npc_index: i32) -> Result<Option<crate::EntityModel>, String> {
@@ -2714,7 +2737,7 @@ pub fn collision_area(
         .collect())
 }
 
-fn menu_entry(e: &ipc::state::MenuEntryInfo) -> crate::MenuEntry {
+pub(crate) fn menu_entry(e: &ipc::state::MenuEntryInfo) -> crate::MenuEntry {
     let raw_target = String::from_utf8_lossy(ipc::state::text(&e.target)).into_owned();
     crate::MenuEntry {
         option: crate::strip_tags(&String::from_utf8_lossy(ipc::state::text(&e.option))),

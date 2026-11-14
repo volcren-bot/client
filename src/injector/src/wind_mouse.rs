@@ -43,6 +43,12 @@ impl Default for Options {
     }
 }
 
+pub enum Follow {
+    Stay,
+    To(f64, f64),
+    Stop,
+}
+
 pub fn run_with(
     start: Option<(f64, f64)>,
     dest: (i32, i32),
@@ -53,7 +59,18 @@ pub fn run_with(
     let Some(start) = start else {
         return post(dest.0, dest.1);
     };
-    WindMouse::new(start, dest, options, post, sleep).run()
+    WindMouse::new(start, dest, options, post, sleep, || Follow::Stay).run()
+}
+
+pub fn follow_with(
+    start: (f64, f64),
+    dest: (i32, i32),
+    options: &Options,
+    post: impl FnMut(i32, i32) -> Result<(), String>,
+    sleep: impl FnMut(Duration) -> bool,
+    follow: impl FnMut() -> Follow,
+) -> Result<(), String> {
+    WindMouse::new(start, dest, options, post, sleep, follow).run()
 }
 
 pub(crate) struct Rng(u64);
@@ -94,9 +111,10 @@ fn sqr(v: f64) -> f64 {
     v * v
 }
 
-struct WindMouse<P, S> {
+struct WindMouse<P, S, F> {
     post: P,
     sleep: S,
+    follow: F,
     cancelled: bool,
     rng: Rng,
     due: Instant,
@@ -133,11 +151,21 @@ struct WindMouse<P, S> {
     overshot: bool,
 }
 
-impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindMouse<P, S> {
-    fn new(start: (f64, f64), dest: (i32, i32), options: &Options, post: P, sleep: S) -> Self {
+impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool, F: FnMut() -> Follow>
+    WindMouse<P, S, F>
+{
+    fn new(
+        start: (f64, f64),
+        dest: (i32, i32),
+        options: &Options,
+        post: P,
+        sleep: S,
+        follow: F,
+    ) -> Self {
         Self {
             post,
             sleep,
+            follow,
             cancelled: false,
             rng: Rng::seeded(),
             due: Instant::now(),
@@ -352,6 +380,11 @@ impl<P: FnMut(i32, i32) -> Result<(), String>, S: FnMut(Duration) -> bool> WindM
         }
 
         while Instant::now() < deadline && !self.cancelled {
+            match (self.follow)() {
+                Follow::Stay => {}
+                Follow::To(x, y) => (self.dest_x, self.dest_y) = (x, y),
+                Follow::Stop => return Ok(()),
+            }
             self.remaining_dist = (self.x - self.dest_x).hypot(self.y - self.dest_y);
             if self.remaining_dist <= 2.0 && !self.coasting {
                 break;
@@ -543,6 +576,54 @@ mod tests {
         assert_eq!(result, Ok(()));
         assert_eq!(sleeps, 4);
         assert!(posted < 10, "{posted}");
+    }
+
+    #[test]
+    fn following_lands_on_the_moved_destination() {
+        let mut posted = Vec::new();
+        let mut steps = 0;
+        let result = follow_with(
+            (0.0, 0.0),
+            (300, 0),
+            &FAST,
+            |x, y| {
+                posted.push((x, y));
+                Ok(())
+            },
+            |_| true,
+            || {
+                steps += 1;
+                Follow::To(300.0, f64::from(steps.min(5)))
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(posted.last(), Some(&(300, 5)));
+    }
+
+    #[test]
+    fn following_stops_when_told() {
+        let mut posted = 0;
+        let mut steps = 0;
+        let result = follow_with(
+            (0.0, 0.0),
+            (500, 500),
+            &FAST,
+            |_, _| {
+                posted += 1;
+                Ok(())
+            },
+            |_| true,
+            || {
+                steps += 1;
+                if steps > 3 {
+                    Follow::Stop
+                } else {
+                    Follow::Stay
+                }
+            },
+        );
+        assert_eq!(result, Ok(()));
+        assert!(posted <= 4, "{posted}");
     }
 
     #[test]

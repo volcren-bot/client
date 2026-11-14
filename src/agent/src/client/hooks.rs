@@ -61,7 +61,7 @@ use crate::shared::{
     sync::event_listener,
 };
 use ipc::input::{
-    CACHE_MESSAGE, GAME_VALS_MESSAGE, ITEM_NAMES_MESSAGE, LOCS_MESSAGE, MENU_MESSAGE,
+    ACT_MESSAGE, CACHE_MESSAGE, GAME_VALS_MESSAGE, ITEM_NAMES_MESSAGE, LOCS_MESSAGE, MENU_MESSAGE,
     MODEL_MESSAGE, MODIFIERS_MESSAGE, NAME_MESSAGE, OPEN_CONSOLE_MESSAGE, PROJECT_MESSAGE,
     TOTAL_XP_MESSAGE,
 };
@@ -193,6 +193,7 @@ unsafe fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESU
         MODEL_MESSAGE => super::model::on_request(),
         LOCS_MESSAGE => super::scene::on_locs_request(),
         CACHE_MESSAGE => super::cache::on_request(),
+        ACT_MESSAGE => super::act::on_request(),
         WM_KILLFOCUS | WM_IME_SETCONTEXT | WM_IME_NOTIFY => {}
         WM_KEYDOWN => {
             if KEYBOARD_MODIFIERS.lock().unwrap().contains(&true) {
@@ -295,6 +296,8 @@ unsafe fn draw_frame() {
     let _ = GetClientRect(hwnd, &mut client_rect);
     let window_height = client_rect.bottom - client_rect.top;
     let offset_y_top_down = window_height - offset_y - height;
+
+    let _ = catch_unwind(|| super::act::on_frame((offset_x, offset_y_top_down)));
 
     let fits = frame_fits(width, height);
     let (mouse, dest, overlay, (cursor, cursor_color, cursor_size)) = {

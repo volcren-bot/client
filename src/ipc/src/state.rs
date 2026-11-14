@@ -902,6 +902,101 @@ impl Default for ModelReply {
     }
 }
 
+pub const ACT_OPTIONS: usize = 4;
+pub const ACT_BLOCKERS: usize = 16;
+
+pub mod act_command {
+    pub const ARM: u32 = 1;
+    pub const CANCEL: u32 = 2;
+}
+
+pub mod act_status {
+    pub const IDLE: i32 = 0;
+    pub const TRACKING: i32 = 1;
+    pub const LEFT: i32 = 2;
+    pub const RIGHT: i32 = 3;
+    pub const NO_OPTION: i32 = -1;
+    pub const GONE: i32 = -2;
+    pub const MENU_OPEN: i32 = -3;
+    pub const TIMEOUT: i32 = -4;
+    pub const CANCELLED: i32 = -5;
+    pub const NOT_FOUND: i32 = -6;
+    pub const OTHER_THREAD: i32 = -7;
+    pub const NOT_IN_GAME: i32 = -8;
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActRequest {
+    pub command: u32,
+    pub right: u32,
+    pub model: ModelRequest,
+    pub entry_kind: i32,
+    pub entry_id: i32,
+    pub entry_index: i32,
+    pub option_count: u32,
+    pub options: [[u8; MENU_OPTION_SIZE]; ACT_OPTIONS],
+    pub near_px: f32,
+    pub spread: f32,
+    pub min_area: f32,
+    pub timeout_ms: u32,
+    pub viewport: [i32; 4],
+    pub blocker_count: u32,
+    pub blockers: [[i32; 4]; ACT_BLOCKERS],
+}
+
+impl Default for ActRequest {
+    fn default() -> Self {
+        Self {
+            command: 0,
+            right: 0,
+            model: ModelRequest::default(),
+            entry_kind: -1,
+            entry_id: -1,
+            entry_index: -1,
+            option_count: 0,
+            options: [[0; MENU_OPTION_SIZE]; ACT_OPTIONS],
+            near_px: 0.0,
+            spread: 0.0,
+            min_area: 0.0,
+            timeout_ms: 0,
+            viewport: [0; 4],
+            blocker_count: 0,
+            blockers: [[0; 4]; ACT_BLOCKERS],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActState {
+    pub request: u32,
+    pub status: i32,
+    pub frame: u32,
+    pub has_spot: u32,
+    pub spot: [f32; 2],
+    pub face: i32,
+    pub face_count: u32,
+    pub mouse: [i32; 2],
+    pub entry: MenuEntryInfo,
+}
+
+impl Default for ActState {
+    fn default() -> Self {
+        Self {
+            request: 0,
+            status: act_status::IDLE,
+            frame: 0,
+            has_spot: 0,
+            spot: [0.0; 2],
+            face: -1,
+            face_count: 0,
+            mouse: [0; 2],
+            entry: MenuEntryInfo::default(),
+        }
+    }
+}
+
 pub mod cache_kind {
     pub const FILES: u32 = 0;
     pub const ARCHIVES: u32 = 1;
@@ -1037,6 +1132,12 @@ pub struct LayoutMemory {
     pub worker_reply_sequence: u32,
     pub reserved20: u32,
     pub worker_reply: WorkerReply,
+    pub act_request_sequence: u32,
+    pub reserved21: u32,
+    pub act_request: ActRequest,
+    pub act_state_sequence: u32,
+    pub reserved22: u32,
+    pub act_state: ActState,
 }
 
 pub const LAYOUT_SIZE: usize = core::mem::size_of::<LayoutMemory>();
@@ -1154,6 +1255,8 @@ impl<'a> Shared<'a> {
     seqlocked!(cache_reply_sequence, cache_reply: CacheReply; fill write_cache_reply_with);
     seqlocked!(worker_request_sequence, worker_request: WorkerRequest; request write_worker_request, read_worker_request(100));
     seqlocked!(worker_reply_sequence, worker_reply: WorkerReply; fill write_worker_reply_with);
+    seqlocked!(act_request_sequence, act_request: ActRequest; request write_act_request, read_act_request(1));
+    seqlocked!(act_state_sequence, act_state: ActState; reply write_act_state, read_act_state);
 
     pub fn write_menu_request(self) -> u32 {
         let this = self.this();
@@ -1392,6 +1495,17 @@ mod tests {
             size_of::<ModelReply>(),
             36 + 8 * 8 + MODEL_HULL * 8 + MODEL_FACES * 24
         );
+        assert_eq!(
+            size_of::<ActRequest>(),
+            8 + size_of::<ModelRequest>()
+                + 16
+                + ACT_OPTIONS * MENU_OPTION_SIZE
+                + 16
+                + 16
+                + 4
+                + ACT_BLOCKERS * 16
+        );
+        assert_eq!(size_of::<ActState>(), 40 + entry);
     }
 
     #[test]

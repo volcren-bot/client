@@ -381,6 +381,23 @@ fn read_submenus(
     submenus
 }
 
+pub enum Snapshot {
+    Closed(Vec<MenuEntryInfo>),
+    Open,
+}
+
+pub fn snapshot() -> Option<Snapshot> {
+    if on_other_thread() {
+        return None;
+    }
+    let memory = OwnMemory;
+    let menu = MenuObject::current(&memory)?;
+    if read_open(&memory, menu) == Some(true) {
+        return Some(Snapshot::Open);
+    }
+    read_raw_entries(&memory, menu).map(|raw| Snapshot::Closed(sorted(raw)))
+}
+
 pub fn on_request() {
     let Some(mapping) = mapping() else { return };
     let shared = mapping.shared();

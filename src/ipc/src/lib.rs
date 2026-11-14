@@ -13,7 +13,7 @@ pub mod script_runs;
 pub mod state;
 pub mod varc_log;
 
-pub const PROTOCOL_VERSION: u8 = 59;
+pub const PROTOCOL_VERSION: u8 = 60;
 
 pub fn shared_memory_name(pid: u32) -> String {
     format!("AGENT_DATA_{pid}")
@@ -86,6 +86,7 @@ pub mod input {
     pub const MODEL_MESSAGE: u32 = 0x0400 + 11;
     pub const LOCS_MESSAGE: u32 = 0x0400 + 12;
     pub const CACHE_MESSAGE: u32 = 0x0400 + 13;
+    pub const ACT_MESSAGE: u32 = 0x0400 + 14;
     pub const SYNTHETIC: u64 = 1 << 40;
     pub const MOUSE_FIRST: u32 = 0x0200;
     pub const MOUSE_LAST: u32 = 0x020e;

@@ -21,6 +21,8 @@ use crate::{
 use ipc::packets::{Filter, filter_add, filter_has};
 
 #[cfg(windows)]
+use crate::act as act_on;
+#[cfg(windows)]
 use crate::bank_pin::enter as bank_pin_enter;
 #[cfg(windows)]
 use crate::{
@@ -156,6 +158,7 @@ mod offline {
         fn send_input(u32, &Input) -> ();
         fn send_input_with(u32, &Input, &dyn super::Pace) -> ();
         fn bank_pin_enter(u32, &(dyn super::Pace + Sync)) -> crate::bank_pin::Outcome;
+        fn act_on(u32, &crate::Act, &dyn super::Pace) -> crate::ActResult;
         fn draw(u32, &Overlay) -> ();
         fn draw_batch(u32, &[Overlay]) -> ();
         fn draw_lines(u32, &[[i32; 4]], crate::Rgba) -> ();
@@ -667,6 +670,14 @@ fn move_input((x, y): (i32, i32)) -> mlua::Result<Input> {
 }
 
 fn wind_mouse_input((x, y, options): (i32, i32, Option<mlua::Table>)) -> mlua::Result<Input> {
+    Ok(Input::WindMouse {
+        x,
+        y,
+        options: wind_options(options)?,
+    })
+}
+
+fn wind_options(options: Option<mlua::Table>) -> mlua::Result<wind_mouse::Options> {
     let mut opts = wind_mouse::Options::default();
     if let Some(options) = options {
         opts.speed = options.get::<Option<f64>>("speed")?.unwrap_or(opts.speed);
@@ -679,10 +690,106 @@ fn wind_mouse_input((x, y, options): (i32, i32, Option<mlua::Table>)) -> mlua::R
             .unwrap_or(opts.timeout_ms);
         opts.pace = options.get::<Option<f64>>("pace")?.unwrap_or(opts.pace);
     }
-    Ok(Input::WindMouse {
-        x,
-        y,
-        options: opts,
+    Ok(opts)
+}
+
+const ACT_TIMEOUT_MS: u32 = 3000;
+const ACT_MAX_TIMEOUT_MS: u32 = 30_000;
+const ACT_MAX_HOLD_MS: u32 = 1000;
+
+fn act_error(why: impl Into<String>) -> mlua::Error {
+    mlua::Error::RuntimeError(format!("act: {}", why.into()))
+}
+
+fn act_rect(rect: &mlua::Table) -> mlua::Result<[i32; 4]> {
+    Ok([
+        rect.get("x1")?,
+        rect.get("y1")?,
+        rect.get("x2")?,
+        rect.get("y2")?,
+    ])
+}
+
+fn act_number(spec: &mlua::Table, key: &str, default: f32) -> mlua::Result<f32> {
+    let value = spec.get::<Option<f32>>(key)?.unwrap_or(default);
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(act_error(format!("{key} must be a finite number >= 0")))
+    }
+}
+
+fn act_spec(spec: &mlua::Table) -> mlua::Result<crate::Act> {
+    use ipc::state::{
+        ACT_BLOCKERS, ACT_OPTIONS, ActRequest, MENU_OPTION_SIZE, ModelRequest, model_target,
+    };
+    let model: mlua::Table = spec.get("model")?;
+    let target: String = model.get("target")?;
+    let model = match target.as_str() {
+        "loc" => ModelRequest {
+            target: model_target::LOC,
+            loc_kind: model.get("kind")?,
+            loc_x: model.get("scene_x")?,
+            loc_y: model.get("scene_y")?,
+            loc_id: model.get("id")?,
+            ..Default::default()
+        },
+        "npc" => ModelRequest {
+            target: model_target::NPC,
+            index: model.get("index")?,
+            ..Default::default()
+        },
+        "player" => ModelRequest {
+            target: model_target::PLAYER,
+            index: model.get("index")?,
+            ..Default::default()
+        },
+        other => return Err(act_error(format!("unknown model target {other:?}"))),
+    };
+    let entry: mlua::Table = spec.get("entry")?;
+    let field =
+        |key: &str| -> mlua::Result<i32> { Ok(entry.get::<Option<i32>>(key)?.unwrap_or(-1)) };
+    let options: Vec<String> = spec.get("options")?;
+    if options.is_empty() || options.len() > ACT_OPTIONS {
+        return Err(act_error(format!("give 1 to {ACT_OPTIONS} options")));
+    }
+    if let Some(long) = options.iter().find(|o| o.len() >= MENU_OPTION_SIZE) {
+        return Err(act_error(format!("option {long:?} is too long")));
+    }
+    let blockers: Vec<mlua::Table> = spec
+        .get::<Option<Vec<mlua::Table>>>("blockers")?
+        .unwrap_or_default();
+    let mut request = ActRequest {
+        right: spec.get::<Option<bool>>("right")?.unwrap_or(false) as u32,
+        model,
+        entry_kind: field("kind")?,
+        entry_id: field("id")?,
+        entry_index: field("index")?,
+        option_count: options.len() as u32,
+        near_px: act_number(spec, "near", 4.0)?,
+        spread: act_number(spec, "spread", 0.45)?,
+        min_area: act_number(spec, "min_area", 4.0)?,
+        timeout_ms: spec
+            .get::<Option<u32>>("timeout")?
+            .unwrap_or(ACT_TIMEOUT_MS)
+            .min(ACT_MAX_TIMEOUT_MS),
+        viewport: act_rect(&spec.get("viewport")?)?,
+        blocker_count: blockers.len().min(ACT_BLOCKERS) as u32,
+        ..Default::default()
+    };
+    for (slot, option) in request.options.iter_mut().zip(&options) {
+        slot[..option.len()].copy_from_slice(option.as_bytes());
+    }
+    for (slot, blocker) in request.blockers.iter_mut().zip(&blockers) {
+        *slot = act_rect(blocker)?;
+    }
+    Ok(crate::Act {
+        request,
+        mouse: wind_options(spec.get("mouse")?)?,
+        hold_ms: spec
+            .get::<Option<u32>>("hold")?
+            .unwrap_or(crate::CLICK_HOLD_MS)
+            .min(ACT_MAX_HOLD_MS),
     })
 }
 
@@ -1270,12 +1377,13 @@ pub fn run_with_modules(
         &print,
         |lua, (status, reason): (mlua::Value, Option<String>)| {
             let status: crate::form::ExitStatus = lua.from_value(status).map_err(|_| {
-                mlua::Error::RuntimeError(
-                    "report_exit: status is \"done\" or \"blocked\"".into(),
-                )
+                mlua::Error::RuntimeError("report_exit: status is \"done\" or \"blocked\"".into())
             })?;
             let reason = reason.map(|r| without_separators(&r));
-            Ok(crate::form::exit_line(&crate::form::Exit { status, reason }))
+            Ok(crate::form::exit_line(&crate::form::Exit {
+                status,
+                reason,
+            }))
         },
     )?;
     s.printing("report_warning", &print, |_, text: mlua::LuaString| {
@@ -1723,6 +1831,18 @@ pub fn run_with_modules(
         widget_children(pid, group, child)
     })?;
 
+    let worker = s.worker.clone();
+    s.set(
+        "act",
+        lua.create_function(move |lua, spec: mlua::Table| -> mlua::Result<mlua::Value> {
+            let pid = need_client(pid)?;
+            let spec = act_spec(&spec)?;
+            cancel_input(worker.as_deref());
+            let result = act_on(pid, &spec, &crate::async_input::Blocking)
+                .map_err(mlua::Error::RuntimeError)?;
+            to_lua(lua, &result)
+        })?,
+    )?;
     let worker = s.worker.clone();
     s.set(
         "bank_pin_enter",

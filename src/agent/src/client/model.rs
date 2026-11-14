@@ -314,8 +314,6 @@ fn write(reply: &mut ModelReply, models: &[Projected], orientation: i32) {
     reply.vertex_count = models.iter().map(|m| m.vertex_count as u32).sum();
 }
 
-type Status = Result<(), i32>;
-
 fn scene() -> Result<Scene, i32> {
     Scene::current().map_err(|status| match status {
         project_status::NOT_IN_GAME => model_status::NOT_IN_GAME,
@@ -370,12 +368,13 @@ unsafe fn build(rules: &Rules, renderable: u64) -> Option<Built> {
     })
 }
 
+type Models = (Vec<Projected>, i32, u32);
+
 fn project_renderables(
-    reply: &mut ModelReply,
     rules: &Rules,
     scene: &Scene,
     renderables: &[(u64, Placement)],
-) -> Status {
+) -> Result<Models, i32> {
     let mut models = Vec::new();
     for &(renderable, at) in renderables {
         let Some(built) = (unsafe { build(rules, renderable) }) else {
@@ -391,11 +390,10 @@ fn project_renderables(
     if models.is_empty() {
         return Err(model_status::NO_MODEL);
     }
-    write(reply, &models, renderables[0].1.orientation);
-    Ok(())
+    Ok((models, renderables[0].1.orientation, 0))
 }
 
-fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> Status {
+fn actor_models(target: u32, index: i32) -> Result<Models, i32> {
     let memory = OwnMemory;
     let layout = LAYOUT.get().ok_or(model_status::NOT_FOUND)?;
     let rules = rules()?;
@@ -417,7 +415,6 @@ fn actor_request(reply: &mut ModelReply, target: u32, index: i32) -> Status {
     let scene = scene()?;
     let height = scene.ground(x, y);
     project_renderables(
-        reply,
         rules,
         &scene,
         &[(
@@ -464,7 +461,7 @@ unsafe fn checked_frames(types: &TypeModels, rules: &Rules, seq: &Pair, frame: i
     (has_frames && (0..count).contains(&frame)).then_some(count as u32)
 }
 
-fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {
+fn npc_type_models(request: &ModelRequest) -> Result<Models, i32> {
     let types = TYPES.get().ok_or(model_status::NOT_FOUND)?;
     let rules = rules()?;
     if !(0..MAX_TYPE_ID).contains(&request.type_id) {
@@ -510,12 +507,10 @@ fn npc_type_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {
         orientation: request.orientation,
     };
     let projected = project(&scene, rules, model.object(), &at).ok_or(model_status::NO_MODEL)?;
-    write(reply, &[projected], request.orientation);
-    reply.frame_count = frame_count;
-    Ok(())
+    Ok((vec![projected], request.orientation, frame_count))
 }
 
-fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {
+fn loc_models(request: &ModelRequest) -> Result<Models, i32> {
     match super::scene::loc_renderables(
         request.loc_kind as u8,
         request.loc_x,
@@ -523,11 +518,33 @@ fn loc_request(reply: &mut ModelReply, request: &ModelRequest) -> Status {
         request.loc_id,
     ) {
         Some(renderables) if !renderables.is_empty() => {
-            project_renderables(reply, rules()?, &scene()?, &renderables)
+            project_renderables(rules()?, &scene()?, &renderables)
         }
         Some(_) => Err(model_status::NO_MODEL),
         None => Err(model_status::NO_NPC),
     }
+}
+
+fn models(request: &ModelRequest) -> Result<Models, i32> {
+    let memory = OwnMemory;
+    match LAYOUT.get().filter(|_| RULES.get().is_some()) {
+        None => Err(model_status::NOT_FOUND),
+        Some(_) if on_other_thread() => Err(model_status::OTHER_THREAD),
+        Some(layout)
+            if read::current_game_state(&memory, layout) != Some(game_state::LOGGED_IN) =>
+        {
+            Err(model_status::NOT_IN_GAME)
+        }
+        _ => match request.target {
+            model_target::LOC => loc_models(request),
+            model_target::NPC_TYPE => npc_type_models(request),
+            target => actor_models(target, request.index),
+        },
+    }
+}
+
+pub fn faces(request: &ModelRequest) -> Result<Vec<[[f32; 2]; 3]>, i32> {
+    models(request).map(|(models, _, _)| models.into_iter().flat_map(|m| m.faces).collect())
 }
 
 pub fn on_request() {
@@ -536,28 +553,20 @@ pub fn on_request() {
     let Some((sequence, request)) = shared.read_model_request() else {
         return;
     };
-    let memory = OwnMemory;
     shared.write_model_reply_with(|reply| {
         reply.sequence = sequence;
         reply.corner_count = 0;
         reply.hull_count = 0;
         reply.face_count = 0;
         reply.frame_count = 0;
-        let status = match LAYOUT.get().filter(|_| RULES.get().is_some()) {
-            None => Err(model_status::NOT_FOUND),
-            Some(_) if on_other_thread() => Err(model_status::OTHER_THREAD),
-            Some(layout)
-                if read::current_game_state(&memory, layout) != Some(game_state::LOGGED_IN) =>
-            {
-                Err(model_status::NOT_IN_GAME)
+        reply.status = match models(&request) {
+            Ok((models, orientation, frame_count)) => {
+                write(reply, &models, orientation);
+                reply.frame_count = frame_count;
+                model_status::OK
             }
-            _ => match request.target {
-                model_target::LOC => loc_request(reply, &request),
-                model_target::NPC_TYPE => npc_type_request(reply, &request),
-                target => actor_request(reply, target, request.index),
-            },
+            Err(status) => status,
         };
-        reply.status = status.map_or_else(|status| status, |()| model_status::OK);
     });
 }
 

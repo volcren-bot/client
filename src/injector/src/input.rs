@@ -21,11 +21,12 @@ use windows_sys::Win32::{
 };
 
 use crate::{
-    Input, MouseButton,
+    Act, ActResult, Input, MouseButton,
     async_input::{Blocking, Pace},
-    win::{canvas_offset, class_is, connection},
-    wind_mouse,
+    win::{act_send, act_state, canvas_offset, class_is, connection, menu_entry},
+    wind_mouse::{self, Follow},
 };
+use ipc::state::{ActState, act_command, act_status};
 
 const MK_LBUTTON: WPARAM = 0x1;
 const MK_RBUTTON: WPARAM = 0x2;
@@ -129,6 +130,198 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
             type_text(window, text, Duration::from_millis(*hold_ms as u64), pace)
         }
     }
+}
+
+const ACT_POLL: Duration = Duration::from_millis(2);
+const ACT_GRACE_MS: u128 = 500;
+const ACT_SETTLED_PX: f64 = 1.0;
+
+fn act_status_name(status: i32) -> &'static str {
+    match status {
+        act_status::LEFT => "left",
+        act_status::RIGHT => "right",
+        act_status::NO_OPTION => "no_option",
+        act_status::GONE => "gone",
+        act_status::MENU_OPEN => "menu_open",
+        act_status::TIMEOUT => "timeout",
+        act_status::CANCELLED => "cancelled",
+        act_status::OTHER_THREAD => "other_thread",
+        act_status::NOT_IN_GAME => "not_in_game",
+        act_status::NOT_FOUND => "not_found",
+        _ => "lost",
+    }
+}
+
+pub fn act(pid: u32, act: &Act, pace: &dyn Pace) -> Result<ActResult, String> {
+    let window = window(pid)?;
+    let request = ipc::state::ActRequest {
+        command: act_command::ARM,
+        ..act.request
+    };
+    let (sequence, _) = act_send(pid, &request)?;
+    let outcome = follow(pid, window, act, sequence, pace);
+    let finished = outcome
+        .as_ref()
+        .is_ok_and(|state| state.status != act_status::TRACKING);
+    if !finished {
+        let cancel = ipc::state::ActRequest {
+            command: act_command::CANCEL,
+            ..act.request
+        };
+        act_send(pid, &cancel)?;
+    }
+    let state = outcome?;
+    if matches!(state.status, act_status::LEFT | act_status::RIGHT) {
+        let button = if state.status == act_status::LEFT {
+            MouseButton::Left
+        } else {
+            MouseButton::Right
+        };
+        Blocking.sleep(Duration::from_millis(act.hold_ms as u64));
+        let (_, up, _) = button_messages(button);
+        let (x, y) = mouse_at(pid)?;
+        post(window, up, 0, point(x, y))?;
+    }
+    let status = if finished {
+        act_status_name(state.status)
+    } else if pace.cancelled() {
+        "cancelled"
+    } else {
+        "timeout"
+    };
+    Ok(ActResult {
+        status,
+        x: state.mouse[0],
+        y: state.mouse[1],
+        entry: matches!(state.status, act_status::LEFT | act_status::RIGHT)
+            .then(|| menu_entry(&state.entry)),
+    })
+}
+
+fn current(pid: u32, sequence: u32) -> Result<Option<ActState>, String> {
+    let state = act_state(pid)?;
+    Ok((state.request == sequence).then_some(state))
+}
+
+const ACT_LEAD_MS: f64 = 30.0;
+const ACT_PURSUIT_PX: f64 = 12.0;
+const ACT_PURSUIT_GAP_MS: (f64, f64) = (6.0, 10.0);
+const ACT_SPEED_SMOOTHING: f64 = 0.5;
+
+struct Tracker {
+    last: Option<(u32, [f32; 2], std::time::Instant)>,
+    velocity: (f64, f64),
+}
+
+impl Tracker {
+    fn observe(&mut self, state: &ActState) {
+        if state.has_spot == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some((frame, spot, at)) = self.last {
+            if frame == state.frame {
+                return;
+            }
+            let ms = now.duration_since(at).as_secs_f64() * 1000.0;
+            if ms > 0.0 {
+                let vx = f64::from(state.spot[0] - spot[0]) / ms;
+                let vy = f64::from(state.spot[1] - spot[1]) / ms;
+                self.velocity.0 += (vx - self.velocity.0) * ACT_SPEED_SMOOTHING;
+                self.velocity.1 += (vy - self.velocity.1) * ACT_SPEED_SMOOTHING;
+            }
+        }
+        self.last = Some((state.frame, state.spot, now));
+    }
+
+    fn goal(&self, state: &ActState) -> (f64, f64) {
+        (
+            f64::from(state.spot[0]) + self.velocity.0 * ACT_LEAD_MS,
+            f64::from(state.spot[1]) + self.velocity.1 * ACT_LEAD_MS,
+        )
+    }
+}
+
+fn follow(
+    pid: u32,
+    window: HWND,
+    act: &Act,
+    sequence: u32,
+    pace: &dyn Pace,
+) -> Result<ActState, String> {
+    let started = std::time::Instant::now();
+    let (ox, oy) = canvas_offset(pid);
+    let mut tracker = Tracker {
+        last: None,
+        velocity: (0.0, 0.0),
+    };
+    let mut rng = wind_mouse::Rng::seeded();
+    loop {
+        let Some(state) = current(pid, sequence)? else {
+            return Err("another act replaced this one".into());
+        };
+        if state.status != act_status::TRACKING
+            || pace.cancelled()
+            || started.elapsed().as_millis() > act.request.timeout_ms as u128 + ACT_GRACE_MS
+        {
+            return Ok(state);
+        }
+        tracker.observe(&state);
+        let start = seen_mouse(pid).map(|(x, y)| (f64::from(x), f64::from(y)));
+        let goal = tracker.goal(&state);
+        let away = start.map_or(f64::INFINITY, |(x, y)| (x - goal.0).hypot(y - goal.1));
+        let Some(start) = start.filter(|_| state.has_spot != 0) else {
+            if !pace.sleep(ACT_POLL) {
+                return Ok(state);
+            }
+            continue;
+        };
+        if away <= ACT_PURSUIT_PX {
+            let (x, y) = (goal.0.round() as i32, goal.1.round() as i32);
+            if away > ACT_SETTLED_PX {
+                post(window, WM_MOUSEMOVE, 0, point(x + ox, y + oy))?;
+            }
+            let gap =
+                ACT_PURSUIT_GAP_MS.0 + rng.random() * (ACT_PURSUIT_GAP_MS.1 - ACT_PURSUIT_GAP_MS.0);
+            if !pace.sleep(Duration::from_secs_f64(gap / 1000.0)) {
+                return Ok(state);
+            }
+            continue;
+        }
+        wind_mouse::follow_with(
+            start,
+            (goal.0.round() as i32, goal.1.round() as i32),
+            &act.mouse,
+            |px, py| post(window, WM_MOUSEMOVE, 0, point(px + ox, py + oy)),
+            |duration| pace.sleep(duration),
+            || match current(pid, sequence) {
+                Ok(Some(s)) if s.status == act_status::TRACKING && s.has_spot != 0 => {
+                    tracker.observe(&s);
+                    let goal = tracker.goal(&s);
+                    if start_distance(goal, pid) <= ACT_PURSUIT_PX / 2.0 {
+                        Follow::Stop
+                    } else {
+                        Follow::To(goal.0, goal.1)
+                    }
+                }
+                Ok(Some(s)) if s.status == act_status::TRACKING => Follow::Stay,
+                _ => Follow::Stop,
+            },
+        )
+        .or_else(|why| {
+            if why.starts_with("wind_mouse timed out") {
+                Ok(())
+            } else {
+                Err(why)
+            }
+        })?;
+    }
+}
+
+fn start_distance(goal: (f64, f64), pid: u32) -> f64 {
+    seen_mouse(pid).map_or(f64::INFINITY, |(x, y)| {
+        (f64::from(x) - goal.0).hypot(f64::from(y) - goal.1)
+    })
 }
 
 fn button_messages(button: MouseButton) -> (u32, u32, WPARAM) {

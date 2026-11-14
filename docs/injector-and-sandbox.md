@@ -13,7 +13,7 @@ Library and CLI for everything outside the client: find clients, inject the agen
 | `win.rs`                                   | All Win32: clients, inject/unload, shared memory, sessions, worker reads, overlays, cache reads |
 | `sandbox.rs`                               | Luau runtime (`mlua`, `luau-jit`), every global, `require`, callbacks, `offline` stubs          |
 | `main.rs`                                  | CLI and the `run` stdin/stdout protocol with the loader                                         |
-| `input.rs`, `wind_mouse.rs`                | Synthetic input via `PostMessageW`; WindMouse paths                                             |
+| `input.rs`, `wind_mouse.rs`                | Synthetic input via `PostMessageW`; WindMouse paths; the `act` driver                           |
 | `async_input.rs`, `input_jobs.rs`          | Per-run input `Worker`, `Pace`, held button/key tracking                                        |
 | `cache.rs`, `collision.rs`, `pathfinding.rs` | Cache collision maps, `find_path`, the game's own walk-click router (`game_route`)            |
 | `scene_collision.rs`, `scene_graph.rs`     | Live scene collision; randomized `scene_route` lattice                                          |
@@ -39,6 +39,7 @@ Library and CLI for everything outside the client: find clients, inject the agen
 - **`scene_route`**: drops the scene's 4 outermost tiles (they miss objects) and fills past the scene from recent scenes and the cache's world collision.
 - **Async input**: one `Worker` per `run`. Blocking input, `input_cancel` and live menu reads (`menu`, `menu_open`, `menu_layout`) cancel first. Cancel drops the queue, interrupts sleeps and returns only when idle, so nothing posts after it; held buttons/keys (`input_jobs::Held`) are released last-pressed-first on cancel and shutdown.
   - Invariant: new input code must sleep through `Pace` (`input::send_with`), never `thread::sleep`, or cancel can't interrupt it.
+- **Act** (`input::act`, global `act`): blocking; cancels async input, arms the agent's job, then runs WindMouse toward the spot the agent publishes each frame (`wind_mouse::follow_with` re-reads the destination every step), aimed `ACT_LEAD_MS` ahead by the spot's velocity and switching to small pursuit moves within `ACT_PURSUIT_PX`. The agent decides and posts the press on its frame (see [agent-dll.md](agent-dll.md)); the injector releases the button after `hold`, and cancels the job if it stops early.
 - **Callbacks**: the script is single-threaded Luau, so item/packet callbacks run only inside `sleep`, `wait_item_change` and `wait_packet`, which block on the watchers' events (`wait_watchers`) instead of a timer. A script that never sleeps never runs callbacks; a callback error surfaces from `sleep`. The `PacketWatcher` exists only while something wants packets, filtered to the union of requested opcodes (`Callbacks::refresh_packets`). The packet ring holds only a few seconds of busy traffic.
 - **`movement()`** reads the agent's `Movement` block, filled before each packet, so it is exact across ticks a busy script missed; tick callbacks can't give that.
 - **Entry swaps**: the account folder is found by duplicating client handles (up to `HANDLE_SCAN_LIMIT`) until one is a file under `users\<digits>` below a drive-root profile folder, so a numeric Windows user name doesn't match. Fails while logged out.
@@ -71,7 +72,7 @@ Usage: `injector run [--script <path> [--lib <dir>]] [pid]`. Lines are `\u{1e}`-
 
 ## Cross-repo contracts
 
-- **`HOST_API`** (`lib.rs`, now 20): bump when adding or changing a sandbox global. Pair with `lib/HOST_API`, bumped in the lib commit that starts using it; `lib/tools/check-host-api.sh` fails the lib release when `host.luau` gains a global without a bump.
+- **`HOST_API`** (`lib.rs`, now 21): bump when adding or changing a sandbox global. Pair with `lib/HOST_API`, bumped in the lib commit that starts using it; `lib/tools/check-host-api.sh` fails the lib release when `host.luau` gains a global without a bump.
 - **Lib selection** (`loader/src/libs.rs::choose`): the loader takes the newest lib release whose `requires_host <= injector::HOST_API`, warning when a newer one was skipped. A missed bump pairs a lib with an injector that lacks the global.
 - **`PROTOCOL_VERSION`** (`ipc`): any IPC layout change bumps it and updates agent, injector and `lib/host.luau` together. `Connection::problem` reports a mismatch.
 - **Adding a global**: implement and bind in `sandbox.rs`, add the `offline` stub, bump `HOST_API`, add type/wrapper to `lib/host.luau` and document it in `lib/docs/host.md`.

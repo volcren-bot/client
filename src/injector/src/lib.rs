@@ -14,7 +14,7 @@ use ipc::{Header, Incompatible};
 pub use ipc::{PROTOCOL_VERSION, state::varp};
 use serde::{Deserialize, Serialize};
 
-pub const HOST_API: u32 = 20;
+pub const HOST_API: u32 = 21;
 
 pub mod antiban;
 pub mod async_input;
@@ -32,8 +32,8 @@ pub mod form;
 pub mod http;
 pub mod input_jobs;
 pub mod lamp;
-pub mod manifest;
 pub mod landmass;
+pub mod manifest;
 pub mod nav;
 pub mod pathfinding;
 pub mod prices;
@@ -320,7 +320,7 @@ mod input;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use input::{open_console, send as send_input, send_with as send_input_with};
+pub use input::{act, open_console, send as send_input, send_with as send_input_with};
 #[cfg(windows)]
 pub(crate) use win::paint_overlay;
 #[cfg(windows)]
@@ -477,6 +477,21 @@ fn down(s: &str) -> Result<bool, String> {
 
 pub const KEY_HOLD_MS: u32 = 60;
 pub const CLICK_HOLD_MS: u32 = 60;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Act {
+    pub request: ipc::state::ActRequest,
+    pub mouse: wind_mouse::Options,
+    pub hold_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActResult {
+    pub status: &'static str,
+    pub x: i32,
+    pub y: i32,
+    pub entry: Option<MenuEntry>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {

@@ -24,6 +24,7 @@ Shared-memory contract between the agent (writer, in the client) and the injecto
 - Fallback: the injector reads memory itself if the worker doesn't answer in 50 ms, replies `TOO_BIG`, or an event is missing. `VOLCREN_NO_WORKER=1` forces it for comparison. Every worker read must therefore also work through `reader(..)`.
 - Window-message requests (`input::*_MESSAGE`, and cache requests) run on the game thread. The agent answers only a slot's newest request, so injectors hold `AGENT_REQUEST_<pid>_<message>` around each ask; otherwise a second asker leaves the first waiting out its 3 s timeout. Injector-only; not a layout change.
 - Async input posts window messages and never touches the worker slot.
+- Act: `ACT_MESSAGE` delivers `act_request` like any window-message request and is answered in `act_state`, which the agent then rewrites every frame until the job ends. The injector polls `act_state` directly (no message) while it drives the mouse.
 
 ## Adding a worker read
 
