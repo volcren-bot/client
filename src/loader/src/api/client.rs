@@ -10,8 +10,9 @@ use super::{
     config::Config,
     error::{ApiError, ErrorBody},
     models::{
-        Ended, Heartbeat, Me, Quote, RecentSession, RecentSessions, Redeemed, Removed, Report,
-        Reported, Scored, ScriptList, ScriptManifest, StartedSession, Stats, StoreScript,
+        AgentBeat, AgentSession, Ended, Heartbeat, Me, Quote, RecentSession, RecentSessions,
+        Redeemed, Removed, Report, Reported, Scored, ScriptList, ScriptManifest, StartedSession,
+        Stats, StoreScript,
     },
 };
 
@@ -116,7 +117,8 @@ impl Api {
         if stale.is_some_and(|stale| current.access_token != stale) {
             return Ok(());
         }
-        match auth::refresh(&self.agent, &self.config, &current.refresh_token) {
+        let refresh_token = TokenStore::load().unwrap_or_else(|| current.refresh_token.clone());
+        match auth::refresh(&self.agent, &self.config, &refresh_token) {
             Ok(tokens) => {
                 let session = Session::from_tokens(tokens);
                 persist(&session);
@@ -126,7 +128,9 @@ impl Api {
             Err(TokenError::Rejected(why)) => {
                 *slot = None;
                 drop(slot);
-                TokenStore::clear();
+                if TokenStore::load().as_deref() == Some(refresh_token.as_str()) {
+                    TokenStore::clear();
+                }
                 Err(ApiError::SignedOut(why))
             }
             Err(TokenError::Other(error)) => Err(error),
@@ -308,6 +312,31 @@ impl Api {
             &format!("/launcher/sessions/{}/end", path_id(session_id, "session")?),
             &serde_json::json!({}),
         )
+    }
+
+    pub fn start_agent_session(&self) -> Result<AgentSession, ApiError> {
+        self.post("/launcher/agent-sessions", &serde_json::json!({}))
+    }
+
+    pub fn agent_heartbeat(&self, id: &str) -> Result<AgentBeat, ApiError> {
+        self.post(
+            &format!(
+                "/launcher/agent-sessions/{}/heartbeat",
+                path_id(id, "agent session")?
+            ),
+            &serde_json::json!({}),
+        )
+    }
+
+    pub fn end_agent_session(&self, id: &str) -> Result<(), ApiError> {
+        self.post::<serde_json::Value>(
+            &format!(
+                "/launcher/agent-sessions/{}/end",
+                path_id(id, "agent session")?
+            ),
+            &serde_json::json!({}),
+        )
+        .map(drop)
     }
 
     pub fn recent_sessions(&self) -> Result<Vec<RecentSession>, ApiError> {

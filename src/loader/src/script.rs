@@ -163,8 +163,35 @@ impl Process {
     }
 }
 
+fn hold_client(target: &Target) -> Result<std::fs::File, String> {
+    let dir = crate::paths::project_dirs()
+        .ok_or("Can't find a data folder on this system.")?
+        .data_dir()
+        .join("clients");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create {}: {e}", dir.display()))?;
+    let name = crate::session::sha256_hex(target.key().as_bytes());
+    let path = dir.join(format!("{}.lock", &name[..16]));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("Couldn't open {}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(
+            "Another script is running on this client, from the loader or an agent. Stop it first."
+                .into(),
+        ),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(format!("Couldn't lock {}: {error}", path.display()))
+        }
+    }
+}
+
 pub struct Script {
     process: Process,
+    client: Option<std::fs::File>,
     stdin: Arc<Mutex<ChildStdin>>,
     output: Receiver<String>,
     stderr: Arc<Mutex<Vec<String>>>,
@@ -198,6 +225,7 @@ impl Script {
         settings: &Settings,
         launch: &Launch,
     ) -> Result<Self, String> {
+        let client = target.map(hold_client).transpose()?;
         let mut command = backend::script_command(target, settings, path, lib)?;
         let mut child = command
             .stdin(Stdio::piped())
@@ -313,6 +341,7 @@ impl Script {
 
         Ok(Self {
             process,
+            client,
             stdin,
             output,
             stderr,
@@ -436,6 +465,7 @@ impl Script {
             && let Some(status) = self.process.status()
         {
             self.finished = true;
+            self.client = None;
             let result = if status.success() {
                 Ok(())
             } else {

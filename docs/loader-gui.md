@@ -24,7 +24,8 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 | `update.rs`, `update/` | Signed manifest, `archive.rs` (Linux), `msi.rs` + `msi_command.rs` (Windows) |
 | `vars.rs`, `script_log.rs`, `script_names.rs`, `inventory.rs`, `widgets.rs`, `packets.rs`, `packet_defs.rs` | Development inspectors |
 | `icons.rs` | Icon store |
-| `terminal.rs` | Terminal page (`portable-pty` + `alacritty_terminal`) |
+| `terminal.rs` | Terminal page (`portable-pty` + `alacritty_terminal`), started in the agent workspace |
+| `mcp.rs`, `mcp/`, `workspace.rs` | `loader mcp` server and the agent workspace, see [mcp.md](mcp.md) |
 | `log_view.rs`, `pipe.rs` | Output tab buffer; append-to-file pipe |
 | `theme.rs`, `highlight.rs`, `fold.rs` | Widgets/fonts, Luau highlighting |
 | `backend/` | `mod.rs` `Settings` + platform-neutral facade; `native.rs` (Windows, calls `injector` lib); `wine.rs` (Linux helper) |
@@ -43,7 +44,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 ## Sign-in and storage
 
 - Discord via Supabase, PKCE; listener on `127.0.0.1:5217`, redirect URL `http://localhost:5217/`. Login times out after 5 min.
-- Keyring service `volcren-loader`: `refresh-token` (sign-in), `accounts-key` (32-byte AES-256-GCM key for `accounts.bin` and run records). Never in eframe storage.
+- Keyring service `volcren-loader`: `refresh-token` (sign-in, shared with `loader mcp`, see [mcp.md](mcp.md)), `accounts-key` (32-byte AES-256-GCM key for `accounts.bin` and run records). Never in eframe storage.
 - eframe storage keys: `script`, `last_script`, `forms`, `queues`, `layouts`, `cursor`, `ui_font`, `community_confirmed`, `http_whitelist`, plus `Settings`.
 - `accounts.bin` (data dir) is `nonce || ciphertext || tag`. If it can't be opened (no keyring, wrong key) the page refuses to save so it isn't overwritten. Only `hash_name` of the account name is kept, normalised like the client (lowercase, spaces/hyphens to `_`).
 - `layouts`: if unreadable (written by a newer loader) it is copied to `layouts-unreadable-<unix>.ron` and never saved over. Two open loaders still overwrite each other's storage.
@@ -58,7 +59,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 - Restart (`App::restart_run`) ends the old session again (idempotent), re-reads the listing (community list only for tester+) and the quote; `session::asks_first` prompts when the quoted price changed or a fee applies. The old run closes only once the new one starts.
 - Store files are AES-256-GCM encrypted (`session::decrypt_file`; `key: null` means plain, pre-encryption revisions), downloaded on every start, never written to disk, sent to the injector over stdin (`MODULES`). The revision cache folder is empty and only anchors relative `require`.
 - Community scripts: the warning's acceptance is stored per script and revision (`Confirmed`, max 500). `session::prepare` refuses and ends a session whose started revision isn't the confirmed one, so a revision published after the warning never runs unseen.
-- One script per client. A store start in progress (quoting, dialog, downloading) holds its client.
+- One script per client, enforced across processes by a lock file (see [mcp.md](mcp.md)). A store start in progress (quoting, dialog, downloading) holds its client.
 - Store scripts use the newest lib in `lib/index.json` whose `requires_host` is at most `injector::HOST_API` (`libs.rs`); if a newer lib needs a newer loader, the script log says to update.
 
 ## Update flow
@@ -67,7 +68,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 - Installs by itself (`update::installs_by_itself`) unless a run is active/starting/in a dialog, or the loader was restarted with `--update-failed`, so a failure can't loop. Checks once per start.
 - Never installs while another loader runs: each holds a share of `loader.lock` in the data dir (`update::Instance`).
 - Under a cargo `target/` dir it never installs (`Kind::Dev`); the header's version hover names the newer version.
-- Linux: unpack into `<install>/.update/`, rename 4 files in with hard links for rollback, start the new loader after this one closes (so `save()`/`on_exit` run). Unwritable install dir falls back to browser download.
+- Linux: unpack into `<install>/.update/`, rename each file in `FILES` (`update/archive.rs`) in with hard links for rollback, start the new loader after this one closes (so `save()`/`on_exit` run). Unwritable install dir falls back to browser download.
 - Windows: MSI to `<data>/update/`, sha256 checked; loader copies itself there and runs the copy with `--finish-update`, which waits, runs `msiexec /passive` with the install's own mode and folder (read from Windows Installer; upgrades don't cross modes), and restarts the installed loader unelevated, with `--update-failed <msg>` on failure (declined UAC counts). Non-MSI installs get browser download.
 - `Settings::fill_missing` forces an install to use the `agent.dll` and `injector` next to it, so a saved path can't pair versions.
 - Versions: `YYYY.MM.DD-<7 char commit>`, or `dev` outside git.

@@ -724,7 +724,7 @@ const CURSOR_STYLES: [CursorStyle; 4] = [
     CursorStyle::Dot,
 ];
 
-const DEFAULT_CURSOR: Cursor = Cursor {
+pub(crate) const DEFAULT_CURSOR: Cursor = Cursor {
     style: CursorStyle::Cross,
     color: [255, 0, 0],
     size: 20,
@@ -846,10 +846,10 @@ const SCRIPT_KEY: &str = "script";
 const LAST_SCRIPT_KEY: &str = "last_script";
 const FORMS_KEY: &str = "forms";
 const LAYOUTS_KEY: &str = "layouts";
-const CURSOR_KEY: &str = "cursor";
+pub(crate) const CURSOR_KEY: &str = "cursor";
 const UI_FONT_KEY: &str = "ui_font";
 const CONFIRMED_KEY: &str = "community_confirmed";
-const HTTP_WHITELIST_KEY: &str = "http_whitelist";
+pub(crate) const HTTP_WHITELIST_KEY: &str = "http_whitelist";
 
 const XP_READ_EVERY: Duration = Duration::from_secs(5);
 
@@ -6617,9 +6617,17 @@ impl LoaderApp {
 
     fn terminal_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        self.terminal
-            .get_or_insert_with(|| crate::terminal::Terminal::new(&ctx))
-            .ui(ui);
+        if self.terminal.is_none() {
+            let dir = crate::workspace::prepare(&self.settings)
+                .map_err(|error| {
+                    self.error(format!("Couldn't prepare the agent workspace: {error}"))
+                })
+                .ok();
+            self.terminal = Some(crate::terminal::Terminal::new(&ctx, dir));
+        }
+        if let Some(terminal) = &mut self.terminal {
+            terminal.ui(ui);
+        }
     }
 
     fn development_ui(&mut self, ui: &mut egui::Ui) {

@@ -47,7 +47,7 @@ function Check([string] $name, [string] $assignment, [string] $folder, [string] 
             if ($products[0].Version -ne $version) { $problems += "version $($products[0].Version)" }
             if ($products[0].Location.TrimEnd("\") -ne $folder) { $problems += "location $($products[0].Location)" }
         }
-        foreach ($file in "loader.exe", "injector.exe", "agent.dll") {
+        foreach ($file in "loader.exe", "injector.exe", "agent.dll", "luau-analyze.exe") {
             if (-not (Test-Path (Join-Path $folder $file))) { $problems += "no $file" }
         }
     } else {

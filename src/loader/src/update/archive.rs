@@ -17,11 +17,12 @@ const WORK_DIR: &str = ".update";
 const STAGE_DIR: &str = "stage";
 const BACKUP_DIR: &str = "backup";
 const ARCHIVE_ROOT: &str = "volcren/";
-const FILES: [(&str, bool); 4] = [
+const FILES: [(&str, bool); 5] = [
     ("loader", true),
     ("injector", true),
     ("injector.exe", false),
     ("agent.dll", false),
+    ("luau-analyze", true),
 ];
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -195,6 +196,7 @@ mod tests {
             ("volcren/injector", b"new injector".to_vec()),
             ("volcren/injector.exe", b"new injector.exe".to_vec()),
             ("volcren/agent.dll", b"new agent".to_vec()),
+            ("volcren/luau-analyze", b"new luau-analyze".to_vec()),
         ]
     }
 

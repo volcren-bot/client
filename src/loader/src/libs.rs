@@ -136,7 +136,7 @@ fn install(api: &Api, root: &Path, manifest: &Release) -> Result<(), String> {
     result.map_err(|e| format!("Couldn't install the script library: {e}"))
 }
 
-fn safe_entry(name: &str) -> Option<PathBuf> {
+pub(crate) fn safe_entry(name: &str) -> Option<PathBuf> {
     if name.contains(['\\', '\0', ':']) {
         return None;
     }
@@ -147,7 +147,7 @@ fn safe_entry(name: &str) -> Option<PathBuf> {
     (plain
         && matches!(
             path.extension().and_then(|e| e.to_str()),
-            Some("luau" | "lua")
+            Some("luau" | "lua" | "md")
         ))
     .then(|| path.to_path_buf())
 }
@@ -236,6 +236,10 @@ mod tests {
             assert_eq!(safe_entry(bad), None, "{bad:?}");
         }
         assert_eq!(safe_entry("host.luau"), Some(PathBuf::from("host.luau")));
+        assert_eq!(
+            safe_entry("docs/main/walker.md"),
+            Some(PathBuf::from("docs/main/walker.md"))
+        );
         assert_eq!(
             safe_entry("main/interfaces/login.luau"),
             Some(PathBuf::from("main/interfaces/login.luau"))

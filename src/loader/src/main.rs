@@ -21,6 +21,7 @@ mod layouts;
 mod libs;
 mod log_view;
 mod logo;
+mod mcp;
 mod packet_defs;
 mod packets;
 mod paths;
@@ -38,11 +39,19 @@ mod update;
 mod vars;
 mod whitelist;
 mod widgets;
+mod workspace;
 mod xp;
 
 use eframe::egui;
 
+pub const APP_ID: &str = "Loader";
+
 fn main() -> eframe::Result {
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        let _instance = update::Instance::hold();
+        mcp::serve();
+        return Ok(());
+    }
     #[cfg(windows)]
     if update::finish_if_asked() {
         return Ok(());
@@ -54,7 +63,7 @@ fn main() -> eframe::Result {
     transports::start();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_app_id("Loader")
+            .with_app_id(APP_ID)
             .with_inner_size([900.0, 640.0])
             .with_min_inner_size([520.0, 300.0]),
         ..Default::default()

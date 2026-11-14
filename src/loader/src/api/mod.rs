@@ -7,4 +7,6 @@ pub mod models;
 pub use client::Api;
 pub use config::Config;
 pub use error::ApiError;
-pub use models::{Heartbeat, Me, Redeemed, Removed, StartedSession, Stats, StoreScript};
+pub use models::{
+    AgentSession, Heartbeat, Me, Redeemed, Removed, StartedSession, Stats, StoreScript,
+};

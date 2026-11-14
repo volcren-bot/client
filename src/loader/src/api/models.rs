@@ -235,6 +235,17 @@ pub struct Ended {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AgentSession {
+    pub id: String,
+    pub heartbeat_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct AgentBeat {
+    pub ended: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RecentSession {
     pub session_id: String,
     pub script_id: String,

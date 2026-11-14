@@ -11,6 +11,9 @@ permissions:
 
 env:
     RUST_VERSION: "1.99.0"
+    LUAU_VERSION: "0.742"
+    LUAU_UBUNTU_SHA256: "152058b98c60ff1f5b5ec9bca0b8eb37793cae161dd3a05608cc3d8738ba1a4d"
+    LUAU_WINDOWS_SHA256: "1114966cd8198f407069f07e8b4e6bacf2ded933e4a57d6ddc75617969278c75"
 
 jobs:
     build:
@@ -114,6 +117,12 @@ jobs:
                   echo "build=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
                   echo "api_version=$(grep -m1 'pub const API_VERSION' src/loader/src/api/models.rs | grep -o '[0-9]*;' | tr -d ';')" >> "$GITHUB_OUTPUT"
 
+            - name: Download luau-analyze
+              run: |
+                  curl -sSfL -o luau.zip "https://github.com/luau-lang/luau/releases/download/$LUAU_VERSION/luau-ubuntu.zip"
+                  echo "$LUAU_UBUNTU_SHA256  luau.zip" | sha256sum -c -
+                  unzip -q luau.zip luau-analyze -d luau
+
             - name: Package
               run: |
                   mkdir -p out
@@ -121,8 +130,8 @@ jobs:
                   lin=dist/volcren-linux-release
                   stage=$(mktemp -d)/volcren
                   mkdir -p "$stage"
-                  cp "$lin/loader" "$lin/injector" "$win/injector.exe" "$win/agent.dll" "$stage/"
-                  chmod +x "$stage/loader" "$stage/injector"
+                  cp "$lin/loader" "$lin/injector" "$win/injector.exe" "$win/agent.dll" luau/luau-analyze "$stage/"
+                  chmod +x "$stage/loader" "$stage/injector" "$stage/luau-analyze"
                   tar -C "$(dirname "$stage")" -czf "out/volcren-linux-$VERSION.tar.gz" volcren
 
             - uses: actions/upload-artifact@v4
@@ -153,6 +162,14 @@ jobs:
                   of_month=$(( (10#$day - 1) * 1440 + 10#$hour * 60 + 10#$minute ))
                   echo "MSI_VERSION=$((10#$year)).$((10#$month)).$of_month" >> "$GITHUB_ENV"
                   echo "VERSION=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y.%m.%d HEAD)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+
+            - name: Download luau-analyze
+              shell: pwsh
+              run: |
+                  Invoke-WebRequest "https://github.com/luau-lang/luau/releases/download/$env:LUAU_VERSION/luau-windows.zip" -OutFile luau.zip
+                  if ((Get-FileHash luau.zip -Algorithm SHA256).Hash -ne $env:LUAU_WINDOWS_SHA256) { throw "luau-windows.zip doesn't match LUAU_WINDOWS_SHA256." }
+                  Expand-Archive luau.zip luau
+                  Copy-Item luau\luau-analyze.exe dist\
 
             - uses: actions/setup-dotnet@v4
               with:

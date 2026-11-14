@@ -148,12 +148,20 @@ struct Session {
 }
 
 impl Session {
-    fn spawn(ctx: &egui::Context, program: &str, size: Size) -> Result<Self, String> {
+    fn spawn(
+        ctx: &egui::Context,
+        program: &str,
+        size: Size,
+        dir: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
         let pair = native_pty_system()
             .openpty(pty_size(size))
             .map_err(|e| e.to_string())?;
         let mut command = CommandBuilder::new(program);
-        if let Ok(dir) = std::env::current_dir() {
+        if let Some(dir) = dir
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+        {
             command.cwd(dir);
         }
         command.env("TERM", "xterm-256color");
@@ -230,23 +238,25 @@ impl Drop for Session {
 
 pub struct Terminal {
     session: Result<Session, String>,
+    dir: Option<std::path::PathBuf>,
     selecting: bool,
     scroll: f32,
     focus_pending: bool,
 }
 
 impl Terminal {
-    pub fn new(ctx: &egui::Context) -> Self {
+    pub fn new(ctx: &egui::Context, dir: Option<std::path::PathBuf>) -> Self {
         Self {
-            session: Self::start(ctx),
+            session: Self::start(ctx, dir.as_deref()),
+            dir,
             selecting: false,
             scroll: 0.0,
             focus_pending: true,
         }
     }
 
-    fn start(ctx: &egui::Context) -> Result<Session, String> {
-        Session::spawn(ctx, &shell(), Size { cols: 80, rows: 24 })
+    fn start(ctx: &egui::Context, dir: Option<&std::path::Path>) -> Result<Session, String> {
+        Session::spawn(ctx, &shell(), Size { cols: 80, rows: 24 }, dir)
     }
 
     pub fn close(&mut self) {
@@ -268,6 +278,7 @@ impl Terminal {
         let ctx = ui.ctx().clone();
         let Self {
             session,
+            dir,
             selecting,
             scroll,
             focus_pending,
@@ -285,7 +296,7 @@ impl Terminal {
                     restart = ui.button("Try again").clicked();
                 });
                 if restart {
-                    self.session = Self::start(&ctx);
+                    *session = Self::start(&ctx, dir.as_deref());
                 }
                 return;
             }
@@ -424,13 +435,14 @@ impl Terminal {
                         pressed: true,
                         ..
                     } if exited => {
-                        *session = match Session::spawn(&ctx, &shell(), session.size) {
-                            Ok(new) => new,
-                            Err(error) => {
-                                self.session = Err(error);
-                                return;
-                            }
-                        };
+                        *session =
+                            match Session::spawn(&ctx, &shell(), session.size, dir.as_deref()) {
+                                Ok(new) => new,
+                                Err(error) => {
+                                    self.session = Err(error);
+                                    return;
+                                }
+                            };
                     }
                     Input::Key {
                         key: egui::Key::C,
@@ -823,6 +835,7 @@ mod tests {
             &egui::Context::default(),
             "/bin/sh",
             Size { cols: 40, rows: 5 },
+            None,
         )
         .expect("spawn");
         session.write(b"echo volcren-$((6*7))\r");

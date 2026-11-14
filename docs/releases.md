@@ -9,9 +9,16 @@
 - Rust (`RUST_VERSION`) is pinned so the build cache survives. The cache job backdates tracked files and touches only those changed since `target/.built-commit`; don't remove that or every crate rebuilds.
 - A failing `installer/test-msi.ps1` stops the release before signing.
 
+## luau-analyze
+
+Both packages ship `luau-analyze` (`.exe` in the MSI) next to the loader, which runs it from its own folder for the MCP `check_luau` tool ([mcp.md](mcp.md)); script authors don't have Luau installed. It is the official luau-lang/luau release build, pinned to the version in `lib/mise.toml` so the loader checks scripts the way the lib's CI does. The Windows build needs the MSVC 2015+ runtime (`VCRUNTIME140.dll`, `MSVCP140.dll`), which the MSI doesn't install.
+
+To bump: set `LUAU_VERSION` in `release.yml` to the new tag, then set `LUAU_UBUNTU_SHA256` and `LUAU_WINDOWS_SHA256` to the hashes of that tag's `luau-ubuntu.zip` and `luau-windows.zip` (`gh release download <tag> -R luau-lang/luau -p 'luau-*.zip'`, then `sha256sum`, and compare with the digests `gh release view <tag> -R luau-lang/luau --json assets` reports). Bump `lib/mise.toml` with it.
+
 ## Bucket layout (public `client`)
 
-- `<version>/volcren-windows-<version>.msi`, `<version>/volcren-linux-<version>.tar.gz` (folder `volcren/` with `loader`, `injector`, `injector.exe`, `agent.dll`); cached a year.
+- `<version>/volcren-windows-<version>.msi`, `<version>/volcren-linux-<version>.tar.gz` (folder `volcren/` with `loader`, `injector`, `injector.exe`, `agent.dll`, `luau-analyze`); cached a year.
+- The tarball must hold exactly the files in `FILES` (`src/loader/src/update/archive.rs`): a Linux loader rejects an update with a file it doesn't know, so adding one strands older installs on a manual install.
 - `latest.signed.json` `{manifest, signature}`: what the loader reads. One object so a signature can't pair with another manifest. Uploaded after the packages.
 - `latest.json`: same manifest unsigned, for the webapp's install page; nothing installs from it. Uploaded last.
 - Manifest: `version`, `build`, `api_version` (from `API_VERSION` in `src/loader/src/api/models.rs`), and per-OS `name`, `path`, `sha256`. One signature covers all packages through the hashes.

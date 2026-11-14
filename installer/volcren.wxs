@@ -83,6 +83,9 @@
         <Component Id="Agent">
           <File Id="AgentDll" Source="$(var.BinDir)\agent.dll" KeyPath="yes" />
         </Component>
+        <Component Id="LuauAnalyze">
+          <File Id="LuauAnalyzeExe" Source="$(var.BinDir)\luau-analyze.exe" KeyPath="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
 

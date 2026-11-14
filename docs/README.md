@@ -11,6 +11,7 @@ Automates the native game client (C++ x64 PE) on Windows, or on Linux with the c
 | `src/decode`     | [ipc-protocol.md](ipc-protocol.md)               |
 | `src/injector`   | [injector-and-sandbox.md](injector-and-sandbox.md) |
 | `src/loader`     | [loader-gui.md](loader-gui.md)                   |
+| `loader mcp` (agents) | [mcp.md](mcp.md)                         |
 | Offsets, client internals, `standalone/`, `archive/`, `tools/memscan` | [reverse-engineering.md](reverse-engineering.md) |
 | Release workflow, signed manifest, MSI | [releases.md](releases.md)          |
 
