@@ -1985,10 +1985,11 @@ impl LoaderApp {
     }
 
     fn open_store_script(&mut self, ctx: &egui::Context, script: StoreScript, target: Target) {
-        match script
-            .revision
-            .and_then(|revision| self.manifests.get(&script.id).filter(|(r, _)| *r == revision))
-        {
+        match script.revision.and_then(|revision| {
+            self.manifests
+                .get(&script.id)
+                .filter(|(r, _)| *r == revision)
+        }) {
             Some((_, manifest)) => {
                 let manifest = manifest.clone();
                 self.configure_store_script(ctx, script, target, &manifest);
@@ -2041,7 +2042,9 @@ impl LoaderApp {
         let mut run = Run::new(id, title.clone(), None, Some(target), None, &self.settings);
         run.source = Some(Source::Store(script));
         run.form = Some(self.settings_form(spec, &title));
-        run.info(format!("Set up {title}, then press Start. Nothing is billed until it starts."));
+        run.info(format!(
+            "Set up {title}, then press Start. Nothing is billed until it starts."
+        ));
         self.add_run(run);
     }
 
@@ -2630,10 +2633,11 @@ impl LoaderApp {
     }
 
     fn start_in_progress(&self) -> bool {
-        self.runs.iter().any(|run| run.ended.is_none())
-            || self.starting.is_some()
-            || self.start_prompt.is_some()
-            || self.warning.is_some()
+        self.runs.iter().any(|run| run.ended.is_none()) || self.start_pending()
+    }
+
+    fn start_pending(&self) -> bool {
+        self.starting.is_some() || self.start_prompt.is_some() || self.warning.is_some()
     }
 
     fn update_failed(&mut self, error: String) {
@@ -4961,7 +4965,9 @@ impl LoaderApp {
                             (injector::form::ExitStatus::Blocked, None) => {
                                 run.info("The script can't go on.");
                             }
-                            (injector::form::ExitStatus::Done, Some(reason)) => run.info(reason.clone()),
+                            (injector::form::ExitStatus::Done, Some(reason)) => {
+                                run.info(reason.clone())
+                            }
                             (injector::form::ExitStatus::Done, None) => {}
                         }
                         run.exit = Some(exit);
@@ -5280,7 +5286,7 @@ impl LoaderApp {
         let is_store = run.store.is_some();
         let waiting = run.is_configuring();
         let form_sent = !waiting && run.form_sent.is_some();
-        let can_start = waiting && !self.start_in_progress();
+        let can_start = waiting && !self.start_pending();
         let changed_form = form_sent && run.form.as_ref().is_some_and(|f| {
             matches!(f.submitted(self.script_layouts(), &self.known_items), crate::form::Outcome::Submitted(v) if Some(&v) != run.form_sent.as_ref())
         });
@@ -5364,8 +5370,14 @@ impl LoaderApp {
             } else {
                 (ICON_STOP, "Stop")
             };
-            if icon_button(ui, stop_icon, stop_text, width, waiting || (running && !stopping))
-                .clicked()
+            if icon_button(
+                ui,
+                stop_icon,
+                stop_text,
+                width,
+                waiting || (running && !stopping),
+            )
+            .clicked()
             {
                 if waiting {
                     outcome = crate::form::Outcome::Cancelled;
@@ -5872,9 +5884,9 @@ impl LoaderApp {
                     fee: prepared.session.fee,
                     fee_charged: 0,
                 };
-                let id = match configured.filter(|id| {
-                    self.run_by_id(*id).is_some_and(Run::is_configuring)
-                }) {
+                let id = match configured
+                    .filter(|id| self.run_by_id(*id).is_some_and(Run::is_configuring))
+                {
                     Some(id) => id,
                     None => {
                         let id = self.next_run_id();
@@ -5974,7 +5986,14 @@ impl LoaderApp {
             injector::manifest::Manifest::default()
         };
         let id = self.next_run_id();
-        let mut run = Run::new(id, name.clone(), None, target.cloned(), None, &self.settings);
+        let mut run = Run::new(
+            id,
+            name.clone(),
+            None,
+            target.cloned(),
+            None,
+            &self.settings,
+        );
         run.source = Some(Source::File(file.clone()));
         run.file = Some(file.clone());
         let spec = manifest.settings.clone().filter(|_| values.is_none());

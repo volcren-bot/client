@@ -83,12 +83,15 @@ impl Check {
             Some(Err(error)) => return Err(format!("{title}: {error}")),
             None => return Err(format!("{title} wasn't checked.")),
         };
-        let manifest = Manifest::parse(fetched.manifest.clone()).map_err(|e| format!("{title}: {e}"))?;
+        let manifest =
+            Manifest::parse(fetched.manifest.clone()).map_err(|e| format!("{title}: {e}"))?;
         if !manifest.queueable {
             return Err(format!("{title}'s live revision can't run in a queue."));
         }
         if spec_hash(&manifest) != entry.spec_hash {
-            return Err(format!("{title}'s settings changed. Open its entry to check them."));
+            return Err(format!(
+                "{title}'s settings changed. Open its entry to check them."
+            ));
         }
         if script.community && !confirmed.has(&script.id, fetched.revision) {
             return Err(format!(
@@ -134,7 +137,10 @@ impl LoaderApp {
         let Some((index, script_id, form)) = &self.queue_page.form else {
             return;
         };
-        let hash = self.manifests.get(script_id).and_then(|(_, m)| spec_hash(m));
+        let hash = self
+            .manifests
+            .get(script_id)
+            .and_then(|(_, m)| spec_hash(m));
         if let Some(entry) = self
             .queues
             .current
@@ -204,7 +210,9 @@ impl LoaderApp {
             Ok(cached) => {
                 self.manifests.insert(script_id, cached);
             }
-            Err(error) => self.script_error(format!("Couldn't load the script's settings: {error}")),
+            Err(error) => {
+                self.script_error(format!("Couldn't load the script's settings: {error}"))
+            }
         }
     }
 
@@ -311,7 +319,11 @@ impl LoaderApp {
                     .desired_width(160.0),
             );
             save = ui.button("Save").clicked();
-            if self.queues.saved.iter().any(|q| q.name == self.queues.current.name)
+            if self
+                .queues
+                .saved
+                .iter()
+                .any(|q| q.name == self.queues.current.name)
                 && ui.button("Delete saved").clicked()
             {
                 delete = Some(self.queues.current.name.clone());
@@ -359,8 +371,9 @@ impl LoaderApp {
                         "stay logged in",
                     );
                 });
-            ui.label("If a script changed:")
-                .on_hover_text("Its price, its settings or a new community revision since the queue started.");
+            ui.label("If a script changed:").on_hover_text(
+                "Its price, its settings or a new community revision since the queue started.",
+            );
             egui::ComboBox::from_id_salt("queue_on_change")
                 .selected_text(match queue.on_change {
                     OnChange::Stop => "stop the queue",
@@ -409,7 +422,11 @@ impl LoaderApp {
                 .current
                 .problem()
                 .or_else(|| self.run_block(target.as_ref()))
-                .or_else(|| self.queue_page.checking.map(|_| "Checking the queue…".into()));
+                .or_else(|| {
+                    self.queue_page
+                        .checking
+                        .map(|_| "Checking the queue…".into())
+                });
             let button = ui.add_enabled(problem.is_none(), egui::Button::new("Start queue"));
             let button = match &problem {
                 Some(why) => button.on_disabled_hover_text(why),
@@ -540,7 +557,11 @@ impl LoaderApp {
                 None => {}
             }
             if let Some(goal) = entry.goal.as_mut() {
-                ui.add(egui::DragValue::new(&mut goal.target).range(1.0..=1e9).speed(1.0));
+                ui.add(
+                    egui::DragValue::new(&mut goal.target)
+                        .range(1.0..=1e9)
+                        .speed(1.0),
+                );
             }
             if goals.is_empty() {
                 ui.weak("(this script names no goals)");
@@ -552,7 +573,10 @@ impl LoaderApp {
         let title = entry.title.clone();
         match self.queue_page.form.take() {
             Some((i, id, mut form)) if i == index => {
-                form.show_inline(ui, self.layouts.get(&title).unwrap_or(&super::EMPTY_LAYOUTS));
+                form.show_inline(
+                    ui,
+                    self.layouts.get(&title).unwrap_or(&super::EMPTY_LAYOUTS),
+                );
                 self.queue_page.form = Some((i, id, form));
             }
             other => {
@@ -606,7 +630,8 @@ impl LoaderApp {
             if let Ok(fetched) = fetched
                 && let Ok(manifest) = Manifest::parse(fetched.manifest.clone())
             {
-                self.manifests.insert(id.clone(), (fetched.revision, manifest));
+                self.manifests
+                    .insert(id.clone(), (fetched.revision, manifest));
             }
         }
         if entry {
@@ -628,7 +653,11 @@ impl LoaderApp {
         for entry in &queue.entries {
             match check.ready(entry, &self.confirmed) {
                 Ok(ready) => {
-                    rows.push((entry.title.clone(), ready.price, entry.most_cost(ready.price)));
+                    rows.push((
+                        entry.title.clone(),
+                        ready.price,
+                        entry.most_cost(ready.price),
+                    ));
                     approved.insert(entry.script_id.clone(), ready.price);
                 }
                 Err(problem) => problems.push(problem),
@@ -745,7 +774,10 @@ impl LoaderApp {
             .ready(&entry, &self.confirmed)
             .and_then(|ready| match approved {
                 Some(price) if price == ready.price => Ok(ready),
-                _ => Err(format!("{}'s price changed since the queue started.", entry.title)),
+                _ => Err(format!(
+                    "{}'s price changed since the queue started.",
+                    entry.title
+                )),
             });
         let ready = match ready {
             Ok(ready) => ready,
@@ -787,7 +819,10 @@ impl LoaderApp {
             .clone()
             .unwrap_or_else(|| serde_json::json!({ "fields": [] }));
         let form = crate::form::Form::new(spec, Some(&entry.settings));
-        let layouts = self.layouts.get(&entry.title).unwrap_or(&super::EMPTY_LAYOUTS);
+        let layouts = self
+            .layouts
+            .get(&entry.title)
+            .unwrap_or(&super::EMPTY_LAYOUTS);
         let values = match form.submitted(layouts, &self.known_items) {
             crate::form::Outcome::Submitted(values) => values,
             _ => Value::Object(Default::default()),
@@ -875,7 +910,14 @@ impl LoaderApp {
             &Launch::default(),
         )?;
         let id = self.next_run_id();
-        let mut run = Run::new(id, "Log out".into(), Some(script), Some(target), None, &self.settings);
+        let mut run = Run::new(
+            id,
+            "Log out".into(),
+            Some(script),
+            Some(target),
+            None,
+            &self.settings,
+        );
         run.info("The queue is logging the account out.");
         self.runs.push(run);
         Ok(id)
@@ -937,15 +979,17 @@ impl LoaderApp {
                     return match outcome {
                         Outcome::Done => self.next_queue_entry(ctx, pid),
                         Outcome::Blocked => {
-                            self.script_info(format!("{title} couldn't go on, so the queue moves on."));
+                            self.script_info(format!(
+                                "{title} couldn't go on, so the queue moves on."
+                            ));
                             self.next_queue_entry(ctx, pid);
                         }
-                        Outcome::Failed => self.finish_queue(
-                            ctx,
-                            pid,
-                            format!("Queue stopped: {title} failed."),
-                        ),
-                        Outcome::Stopped => self.end_queue(pid, format!("Queue stopped: {title} was stopped.")),
+                        Outcome::Failed => {
+                            self.finish_queue(ctx, pid, format!("Queue stopped: {title} failed."))
+                        }
+                        Outcome::Stopped => {
+                            self.end_queue(pid, format!("Queue stopped: {title} was stopped."))
+                        }
                     };
                 }
                 let Some(entry) = runner.entry() else {
@@ -962,7 +1006,9 @@ impl LoaderApp {
                             if let Some(run) = self.run_by_id_mut(run) {
                                 run.report(sent, "The queue asked the script to wrap up.");
                             }
-                            if let Some(runner) = self.queue_runners.iter_mut().find(|r| r.pid == pid) {
+                            if let Some(runner) =
+                                self.queue_runners.iter_mut().find(|r| r.pid == pid)
+                            {
                                 runner.phase = Phase::Running {
                                     run,
                                     finish_sent: Some(Instant::now()),
@@ -971,15 +1017,15 @@ impl LoaderApp {
                         }
                     }
                     Some(_) => {
-                        let grace = self
-                            .manifests
-                            .get(&entry.script_id)
-                            .map_or(injector::manifest::DEFAULT_FINISH_GRACE_MINUTES, |(_, m)| {
-                                m.finish_grace_minutes
-                            });
+                        let grace = self.manifests.get(&entry.script_id).map_or(
+                            injector::manifest::DEFAULT_FINISH_GRACE_MINUTES,
+                            |(_, m)| m.finish_grace_minutes,
+                        );
                         let late = runner.grace(grace).is_some_and(|left| left.is_zero());
                         if late && !runner.killed {
-                            if let Some(runner) = self.queue_runners.iter_mut().find(|r| r.pid == pid) {
+                            if let Some(runner) =
+                                self.queue_runners.iter_mut().find(|r| r.pid == pid)
+                            {
                                 runner.killed = true;
                             }
                             if let Some(run) = self.run_by_id_mut(run) {
@@ -1001,13 +1047,16 @@ impl LoaderApp {
             .find(|r| r.run_id() == Some(run))
             .map(Runner::progress)
     }
-
 }
 
 fn limits_text(entry: &Entry) -> String {
     let mut parts = Vec::new();
     if let Some(goal) = &entry.goal {
-        parts.push(format!("goal {} {}", crate::counters::number(goal.target), goal.counter));
+        parts.push(format!(
+            "goal {} {}",
+            crate::counters::number(goal.target),
+            goal.counter
+        ));
     }
     if let Some(min) = entry.min_minutes {
         parts.push(format!("at least {min} min"));
@@ -1091,10 +1140,24 @@ mod tests {
     fn changes_since_the_entry_was_set_up_are_refused() {
         let manifest = serde_json::json!({ "queueable": true, "settings": { "fields": [{ "id": "a", "kind": "check" }] } });
         let old = entry(&serde_json::json!({ "queueable": true }));
-        assert!(check(script(true, false), manifest.clone(), 0).ready(&old, &Default::default()).unwrap_err().contains("settings changed"));
-        let not_queueable = serde_json::json!({ "settings": { "fields": [{ "id": "a", "kind": "check" }] } });
-        assert!(check(script(true, false), not_queueable, 0).ready(&entry(&manifest), &Default::default()).is_err());
-        assert!(check(script(false, false), manifest.clone(), 0).ready(&entry(&manifest), &Default::default()).is_err());
+        assert!(
+            check(script(true, false), manifest.clone(), 0)
+                .ready(&old, &Default::default())
+                .unwrap_err()
+                .contains("settings changed")
+        );
+        let not_queueable =
+            serde_json::json!({ "settings": { "fields": [{ "id": "a", "kind": "check" }] } });
+        assert!(
+            check(script(true, false), not_queueable, 0)
+                .ready(&entry(&manifest), &Default::default())
+                .is_err()
+        );
+        assert!(
+            check(script(false, false), manifest.clone(), 0)
+                .ready(&entry(&manifest), &Default::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1102,7 +1165,12 @@ mod tests {
         let manifest = serde_json::json!({ "queueable": true });
         let check = check(script(true, true), manifest.clone(), 0);
         let mut confirmed = crate::store::Confirmed::default();
-        assert!(check.ready(&entry(&manifest), &confirmed).unwrap_err().contains("reviewed"));
+        assert!(
+            check
+                .ready(&entry(&manifest), &confirmed)
+                .unwrap_err()
+                .contains("reviewed")
+        );
         confirmed.confirm("s1", 4);
         assert!(check.ready(&entry(&manifest), &confirmed).is_ok());
     }
@@ -1112,6 +1180,11 @@ mod tests {
         let manifest = serde_json::json!({ "queueable": true });
         let mut check = check(script(true, false), manifest.clone(), 0);
         check.scripts.clear();
-        assert!(check.ready(&entry(&manifest), &Default::default()).unwrap_err().contains("no longer available"));
+        assert!(
+            check
+                .ready(&entry(&manifest), &Default::default())
+                .unwrap_err()
+                .contains("no longer available")
+        );
     }
 }
