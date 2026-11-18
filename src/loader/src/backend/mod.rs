@@ -113,6 +113,18 @@ impl Target {
     }
 }
 
+/// Starts a console program without a console window. On Windows the loader is a GUI
+/// program (outside debug builds), so each console child would otherwise open its own
+/// terminal. Its pipes are unaffected.
+pub fn no_window(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    command
+}
+
 #[derive(Default)]
 pub struct Scan {
     pub targets: Vec<Target>,

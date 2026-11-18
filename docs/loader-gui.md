@@ -88,7 +88,7 @@ The desktop app (`eframe`/egui). It never touches the client itself: a new capab
 
 ## Scripts, settings and stdin contract
 
-- Each script runs as `injector run --script <path> <pid>`, so a crash can't take the app down.
+- Each script runs as `injector run --script <path> <pid>`, so a crash can't take the app down. On Windows it starts with `backend::no_window` (`CREATE_NO_WINDOW`): the loader is a GUI program outside debug builds, so a console child would otherwise open a terminal per run. Use it for any console program the loader starts.
 - Lines written to the script's stdin before start: antiban config (`injector::antiban::line`), transports (`TRANSPORT_SETTINGS`), Script debugging (`DEBUG`), `prices_url` (`injector::prices::line`), `SETTINGS` (the form's values, `script::Launch`) and, for a queue entry, `RESUME` (the previous entry's break plan). Live: `UPDATE` (settings changed while running, read by `Host.form_update()`), antiban push, transport push, Script debugging push, skip-next, `FINISH` (queue only).
 - Settings come from the script's `manifest.json` (`injector::manifest`): the store's live revision through `GET /launcher/scripts/:id/manifest`, cached in memory by script and revision, or the file beside an editor script. A script with settings opens a **configuring** run (`Run::is_configuring`: no process, no session) whose Start quotes, starts the session and launches it, so nothing is billed while the form is open. Without settings it starts at once. Values are remembered per script title; layouts resolve to their contents when Start is pressed.
 - Script requests on stdout: `LAMPREQ`, PIN, `HTTPREQ`. The layout JSON a script gets is documented in the lib's `host.luau`.

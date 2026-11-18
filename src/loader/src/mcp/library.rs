@@ -205,7 +205,9 @@ pub fn check(workspace: &Path, draft: Draft<'_>) -> Result<String, String> {
             false,
         ),
     };
-    let output = Command::new(analyzer()).arg(&file).output();
+    let output = loader::backend::no_window(&mut Command::new(analyzer()))
+        .arg(&file)
+        .output();
     if temporary {
         let _ = fs::remove_file(&file);
     }

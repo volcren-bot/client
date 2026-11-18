@@ -223,6 +223,7 @@ pub fn script_command(
         return Err("Set the path to injector.exe, scripts run in it.".into());
     }
     let mut command = Command::new(&settings.helper);
+    super::no_window(&mut command);
     super::run_args(&mut command, script, lib);
     if let Some(target) = target {
         command.arg(target.client.pid.to_string());
