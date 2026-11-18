@@ -4189,6 +4189,7 @@ fn cursor_canvas(pid: u32) -> Option<[f32; 2]> {
     let hwnd = client_window(pid)?;
     let mut cursor = POINT { x: 0, y: 0 };
     let mut origin = POINT { x: 0, y: 0 };
+    let _dpi = crate::input::DpiOf::window(hwnd);
     if unsafe { GetCursorPos(&mut cursor) } == 0
         || unsafe { ClientToScreen(hwnd, &mut origin) } == 0
     {

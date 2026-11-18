@@ -11,6 +11,9 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, POINT, WPARAM},
     Graphics::Gdi::ClientToScreen,
     UI::{
+        HiDpi::{
+            DPI_AWARENESS_CONTEXT, GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext,
+        },
         Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW, VkKeyScanW},
         WindowsAndMessaging::{
             EnumChildWindows, EnumWindows, GetWindowThreadProcessId, IsWindow, PostMessageW,
@@ -98,6 +101,7 @@ pub fn send_with(pid: u32, input: &Input, pace: &dyn Pace) -> Result<(), String>
         Input::Scroll { notches } => {
             let (x, y) = mouse_at(pid)?;
             let mut at = POINT { x, y };
+            let _dpi = DpiOf::window(window);
             if unsafe { ClientToScreen(window, &mut at) } == 0 {
                 return Err(format!(
                     "ClientToScreen failed: {}",
@@ -375,6 +379,7 @@ fn post(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Result<()
     } else {
         wparam
     };
+    let _dpi = DpiOf::window(window);
     if unsafe { PostMessageW(window, message, wparam, lparam) } == 0 {
         return Err(format!(
             "PostMessageW failed: {}",
@@ -382,6 +387,31 @@ fn post(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> Result<()
         ));
     }
     Ok(())
+}
+
+/// Puts this thread in `window`'s DPI awareness until dropped. Windows rescales the
+/// coordinates of mouse messages posted from a thread of another awareness, and gives
+/// cursor and screen positions in the calling thread's: a DPI-unaware injector posting
+/// to a per-monitor aware client at 125% lands every move 1.25x too far. In the
+/// window's own awareness, coordinates are the client's.
+pub(crate) struct DpiOf(DPI_AWARENESS_CONTEXT);
+
+impl DpiOf {
+    pub(crate) fn window(window: HWND) -> Self {
+        let context = unsafe { GetWindowDpiAwarenessContext(window) };
+        if context.is_null() {
+            return Self(null_mut());
+        }
+        Self(unsafe { SetThreadDpiAwarenessContext(context) })
+    }
+}
+
+impl Drop for DpiOf {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { SetThreadDpiAwarenessContext(self.0) };
+        }
+    }
 }
 
 fn point(x: i32, y: i32) -> LPARAM {
