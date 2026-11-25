@@ -16,6 +16,7 @@ local Minimenu = require("@volcren/minimenu")
 local Mouse = require("@volcren/mouse")
 local Npcs = require("@volcren/npcs")
 local Objects = require("@volcren/objects")
+local Player = require("@volcren/player")
 local Random = require("@volcren/random")
 local Toplevel = require("@volcren/toplevel")
 local Walker = require("@volcren/walker")
@@ -23,6 +24,7 @@ local Widgets = require("@volcren/widgets")
 type Loc = Host.Loc
 type Npc = Host.Npc
 type Tile = Host.Tile
+type Collision = Host.Collision
 
 local CONTAINER = 95
 local GROUP_ID = 12
@@ -126,6 +128,32 @@ local OPEN_TIMEOUT_MS = 2400
 local POLL_MS = 50
 local OBJECT_OPTIONS = table.freeze({ "Bank", "Use" })
 local NPC_OPTIONS = table.freeze({ "Bank" })
+local BLOCKED = 0x1240100
+local WALL_NORTH = 0x2
+local WALL_EAST = 0x8
+local WALL_SOUTH = 0x20
+local WALL_WEST = 0x80
+local STEP_CORNER = { [-1] = { [-1] = 0x0e, [1] = 0x38 }, [1] = { [-1] = 0x83, [1] = 0xe0 } }
+local STEP_SIDE_X = { [-1] = WALL_EAST, [1] = WALL_WEST }
+local STEP_SIDE_Y = { [-1] = WALL_NORTH, [1] = WALL_SOUTH }
+local CARDINALS = table.freeze({
+	{ dx = 1, dy = 0, wall = WALL_EAST, back = WALL_WEST },
+	{ dx = -1, dy = 0, wall = WALL_WEST, back = WALL_EAST },
+	{ dx = 0, dy = 1, wall = WALL_NORTH, back = WALL_SOUTH },
+	{ dx = 0, dy = -1, wall = WALL_SOUTH, back = WALL_NORTH },
+})
+local STEP_ORDER = table.freeze({
+	{ -1, 0 },
+	{ 1, 0 },
+	{ 0, -1 },
+	{ 0, 1 },
+	{ -1, -1 },
+	{ 1, -1 },
+	{ -1, 1 },
+	{ 1, 1 },
+})
+local ROUTE_MARGIN = 16
+local ALTERNATIVE_RADIUS = 10
 
 export type Button =
 	"ARRANGEMENT"
@@ -327,6 +355,207 @@ local function bank_locs(): { Loc }
 	return banks
 end
 
+local function flag_at(grid: Collision, x: number, y: number): number
+	local i, j = x - grid.x, y - grid.y
+	if i < 0 or j < 0 or i >= grid.width or j >= grid.height then
+		return BLOCKED
+	end
+	return grid.flags[i * grid.height + j + 1]
+end
+
+local function free(grid: Collision, x: number, y: number, mask: number): boolean
+	return bit32.band(flag_at(grid, x, y), bit32.bor(mask, BLOCKED)) == 0
+end
+
+local function has_wall(grid: Collision, x: number, y: number, wall: number): boolean
+	return bit32.band(flag_at(grid, x, y), wall) ~= 0
+end
+
+local function can_step(grid: Collision, x: number, y: number, dx: number, dy: number): boolean
+	if dy == 0 then
+		return free(grid, x + dx, y, STEP_SIDE_X[dx])
+	elseif dx == 0 then
+		return free(grid, x, y + dy, STEP_SIDE_Y[dy])
+	end
+	return free(grid, x + dx, y + dy, STEP_CORNER[dx][dy])
+		and free(grid, x + dx, y, STEP_SIDE_X[dx])
+		and free(grid, x, y + dy, STEP_SIDE_Y[dy])
+end
+
+local function npc_tile(npc: Npc): Tile
+	return { x = math.floor(npc.x), y = math.floor(npc.y) }
+end
+
+local function covers(locs: { Loc }, x: number, y: number): boolean
+	for _, loc in ipairs(locs) do
+		if x >= loc.x and x < loc.x + loc.size_x and y >= loc.y and y < loc.y + loc.size_y then
+			return true
+		end
+	end
+	return false
+end
+
+local function collision_around(a: Tile, b: Tile): Collision?
+	local grid = Host.collision({
+		x1 = math.min(a.x, b.x) - ROUTE_MARGIN,
+		y1 = math.min(a.y, b.y) - ROUTE_MARGIN,
+		x2 = math.max(a.x, b.x) + ROUTE_MARGIN,
+		y2 = math.max(a.y, b.y) + ROUTE_MARGIN,
+	})
+	return grid
+end
+
+local function counter_tiles(grid: Collision, booths: { Loc }, at: Tile): { Tile }
+	local tiles: { Tile } = {}
+	for _, d in ipairs(CARDINALS) do
+		local nx, ny = at.x + d.dx, at.y + d.dy
+		if not has_wall(grid, at.x, at.y, d.wall) then
+			if covers(booths, nx, ny) then
+				local fx, fy = nx + d.dx, ny + d.dy
+				if
+					not has_wall(grid, nx, ny, d.back)
+					and not has_wall(grid, nx, ny, d.wall)
+					and free(grid, fx, fy, d.back)
+				then
+					table.insert(tiles, { x = fx, y = fy })
+				end
+			elseif can_step(grid, at.x, at.y, d.dx, d.dy) then
+				table.insert(tiles, { x = nx, y = ny })
+			end
+		end
+	end
+	return tiles
+end
+
+local function reaches(grid: Collision, x: number, y: number, at: Tile): boolean
+	local dx, dy = at.x - x, at.y - y
+	if math.abs(dx) + math.abs(dy) ~= 1 then
+		return false
+	end
+	return can_step(grid, x, y, dx, dy)
+end
+
+local function game_walk_end(grid: Collision, from: Tile, at: Tile): Tile?
+	local steps: { [number]: number } = {}
+	local function index(x: number, y: number): number
+		return (x - grid.x) * grid.height + (y - grid.y) + 1
+	end
+	local queue: { Tile } = { { x = from.x, y = from.y } }
+	steps[index(from.x, from.y)] = 0
+	local head = 1
+	local best: Tile? = nil
+	local best_distance, best_steps = math.huge, math.huge
+	while head <= #queue do
+		local here = queue[head]
+		head += 1
+		local here_steps = steps[index(here.x, here.y)]
+		if reaches(grid, here.x, here.y, at) then
+			return here
+		end
+		local dx, dy = here.x - at.x, here.y - at.y
+		if math.abs(dx) <= ALTERNATIVE_RADIUS and math.abs(dy) <= ALTERNATIVE_RADIUS and (dx ~= 0 or dy ~= 0) then
+			local distance = dx * dx + dy * dy
+			if distance < best_distance or (distance == best_distance and here_steps < best_steps) then
+				best, best_distance, best_steps = here, distance, here_steps
+			end
+		end
+		for _, step in ipairs(STEP_ORDER) do
+			local x, y = here.x + step[1], here.y + step[2]
+			local inside = x >= grid.x and y >= grid.y and x < grid.x + grid.width and y < grid.y + grid.height
+			if inside and steps[index(x, y)] == nil and can_step(grid, here.x, here.y, step[1], step[2]) then
+				steps[index(x, y)] = here_steps + 1
+				table.insert(queue, { x = x, y = y })
+			end
+		end
+	end
+	return best
+end
+
+function Bankmain.counter_tiles(npc: Npc): { Tile }
+	local me = Walker.position()
+	if me == nil then
+		return {}
+	end
+	local at = npc_tile(npc)
+	local grid = collision_around(me, at)
+	if grid == nil then
+		return {}
+	end
+	return counter_tiles(grid, bank_locs(), at)
+end
+
+function Bankmain.can_click_banker(npc: Npc): boolean
+	local me = Walker.position()
+	if me == nil then
+		return false
+	end
+	local at = npc_tile(npc)
+	local grid = collision_around(me, at)
+	if grid == nil then
+		return false
+	end
+	local landing = game_walk_end(grid, { x = me.x, y = me.y }, at)
+	if landing == nil then
+		return false
+	end
+	if reaches(grid, landing.x, landing.y, at) then
+		return true
+	end
+	for _, tile in ipairs(counter_tiles(grid, bank_locs(), at)) do
+		if tile.x == landing.x and tile.y == landing.y then
+			return true
+		end
+	end
+	return false
+end
+
+local function nearest_counter(npc: Npc): (Tile?, number?)
+	local best: Tile? = nil
+	local best_cost: number? = nil
+	for _, tile in ipairs(Bankmain.counter_tiles(npc)) do
+		local plan = Walker.plan(tile, nil, { near = 0 })
+		if plan and plan.reached and (best_cost == nil or #plan.tiles < best_cost) then
+			best, best_cost = tile, #plan.tiles
+		end
+	end
+	return best, best_cost
+end
+
+local function approach_banker(npc: Npc): boolean
+	if Bankmain.can_click_banker(npc) then
+		return Npcs.interact(npc, NPC_OPTIONS)
+	end
+	local counter = nearest_counter(npc)
+	if counter == nil then
+		Log.log("Bankmain", `no counter tile reaches {npc.name}`)
+		return false
+	end
+	local clicked = false
+	local last_spot: string? = nil
+	local walked = Walker.walk(counter, {
+		near = 0,
+		on_step = function(here: Tile): boolean
+			local spot = `{here.x},{here.y}`
+			if spot == last_spot then
+				return true
+			end
+			last_spot = spot
+			if Bankmain.can_click_banker(npc) then
+				clicked = Npcs.interact(npc, NPC_OPTIONS, false)
+				return not clicked
+			end
+			return true
+		end,
+	})
+	if clicked then
+		return Player.wait_walk()
+	end
+	if not walked then
+		return false
+	end
+	return Npcs.interact(npc, NPC_OPTIONS)
+end
+
 function Bankmain.nearest(): Source?
 	local me = Walker.position()
 	if me == nil then
@@ -355,8 +584,13 @@ function Bankmain.nearest(): Source?
 	local best_cost = math.huge
 	for i = 1, math.min(#candidates, Bankmain.PLAN_CANDIDATES) do
 		local c = candidates[i]
-		local at: Tile = (c.source.loc or c.source.npc) :: Tile
-		local cost = walk_cost(at, c.plane)
+		local cost: number?
+		if c.source.npc then
+			local _, counter_cost = nearest_counter(c.source.npc)
+			cost = counter_cost
+		else
+			cost = walk_cost(c.source.loc :: Tile, c.plane)
+		end
 		if cost and cost < best_cost then
 			best, best_cost = c.source, cost
 		end
@@ -418,7 +652,7 @@ function Bankmain.open(source: Source?, walk: boolean?): boolean
 	else
 		local npc = target.npc :: Npc
 		if walk ~= false then
-			picked = Npcs.approach(npc, NPC_OPTIONS)
+			picked = approach_banker(npc)
 		else
 			picked = Npcs.interact(npc, NPC_OPTIONS)
 		end

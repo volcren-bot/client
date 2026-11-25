@@ -79,7 +79,7 @@ Bankmain.PLAN_CANDIDATES = 6
 function Bankmain.nearest(): Source?
 ```
 
-The bank that is the fewest steps to walk to, as a `Source` holding either a `loc` or an `npc`. It looks at every loaded object whose menu, as shown now (`Host.loc_shown`), offers "Bank", or "Use" together with "Collect" (bank chests), and every NPC that `is_banker`, plans a walk (`Walker.plan`, through doors, stairs and ladders, to within `Clickbox.APPROACH_NEAR` tiles) to the `PLAN_CANDIDATES` closest by straight distance, and takes the shortest plan; a plan that stops short counts the straight distance left. Objects are told apart by their options rather than their names because multi-state booths have no name in the cache (Varrock West's first booth, 34810) and banks come as booths, chests, tables and counters; a bare "Use" is too common to count on its own. This costs one plan per candidate. When none can be planned it returns the closest by straight distance. `nil` when none is loaded or the position is unknown.
+The bank that is the fewest steps to walk to, as a `Source` holding either a `loc` or an `npc`. It looks at every loaded object whose menu, as shown now (`Host.loc_shown`), offers "Bank", or "Use" together with "Collect" (bank chests), and every NPC that `is_banker`, plans a walk (`Walker.plan`, through doors, stairs and ladders) to the `PLAN_CANDIDATES` closest by straight distance, and takes the shortest plan. An object is planned to within `Clickbox.APPROACH_NEAR` tiles, and a plan that stops short counts the straight distance left. A banker is planned to its nearest `counter_tiles` tile and counts only when the plan gets there, so a banker behind a wall isn't taken for near. Objects are told apart by their options rather than their names because multi-state booths have no name in the cache (Varrock West's first booth, 34810) and banks come as booths, chests, tables and counters; a bare "Use" is too common to count on its own. This costs one plan per candidate. When none can be planned it returns the closest by straight distance. `nil` when none is loaded or the position is unknown.
 
 ## Bankmain.is_banker
 
@@ -103,6 +103,51 @@ for _, npc in ipairs(Npcs.find() or {}) do
 end
 ```
 
+## Bankmain.counter_tiles
+
+Definition:
+
+```luau
+function Bankmain.counter_tiles(npc: Npc): { Tile }
+```
+
+The tiles the banker can be used from, read off the collision map (`Host.collision`) and the loaded banks: each tile beside it with no wall between, and each tile past a bank object beside it (the counter), when neither side of that object has a wall. The tiles aren't checked for a walk from here: tiles on the banker's own side of the counter are usually closed off. Empty when the position or the collision map is unknown.
+
+Example:
+
+```luau
+local Npcs = require("@volcren/npcs")
+
+for _, npc in ipairs(Npcs.find() or {}) do
+	if Bankmain.is_banker(npc) then
+		for _, tile in ipairs(Bankmain.counter_tiles(npc)) do
+			print(npc.name, tile.x, tile.y)
+		end
+	end
+end
+```
+
+## Bankmain.can_click_banker
+
+Definition:
+
+```luau
+function Bankmain.can_click_banker(npc: Npc): boolean
+```
+
+Whether clicking the banker from here would get it used. Works out where the game's own pathing would take the player on the collision map: the nearest tile beside the banker with no wall between, or, when none can be reached, the reachable tile closest to it within 10 tiles (fewest steps on a tie). `true` when that tile is beside the banker or one of its `counter_tiles`. `false` when the game would stop the player short, such as outside the wall behind the banker, where clicking only gets "I can't reach that". Plans over the collision map from the player and the banker out to 16 tiles, once per call.
+
+Example:
+
+```luau
+local Npcs = require("@volcren/npcs")
+
+local banker = Npcs.nearest("Banker", Walker.position())
+if banker and Bankmain.can_click_banker(banker) then
+	print("the click lands at the counter")
+end
+```
+
 ## Bankmain.hover
 
 Definition:
@@ -121,7 +166,7 @@ Definition:
 function Bankmain.open(source: Source?, walk: boolean?): boolean
 ```
 
-Opens the closest bank (or `source`) with "Bank" (or "Use" on objects) and waits for it. Walks closer first unless `walk` is `false`. Another interface in the way is closed with Escape first. If the keypad shows up, `is_open` has the injector enter the PIN. `true` when the bank ends up open.
+Opens the closest bank (or `source`) with "Bank" (or "Use" on objects) and waits for it. Walks closer first unless `walk` is `false`. A banker is clicked at once when `can_click_banker`; otherwise the walk heads for its nearest reachable `counter_tiles` tile, checks again on each new tile and clicks as soon as the click would land, so a banker behind a wall is walked round to rather than clicked from outside. `false` when no counter tile can be walked to. Another interface in the way is closed with Escape first. If the keypad shows up, `is_open` has the injector enter the PIN. `true` when the bank ends up open.
 
 Example:
 
