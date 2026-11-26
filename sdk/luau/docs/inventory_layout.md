@@ -29,9 +29,13 @@ Definition:
 ```luau
 InventoryLayout.SIZE = 28
 InventoryLayout.POUCH_TIMEOUT_MS = 2500
+InventoryLayout.POUCH_LOAD_BASE = 0.7
+InventoryLayout.POUCH_SLOTS = 3
+InventoryLayout.DIVINE_POUCH_SLOTS = 4
+InventoryLayout.DIVINE_POUCHES = { "Divine rune pouch", "Divine rune pouch (l)" }
 InventoryLayout.POLL_MS = 50
 ```
-Inventory size; how long to wait for withdrawn runes to reach the pouch ([Runepouch](runepouch.md)); poll interval.
+Inventory size; how long to wait for withdrawn runes to reach the pouch ([Runepouch](runepouch.md)); the chance base for loading a saved pouch loadout over filling the pouch by hand (see `withdraw`); how many rune types a rune pouch and a divine rune pouch hold, and the divine pouches' names (`DIVINE_POUCHES` is frozen); poll interval.
 
 ## Types
 
@@ -115,7 +119,7 @@ function InventoryLayout.withdraw(layout: Layout): boolean
 ```
 With the bank open, makes the inventory match: `deposit_diff`, fill the pouch, then withdraw what is missing (a stack under `min` up to `max`, all of it when both are 0 and none is held; missing copies in accepted-dose order). True when the layout matches at the end.
 
-Everything unlisted is deposited, so wear an equipment layout first (`EquipmentLayout.prepare`). The pouch is withdrawn if not carried, its bank panel opened (`BankPouch.open`), runes withdrawn into it (`BankPouch.withdraw`) and the panel dismissed; an already-open panel is dismissed first. Amounts the 1/5/10 buttons can't give that several items share are taken first so the X button is set once; a one-off amount uses `Withdraw-X` from the menu (see `Bankmain.withdraw`). A last non-stacking item that fills the free slots is left-clicked when the selected quantity covers it (`Bankmain.withdraw_selected`).
+Everything unlisted is deposited, so wear an equipment layout first (`EquipmentLayout.prepare`). The pouch is withdrawn if not carried and its bank panel opened (`BankPouch.open`); an already-open panel is dismissed first. When a saved loadout (`BankPouch.loadouts`) holds exactly the layout's rune types, it is loaded (`BankPouch.load`) with probability `POUCH_LOAD_BASE` plus the rest weighted by the account's `Biometrics.CHOOSEOPTION`. Otherwise, or when the load fails, the pouch is filled by hand: runes the layout doesn't list are banked (`BankPouch.deposit`, or "Deposit runes" when that's all of them), only as many as the layout's new rune types need slots for, so they stay while there's room. Then whatever is still short is withdrawn into the pouch (`BankPouch.withdraw`), which tops up a loadout that brought less than `min`, and the panel is dismissed. Amounts the 1/5/10 buttons can't give that several items share are taken first so the X button is set once; a one-off amount uses `Withdraw-X` from the menu (see `Bankmain.withdraw`). A last non-stacking item that fills the free slots is left-clicked when the selected quantity covers it (`Bankmain.withdraw_selected`).
 
 Example:
 ```luau
