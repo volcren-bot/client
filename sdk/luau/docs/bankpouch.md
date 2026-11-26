@@ -30,8 +30,9 @@ BankPouch.AMOUNT_QUERY = "Enter amount"
 BankPouch.MAX_SCROLLS = 12
 BankPouch.TIMEOUT_MS = 2500
 BankPouch.POLL_MS = 50
+BankPouch.SETTLE_TICKS = 1
 ```
-Panel components: `RUNES` holds the pouch cells as children 1 to `SLOTS`; each `LOADOUTS` row holds its rune cells the same way (`EMPTY_SLOT` where unset), with its name as child 1 of the matching `NAMES` entry (`UNNAMED` until named) and a Load button parented to the row somewhere up to `LAST_CHILD`. Then menu options, the typed-amount query, the scroll limit and timings. `LOADOUTS` and `NAMES` are frozen.
+Panel components: `RUNES` holds the pouch cells as children 1 to `SLOTS`; each `LOADOUTS` row holds its rune cells the same way (`EMPTY_SLOT` where unset), with its name as child 1 of the matching `NAMES` entry (`UNNAMED` until named) and a Load button parented to the row somewhere up to `LAST_CHILD`. Then menu options, the typed-amount query, the scroll limit and timings; `SETTLE_TICKS` is how many game ticks `open` waits for after the panel shows. `LOADOUTS` and `NAMES` are frozen.
 
 ## Types
 
@@ -55,7 +56,7 @@ Definition:
 ```luau
 function BankPouch.open(timeout_ms: number?): boolean
 ```
-Uses "Configure" on the first pouch in the bank's inventory and waits up to `timeout_ms` (default `TIMEOUT_MS`) for the panel. True at once if already open; false when the bank isn't open or no pouch is held.
+Uses "Configure" on the first pouch in the bank's inventory, waits up to `timeout_ms` (default `TIMEOUT_MS`) for the panel, then waits until `SETTLE_TICKS` game ticks have passed (`Ticks.wait`), since the game ignores a deposit clicked in the tick the panel appears. True at once if already open; false when the bank isn't open or no pouch is held.
 
 Example:
 ```luau

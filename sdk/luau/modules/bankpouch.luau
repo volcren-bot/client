@@ -12,6 +12,7 @@ local Log = require("@volcren/log")
 local Mouse = require("@volcren/mouse")
 local Random = require("@volcren/random")
 local Runepouch = require("@volcren/runepouch")
+local Ticks = require("@volcren/ticks")
 local Widgets = require("@volcren/widgets")
 
 local BankPouch = {}
@@ -38,6 +39,7 @@ BankPouch.AMOUNT_QUERY = "Enter amount"
 BankPouch.MAX_SCROLLS = 12
 BankPouch.TIMEOUT_MS = 2500
 BankPouch.POLL_MS = 50
+BankPouch.SETTLE_TICKS = 1
 
 function BankPouch.is_open(): boolean
 	local panel = widget(BankPouch.GROUP, BankPouch.PANEL)
@@ -64,7 +66,11 @@ function BankPouch.open(timeout_ms: number?): boolean
 	if not Bankmain.inventory.interact_slot(slots[1], BankPouch.OPTION) then
 		return false
 	end
-	return wait(BankPouch.is_open, timeout_ms)
+	if not wait(BankPouch.is_open, timeout_ms) then
+		return false
+	end
+	Ticks.wait(BankPouch.SETTLE_TICKS)
+	return true
 end
 
 local function click(child: number, option: string, what: string): boolean
