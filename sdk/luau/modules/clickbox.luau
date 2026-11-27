@@ -740,12 +740,12 @@ local function act_once(
 	spam: number?
 ): (Acted, boolean?)
 	local box = clickbox()
-	if box == nil and tile then
+	if tile and (box == nil or Clickbox.target(box, what) == nil) then
 		Clickbox.reveal(clickbox, tile, what)
 		box = clickbox()
 	end
 	local view = Toplevel.viewport()
-	if box == nil or view == nil then
+	if box == nil or view == nil or Clickbox.target(box, what) == nil then
 		return "unusable", nil
 	end
 	local before = Minimenu.clicked()
