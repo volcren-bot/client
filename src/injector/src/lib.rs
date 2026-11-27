@@ -31,7 +31,7 @@ pub mod config;
 pub mod debug_shapes;
 pub mod devtools;
 pub mod entry_swaps;
-pub use entry_swaps::{EntrySwaps, Swap};
+pub use entry_swaps::EntrySwaps;
 pub mod form;
 pub mod house;
 pub mod http;
@@ -336,8 +336,8 @@ pub use win::{
     ItemWatcher, PacketWatcher, cache_archive_files, cache_archives, cache_files, cache_locs,
     chat_messages, client_cycle, collision_area, connection, draw, draw_batch, draw_lines,
     entry_swaps, enum_def, find_path, game_state, game_val_names, ground_items, hider, house, in_instance,
-    item_changes, item_changes_wait, item_container, item_containers, item_families, item_icons,
-    item_names, item_params, item_stackable, landmasses, list_clients, load, loc_model, loc_shown,
+    item_changes_wait, item_container, item_containers, item_families, item_icons,
+    item_names, item_params, item_placeholder, item_stackable, landmasses, list_clients, load, loc_model, loc_shown,
     locs, map_regions, memory_words, menu, menu_click, menu_layout, menu_open, movement, nav_plan,
     npc_actions, npc_hitsplats, npc_model, npc_overhead_text, npc_sizes, npc_type_model, npc_words, npcs,
     packet_layouts, packets, player_hitsplats, player_model, player_overhead_text, player_plane,

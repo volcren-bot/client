@@ -13,13 +13,13 @@ pub fn packet_wake_event_name(pid: u32, slot: u32) -> String {
     format!("AGENT_PACKETS_WAKE_{pid}_{slot}")
 }
 
-pub const SUBSCRIBER_SLOTS: u32 = 32;
+const SUBSCRIBER_SLOTS: u32 = 32;
 
 pub const FILTER_WORDS: usize = 16;
 
 pub type Filter = [u32; FILTER_WORDS];
 
-pub fn filter_bit(direction: u8, opcode: u16) -> Option<usize> {
+fn filter_bit(direction: u8, opcode: u16) -> Option<usize> {
     (direction <= direction::SENT && opcode < 256)
         .then(|| direction as usize * 256 + opcode as usize)
 }
@@ -46,7 +46,7 @@ pub mod direction {
 }
 
 #[repr(C)]
-pub struct Slot {
+pub(crate) struct Slot {
     commit: AtomicU64,
     time_ms: u64,
     length: u32,
@@ -75,18 +75,18 @@ pub struct Log {
     layouts: [LayoutSlot; LAYOUT_IDS],
 }
 
-pub const LAYOUT_IDS: usize = 256;
+const LAYOUT_IDS: usize = 256;
 
-pub const LAYOUT_FIELDS: usize = 16;
+const LAYOUT_FIELDS: usize = 16;
 
-pub const LAYOUT_ROLES: usize = 4;
+const LAYOUT_ROLES: usize = 4;
 
 const NO_LAYOUT: u8 = 0xff;
 
 const NO_NAME: u8 = 0;
 
 #[repr(C)]
-pub struct LayoutSlot {
+struct LayoutSlot {
     size: i32,
     fields_count: u8,
     name: u8,
@@ -123,7 +123,7 @@ impl Name {
         }
     }
 
-    pub fn roles(self) -> &'static [&'static str] {
+    fn roles(self) -> &'static [&'static str] {
         match self {
             Name::Tick | Name::MessageGame => &[],
             Name::VarpSmall | Name::VarpLarge => &["id", "value"],
@@ -132,7 +132,9 @@ impl Name {
     }
 
     pub fn from_spelling(spelling: &str) -> Option<Name> {
-        Name::ALL.into_iter().find(|name| name.spelling() == spelling)
+        Name::ALL
+            .into_iter()
+            .find(|name| name.spelling() == spelling)
     }
 
     fn from_code(code: u8) -> Option<Name> {
@@ -202,7 +204,7 @@ pub enum Transform {
     Sub = 3,
 }
 
-pub fn encode_field(field: &Field) -> Option<[u8; 2]> {
+fn encode_field(field: &Field) -> Option<[u8; 2]> {
     let width = field.shifts.len();
     if !(1..=4).contains(&width) || field.shifts.iter().any(|&s| s > 3) {
         return None;
@@ -218,7 +220,7 @@ pub fn encode_field(field: &Field) -> Option<[u8; 2]> {
     ])
 }
 
-pub fn decode_field(code: [u8; 2]) -> Option<Field> {
+fn decode_field(code: [u8; 2]) -> Option<Field> {
     let width = (code[0] & 7) as usize;
     if !(1..=4).contains(&width) {
         return None;
@@ -304,7 +306,7 @@ impl Field {
         self.shifts.len()
     }
 
-    pub fn read(&self, bytes: &[u8]) -> Option<i64> {
+    fn read(&self, bytes: &[u8]) -> Option<i64> {
         let width = self.width();
         let mut value = 0u32;
         for (&byte, &shift) in bytes.get(..width)?.iter().zip(&self.shifts) {
@@ -695,18 +697,9 @@ mod tests {
                 Some(LAYOUT_FIELDS)
             );
             assert_eq!(layouts[4].fields, None);
-            assert_eq!(
-                layouts[0],
-                unnamed(0, 0, Some(vec![]))
-            );
-            assert_eq!(
-                layouts[1],
-                unnamed(1, -1, None)
-            );
-            assert_eq!(
-                layouts[2],
-                unnamed(2, 2, Some(vec![u16le]))
-            );
+            assert_eq!(layouts[0], unnamed(0, 0, Some(vec![])));
+            assert_eq!(layouts[1], unnamed(1, -1, None));
+            assert_eq!(layouts[2], unnamed(2, 2, Some(vec![u16le])));
         }
     }
 
@@ -756,7 +749,12 @@ mod tests {
         unsafe {
             publish_layouts(
                 memory.0,
-                &[unnamed(0, 0, Some(vec![])), large.clone(), wrong_roles, chat.clone()],
+                &[
+                    unnamed(0, 0, Some(vec![])),
+                    large.clone(),
+                    wrong_roles,
+                    chat.clone(),
+                ],
             );
             let layouts = read_layouts(memory.0).unwrap();
             assert_eq!(layouts[0].name, None);
@@ -787,7 +785,10 @@ mod tests {
         };
         assert_eq!(
             decode_named(&large, &[0x02, 0x01, 0xff, 0xff, 0x0b, 0x75]),
-            Some(vec![("id", Value::Int(2933)), ("value", Value::Int(-65023))])
+            Some(vec![
+                ("id", Value::Int(2933)),
+                ("value", Value::Int(-65023))
+            ])
         );
         assert_eq!(decode_named(&large, &[0x02, 0x01, 0xff]), None);
 
@@ -825,7 +826,10 @@ mod tests {
                 ("delay", Value::Int(30))
             ])
         );
-        assert_eq!(decode_named(&unnamed(30, 5, sound.fields.clone()), &[0; 5]), None);
+        assert_eq!(
+            decode_named(&unnamed(30, 5, sound.fields.clone()), &[0; 5]),
+            None
+        );
     }
 
     #[test]

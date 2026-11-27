@@ -1730,6 +1730,12 @@ pub fn item_stackable(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String
     })
 }
 
+pub fn item_placeholder(pid: u32, ids: &[i32]) -> Result<Vec<Option<bool>>, String> {
+    item_defs(pid, ids, |data| {
+        crate::config::decode_obj(data).map(|def| def.placeholder)
+    })
+}
+
 pub fn item_families(pid: u32, ids: &[i32]) -> Result<Vec<crate::config::ItemFamily>, String> {
     let decode = |data: Option<Vec<u8>>| {
         data.and_then(|data| crate::config::decode_obj(&data))

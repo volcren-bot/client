@@ -9,7 +9,7 @@ pub fn varc_log_memory_name(pid: u32) -> String {
     format!("AGENT_VARCS_{pid}")
 }
 
-pub const SLOT_COUNT: usize = 4096;
+const SLOT_COUNT: usize = 4096;
 
 pub const TEXT_SIZE: usize = 60;
 
@@ -19,7 +19,7 @@ pub mod kind {
 }
 
 #[repr(C)]
-pub struct Slot {
+pub(crate) struct Slot {
     commit: AtomicU64,
     time_ms: u64,
     index: i32,
@@ -77,7 +77,7 @@ pub struct Change<'a> {
     pub new_length: u32,
 }
 
-pub type Page = ring::Page<Entry>;
+pub(crate) type Page = ring::Page<Entry>;
 
 pub unsafe fn init(log: *mut Log) {
     ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));

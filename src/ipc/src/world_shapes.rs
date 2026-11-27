@@ -16,8 +16,8 @@ pub fn mapping_name(pid: u32) -> String {
 pub const VIEW: usize = 0;
 pub const SCRIPT: usize = 1;
 pub const CHANNELS: usize = 2;
-pub const CHANNEL_BYTES: usize = 1 << 20;
-pub const FONT_BYTES: usize = 1 << 17;
+const CHANNEL_BYTES: usize = 1 << 20;
+const FONT_BYTES: usize = 1 << 17;
 const READ_ATTEMPTS: usize = 4;
 
 #[repr(C)]

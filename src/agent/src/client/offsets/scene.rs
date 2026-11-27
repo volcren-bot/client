@@ -378,8 +378,6 @@ pub struct DecorationLayout {
     pub x: u32,
     pub height: u32,
     pub y: u32,
-    pub x_offset: u32,
-    pub y_offset: u32,
 }
 
 const DECORATION_WINDOW: usize = 4;
@@ -441,7 +439,7 @@ pub fn find_decoration_layout(pe: &Pe, scene: &Scene) -> Result<DecorationLayout
     for &(begin, end) in &pe.functions {
         adds.extend(offset_adds(&function_instrs(pe, begin, end), scene.tag));
     }
-    let (x, x_offset) = one(adds
+    let (x, _) = one(adds
         .iter()
         .copied()
         .filter(|&(x, offset)| adds.contains(&(x, offset + SECOND_OFFSET)))
@@ -450,8 +448,6 @@ pub fn find_decoration_layout(pe: &Pe, scene: &Scene) -> Result<DecorationLayout
         x,
         height: x + 4,
         y: x + 8,
-        x_offset,
-        y_offset: x_offset + 4,
     })
 }
 

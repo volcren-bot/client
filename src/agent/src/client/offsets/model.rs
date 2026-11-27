@@ -4,7 +4,6 @@ use super::*;
 pub struct NpcModel {
     pub definition: u32,
     pub get_model: u32,
-    pub definition_size: u32,
     pub bounding_box: u32,
 }
 
@@ -89,11 +88,10 @@ pub fn find_npc_model(pe: &Pe) -> Result<NpcModel, ScanError> {
             }
         }
     }
-    let (definition, get_model, definition_size, bounding_box) = one(found)?;
+    let (definition, get_model, _, bounding_box) = one(found)?;
     Ok(NpcModel {
         definition,
         get_model,
-        definition_size,
         bounding_box,
     })
 }
@@ -103,7 +101,6 @@ const MAX_BOUNDS: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModelVertices {
     pub bounds: [u32; MAX_BOUNDS],
-    pub bounds_slot: u32,
     pub height: u32,
     pub count: u32,
     pub x: u32,
@@ -111,7 +108,7 @@ pub struct ModelVertices {
     pub z: u32,
 }
 
-fn model_height(pe: &Pe, get_model: u32, bounding_box: u32) -> Option<(u32, u32)> {
+fn model_height(pe: &Pe, get_model: u32, bounding_box: u32) -> Option<u32> {
     let instrs = whole_function(pe, get_model, 0x1000);
     let flag = instrs
         .iter()
@@ -145,16 +142,15 @@ fn model_height(pe: &Pe, get_model: u32, bounding_box: u32) -> Option<(u32, u32)
             && holds_model(at, i.memory_base())
     })?;
     let height = instrs[at].memory_displacement64() as u32;
-    let slot = instrs[at.saturating_sub(3)..at].iter().find_map(|i| {
-        (i.mnemonic() == Mnemonic::Call
+    let follows_virtual_call = instrs[at.saturating_sub(3)..at].iter().any(|i| {
+        i.mnemonic() == Mnemonic::Call
             && i.op0_kind() == OpKind::Memory
-            && i.memory_base() == Register::RAX)
-            .then(|| i.memory_displacement64() as u32)
-    })?;
-    Some((height, slot))
+            && i.memory_base() == Register::RAX
+    });
+    follows_virtual_call.then_some(height)
 }
 
-fn bounds_cylinder(instrs: &[Instruction], height: u32, bounds_slot: u32) -> Option<ModelVertices> {
+fn bounds_cylinder(instrs: &[Instruction], height: u32) -> Option<ModelVertices> {
     let mem_dword = |i: &Instruction| {
         i.op0_kind() == OpKind::Memory
             && i.memory_index() == Register::None
@@ -205,7 +201,6 @@ fn bounds_cylinder(instrs: &[Instruction], height: u32, bounds_slot: u32) -> Opt
     bounds[0] = instrs.first()?.ip() as u32;
     loads_count_from_base.then_some(ModelVertices {
         bounds,
-        bounds_slot,
         height,
         count,
         x,
@@ -215,15 +210,14 @@ fn bounds_cylinder(instrs: &[Instruction], height: u32, bounds_slot: u32) -> Opt
 }
 
 pub fn find_model_vertices(pe: &Pe, rule: &NpcModel) -> Result<ModelVertices, ScanError> {
-    let (height, bounds_slot) =
-        model_height(pe, rule.get_model, rule.bounding_box).ok_or(ScanError::NotFound)?;
+    let height = model_height(pe, rule.get_model, rule.bounding_box).ok_or(ScanError::NotFound)?;
     let mut found = Vec::new();
     for &(begin, _) in &pe.functions {
         if !is_root(pe, begin) {
             continue;
         }
         let instrs = whole_function(pe, begin, 0x400);
-        found.extend(bounds_cylinder(&instrs, height, bounds_slot));
+        found.extend(bounds_cylinder(&instrs, height));
     }
     let mut merged = *found.first().ok_or(ScanError::NotFound)?;
     let same = |v: &ModelVertices| {

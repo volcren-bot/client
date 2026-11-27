@@ -29,7 +29,7 @@ use crate::bank_pin::enter as bank_pin_enter;
 use crate::{
     ItemWatcher, PacketWatcher, cache_files, cache_locs, chat_messages, client_cycle, connection,
     draw, draw_batch, draw_lines, entry_swaps, enum_def, find_path, game_state, game_val_names,
-    ground_items, in_instance, item_container, item_names, item_params, item_stackable, landmasses,
+    ground_items, in_instance, item_container, item_names, item_params, item_placeholder, item_stackable, landmasses,
     loc_model, loc_shown, locs, map_regions, menu, menu_click, menu_layout, menu_open, movement,
     nav_plan, npc_actions, npc_hitsplats, npc_model, npc_overhead_text, npc_sizes, npc_type_model, npcs,
     player_hitsplats, player_model, player_overhead_text, player_plane, players, project_from,
@@ -122,6 +122,7 @@ mod offline {
         fn widget_model(u32, u16, u16) -> Option<decode::widgets::WidgetModel>;
         fn item_names(u32, &[i32]) -> Vec<Option<String>>;
         fn item_stackable(u32, &[i32]) -> Vec<Option<bool>>;
+        fn item_placeholder(u32, &[i32]) -> Vec<Option<bool>>;
         fn item_container(u32, i32) -> Option<Vec<Item>>;
         fn varc(u32, i32) -> Option<i32>;
         fn varp_value(u32, usize) -> Option<i32>;
@@ -1706,6 +1707,9 @@ pub fn run_with_modules(
     s.query("item_names", |pid, ids: Vec<i32>| item_names(pid, &ids))?;
     s.query("item_stackable", |pid, ids: Vec<i32>| {
         item_stackable(pid, &ids)
+    })?;
+    s.query("item_placeholder", |pid, ids: Vec<i32>| {
+        item_placeholder(pid, &ids)
     })?;
     s.query("varc", varc)?;
     s.query("varp", varp_value)?;

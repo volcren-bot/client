@@ -969,6 +969,7 @@ return {
 	player_overhead_text = g.player_overhead_text :: (indices: { number }) -> { [number]: string }?,
 	client_cycle = g.client_cycle :: () -> number?,
 	item_stackable = g.item_stackable :: (ids: { number }) -> { boolean? }?,
+	item_placeholder = g.item_placeholder :: (ids: { number }) -> { boolean? }?,
 	locs = g.locs :: (plane: number?) -> { Loc }?,
 	loc_shown = g.loc_shown :: (ids: { number }) -> { LocView }?,
 	cache_locs = g.cache_locs :: (area: Corners, filter: CacheLocFilter?) -> { CacheLoc }?,

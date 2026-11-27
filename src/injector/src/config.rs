@@ -132,6 +132,7 @@ pub struct ObjDef {
     pub params: BTreeMap<u32, Value>,
     pub stackable: bool,
     pub copy: bool,
+    pub placeholder: bool,
     pub named_after: Option<u16>,
 }
 
@@ -270,6 +271,7 @@ pub fn decode_obj(data: &[u8]) -> Option<ObjDef> {
                 templated[slot(op)] = copy;
                 def.copy |= copy;
                 def.stackable |= copy && op == 98;
+                def.placeholder |= copy && op == 149;
             }
             1 | 4..=8 | 24 | 26 | 75 | 78 | 79 | 90..=95 | 99 | 110..=112 => r.skip(2)?,
             3 | 9 | 30..=39 => {
@@ -436,6 +438,9 @@ mod tests {
         assert!(decode_obj(&hex("95384100")).unwrap().copy);
         assert!(decode_obj(&hex("8c000100")).unwrap().copy);
         assert!(!decode_obj(&hex("95000000")).unwrap().copy);
+        assert!(decode_obj(&hex("95384100")).unwrap().placeholder);
+        assert!(!decode_obj(&hex("62031f00")).unwrap().placeholder);
+        assert!(!decode_obj(&hex("02580000")).unwrap().placeholder);
         assert!(decode_obj(&hex("62031f00")).unwrap().copy);
     }
 

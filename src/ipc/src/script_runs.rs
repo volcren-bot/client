@@ -9,7 +9,7 @@ pub fn script_runs_memory_name(pid: u32) -> String {
     format!("AGENT_SCRIPTS_{pid}")
 }
 
-pub const SLOT_COUNT: usize = 32768;
+const SLOT_COUNT: usize = 32768;
 
 pub const ARG_COUNT: usize = 6;
 
@@ -25,7 +25,7 @@ pub mod arg_kind {
 }
 
 #[repr(C)]
-pub struct Slot {
+pub(crate) struct Slot {
     commit: AtomicU64,
     time_us: u64,
     event_type: i32,
@@ -65,7 +65,7 @@ pub struct Entry {
     pub args: Vec<(u8, i32)>,
 }
 
-pub type Page = ring::Page<Entry>;
+pub(crate) type Page = ring::Page<Entry>;
 
 pub unsafe fn init(log: *mut Log) {
     ring::Header::init::<Slot, SLOT_COUNT>(addr_of_mut!((*log).header));

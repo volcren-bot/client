@@ -483,8 +483,7 @@ impl LoaderApp {
             .flex_col()
             .gap(theme::LINE_GAP)
             .mt(px(20.0))
-            .child(widgets::strong("Hide"))
-            .child(widgets::weak(crate::hider::HINT))
+            .child(widgets::strong("Entity hider"))
             .child(div().flex().flex_wrap().gap(COLUMN_GAP).children(columns))
     }
 

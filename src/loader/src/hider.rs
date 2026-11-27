@@ -56,9 +56,6 @@ pub const GROUPS: [(&str, &[Category]); 3] = [
     ),
 ];
 
-pub const HINT: &str =
-    "Hidden things can't be clicked. When a script reaches for one, its box turns off by itself.";
-
 pub fn labels(mask: u64) -> Vec<&'static str> {
     GROUPS
         .iter()

@@ -6,7 +6,6 @@ pub struct Minimap {
     pub zoom: u32,
     pub angle: u32,
     pub focal_x: u32,
-    pub focal_y: u32,
 }
 
 const CONTENT_TYPE: u64 = 1338;
@@ -153,7 +152,6 @@ pub fn find_minimap(pe: &Pe, client: u32) -> Result<Minimap, ScanError> {
         zoom,
         angle,
         focal_x,
-        focal_y: focal_x + 8,
     })
 }
 

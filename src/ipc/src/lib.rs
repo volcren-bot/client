@@ -35,7 +35,7 @@ pub const fn overlay_offset(slot: usize) -> usize {
 
 pub const MASK_RECTS: usize = 32;
 
-pub const UI_ALPHA_BIT: u8 = 1;
+const UI_ALPHA_BIT: u8 = 1;
 
 pub const fn tag_alpha(alpha: u8, ui: bool) -> u8 {
     if alpha == 0 {
@@ -128,7 +128,7 @@ pub mod cursor_style {
     pub const X: u8 = 3;
 }
 
-pub const PREAMBLE_SIZE: usize = 9;
+const PREAMBLE_SIZE: usize = 9;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]

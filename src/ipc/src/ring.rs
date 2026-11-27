@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{fence, AtomicU32, AtomicU64, Ordering},
 };
 
-pub trait Slot {
+pub(crate) trait Slot {
     fn commit(&self) -> &AtomicU64;
 }
 
@@ -140,7 +140,7 @@ pub(crate) struct Zeroed<T>(pub *mut T);
 
 #[cfg(test)]
 impl<T> Zeroed<T> {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(unsafe { alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<T>()) }.cast())
     }
 }

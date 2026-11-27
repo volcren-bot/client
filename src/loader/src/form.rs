@@ -475,9 +475,11 @@ fn field_ui(
                     let change = change.clone();
                     list.child(
                         div()
+                            .id(format!("form-list-row-{id}-{i}"))
                             .px(px(4.0))
                             .py(px(3.0))
                             .when(i % 2 == 1, |this| this.bg(theme::BG_FLOAT))
+                            .when(usable, |this| this.hover(|style| style.bg(theme::BG_HL)))
                             .child(fields::checkbox(
                                 ("form-list", i),
                                 row_label.clone(),
@@ -568,6 +570,18 @@ fn field_ui(
             input.set_range(range);
             input.sync(*n, window, cx);
             let input = input.input(usable).w(px(NUMBER_WIDTH));
+            if spec_form::stacked(field) {
+                return Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(theme::LINE_GAP)
+                        .child(text(&with_colon(label), usable))
+                        .child(input)
+                        .into_any_element(),
+                );
+            }
             let label = text(label, usable);
             let row = div().flex().items_center().gap(theme::ITEM_GAP);
             if spec_form::box_first(field) {
@@ -782,10 +796,15 @@ fn grid_ui(
             let below = match column.max {
                 Some(_) => small("\u{2014}".to_owned()).into_any_element(),
                 None => {
-                    let (set, rows) = (set.clone(), shown.clone());
+                    let rows: Vec<usize> = shown
+                        .iter()
+                        .copied()
+                        .filter(|&i| grid.items[i].allows(c))
+                        .collect();
+                    let set = set.clone();
                     small("all".to_owned())
                         .id(format!("form-grid-all-{id}-{c}"))
-                        .when(usable && !shown.is_empty(), |this| {
+                        .when(usable && !rows.is_empty(), |this| {
                             this.cursor_pointer()
                                 .hover(|style| style.text_color(theme::FG))
                                 .on_click(move |_, _, cx| set(rows.clone(), c, cx))
@@ -824,16 +843,19 @@ fn grid_ui(
                 });
             let row = grid.columns.iter().enumerate().fold(
                 div()
+                    .id(format!("form-grid-row-{id}-{i}"))
                     .flex()
                     .items_center()
                     .h(theme::ROW_HEIGHT)
                     .px(px(6.0))
                     .when(n % 2 == 1, |this| this.bg(theme::BG_FLOAT))
+                    .when(usable, |this| this.hover(|style| style.bg(theme::BG_HL)))
                     .when(!usable, |this| this.text_color(theme::COMMENT))
                     .child(name),
                 |row, (c, column)| {
                     let selected = picked[i] == c;
-                    let open = usable && column.max.is_none_or(|max| counts[c] < max);
+                    let open =
+                        usable && item.allows(c) && column.max.is_none_or(|max| counts[c] < max);
                     let set = set.clone();
                     row.child(
                         div()

@@ -1904,7 +1904,6 @@ mod tests {
                 zoom: 0x6470,
                 angle: 0x89620,
                 focal_x: 0x8968c,
-                focal_y: 0x89694
             }
         );
         assert_eq!(find_destination(&pe, minimap.object), Ok(0));

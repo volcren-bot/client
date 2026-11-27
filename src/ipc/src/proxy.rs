@@ -8,7 +8,7 @@ use crate::state::{seqlock_read, seqlock_write};
 
 pub const VERSION: u32 = 1;
 pub const MEMORY_SIZE: usize = 4096;
-pub const FIELD_LEN: usize = 255;
+const FIELD_LEN: usize = 255;
 
 pub fn memory_name(pid: u32) -> String {
     format!("AGENT_PROXY_{pid}")
@@ -22,12 +22,12 @@ pub struct Field {
 }
 
 impl Field {
-    pub const EMPTY: Self = Self {
+    const EMPTY: Self = Self {
         len: 0,
         bytes: [0; FIELD_LEN],
     };
 
-    pub fn new(text: &str) -> Option<Self> {
+    pub(crate) fn new(text: &str) -> Option<Self> {
         let len = u8::try_from(text.len()).ok()?;
         let mut bytes = [0; FIELD_LEN];
         bytes[..text.len()].copy_from_slice(text.as_bytes());
@@ -106,14 +106,14 @@ pub mod error {
     pub const RESOLVE: i32 = 1;
     pub const CONNECT: i32 = 2;
     pub const TIMEOUT: i32 = 3;
-    pub const METHOD: i32 = 4;
-    pub const AUTH: i32 = 5;
+    pub(crate) const METHOD: i32 = 4;
+    pub(crate) const AUTH: i32 = 5;
     pub const REPLY: i32 = 6;
     pub const FAMILY: i32 = 7;
     pub const DATAGRAM: i32 = 8;
     pub const UNREADABLE: i32 = 9;
     pub const CHANGED: i32 = 10;
-    pub const REFUSED: i32 = 0x100;
+    pub(crate) const REFUSED: i32 = 0x100;
 
     pub fn describe(code: i32) -> String {
         let text = match code {
@@ -194,7 +194,7 @@ impl Status {
 }
 
 #[repr(C)]
-pub struct ProxyMemory {
+struct ProxyMemory {
     version: u32,
     sequence: u32,
     request: Request,

@@ -13,14 +13,14 @@ pub fn item_wake_event_name(pid: u32, slot: u32) -> String {
     format!("AGENT_ITEMS_WAKE_{pid}_{slot}")
 }
 
-pub const SUBSCRIBER_SLOTS: u32 = 32;
+const SUBSCRIBER_SLOTS: u32 = 32;
 
-pub const SLOT_COUNT: usize = 8192;
+const SLOT_COUNT: usize = 8192;
 
 pub const NO_TICK: i32 = -1;
 
 #[repr(C)]
-pub struct Slot {
+pub(crate) struct Slot {
     commit: AtomicU64,
     time_ms: u64,
     tick: i32,

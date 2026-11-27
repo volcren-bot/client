@@ -435,6 +435,13 @@ pub struct GridItem {
     pub label: String,
     pub detail: Option<String>,
     pub column: usize,
+    allowed: Vec<bool>,
+}
+
+impl GridItem {
+    pub fn allows(&self, column: usize) -> bool {
+        self.allowed.get(column).copied().unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -505,16 +512,25 @@ impl Grid {
             .map(|(i, item)| {
                 let parsed = || -> Result<GridItem, String> {
                     let id = text_of(item, "id")?.ok_or("needs an id")?;
+                    let allowed = Self::parse_allowed(item, columns.len(), column_of)?;
                     let column = match text_of(item, "default")? {
-                        None => fallback,
-                        Some(c) => column_of(c)
-                            .ok_or_else(|| format!("`default` \"{c}\" is not a column"))?,
+                        None if allowed[fallback] => fallback,
+                        None => allowed.iter().position(|&a| a).unwrap_or(fallback),
+                        Some(c) => {
+                            let c = column_of(c)
+                                .ok_or_else(|| format!("`default` \"{c}\" is not a column"))?;
+                            if !allowed[c] {
+                                return Err("`default` is not one of its `columns`".into());
+                            }
+                            c
+                        }
                     };
                     Ok(GridItem {
                         id: id.to_owned(),
                         label: text_of(item, "label")?.unwrap_or(id).to_owned(),
                         detail: text_of(item, "detail")?.map(str::to_owned),
                         column,
+                        allowed,
                     })
                 };
                 parsed().map_err(|e| format!("item {}: {e}", i + 1))
@@ -536,6 +552,27 @@ impl Grid {
             return Err("the defaults put more items in a column than its `max`".into());
         }
         Ok(grid)
+    }
+
+    fn parse_allowed(
+        item: &Value,
+        count: usize,
+        column_of: impl Fn(&str) -> Option<usize>,
+    ) -> Result<Vec<bool>, String> {
+        let ids = match item.get("columns") {
+            None | Some(Value::Null) => return Ok(vec![true; count]),
+            Some(Value::Array(ids)) if !ids.is_empty() => ids,
+            Some(_) => return Err("`columns` is a list of column ids".into()),
+        };
+        let mut allowed = vec![false; count];
+        for id in ids {
+            let id = id.as_str().ok_or("`columns` is a list of column ids")?;
+            let c = column_of(id).ok_or_else(|| format!("`columns` \"{id}\" is not a column"))?;
+            if std::mem::replace(&mut allowed[c], true) {
+                return Err(format!("`columns` repeats \"{id}\""));
+            }
+        }
+        Ok(allowed)
     }
 
     fn parse_column(column: &Value, colored: bool, color: u32) -> Result<GridColumn, String> {
@@ -590,6 +627,7 @@ impl Grid {
                     .and_then(|s| s.get(&item.id))
                     .and_then(Value::as_str)
                     .and_then(|id| self.columns.iter().position(|c| c.id == id))
+                    .filter(|&c| item.allows(c))
                     .unwrap_or(item.column)
             })
             .collect();
@@ -613,7 +651,14 @@ impl Grid {
 
 pub const MAX_TASKS: usize = 50;
 pub const TASK_FIELD_KINDS: [&str; 4] = ["check", "number", "text", "choice"];
-const TASK_FIELD_REFUSED: [&str; 5] = ["visible_when", "enabled_by", "disabled_by", "above", "row"];
+const TASK_FIELD_REFUSED: [&str; 6] = [
+    "visible_when",
+    "enabled_by",
+    "disabled_by",
+    "above",
+    "row",
+    "stacked",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskType {
@@ -865,6 +910,13 @@ pub fn box_first(field: &Value) -> bool {
         .unwrap_or(false)
 }
 
+pub fn stacked(field: &Value) -> bool {
+    field
+        .get("stacked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn heading(field: &Value) -> Option<u64> {
     field.get("heading").and_then(Value::as_u64)
 }
@@ -1033,6 +1085,20 @@ pub fn validate(spec: &Value) -> Result<(), String> {
         {
             return Err(format!(
                 "field {}: `box_first` is true or false, on a number",
+                i + 1
+            ));
+        }
+        if field.get("stacked").is_some()
+            && !(kind == "number" && field.get("stacked").is_some_and(Value::is_boolean))
+        {
+            return Err(format!(
+                "field {}: `stacked` is true or false, on a number",
+                i + 1
+            ));
+        }
+        if stacked(field) && box_first(field) {
+            return Err(format!(
+                "field {}: a `stacked` number has its label above, so it can't be `box_first`",
                 i + 1
             ));
         }
@@ -1454,7 +1520,25 @@ mod tests {
         })))
         .unwrap();
         assert!(plain.columns.iter().all(|c| c.color.is_none()));
+        let limited = Grid::parse(&grid(json!({
+            "items": [
+                { "id": "a", "columns": ["skip", "block"] },
+                { "id": "b", "columns": ["do", "skip"], "default": "skip" }
+            ]
+        })))
+        .unwrap();
+        assert_eq!(limited.defaults(), [1, 1]);
+        assert!(!limited.items[0].allows(0) && limited.items[0].allows(2));
+        assert_eq!(
+            limited.picked(Some(&json!({ "a": "do", "b": "block" }))),
+            [1, 1]
+        );
         for bad in [
+            json!({ "items": [{ "id": "a", "columns": [] }] }),
+            json!({ "items": [{ "id": "a", "columns": ["do", "do"] }] }),
+            json!({ "items": [{ "id": "a", "columns": ["maybe"] }] }),
+            json!({ "items": [{ "id": "a", "columns": "do" }] }),
+            json!({ "items": [{ "id": "a", "columns": ["do"], "default": "skip" }] }),
             json!({ "columns": [{ "id": "only" }] }),
             json!({ "columns": [{ "id": "a" }, { "id": "a" }] }),
             json!({ "columns": [{ "id": "a", "color": "green" }, { "id": "b" }] }),
@@ -1600,6 +1684,20 @@ mod tests {
             validate(&json!({ "fields": [{ "id": "a", "kind": "number", "box_first": true }] })),
             Ok(())
         );
+        assert_eq!(
+            validate(&json!({ "fields": [{ "id": "a", "kind": "number", "stacked": true }] })),
+            Ok(())
+        );
+        for bad in [
+            json!({ "id": "a", "kind": "check", "stacked": true }),
+            json!({ "id": "a", "kind": "number", "stacked": "yes" }),
+            json!({ "id": "a", "kind": "number", "stacked": true, "box_first": true }),
+        ] {
+            assert!(
+                validate(&json!({ "fields": [bad.clone()] })).is_err(),
+                "{bad}"
+            );
+        }
         assert!(validate(&json!({ "fields": [{ "kind": "label", "heading": 3 }] })).is_err());
         assert!(validate(&json!({ "row_gap": -1, "fields": [] })).is_err());
         assert_eq!(validate(&json!({ "row_gap": 12, "fields": [] })), Ok(()));

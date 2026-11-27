@@ -103,6 +103,7 @@
 - [Depositbox](depositbox.md)
 - [Fairyring](fairyring.md)
 - [Gnomeglider](gnomeglider.md)
+- [Grandexchange](grandexchange.md)
 - [HuntsmansKit](huntsmans_kit.md)
 - [Itemretrieval](itemretrieval.md)
 - [Jewellerybox](jewellerybox.md)

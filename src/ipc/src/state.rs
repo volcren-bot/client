@@ -79,14 +79,14 @@ pub const SKILL_NAMES: [&str; 24] = [
 ];
 
 pub mod game_state {
-    pub const STARTING: i32 = 0;
+    const STARTING: i32 = 0;
     pub const LOGIN_SCREEN: i32 = 10;
     pub const LOGIN_SCREEN_AUTHENTICATOR: i32 = 11;
-    pub const LOGGING_IN: i32 = 20;
+    const LOGGING_IN: i32 = 20;
     pub const LOADING: i32 = 25;
     pub const LOGGED_IN: i32 = 30;
-    pub const CONNECTION_LOST: i32 = 40;
-    pub const HOPPING: i32 = 45;
+    const CONNECTION_LOST: i32 = 40;
+    const HOPPING: i32 = 45;
 
     pub fn name(state: i32) -> Option<&'static str> {
         Some(match state {
@@ -558,26 +558,15 @@ pub struct HiderStatus {
 
 pub mod game_val {
     pub const OBJ: u32 = 0;
-    pub const NPC: u32 = 1;
-    pub const INV: u32 = 2;
-    pub const VARP: u32 = 3;
     pub const VARBIT: u32 = 4;
-    pub const LOC: u32 = 6;
-    pub const SEQ: u32 = 7;
-    pub const SPOT: u32 = 8;
-    pub const ROW: u32 = 9;
     pub const TABLE: u32 = 10;
-    pub const JINGLE: u32 = 11;
-    pub const SPRITE: u32 = 12;
     pub const INTERFACE: u32 = 14;
-    pub const VARC: u32 = 15;
 }
 
 pub const MENU_OPTION_SIZE: usize = 40;
-pub const MENU_TARGET_SIZE: usize = 256;
+const MENU_TARGET_SIZE: usize = 256;
 
 pub mod menu_kind {
-    pub const NONE: u8 = 0;
     pub const TILE: u8 = 1;
     pub const NPC: u8 = 2;
     pub const PLAYER: u8 = 6;
@@ -621,7 +610,6 @@ impl Default for MenuEntryInfo {
 }
 
 pub mod model_status {
-    pub const OK: i32 = 1;
     pub const NOT_FOUND: i32 = -1;
     pub const NOT_IN_GAME: i32 = -4;
     pub const NO_NPC: i32 = -5;
@@ -670,7 +658,7 @@ pub mod worker_status {
     pub const TOO_BIG: i32 = -3;
 }
 
-pub const WORKER_DATA_SIZE: usize = 512 * 1024;
+const WORKER_DATA_SIZE: usize = 512 * 1024;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -698,7 +686,7 @@ pub mod act_command {
 }
 
 pub mod act_status {
-    pub const IDLE: i32 = 0;
+    pub(crate) const IDLE: i32 = 0;
     pub const TRACKING: i32 = 1;
     pub const LEFT: i32 = 2;
     pub const RIGHT: i32 = 3;

@@ -68,14 +68,32 @@ local function shown_slots(): { [number]: Widget }?
 	return found
 end
 
+local placeholder_ids: { [number]: boolean } = {}
+
 local function placeholders(): { [number]: boolean }?
-	if not Toplevel.is_open(GROUP_ID) then
+	local slots = Host.item_container(CONTAINER)
+	if slots == nil then
 		return nil
 	end
+	local unknown: { number } = {}
+	for _, s in ipairs(slots) do
+		if s.id ~= -1 and placeholder_ids[s.id] == nil and not table.find(unknown, s.id) then
+			table.insert(unknown, s.id)
+		end
+	end
+	if #unknown > 0 then
+		local flags = Host.item_placeholder(unknown)
+		if flags == nil then
+			return nil
+		end
+		for i, id in ipairs(unknown) do
+			placeholder_ids[id] = flags[i] == true
+		end
+	end
 	local found: { [number]: boolean } = {}
-	for _, k in ipairs(widget_children(GROUP_ID, GRID_CHILD) or {}) do
-		if k.item_id ~= -1 and k.item_quantity == 0 then
-			found[k.index] = true
+	for _, s in ipairs(slots) do
+		if placeholder_ids[s.id] then
+			found[s.slot] = true
 		end
 	end
 	return found
