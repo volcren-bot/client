@@ -17,6 +17,7 @@ LoginWorldSwitcher.PVP_ARENA = 0x40
 LoginWorldSwitcher.SKILL_TOTAL = 0x80
 LoginWorldSwitcher.QUEST_SPEEDRUNNING = 0x100
 LoginWorldSwitcher.HIGH_RISK = 0x400
+LoginWorldSwitcher.HARDCORE_WORLD = 0x800
 LoginWorldSwitcher.LAST_MAN_STANDING = 0x4000
 LoginWorldSwitcher.BETA_WORLD = 0x10000
 LoginWorldSwitcher.LEGACY_ONLY = 0x400000
