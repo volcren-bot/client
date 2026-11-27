@@ -151,6 +151,7 @@ The desktop app (GPUI with gpui-component, through `gpui-kit`). It never touches
 ## Transports
 
 - Upstream commit checked daily; last 3 versions under `<data>/transports/` with `versions.json`. A version is used only when fully downloaded and parsed; a running script keeps its data. Roll back ends at the bundled copy; the daily check won't re-take a rolled-back commit.
+- Upstream rows we know are wrong are fixed by `CORRECTIONS` in `transports.rs`, applied to every copy, bundled or downloaded, so the bundled files stay as upstream had them. A file upstream can't be trusted with at all goes in `BUNDLED_ONLY`.
 
 ## Layouts
 

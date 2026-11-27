@@ -9,7 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use injector::transports::{self, Data, ItemName, Transport};
+use injector::transports::{self, Data, ItemName, Tile, Transport};
 
 use crate::script::lock;
 
@@ -45,6 +45,30 @@ fn is_trip(t: &Transport) -> bool {
 }
 
 const BUNDLED_ONLY: &[&str] = &["teleportation_levers"];
+
+struct Correction {
+    file: &'static str,
+    name: &'static str,
+    destination: Tile,
+}
+
+const CORRECTIONS: &[Correction] = &[Correction {
+    file: "teleportation_spells",
+    name: "Watchtower Teleport",
+    destination: Tile {
+        x: 2932,
+        y: 4712,
+        plane: 2,
+    },
+}];
+
+fn correct(file: &File, rows: &mut [Transport]) {
+    for fix in CORRECTIONS.iter().filter(|fix| fix.file == file.name) {
+        for row in rows.iter_mut().filter(|row| row.name == fix.name) {
+            row.destination = Some(fix.destination);
+        }
+    }
+}
 
 macro_rules! transports_file {
     ($name:literal) => {
@@ -216,6 +240,7 @@ fn validate(file: &File, text: &str) -> Result<Parsed, String> {
             for why in skipped {
                 eprintln!("transports: skipped {why}");
             }
+            correct(file, &mut rows);
             let climbs: Vec<Transport> = match file.climbs {
                 Some(accept) => rows.iter().filter(|t| accept(t)).cloned().collect(),
                 None => Vec::new(),
@@ -519,6 +544,37 @@ mod tests {
                 let (_, skipped) = transports::parse_file(file.name, file.bundled).unwrap();
                 assert!(skipped.is_empty(), "{}: {skipped:?}", file.name);
             }
+        }
+    }
+
+    #[test]
+    fn corrections_apply_to_every_copy() {
+        let file = FILES
+            .iter()
+            .find(|file| file.name == "teleportation_spells")
+            .unwrap();
+        let upstream = "Destination\tDisplay info\n2546 3112 0\tWatchtower Teleport\n2584 3097 0\tWatchtower Teleport: Yanille\n";
+        for text in [file.bundled, upstream] {
+            let Ok(Parsed::Transports(rows, _)) = validate(file, text) else {
+                panic!("parses");
+            };
+            let landing = |name: &str| rows.iter().find(|row| row.name == name).unwrap().destination;
+            assert_eq!(
+                landing("Watchtower Teleport"),
+                Some(Tile {
+                    x: 2932,
+                    y: 4712,
+                    plane: 2
+                })
+            );
+            assert_eq!(
+                landing("Watchtower Teleport: Yanille"),
+                Some(Tile {
+                    x: 2584,
+                    y: 3097,
+                    plane: 0
+                })
+            );
         }
     }
 
