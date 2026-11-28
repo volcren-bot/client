@@ -68,6 +68,12 @@ pub enum Shape {
         faces: Color,
         hull: Color,
     },
+    ScreenLabel {
+        at: [i32; 2],
+        text: String,
+        color: Color,
+        bold: bool,
+    },
 }
 
 impl Shape {
@@ -76,7 +82,7 @@ impl Shape {
             Self::Path { points, .. } => (points, [None, None]),
             Self::Arrow { from, to, .. } => (&[], [Some(from), Some(to)]),
             Self::Label { at, .. } => (&[], [Some(at), None]),
-            Self::Loc { .. } => (&[], [None, None]),
+            Self::Loc { .. } | Self::ScreenLabel { .. } => (&[], [None, None]),
         };
         path.iter().chain(ends.into_iter().flatten())
     }
@@ -138,10 +144,16 @@ mod tests {
                 faces: [255, 255, 0, 70],
                 hull: [255, 255, 0, 255],
             },
+            Shape::ScreenLabel {
+                at: [1212, 1257],
+                text: "Alching".into(),
+                color: [255, 0, 255, 255],
+                bold: true,
+            },
         ];
         assert_eq!(
             shapes.iter().map(|s| s.points().count()).collect::<Vec<_>>(),
-            [2, 2, 1, 0]
+            [2, 2, 1, 0, 0]
         );
         assert_eq!(decode(&encode(&shapes)), Some(shapes));
         assert_eq!(decode(&encode(&[])), Some(Vec::new()));

@@ -473,6 +473,12 @@ fn world_shape(t: &mlua::Table) -> mlua::Result<decode::shapes::Shape> {
             color,
             bold: t.get::<Option<bool>>("bold")?.unwrap_or(false),
         }),
+        "screen_label" => Ok(decode::shapes::Shape::ScreenLabel {
+            at: [t.get("x")?, t.get("y")?],
+            text: t.get("text")?,
+            color,
+            bold: t.get::<Option<bool>>("bold")?.unwrap_or(false),
+        }),
         _ => Err(mlua::Error::RuntimeError(format!(
             "unknown debug shape kind: {kind}"
         ))),
@@ -2154,6 +2160,16 @@ mod tests {
             bold,
             decode::shapes::Shape::Label { bold: true, .. }
         ));
+        let screen = shape("{ kind = 'screen_label', x = 1212, y = 1257, text = 'Alching', r = 255, g = 0, b = 255, bold = true }").unwrap();
+        assert_eq!(
+            screen,
+            decode::shapes::Shape::ScreenLabel {
+                at: [1212, 1257],
+                text: "Alching".into(),
+                color: [255, 0, 255, 255],
+                bold: true,
+            }
+        );
         let loc = shape("{ kind = 'loc', loc_kind = 10, x = 3200, y = 3201, id = 99, faces = { r = 255, g = 255, b = 0, a = 70 } }").unwrap();
         assert_eq!(
             loc,

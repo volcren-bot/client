@@ -239,40 +239,67 @@ pub fn refresh() -> bool {
 pub fn draw(viewport: [i32; 4], mask: &[Rect]) {
     let Some(layout) = LAYOUT.get() else { return };
     with_state(|state| {
-        let points: Vec<shapes::Point> = state
-            .channels
-            .iter()
-            .flat_map(|c| &c.shapes)
-            .flat_map(Shape::points)
-            .copied()
-            .collect();
         if state.channels.iter().all(|c| c.shapes.is_empty()) {
             return;
         }
-        let Ok(screen) =
-            projection::project_world(&OwnMemory, layout, &mut state.terrain, &points, || {
-                super::scene::locs(decode::locs::request::PLAYER_PLANE)
-                    .ok()
-                    .map(|locs| projection::decorations(&locs))
-            })
-        else {
-            return;
-        };
-        let base = projection::scene_base(&OwnMemory, layout);
-        let mut mesh = Mesh::default();
-        let mut next = screen.iter().copied();
-        for shape in state.channels.iter().flat_map(|c| &c.shapes) {
-            let model = match (shape, base) {
-                (Shape::Loc { kind, tile, id, .. }, Some([x, y])) => {
-                    loc_model(*kind, [tile[0] - x, tile[1] - y], *id)
-                }
-                _ => None,
-            };
-            mesh.shape(shape, &mut next, state.glyphs.as_ref(), model.as_ref());
-        }
+        let world = world_mesh(state, layout);
+        let screen = screen_mesh(state);
         let atlas = state.glyphs.as_ref().map_or(&state.solid, |g| &g.atlas);
-        draw_world(viewport, &mesh.vertices, atlas, mask);
+        if let Some(world) = world {
+            draw_world(viewport, &world.vertices, atlas, mask);
+        }
+        draw_world(viewport, &screen.vertices, atlas, &[]);
     });
+}
+
+fn world_mesh(state: &mut State, layout: &ipc::state::Layout) -> Option<Mesh> {
+    let points: Vec<shapes::Point> = state
+        .channels
+        .iter()
+        .flat_map(|c| &c.shapes)
+        .flat_map(Shape::points)
+        .copied()
+        .collect();
+    let screen = projection::project_world(&OwnMemory, layout, &mut state.terrain, &points, || {
+        super::scene::locs(decode::locs::request::PLAYER_PLANE)
+            .ok()
+            .map(|locs| projection::decorations(&locs))
+    })
+    .ok()?;
+    let base = projection::scene_base(&OwnMemory, layout);
+    let mut mesh = Mesh::default();
+    let mut next = screen.iter().copied();
+    for shape in state.channels.iter().flat_map(|c| &c.shapes) {
+        let model = match (shape, base) {
+            (Shape::Loc { kind, tile, id, .. }, Some([x, y])) => {
+                loc_model(*kind, [tile[0] - x, tile[1] - y], *id)
+            }
+            _ => None,
+        };
+        mesh.shape(shape, &mut next, state.glyphs.as_ref(), model.as_ref());
+    }
+    Some(mesh)
+}
+
+fn screen_mesh(state: &State) -> Mesh {
+    let mut mesh = Mesh::default();
+    let Some(glyphs) = state.glyphs.as_ref() else {
+        return mesh;
+    };
+    for shape in state.channels.iter().flat_map(|c| &c.shapes) {
+        if let Shape::ScreenLabel {
+            at: [x, y],
+            text,
+            color,
+            bold,
+        } = shape
+        {
+            if let Some(face) = glyphs.face(*bold) {
+                mesh.label(face, text, [*x as f32, *y as f32], *color, Anchor::BottomLeft);
+            }
+        }
+    }
+    mesh
 }
 
 fn loc_model(kind: u8, [x, y]: [i32; 2], id: i32) -> Option<Model> {
@@ -290,6 +317,12 @@ fn loc_model(kind: u8, [x, y]: [i32; 2], id: i32) -> Option<Model> {
 fn shown([x, y]: [f32; 2]) -> Option<[f32; 2]> {
     (x.is_finite() && y.is_finite() && x.abs() < SCREEN_LIMIT && y.abs() < SCREEN_LIMIT)
         .then_some([x, y])
+}
+
+#[derive(Clone, Copy)]
+enum Anchor {
+    BottomCentre,
+    BottomLeft,
 }
 
 #[derive(Default)]
@@ -337,7 +370,7 @@ impl Mesh {
             } => {
                 let at = screen.next().and_then(shown);
                 if let (Some(at), Some(face)) = (at, glyphs.and_then(|g| g.face(*bold))) {
-                    self.label(face, text, at, *color);
+                    self.label(face, text, at, *color, Anchor::BottomCentre);
                 }
             }
             Shape::Loc { faces, hull, .. } => {
@@ -345,6 +378,7 @@ impl Mesh {
                     self.model(model, *faces, *hull);
                 }
             }
+            Shape::ScreenLabel { .. } => {}
         }
     }
 
@@ -431,7 +465,14 @@ impl Mesh {
         }
     }
 
-    fn label(&mut self, face: &Typeface, text: &str, [x, y]: [f32; 2], color: [u8; 4]) {
+    fn label(
+        &mut self,
+        face: &Typeface,
+        text: &str,
+        [x, y]: [f32; 2],
+        color: [u8; 4],
+        anchor: Anchor,
+    ) {
         let font = &face.font;
         let line_height = font.max_height * LABEL_SCALE;
         let lines: Vec<&str> = text.split('\n').collect();
@@ -440,7 +481,10 @@ impl Mesh {
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let left = x.round() as i32 - font.width(line, LABEL_SCALE) / 2;
+                let left = match anchor {
+                    Anchor::BottomCentre => x.round() as i32 - font.width(line, LABEL_SCALE) / 2,
+                    Anchor::BottomLeft => x.round() as i32,
+                };
                 let top = bottom - (lines.len() - i) as i32 * line_height;
                 (*line, [left, top])
             })
@@ -538,7 +582,7 @@ mod tests {
         assert_eq!(heavy.font.max_height, 6);
         assert_ne!(heavy.places[b'A' as usize], plain.places[b'A' as usize]);
         let mut mesh = Mesh::default();
-        mesh.label(plain, "A", [100.0, 50.0], [1, 2, 3, 200]);
+        mesh.label(plain, "A", [100.0, 50.0], [1, 2, 3, 200], Anchor::BottomCentre);
         assert_eq!(mesh.vertices.len(), 5 * 6);
         let text = &mesh.vertices[4 * 6];
         assert_eq!(text.position, [96.0, 42.0]);
@@ -547,13 +591,32 @@ mod tests {
         assert_eq!(mesh.vertices[3 * 6].position, [98.0, 44.0]);
         assert_eq!(mesh.vertices[0].color, [0, 0, 0, 200]);
         let mut mesh = Mesh::default();
-        mesh.label(plain, "A\nAA", [100.0, 50.0], [1, 2, 3, 200]);
+        mesh.label(plain, "A\nAA", [100.0, 50.0], [1, 2, 3, 200], Anchor::BottomCentre);
         assert_eq!(mesh.vertices.len(), 3 * 5 * 6);
         let first = &mesh.vertices[12 * 6];
         let second = &mesh.vertices[13 * 6];
         assert_eq!(first.position, [96.0, 32.0]);
         assert_eq!(second.position, [92.0, 42.0]);
         assert_eq!(Glyphs::new(vec![font()], 2).face(true).unwrap().font.max_height, 5);
+        let mut mesh = Mesh::default();
+        mesh.label(plain, "A\nAA", [100.0, 50.0], [1, 2, 3, 200], Anchor::BottomLeft);
+        assert_eq!(mesh.vertices[12 * 6].position, [100.0, 32.0]);
+        assert_eq!(mesh.vertices[13 * 6].position, [100.0, 42.0]);
+    }
+
+    #[test]
+    fn screen_labels_skip_the_projection() {
+        let mut mesh = Mesh::default();
+        let shape = Shape::ScreenLabel {
+            at: [10, 20],
+            text: "A".into(),
+            color: [255; 4],
+            bold: false,
+        };
+        let mut screen = [[0.0, 0.0]].into_iter();
+        mesh.shape(&shape, &mut screen, None, None);
+        assert!(mesh.vertices.is_empty());
+        assert_eq!(screen.next(), Some([0.0, 0.0]));
     }
 
     #[test]

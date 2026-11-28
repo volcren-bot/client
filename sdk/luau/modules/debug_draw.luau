@@ -1,8 +1,10 @@
 --!strict
 local Draw = require("@volcren/draw")
+local Geometry = require("@volcren/geometry")
 local Host = require("@volcren/host")
 local Projection = require("@volcren/projection")
 type Tile = Projection.Tile
+type Point = Geometry.Point
 export type Spot = { x: number, y: number }
 
 local DebugDraw = {}
@@ -128,6 +130,21 @@ function DebugDraw.label(at: Spot, text: string, color: Draw.Color, bold: boolea
 	local shape: Host.DebugShape = {
 		kind = "label",
 		at = ground(at),
+		text = text,
+		r = color.r,
+		g = color.g,
+		b = color.b,
+		a = color.a,
+		bold = bold,
+	}
+	table.insert(shapes(), shape)
+end
+
+function DebugDraw.screen_label(at: Point, text: string, color: Draw.Color, bold: boolean?)
+	local shape: Host.DebugShape = {
+		kind = "screen_label",
+		x = math.round(at.x),
+		y = math.round(at.y),
 		text = text,
 		r = color.r,
 		g = color.g,

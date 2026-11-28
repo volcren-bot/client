@@ -2,7 +2,7 @@
 
 Debug drawing that shows only while Script debugging is on in a client's development page in the loader (`Host.script_debugging`). Callers register named layers; every change repaints all layers, so the SDK's drawings (such as `Walker.show_route`) and a script's own stay on screen together.
 
-Inside a layer's `paint`, `DebugDraw.outline`, `DebugDraw.line`, `DebugDraw.label` and `DebugDraw.loc` take tiles or locs, not pixels. They become world drawings that the agent projects every frame (`Host.debug_shapes`), so they stay on their tiles while the camera turns, zooms or pans, whatever the script is doing, hide under game interfaces, and vanish when Script debugging is turned off or the run ends. `Draw` calls inside `paint` still draw screen pixels: use them only for marks that belong to the screen, such as inventory slots on a `"ui"` layer. Painting clears the screen overlay first, so don't mix DebugDraw with a script's own `Draw` calls.
+Inside a layer's `paint`, `DebugDraw.outline`, `DebugDraw.line`, `DebugDraw.label` and `DebugDraw.loc` take tiles or locs, not pixels. They become world drawings that the agent projects every frame (`Host.debug_shapes`), so they stay on their tiles while the camera turns, zooms or pans, whatever the script is doing, hide under game interfaces, and vanish when Script debugging is turned off or the run ends. `DebugDraw.screen_label` is the one world drawing placed by screen pixel instead: game-font text that stays at a spot on the screen and shows over interfaces. `Draw` calls inside `paint` still draw screen pixels: use them only for marks that belong to the screen, such as inventory slots on a `"ui"` layer. Painting clears the screen overlay first, so don't mix DebugDraw with a script's own `Draw` calls.
 
 A `Spot` is `{ x, y }` in tiles; whole numbers are a tile's centre and fractions are allowed, such as a player between tiles.
 
@@ -107,6 +107,28 @@ local Draw = require("@volcren/draw")
 DebugDraw.set("names", function()
 	DebugDraw.label({ x = 3200, y = 3200 }, "Bank", Draw.WHITE, true)
 end)
+```
+
+## DebugDraw.screen_label
+
+Definition:
+```luau
+function DebugDraw.screen_label(at: Point, text: string, color: Draw.Color, bold: boolean?)
+```
+Text in the game's font (its bold font when `bold`) with a shadow, at a screen pixel instead of a tile: its left edge at `at.x` and its bottom at `at.y`, with `\n` lines stacked upwards. It is drawn over game interfaces, like a `"ui"` layer's marks, so it suits status lines beside a panel. The agent draws it every frame like the world drawings, so it shows without a repaint while the script is busy and vanishes with them. Up to 200 bytes. Only inside a layer's `paint`.
+
+Example:
+```luau
+local DebugDraw = require("@volcren/debug_draw")
+local Draw = require("@volcren/draw")
+local Host = require("@volcren/host")
+
+local panel = Host.widget(161, 97)
+if panel then
+	DebugDraw.set("status", function()
+		DebugDraw.screen_label({ x = panel.x + 8, y = panel.y - 8 }, "Alching", Draw.MAGENTA, true)
+	end)
+end
 ```
 
 ## DebugDraw.loc

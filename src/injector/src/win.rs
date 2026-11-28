@@ -3975,7 +3975,9 @@ pub fn publish_world(pid: u32, channel: usize, shapes: &[Shape]) -> Result<(), S
     unsafe {
         let font = World::font(world);
         if world_shapes::Font::sequence(font) == 0
-            && shapes.iter().any(|s| matches!(s, Shape::Label { .. }))
+            && shapes
+                .iter()
+                .any(|s| matches!(s, Shape::Label { .. } | Shape::ScreenLabel { .. }))
         {
             let bold = cache_font(pid, crate::font::B12_FULL)?;
             let plain = label_font(pid)?;

@@ -34,7 +34,7 @@ pub fn validate(shapes: &[Shape]) -> Result<(), String> {
         Shape::Path { width, .. } if !(1..=MAX_WIDTH).contains(width) => {
             Err(format!("a path's width is 1 to {MAX_WIDTH}, got {width}"))
         }
-        Shape::Label { text, .. } if text.len() > MAX_TEXT => {
+        Shape::Label { text, .. } | Shape::ScreenLabel { text, .. } if text.len() > MAX_TEXT => {
             Err(format!("a label is at most {MAX_TEXT} bytes"))
         }
         _ => Ok(()),
@@ -108,6 +108,14 @@ mod tests {
         };
         assert!(validate(&[label(MAX_TEXT)]).is_ok());
         assert!(validate(&[label(MAX_TEXT + 1)]).is_err());
+        let screen = |len| Shape::ScreenLabel {
+            at: [10, 20],
+            text: "a".repeat(len),
+            color: [0; 4],
+            bold: true,
+        };
+        assert!(validate(&[screen(MAX_TEXT)]).is_ok());
+        assert!(validate(&[screen(MAX_TEXT + 1)]).is_err());
         assert!(validate(&vec![label(1); MAX_SHAPES + 1]).is_err());
         let long = Shape::Path {
             points: vec![point(); MAX_POINTS + 1],

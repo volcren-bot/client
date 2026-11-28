@@ -872,6 +872,17 @@ export type DebugShape =
 		faces: { r: number, g: number, b: number, a: number? }?,
 		hull: { r: number, g: number, b: number, a: number? }?,
 	}
+	| {
+		kind: "screen_label",
+		x: number,
+		y: number,
+		text: string,
+		r: number,
+		g: number,
+		b: number,
+		a: number?,
+		bold: boolean?,
+	}
 
 export type HttpRequest = {
 	url: string,
