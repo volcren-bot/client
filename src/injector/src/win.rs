@@ -5189,10 +5189,12 @@ fn with_overlay(
         let serial_at = base.add(mem::offset_of!(Header, overlay_serial)) as *mut u32;
         let hash_at = base.add(mem::offset_of!(Header, overlay_hash)) as *mut u64;
         let mode_at = base.add(mem::offset_of!(Header, overlay_mode));
+        let writer_at = base.add(mem::offset_of!(Header, overlay_writer)) as *mut u32;
         let current = *mode_at;
+        let own = writer_at.read_unaligned() == std::process::id();
 
         let hash = hash.map(|h| (h ^ (width as u64) << 32 ^ height as u64) | 1);
-        if hash.is_some_and(|h| hash_at.read_unaligned() == h) && current == mode {
+        if own && hash.is_some_and(|h| hash_at.read_unaligned() == h) && current == mode {
             return Ok(());
         }
 
@@ -5202,7 +5204,7 @@ fn with_overlay(
         let back_slot = shown_slot ^ 1;
         let shown = base.add(overlay_offset(shown_slot));
         let back = base.add(overlay_offset(back_slot));
-        if keep {
+        if keep && own {
             keep_overlay(
                 shown,
                 sizes_at.add(shown_slot).read_unaligned(),
@@ -5217,6 +5219,7 @@ fn with_overlay(
         sizes_at.add(back_slot).write_unaligned([width, height]);
         fence(Ordering::Release);
         hash_at.write_unaligned(hash.unwrap_or(0));
+        writer_at.write_unaligned(std::process::id());
         serial_at.write_unaligned(serial.wrapping_add(1));
         *mode_at = mode;
     }

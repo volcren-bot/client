@@ -466,6 +466,55 @@ pub fn item_names(
     call_ids(target, settings, "item-names", &[], ids)
 }
 
+pub fn npcs(target: &Target, settings: &Settings) -> Result<Vec<injector::Npc>, String> {
+    call(target, settings, "npcs", &[])
+}
+
+pub fn players(target: &Target, settings: &Settings) -> Result<Vec<injector::Player>, String> {
+    call(target, settings, "players", &[])
+}
+
+pub fn locs(target: &Target, settings: &Settings) -> Result<Vec<injector::Loc>, String> {
+    call(target, settings, "locs", &[])
+}
+
+pub fn ground_items(
+    target: &Target,
+    settings: &Settings,
+) -> Result<Vec<injector::GroundItem>, String> {
+    call(target, settings, "ground-items", &[])
+}
+
+pub fn sub_interfaces(
+    target: &Target,
+    settings: &Settings,
+) -> Result<Option<Vec<injector::SubInterface>>, String> {
+    call(target, settings, "interfaces", &[])
+}
+
+pub fn chat_messages(
+    target: &Target,
+    settings: &Settings,
+) -> Result<Vec<injector::ChatMessage>, String> {
+    call(target, settings, "chat", &[])
+}
+
+pub fn npc_actions(
+    target: &Target,
+    settings: &Settings,
+    ids: &[i32],
+) -> Result<std::collections::BTreeMap<i32, Vec<String>>, String> {
+    call_ids(target, settings, "npc-actions", &[], ids)
+}
+
+pub fn loc_shown(
+    target: &Target,
+    settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<injector::LocView>, String> {
+    call_ids(target, settings, "loc-shown", &[], ids)
+}
+
 pub fn scene_tiles_next_frame(
     target: &Target,
     settings: &Settings,

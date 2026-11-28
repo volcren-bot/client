@@ -27,3 +27,4 @@ pub mod unload;
 pub mod varc_log;
 pub mod worker;
 pub mod world_shapes;
+pub mod writer;

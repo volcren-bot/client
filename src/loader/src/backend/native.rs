@@ -255,6 +255,59 @@ pub fn item_names(
     injector::item_names(target.client.pid, ids)
 }
 
+pub fn npcs(target: &Target, _settings: &Settings) -> Result<Vec<injector::Npc>, String> {
+    injector::npcs(target.client.pid)
+}
+
+pub fn players(target: &Target, _settings: &Settings) -> Result<Vec<injector::Player>, String> {
+    injector::players(target.client.pid)
+}
+
+pub fn locs(target: &Target, _settings: &Settings) -> Result<Vec<injector::Loc>, String> {
+    injector::locs(target.client.pid, None)
+}
+
+pub fn ground_items(
+    target: &Target,
+    _settings: &Settings,
+) -> Result<Vec<injector::GroundItem>, String> {
+    injector::ground_items(target.client.pid)
+}
+
+pub fn sub_interfaces(
+    target: &Target,
+    _settings: &Settings,
+) -> Result<Option<Vec<injector::SubInterface>>, String> {
+    injector::sub_interfaces(target.client.pid)
+}
+
+pub fn chat_messages(
+    target: &Target,
+    _settings: &Settings,
+) -> Result<Vec<injector::ChatMessage>, String> {
+    injector::chat_messages(target.client.pid)
+}
+
+pub fn npc_actions(
+    target: &Target,
+    _settings: &Settings,
+    ids: &[i32],
+) -> Result<std::collections::BTreeMap<i32, Vec<String>>, String> {
+    injector::npc_actions(target.client.pid, ids)
+}
+
+pub fn loc_shown(
+    target: &Target,
+    _settings: &Settings,
+    ids: &[i32],
+) -> Result<Vec<injector::LocView>, String> {
+    let ids = ids
+        .iter()
+        .map(|id| u32::try_from(*id).map_err(|_| format!("{id} isn't an object id")))
+        .collect::<Result<Vec<u32>, String>>()?;
+    injector::loc_shown(target.client.pid, &ids)
+}
+
 pub fn varbits_of(
     target: &Target,
     _settings: &Settings,

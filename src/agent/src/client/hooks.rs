@@ -76,6 +76,7 @@ use ipc::{cursor_style, image_fits, overlay_mode};
 const MODIFIER_KEYS: [u8; 3] = [0x10, 0x11, 0x12];
 static KEYBOARD_MODIFIERS: Mutex<[bool; 3]> = Mutex::new([false; 3]);
 static LAST_CHAR: AtomicU8 = AtomicU8::new(0);
+static OVERLAY_OWNER: Mutex<super::writer::Owner> = Mutex::new(super::writer::Owner::new());
 
 unsafe fn open_client_console() {
     let hwnd = GetConsoleWindow();
@@ -297,8 +298,12 @@ unsafe fn draw_frame() {
     let (mouse, dest, overlay, (cursor, cursor_color, cursor_size)) = {
         let mem_manager = memory_manager();
         mem_manager.set_viewport(offset_x, offset_y, width, height, window_height);
-        let overlay = (mem_manager.overlay_mode() != overlay_mode::OFF)
-            .then(|| {
+        let overlay = (mem_manager.overlay_mode() != overlay_mode::OFF
+            && OVERLAY_OWNER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .alive(mem_manager.overlay_writer()))
+        .then(|| {
                 let serial = mem_manager.overlay_serial();
                 let slot = serial as usize & 1;
                 let size = mem_manager.overlay_size(slot);

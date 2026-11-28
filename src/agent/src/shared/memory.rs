@@ -125,6 +125,7 @@ impl MemoryManager {
             cursor_size,
             frame_serial: 0,
             overlay_sizes: [[0; 2]; OVERLAY_SLOTS],
+            overlay_writer: 0,
         };
 
         let event_name = wide(&frame_event_name(pid));
@@ -209,6 +210,10 @@ impl MemoryManager {
 
     pub unsafe fn overlay_serial(&self) -> u32 {
         read_volatile(addr_of!((*self.ptr).header.overlay_serial))
+    }
+
+    pub unsafe fn overlay_writer(&self) -> u32 {
+        read_unaligned(addr_of!((*self.ptr).header.overlay_writer))
     }
 
     pub unsafe fn cursor(&self) -> (u8, [u8; 3], u8) {

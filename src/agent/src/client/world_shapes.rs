@@ -13,13 +13,10 @@ use ipc::{
 use windows::{
     core::PCSTR,
     Win32::{
-        Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0},
-        System::{
-            Memory::{
-                CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
-                MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
-            },
-            Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        Foundation::{CloseHandle, HANDLE},
+        System::Memory::{
+            CreateFileMappingA, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
+            MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
         },
     },
 };
@@ -27,6 +24,7 @@ use windows::{
 use super::{
     graphics::{draw_world, Atlas, WorldVertex},
     own::{OwnMemory, LAYOUT},
+    writer::Writer,
 };
 use decode::interface_mask::Rect;
 
@@ -86,26 +84,6 @@ pub fn create(pid: u32) {
 
 pub fn close() {
     STATE.lock().unwrap_or_else(|e| e.into_inner()).take();
-}
-
-struct Writer(isize);
-
-impl Writer {
-    fn open(pid: u32) -> Option<Self> {
-        unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }
-            .ok()
-            .map(|handle| Self(handle.0 as isize))
-    }
-
-    fn exited(&self) -> bool {
-        unsafe { WaitForSingleObject(HANDLE(self.0 as *mut _), 0) == WAIT_OBJECT_0 }
-    }
-}
-
-impl Drop for Writer {
-    fn drop(&mut self) {
-        let _ = unsafe { CloseHandle(HANDLE(self.0 as *mut _)) };
-    }
 }
 
 #[derive(Default)]

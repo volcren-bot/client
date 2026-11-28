@@ -33,6 +33,7 @@ fn dir() -> Option<PathBuf> {
 
 pub struct Record {
     file: Option<fs::File>,
+    pub path: Option<PathBuf>,
 }
 
 impl Record {
@@ -46,16 +47,19 @@ impl Record {
             .ok_or_else(|| "no data folder".to_owned())
             .and_then(|dir| {
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let path = dir.join(name);
                 fs::OpenOptions::new()
                     .create_new(true)
                     .append(true)
-                    .open(dir.join(name))
+                    .open(&path)
+                    .map(|file| (file, path))
                     .map_err(|e| e.to_string())
             });
-        let file = opened
+        let (file, path) = opened
             .map_err(|error| eprintln!("Couldn't record the run for the loader window: {error}"))
-            .ok();
-        let mut record = Self { file };
+            .ok()
+            .unzip();
+        let mut record = Self { file, path };
         record.write(&Entry::Start {
             pid,
             title: title.to_owned(),

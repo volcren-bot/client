@@ -15,7 +15,7 @@ pub mod state;
 pub mod varc_log;
 pub mod world_shapes;
 
-pub const PROTOCOL_VERSION: u8 = 71;
+pub const PROTOCOL_VERSION: u8 = 72;
 
 pub fn shared_memory_name(pid: u32) -> String {
     format!("AGENT_DATA_{pid}")
@@ -153,6 +153,7 @@ pub struct Header {
     pub cursor_size: u8,
     pub frame_serial: u32,
     pub overlay_sizes: [[i32; 2]; OVERLAY_SLOTS],
+    pub overlay_writer: u32,
 }
 
 pub const HEADER_SIZE: usize = core::mem::size_of::<Header>();
@@ -214,7 +215,8 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Header, cursor_size), 56);
         assert_eq!(core::mem::offset_of!(Header, frame_serial), 57);
         assert_eq!(core::mem::offset_of!(Header, overlay_sizes), 61);
-        assert_eq!(HEADER_SIZE, PREAMBLE_SIZE + 28 + 3 + 4 + 8 + 4 + 1 + 4 + 16);
+        assert_eq!(core::mem::offset_of!(Header, overlay_writer), 77);
+        assert_eq!(HEADER_SIZE, PREAMBLE_SIZE + 28 + 3 + 4 + 8 + 4 + 1 + 4 + 16 + 4);
     }
 
     #[test]
